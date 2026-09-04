@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseStrictJson, parseToolCall, validateToolResult, ToolCallStreamDecoder, EnvelopeError } from '../../host/agent/tool-envelope.mjs';
+import { makeToolResult, parseStrictJson, parseToolCall, validateToolCall, validateToolResult, ToolCallStreamDecoder, EnvelopeError } from '../../host/agent/tool-envelope.mjs';
 import { validateEvent } from '../../host/agent/assistant-events.mjs';
 import { ConversationController } from '../../host/agent/controller.mjs';
 import { FixtureEngineClient } from '../../host/engine/fixture-engine.mjs';
@@ -20,18 +20,61 @@ test('tool envelope is exact and result is bounded', () => {
   assert.throws(() => parseToolCall('{"id":"call_1","name":"time.now","arguments":{},"extra":true}'), /unknown field/);
   assert.throws(() => parseToolCall('{"id":"call_1","name":"time.now","arguments":[]}'), /arguments/);
   assert.deepEqual(validateToolResult({ id: 'call_1', name: 'time.now', status: 'ok', content: [{ type: 'text', text: 'ok' }], metadata: { truncated: false, duration_ms: 1 } }).status, 'ok');
+  const prototypeKey = parseStrictJson('{"__proto__":{"polluted":true}}');
+  assert.equal(Object.hasOwn(prototypeKey, '__proto__'), true); assert.equal(Object.prototype.polluted, undefined);
+  const inheritedResult = Object.create({ id: 'call_1', name: 'time.now', status: 'ok', content: [], metadata: { truncated: false, duration_ms: 0 } });
+  assert.throws(() => validateToolResult(inheritedResult), /missing field/);
+  const inheritedCall = Object.create({ id: 'call_1', name: 'time.now', arguments: {} });
+  assert.throws(() => validateToolCall(inheritedCall), EnvelopeError);
 });
 
 test('Qwen XML tool calls remain safe across split chunks', () => {
   const decoder = new ToolCallStreamDecoder(); const events = [];
-  for (const chunk of ['prefix ', '<tool_', 'call>{"id":"call_xml1","name":"time.now","arguments":{}}', '</tool_call>']) events.push(...decoder.push(chunk));
+  for (const chunk of ['prefix ', '<tool_', 'call>\n<function=time.now>\n<parameter=format>\nlocal\n</parameter>\n</function>', '</tool_call>']) events.push(...decoder.push(chunk));
   events.push(...decoder.finish());
-  assert.equal(events.filter(e => e.kind === 'text_delta').map(e => e.text).join(''), 'prefix ');
+  assert.equal(events.filter(e => e.kind === 'text_delta').map(e => e.text).join(''), '');
   assert.equal(events.filter(e => e.kind === 'tool_call_chunk').length, 1);
   const callEvent = events.find(e => e.kind === 'tool_call_chunk');
-  assert.equal(parseToolCall(callEvent.text).id, 'call_xml1');
-  assert.throws(() => parseToolCall('<tool_call>{"id":"c","name":"time.now","arguments":{}}</tool_call> trailing'), EnvelopeError);
+  assert.equal(parseToolCall(callEvent.text).name, 'time.now');
+  assert.throws(() => parseToolCall('<tool_call>\n<function=time.now>\n</function>\n</tool_call> trailing'), EnvelopeError);
   const incomplete = new ToolCallStreamDecoder(); incomplete.push('<tool_call>{'); assert.throws(() => incomplete.finish(), /unterminated/);
+  const partialTag = new ToolCallStreamDecoder(); partialTag.push('answer <tool_'); assert.throws(() => partialTag.finish(), /incomplete/);
+});
+
+test('receipt Qwen XML grammar parses at every byte boundary and assigns host correlation', async () => {
+  const xml = '<tool_call>\n<function=system.get_info>\n</function>\n</tool_call>';
+  for (let split = 0; split <= xml.length; split++) {
+    const decoder = new ToolCallStreamDecoder(); const events = [...decoder.push(xml.slice(0, split)), ...decoder.push(xml.slice(split)), ...decoder.finish()];
+    const calls = events.filter(e => e.kind === 'tool_call_chunk'); assert.equal(calls.length, 1, `split ${split}`);
+    const parsed = parseToolCall(calls[0].text); assert.match(parsed.id, /^call_[A-Za-z0-9_-]{32}$/); assert.equal(parsed.name, 'system.get_info'); assert.deepEqual(parsed.arguments, {});
+  }
+  for (const malformed of [
+    '<tool_call><function=system.get_info><parameter=x bad>1</parameter></function></tool_call>',
+    '<tool_call><function=system.get_info><parameter=x>1</parameter><parameter=x>2</parameter></function></tool_call>',
+    '<tool_call><function=system.get_info><parameter=x><nested/></parameter></function></tool_call>',
+    '<tool_call><function=system.get_info></function></tool_call>suffix'
+  ]) assert.throws(() => parseToolCall(malformed), EnvelopeError);
+  const unknownArgument = new ConversationController({ engine: { async *generate() { yield { kind: 'tool_call_chunk', text: '<tool_call><function=system.get_info><parameter=x>1</parameter></function></tool_call>' }; } }, toolRegistry: { 'system.get_info': { name: 'system.get_info', execute: async () => { throw new Error('must not execute'); } } } });
+  assert.equal((await unknownArgument.runTurn({ sessionId: 'ses_xmlbad', requestId: 'req_xmlbad', message: 'bad arg' })).error, 'invalid_tool_arguments');
+});
+
+test('receipt Qwen XML parameters normalize safely and controller bounds tool results', async () => {
+  const parsed = parseToolCall('<tool_call>\n<function=time.now>\n<parameter=format>\nlocal\n</parameter>\n</function>\n</tool_call>');
+  assert.equal(parsed.name, 'time.now'); assert.deepEqual(parsed.arguments, { format: 'local' }); assert.match(parsed.id, /^call_/);
+  const badResult = new ConversationController({ engine: { async *generate() { yield { kind: 'tool_call_chunk', text: JSON.stringify({ id: 'call_badresult', name: 'test.bad', arguments: {} }) }; } }, toolRegistry: { 'test.bad': { name: 'test.bad', timeout_ms: 100, execute: async () => ({ id: 'call_badresult', name: 'test.bad', content: [] }) } } });
+  assert.equal((await badResult.runTurn({ sessionId: 'ses_badres', requestId: 'req_badres', message: 'bad' })).error, 'invalid_tool_result');
+  const timed = new ConversationController({ engine: { async *generate() { yield { kind: 'tool_call_chunk', text: JSON.stringify({ id: 'call_timeout', name: 'test.slow', arguments: {} }) }; } }, toolRegistry: { 'test.slow': { name: 'test.slow', timeout_ms: 5, execute: async () => new Promise(resolve => setTimeout(resolve, 50)) } } });
+  assert.equal((await timed.runTurn({ sessionId: 'ses_timeout', requestId: 'req_timeout', message: 'slow' })).error, 'tool_timeout');
+  let executed = false;
+  const previewTimed = new ConversationController({ engine: { async *generate() { yield { kind: 'tool_call_chunk', text: JSON.stringify({ id: 'call_preview', name: 'test.preview', arguments: {} }) }; } }, toolRegistry: { 'test.preview': { name: 'test.preview', timeout_ms: 5, preview: async () => new Promise(resolve => setTimeout(resolve, 50)), execute: async () => { executed = true; return makeToolResult({ id: 'call_preview', name: 'test.preview' }); } } } });
+  assert.equal((await previewTimed.runTurn({ sessionId: 'ses_preview', requestId: 'req_preview', message: 'preview' })).error, 'tool_timeout'); assert.equal(executed, false);
+  const literal = parseToolCall('<tool_call><function=browser.open_url><parameter=url>https://example.test/a?x=1&amp;raw=2</parameter></function></tool_call>'.replace('&amp;', '&'));
+  assert.equal(literal.arguments.url, 'https://example.test/a?x=1&raw=2');
+  const code = parseToolCall('<tool_call><function=fs.write_new><parameter=content>if (a < b && c > d) {\n  return "ok";\n}</parameter></function></tool_call>');
+  assert.match(code.arguments.content, /a < b && c > d/);
+  const indented = parseToolCall('<tool_call><function=fs.write_new><parameter=content>\n  first line  \n  second line\n</parameter></function></tool_call>');
+  assert.equal(indented.arguments.content, '  first line  \n  second line');
+  for (const attack of ['<tool_call><function=fs.write_new><parameter=content><parameter=x>bad</parameter></parameter></function></tool_call>', '<tool_call><function=fs.write_new><parameter=content>bad</function></parameter></function></tool_call>']) assert.throws(() => parseToolCall(attack), EnvelopeError);
 });
 
 test('controller propagates complete tool schema and ordered tool result correlation', async () => {
@@ -40,19 +83,36 @@ test('controller propagates complete tool schema and ordered tool result correla
     seen.push({ messages: structuredClone(messages), tools: structuredClone(tools) });
     if (!messages.some(m => m.role === 'tool')) {
       const decoder = new ToolCallStreamDecoder();
-      for (const chunk of ['<tool_', 'call>{"id":"call_order1","name":"test.echo","arguments":{"value":"ok"}}</tool_call>']) for (const event of decoder.push(chunk)) yield event;
+      for (const chunk of ['<tool_', 'call>\n<function=test.echo>\n<parameter=value>\nok\n</parameter>\n</function></tool_call>']) for (const event of decoder.push(chunk)) yield event;
       for (const event of decoder.finish()) yield event;
       return;
     }
     yield { kind: 'text_delta', text: 'done' }; yield { kind: 'done', finish_reason: 'stop' };
   } };
   const controller = new ConversationController({ engine, toolRegistry: {
-    'test.echo': { name: 'test.echo', description: 'Echo a value.', execute: async ({ id, name, arguments: args }) => ({ id, name, status: 'ok', content: [{ type: 'text', text: args.value }], metadata: { truncated: false, duration_ms: 0 } }) }
+    'test.echo': { name: 'test.echo', description: 'Echo a value.', parameters: { type: 'object', properties: { value: { type: 'string', maxLength: 64 } }, required: ['value'], additionalProperties: false }, execute: async ({ id, name, arguments: args }) => ({ id, name, status: 'ok', content: [{ type: 'text', text: args.value }], metadata: { truncated: false, duration_ms: 0 } }) }
   } });
   const result = await controller.runTurn({ sessionId: 'ses_xml01', requestId: 'req_xml01', message: 'use echo' });
   assert.equal(result.state, 'COMPLETED'); assert.equal(result.text, 'done'); assert.equal(seen.length, 2);
   assert.equal(seen[0].tools.find(t => t.function.name === 'test.echo').type, 'function');
-  assert.equal(seen[1].messages.at(-1).tool_call_id, 'call_order1'); assert.equal(seen[1].messages.at(-1).content, 'ok');
+  assert.match(seen[1].messages.at(-1).tool_call_id, /^call_/); assert.equal(seen[1].messages.at(-1).content, 'ok');
+  assert.deepEqual(seen[1].messages.map(message => message.role), ['user', 'assistant', 'tool']); assert.match(seen[1].messages[1].content, /<tool_call>/);
+});
+
+test('controller rejects text mixed with a tool frame before preview or execution', async () => {
+  let executed = false;
+  const controller = new ConversationController({ engine: { async *generate() { yield { kind: 'text_delta', text: 'leaked answer' }; yield { kind: 'tool_call_chunk', text: JSON.stringify({ id: 'call_mix01', name: 'test.mix', arguments: {} }) }; } }, toolRegistry: { 'test.mix': { name: 'test.mix', execute: async () => { executed = true; return makeToolResult({ id: 'call_mix01', name: 'test.mix' }); } } } });
+  const result = await controller.runTurn({ sessionId: 'ses_mix01', requestId: 'req_mix01', message: 'mixed' });
+  assert.equal(result.error, 'mixed_tool_call_output'); assert.equal(executed, false);
+});
+
+test('controller enforces every fs.apply_patch base/payload combination', async () => {
+  for (const [base, payload] of [['base_sha256', 'replacement'], ['base_sha256', 'patch'], ['base_hash', 'replacement'], ['base_hash', 'patch']]) {
+    const args = { workspace_id: 'project', path: 'x', [base]: 'a'.repeat(64), [payload]: 'body' };
+    const engine = { async *generate({ messages }) { if (!messages.some(m => m.role === 'tool')) { yield { kind: 'tool_call_chunk', text: JSON.stringify({ id: 'call_combo01', name: 'fs.apply_patch', arguments: args }) }; return; } yield { kind: 'text_delta', text: 'ok' }; } };
+    const controller = new ConversationController({ engine, toolRegistry: { 'fs.apply_patch': { name: 'fs.apply_patch', execute: async ({ id, name }) => ({ id, name, status: 'ok', content: [{ type: 'text', text: 'ok' }], metadata: { truncated: false, duration_ms: 0 } }) } } });
+    assert.equal((await controller.runTurn({ sessionId: `ses_${payload}${base.slice(-2)}`, requestId: `req_${payload}${base.slice(-2)}`, message: 'patch' })).state, 'COMPLETED');
+  }
 });
 
 test('controller executes deterministic time.now loop and preserves event order', async () => {

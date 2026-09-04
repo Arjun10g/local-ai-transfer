@@ -59,9 +59,13 @@ terminates with `data: [DONE]\n\n`. Every response includes `X-Request-Id`.
 definition has exactly `type:function` and a function `name`, `description`, and
 object-valued JSON-schema `parameters`; malformed or oversized schemas are rejected.
 The native real backend passes these definitions to the model-embedded, pinned
-chat-template evaluator. Qwen tool output is expected as a bounded
-`<tool_call>{...strict JSON tool envelope...}</tool_call>` stream; incomplete,
-malformed, or mixed calls fail closed and are never executed.
+chat-template evaluator. Qwen tool output is expected as one bounded XML call:
+`<tool_call><function=name><parameter=key>value</parameter></function></tool_call>`.
+Parameter values follow the pinned template rules (text scalars or JSON for
+objects/arrays); the host assigns the opaque correlation ID because this model
+format emits no ID. Incomplete, malformed, duplicate/unknown-tag, suffixed, or
+multiple calls fail closed and are never executed. Optional reasoning before the
+call is non-executable; XML tags are not exposed as assistant text.
 
 ## Cancellation and atomic state
 

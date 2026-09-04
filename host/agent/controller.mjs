@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { makeEvent } from './assistant-events.mjs';
-import { makeToolResult, parseToolCall, EnvelopeError } from './tool-envelope.mjs';
+import { makeToolResult, parseToolCall, validateToolResult, EnvelopeError } from './tool-envelope.mjs';
 import { timeNowDefinition, timeNowTool } from '../tools/time-now.mjs';
 
 export const STATES = Object.freeze(['IDLE', 'BUILDING_PROMPT', 'INFERENCING', 'TOOL_PROPOSED', 'WAITING_CONFIRMATION', 'TOOL_RUNNING', 'CONTINUING_MODEL', 'COMPLETED', 'CANCELLED', 'FAILED']);
@@ -10,13 +10,76 @@ const sessionIdPattern = /^[A-Za-z0-9_-]{8,96}$/;
 
 // The model sees only the OpenAI-compatible function schema. Execution and
 // confirmation policy remain host-owned and never cross the native boundary.
+const string = (max = 4096) => ({ type: 'string', maxLength: max });
+const integer = (minimum, maximum) => ({ type: 'integer', minimum, maximum });
+const descriptions = {
+  'time.now': 'Return local wall-clock and UTC time.', 'system.get_info': 'Return bounded local runtime information.', 'clipboard.read': 'Read the local clipboard when supported.',
+  'fs.list': 'List entries in an approved workspace directory.', 'fs.read_text': 'Read bounded UTF-8 text from an approved workspace file.', 'fs.search_text': 'Search literal text in approved workspace files.',
+  'fs.write_new': 'Create a new file in an approved workspace.', 'fs.apply_patch': 'Apply a guarded replacement or patch to an approved workspace file.', 'clipboard.write': 'Write text to the local clipboard when supported.',
+  'app.open': 'Open an allowlisted local application.', 'browser.open_url': 'Open an HTTPS URL after local policy checks.'
+};
 const parameterSchema = name => {
-  const required = { 'fs.list': ['workspace_id'], 'fs.read_text': ['workspace_id', 'path'], 'fs.search_text': ['workspace_id', 'query'], 'fs.write_new': ['workspace_id', 'path', 'content'], 'fs.apply_patch': ['workspace_id', 'path'], 'clipboard.write': ['text'], 'app.open': ['app_id'], 'browser.open_url': ['url'] }[name] ?? [];
-  return { type: 'object', properties: {}, required, additionalProperties: true };
+  const schemas = {
+    'time.now': { properties: { format: { type: 'string', enum: ['local', 'utc', 'iso'] } } },
+    'system.get_info': { properties: {} }, 'clipboard.read': { properties: {} },
+    'fs.list': { properties: { workspace_id: string(64), path: string(), max_entries: integer(1, 500) }, required: ['workspace_id'] },
+    'fs.read_text': { properties: { workspace_id: string(64), path: string(), offset_bytes: integer(0, 1048576), max_bytes: integer(1, 65536) }, required: ['workspace_id', 'path'] },
+    'fs.search_text': { properties: { workspace_id: string(64), path: string(), query: string(4096), max_files: integer(1, 200), max_matches: integer(1, 500), max_depth: integer(0, 16) }, required: ['workspace_id', 'query'] },
+    'fs.write_new': { properties: { workspace_id: string(64), path: string(), content: string(65536) }, required: ['workspace_id', 'path', 'content'] },
+    'fs.apply_patch': { properties: { workspace_id: string(64), path: string(), base_sha256: { type: 'string', pattern: '^[a-fA-F0-9]{64}$' }, base_hash: { type: 'string', pattern: '^[a-fA-F0-9]{64}$' }, replacement: string(2097152), patch: string(2097152) }, required: ['workspace_id', 'path'], oneOf: [
+      { required: ['base_sha256', 'replacement'], not: { anyOf: [{ required: ['base_hash'] }, { required: ['patch'] }] } },
+      { required: ['base_sha256', 'patch'], not: { anyOf: [{ required: ['base_hash'] }, { required: ['replacement'] }] } },
+      { required: ['base_hash', 'replacement'], not: { anyOf: [{ required: ['base_sha256'] }, { required: ['patch'] }] } },
+      { required: ['base_hash', 'patch'], not: { anyOf: [{ required: ['base_sha256'] }, { required: ['replacement'] }] } }
+    ] },
+    'clipboard.write': { properties: { text: string(65536) }, required: ['text'] }, 'app.open': { properties: { app_id: string(64) }, required: ['app_id'] }, 'browser.open_url': { properties: { url: string(2048) }, required: ['url'] }
+  };
+  return { type: 'object', ...(schemas[name] ?? { properties: {} }), additionalProperties: false };
 };
 const modelToolDefinitions = tools => [...tools.values()].map(tool => ({
-  type: 'function', function: { name: tool.name, description: tool.description ?? '', parameters: tool.parameters ?? parameterSchema(tool.name) }
+  type: 'function', function: { name: tool.name, description: tool.description ?? descriptions[tool.name] ?? `Execute the local ${tool.name} operation.`, parameters: tool.parameters ?? parameterSchema(tool.name) }
 }));
+
+function schemaEqual(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+function schemaMatches(value, schema) {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return false;
+  if (schema.not && schemaMatches(value, schema.not)) return false;
+  if (schema.oneOf && schema.oneOf.filter(item => schemaMatches(value, item)).length !== 1) return false;
+  if (schema.anyOf && !schema.anyOf.some(item => schemaMatches(value, item))) return false;
+  if (schema.enum && !schema.enum.some(item => schemaEqual(value, item))) return false;
+  if (schema.type === 'object' || schema.required || schema.properties || schema.additionalProperties === false) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const properties = schema.properties ?? {};
+    if (schema.additionalProperties === false && Object.keys(value).some(key => !Object.hasOwn(properties, key))) return false;
+    if ((schema.required ?? []).some(key => !Object.hasOwn(value, key))) return false;
+    return Object.entries(value).every(([key, item]) => !Object.hasOwn(properties, key) || schemaMatches(item, properties[key]));
+  }
+  if (schema.type === 'array') return Array.isArray(value) && (schema.maxItems === undefined || value.length <= schema.maxItems) && (!schema.items || value.every(item => schemaMatches(item, schema.items)));
+  if (schema.type === 'string') return typeof value === 'string' && (schema.maxLength === undefined || value.length <= schema.maxLength) && (!schema.pattern || new RegExp(schema.pattern).test(value));
+  if (schema.type === 'integer') return Number.isInteger(value) && (!('minimum' in schema) || value >= schema.minimum) && (!('maximum' in schema) || value <= schema.maximum);
+  if (schema.type === 'number') return typeof value === 'number' && Number.isFinite(value) && (!('minimum' in schema) || value >= schema.minimum) && (!('maximum' in schema) || value <= schema.maximum);
+  if (schema.type === 'boolean') return typeof value === 'boolean';
+  return schema.type === undefined;
+}
+function validateToolArgumentShape(tool, call) {
+  const schema = tool.parameters ?? parameterSchema(call.name);
+  if (!schemaMatches(call.arguments, schema)) throw Object.assign(new Error('tool arguments do not match schema'), { code: 'invalid_tool_arguments' });
+}
+
+async function invokeWithTimeout(tool, operation, call, signal) {
+  // Tools must honor the supplied AbortSignal; the race bounds the controller
+  // even when a misbehaving implementation cannot be interrupted immediately.
+  // Tools must honor the supplied AbortSignal; the race bounds the controller
+  // even when a misbehaving implementation cannot be interrupted immediately.
+  const timeoutMs = tool.timeout_ms ?? 30000;
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600000) throw Object.assign(new Error('invalid_tool_timeout'), { code: 'invalid_tool_timeout' });
+  const child = new AbortController(); const relay = () => child.abort(); signal?.addEventListener('abort', relay, { once: true });
+  let timer;
+  const timeout = new Promise((_, reject) => { timer = setTimeout(() => { child.abort(); reject(Object.assign(new Error('tool execution timed out'), { code: 'tool_timeout' })); }, timeoutMs); });
+  let cancelReject; const cancelled = signal ? new Promise((_, reject) => { cancelReject = () => reject(Object.assign(new Error('cancelled'), { code: 'cancelled' })); signal.addEventListener('abort', cancelReject, { once: true }); }) : null;
+  try { return await Promise.race([operation({ ...call, signal: child.signal }), timeout, ...(signal ? [cancelled] : [])]); }
+  finally { clearTimeout(timer); signal?.removeEventListener('abort', relay); if (signal && cancelReject) signal.removeEventListener('abort', cancelReject); }
+}
 
 export class ConversationController {
   constructor({ engine, maxToolCalls = 8, confirmationTimeoutMs = 30000, maxSessions = 4, maxHistoryMessages = 64, maxHistoryBytes = 262144, toolRegistry } = {}) {
@@ -79,8 +142,9 @@ export class ConversationController {
         calls++; if (calls > this.maxToolCalls) throw Object.assign(new Error('tool_call_limit_exceeded'), { code: 'tool_call_limit_exceeded' });
         const call = parseToolCall(callText); session.state = 'TOOL_PROPOSED';
         const tool = this.tools.get(call.name); if (!tool) throw Object.assign(new Error('unknown_tool'), { code: 'unknown_tool' });
+        validateToolArgumentShape(tool, call);
         let preview;
-        if (tool.preview) preview = await tool.preview(call);
+        if (tool.preview) preview = await invokeWithTimeout(tool, tool.preview, call, controller.signal);
         emit('tool.proposed', { call, ...(preview === undefined ? {} : { preview }) });
         let approved = true;
         if (tool.requires_confirmation) {
@@ -95,10 +159,13 @@ export class ConversationController {
         if (!approved) result = makeToolResult({ id: call.id, name: call.name, status: 'denied', text: 'User denied this action.' });
         else {
           if (controller.signal.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' });
-          result = await tool.execute({ ...call, signal: controller.signal });
+          result = await invokeWithTimeout(tool, tool.execute, call, controller.signal);
         }
-        if (!result || result.id !== call.id) throw new Error('tool_result_mismatch');
-        emit('tool.completed', { result }); this._appendHistory(session, { role: 'tool', name: call.name, tool_call_id: call.id, content: result.content[0]?.text ?? '' });
+        try { result = validateToolResult(result); } catch { throw Object.assign(new Error('invalid_tool_result'), { code: 'invalid_tool_result' }); }
+        if (result.id !== call.id || result.name !== call.name) throw Object.assign(new Error('tool_result_mismatch'), { code: 'tool_result_mismatch' });
+        emit('tool.completed', { result });
+        this._appendHistory(session, { role: 'assistant', content: callText });
+        this._appendHistory(session, { role: 'tool', name: call.name, tool_call_id: call.id, content: result.content[0]?.text ?? '' });
         session.state = 'CONTINUING_MODEL'; text = '';
       }
     } catch (error) {

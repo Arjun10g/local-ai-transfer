@@ -9,7 +9,7 @@
     {"method":"POST","path":"/v1/sessions","auth":true}, {"method":"DELETE","path":"/v1/sessions/{id}","auth":true},
     {"method":"POST","path":"/v1/chat/completions","auth":true}, {"method":"POST","path":"/v1/cancel/{request_id}","auth":true}
   ],
-  "chat_request": {"required":["model","messages"],"max_messages":64,"max_message_content_bytes":32768,"roles":["system","user","assistant","tool"],"system_position":0,"requires_user":true,"unknown_fields":"reject","thinking_modes":{"normal":false,"deep":true},"tools":{"max":32,"format":"openai-function","parameters":"bounded-object-json"},"tool_call_stream":{"wrapper":"<tool_call>...</tool_call>","payload":"strict-tool-envelope-v0.1.0","malformed":"fail_closed"}},
+  "chat_request": {"required":["model","messages"],"max_messages":64,"max_message_content_bytes":32768,"roles":["system","user","assistant","tool"],"system_position":0,"requires_user":true,"unknown_fields":"reject","thinking_modes":{"normal":false,"deep":true},"tools":{"max":32,"format":"openai-function","parameters":"bounded-object-json"},"tool_call_stream":{"wrapper":"<tool_call><function=name><parameter=key>value</parameter></function></tool_call>","payload":"strict-tool-envelope-v0.1.0-with-host-id","malformed":"fail_closed","reasoning_prefix":"non_executable","suffix":"reject","multiple":"reject"}},
   "stream": {"media_type":"text/event-stream","terminator":"data: [DONE]\\n\\n","finish_reasons":["stop","length","cancelled"]},
   "origin_policy": {"host_required":true,"http_version":"HTTP/1.1","allowed_authorities":["127.0.0.1","localhost"],"allow_cors_wildcard":false}
 }
