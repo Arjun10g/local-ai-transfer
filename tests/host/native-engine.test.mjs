@@ -32,14 +32,20 @@ test('NativeEngineClient integrates authenticated native fixture streaming, sess
   if (process.platform === 'win32' && !existsSync('cmake.exe')) return t.skip('cmake unavailable');
   if (process.platform !== 'win32' && !existsSync('/usr/bin/cmake') && !existsSync('/opt/homebrew/bin/cmake')) return t.skip('cmake unavailable');
   const executable = await buildFixture(); assert.equal(existsSync(executable), true); const engineToken = randomBytes(24).toString('base64url'); const fixture = await startFixture(executable, engineToken); t.after(() => stop(fixture.child));
-  const client = new NativeEngineClient({ endpoint: `http://127.0.0.1:${fixture.port}`, token: engineToken, timeoutMs: 10000 }); t.after(() => client.shutdown());
-  assert.equal((await client.health()).ready, true); assert.equal((await client.waitReady()).ready, true);
+  const client = new NativeEngineClient({ endpoint: `http://127.0.0.1:${fixture.port}`, token: engineToken, model: 'fixture', backend: 'fixture-cpu', timeoutMs: 10000 }); t.after(() => client.shutdown());
+  const health = await client.health(); assert.equal(health.ready, true); assert.equal(health.backend, 'fixture-cpu/0.1.0'); assert.equal(health.model, 'fixture'); assert.equal((await client.waitReady()).ready, true);
+  const mismatched = new NativeEngineClient({ endpoint: `http://127.0.0.1:${fixture.port}`, token: engineToken, model: 'qwen35-9b-q4-k-m', backend: 'cpu', timeoutMs: 10000 }); t.after(() => mismatched.shutdown());
+  await assert.rejects(() => mismatched.health(), /identity does not match/);
   const controller = new ConversationController({ engine: client }); const session = controller.createSession('ses_native01'); const events = [];
   const result = await controller.runTurn({ sessionId: session.id, requestId: 'req_native01', message: 'hello', onEvent: event => events.push(event) });
   assert.equal(result.state, 'COMPLETED'); assert.match(result.text, /fixture response/); assert.ok(client.sessions.has(session.id)); assert.ok(events.some(event => event.event === 'message.completed'));
   const cancelled = controller.runTurn({ sessionId: session.id, requestId: 'req_native02', message: 'hello', onEvent: () => {} }); setTimeout(() => controller.cancel('req_native02'), 20); const cancelledResult = await cancelled;
   assert.equal(cancelledResult.state, 'CANCELLED'); assert.equal(controller.state(session.id), 'CANCELLED');
   assert.equal(await client.deleteSession(session.id), true); assert.equal(client.sessions.has(session.id), false);
+});
+
+test('NativeEngineClient requires explicit model/backend identity', () => {
+  assert.throws(() => new NativeEngineClient({ endpoint: 'http://127.0.0.1:1234', token: 'native-client-test-token' }), /model identity is required/);
 });
 
 test('launcher rejects invalid or conflicting engine selection without fixture fallback', () => {

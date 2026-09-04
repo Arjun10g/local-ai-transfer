@@ -5,6 +5,7 @@
 #include "../../native/server/chat_request.hpp"
 #include "../../native/backend/llama_chat_template.hpp"
 #include "../../native/backend/llama_backend.hpp"
+#include "../../native/config/runtime_config.hpp"
 
 #include <cassert>
 #include <iostream>
@@ -106,6 +107,26 @@ int main() {
   profile.expected_sha256 = std::string(64, '0');
   const auto rejected_hash = lae::validate_model_file(model_path, profile, true);
   assert(!rejected_hash.valid && rejected_hash.code == "model_hash_mismatch");
-  std::error_code cleanup_error; std::filesystem::remove(model_path, cleanup_error);
+  const auto config_path = std::filesystem::temp_directory_path() / "lae-runtime-config.json";
+  {
+    std::ofstream config(config_path, std::ios::trunc);
+    config << "{\"model_path\":\"" << model_path.string() << "\",\"context_tokens\":8192}";
+  }
+  RuntimeConfigFile runtime_config;
+  std::string config_error;
+  std::error_code cleanup_error;
+  assert(load_runtime_config(config_path, runtime_config, config_error));
+  assert(runtime_config.model_path == model_path.string() && runtime_config.backend_profile == "cpu" && runtime_config.context_tokens == 8192);
+  const auto relative_config = std::filesystem::path("runtime-config.json");
+  assert(!load_runtime_config(relative_config, runtime_config, config_error));
+  const auto symlink_path = std::filesystem::temp_directory_path() / "lae-runtime-model-link.gguf";
+  std::filesystem::create_symlink(model_path, symlink_path, cleanup_error);
+  if (!cleanup_error) {
+    const auto symlink_result = lae::validate_model_file(symlink_path, profile, true);
+    assert(!symlink_result.valid && symlink_result.code == "model_symlink_forbidden");
+    std::filesystem::remove(symlink_path, cleanup_error);
+  }
+  std::filesystem::remove(model_path, cleanup_error);
+  std::filesystem::remove(config_path, cleanup_error);
   std::cout << "runtime contract/backend tests: PASS\\n";
 }

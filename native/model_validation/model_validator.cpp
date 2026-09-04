@@ -131,6 +131,8 @@ ModelValidationResult validate_model_file(const std::filesystem::path& input,
   if (ec) return invalid("model_path_invalid", "model path cannot be canonicalized");
   const auto size = std::filesystem::file_size(canonical, ec);
   if (ec) return invalid("model_stat_failed", "model file size is unavailable");
+  const auto observed_write_time = std::filesystem::last_write_time(canonical, ec);
+  if (ec) return invalid("model_stat_failed", "model modification time is unavailable");
   if (!fixture_mode && profile.expected_size_bytes == 0) return invalid("model_profile_incomplete", "release profile requires expected size");
   if (profile.expected_size_bytes && size != profile.expected_size_bytes) return invalid("model_size_mismatch", "model size does not match profile");
   if (!profile.expected_filename.empty() && canonical.filename().string() != profile.expected_filename)
@@ -139,6 +141,14 @@ ModelValidationResult validate_model_file(const std::filesystem::path& input,
     return invalid("model_mmproj_forbidden", "vision projection is not accepted by text-only runtime");
   std::ifstream file(canonical, std::ios::binary);
   if (!file) return invalid("model_open_failed", "model file cannot be opened read-only");
+  // C++17 streams cannot portably bind a pathname to an immutable handle.
+  // Re-check identity/size immediately after opening and again after hashing
+  // to reject the common replacement/write race; OS-specific locked handles
+  // remain a release-platform hardening task.
+  std::error_code opened_ec;
+  if (!std::filesystem::equivalent(input, canonical, opened_ec) || opened_ec ||
+      std::filesystem::file_size(canonical, opened_ec) != size || opened_ec)
+    return invalid("model_changed_during_validation", "model changed while validation was starting");
   constexpr size_t kHeaderLimit = 1024 * 1024;
   std::vector<std::uint8_t> header(kHeaderLimit);
   file.read(reinterpret_cast<char*>(header.data()), header.size());
@@ -160,6 +170,11 @@ ModelValidationResult validate_model_file(const std::filesystem::path& input,
   file.clear(); file.seekg(0);
   std::array<char, 1024 * 1024> chunk{};
   while (file) { file.read(chunk.data(), chunk.size()); const auto n = file.gcount(); if (n > 0) digest.update(reinterpret_cast<const std::uint8_t*>(chunk.data()), static_cast<size_t>(n)); }
+  if (file.bad()) return invalid("model_read_failed", "model read failed during validation");
+  const auto final_size = std::filesystem::file_size(canonical, ec);
+  const auto final_write_time = std::filesystem::last_write_time(canonical, ec);
+  if (ec || final_size != size || final_write_time != observed_write_time)
+    return invalid("model_changed_during_validation", "model changed while validation was running");
   const std::string hash = digest.finish();
   if (!fixture_mode && profile.expected_sha256.empty()) return invalid("model_profile_incomplete", "release profile requires expected SHA-256");
   if (!profile.expected_sha256.empty() && hash != profile.expected_sha256) return invalid("model_hash_mismatch", "model SHA-256 does not match profile");

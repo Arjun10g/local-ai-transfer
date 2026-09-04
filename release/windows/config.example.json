@@ -1,6 +1,6 @@
 {
   "model_path": "D:/ApprovedModels/Qwen3.5-9B-Q4_K_M.gguf",
-  "backend_profile": "cpu-safe",
+  "backend_profile": "cpu",
   "context_tokens": 8192,
   "network_provider": "disabled",
   "workspaces": []

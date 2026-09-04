@@ -10,6 +10,10 @@ if (-not (Test-Path -LiteralPath $engine -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
     throw 'config.local.json is required; copy config.example.json and set an approved local model path.'
 }
-# The production launcher receives a random per-launch token through a
-# protected handle. This fixture does not start a server or print credentials.
-& $engine 'serve' '--config' $configPath
+$token = [Environment]::GetEnvironmentVariable('LAE_ENGINE_TOKEN')
+if ([string]::IsNullOrEmpty($token)) {
+    throw 'LAE_ENGINE_TOKEN must be supplied through the protected launch environment.'
+}
+# The native CLI consumes this explicit config and defaults its backend profile
+# to CPU when backend_profile is omitted. No model path or token is inferred.
+& $engine 'serve' '--config' $configPath '--token' $token

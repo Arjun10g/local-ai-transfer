@@ -18,6 +18,13 @@ validation first and then loads through the pinned llama.cpp adapter. Context is
 bounded to 8,192 by default and 16,384 maximum; CPU offload is mandatory and no
 Intel promotion is implied by this slice.
 
+Validation keeps the opened stream for bounded header checks and the full hash,
+then rechecks pathname equivalence, size, and modification time. Portable
+C++17 cannot turn a pathname into an immutable, share-deny handle on every
+target, so a concurrent replacement that evades those checks remains an
+OS-specific release hardening concern and is reported as
+`model_changed_during_validation` when detected.
+
 The real adapter receives the complete ordered API message history and renders
 the GGUF-embedded template through the official same-pin llama.cpp Jinja
 evaluator (the selectively vendored `common/jinja` sources). It passes

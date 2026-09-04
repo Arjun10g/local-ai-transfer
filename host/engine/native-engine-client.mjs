@@ -38,9 +38,13 @@ async function* sseEvents(response, signal) {
 }
 
 export class NativeEngineClient {
-  constructor({ endpoint, token, timeoutMs = 30000, maxTokens = 64 } = {}) {
+  constructor({ endpoint, token, model, backend, timeoutMs = 120000, maxTokens = 64 } = {}) {
     this.baseUrl = endpointUrl(endpoint); if (typeof token !== 'string' || token.length < 16 || token.length > 512) throw new NativeEngineError('invalid_engine_token', 'engine bearer token is invalid');
-    this.token = token; this.timeoutMs = timeoutMs; this.maxTokens = maxTokens; this.sessions = new Map(); this.active = new Map(); this.closed = false;
+    if (typeof model !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(model)) throw new NativeEngineError('invalid_engine_model', 'native model identity is required');
+    if (typeof backend !== 'string' || !/^[A-Za-z0-9._/-]{1,128}$/.test(backend)) throw new NativeEngineError('invalid_engine_backend', 'native backend identity is required');
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120000) throw new NativeEngineError('invalid_engine_timeout', 'native engine timeout must be 1000-120000ms');
+    if (!Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > 64) throw new NativeEngineError('invalid_engine_max_tokens', 'native maxTokens must be 1-64');
+    this.token = token; this.model = model; this.backend = backend; this.timeoutMs = timeoutMs; this.maxTokens = maxTokens; this.sessions = new Map(); this.active = new Map(); this.closed = false;
   }
   headers(extra = {}) { return { authorization: `Bearer ${this.token}`, ...extra }; }
   async request(path, options = {}, { signal, timeoutMs = this.timeoutMs } = {}) {
@@ -55,7 +59,16 @@ export class NativeEngineClient {
       throw error;
     } finally { clearTimeout(timer); signal?.removeEventListener('abort', relay); }
   }
-  async health() { const response = await this.request('/healthz'); const data = await readJson(response); return { ready: data.lifecycle === 'READY' || data.lifecycle === 'BUSY', engine: 'native-0.1.0', backend: 'fixture-cpu', lifecycle: data.lifecycle ?? 'UNKNOWN' }; }
+  async health() {
+    const response = await this.request('/healthz', {}, { timeoutMs: 10000 }); const data = await readJson(response);
+    const build = await this.buildInfo();
+    const backendMatches = this.backend === 'cpu'
+      ? typeof build.backend === 'string' && build.backend.endsWith('/cpu')
+      : build.backend === this.backend || (typeof build.backend === 'string' && build.backend.startsWith(`${this.backend}/`));
+    if (build.model !== this.model || !backendMatches) throw new NativeEngineError('engine_identity_mismatch', 'native engine identity does not match configured model/backend');
+    return { ready: data.lifecycle === 'READY' || data.lifecycle === 'BUSY', engine: build.engine_version ?? 'native-0.1.0', backend: build.backend ?? this.backend, model: build.model ?? this.model, lifecycle: data.lifecycle ?? 'UNKNOWN' };
+  }
+  async buildInfo() { const response = await this.request('/build-info', {}, { timeoutMs: 10000 }); return readJson(response); }
   async ready() { const response = await this.request('/readyz'); const data = await readJson(response); return { ready: data.ready === true, lifecycle: data.lifecycle ?? 'UNKNOWN' }; }
   async waitReady({ timeoutMs = this.timeoutMs, intervalMs = 25 } = {}) { const deadline = Date.now() + timeoutMs; while (Date.now() < deadline) { try { const status = await this.ready(); if (status.ready) return status; } catch (error) { if (!(error instanceof NativeEngineError) || !['engine_timeout', 'http_503', 'not_ready'].includes(error.code)) throw error; } await delay(intervalMs); } throw new NativeEngineError('engine_not_ready', 'native engine readiness timed out'); }
   async ensureSession(hostSessionId, signal) {
@@ -73,11 +86,13 @@ export class NativeEngineClient {
   async postCancel(nativeRequestId) { if (!REQUEST_ID.test(nativeRequestId)) return false; try { await this.request(`/v1/cancel/${encodeURIComponent(nativeRequestId)}`, { method: 'POST', body: '{}' }, { timeoutMs: 2000 }); return true; } catch { return false; } }
   async *generate({ requestId, sessionId, messages = [], mode = 'normal', signal }) {
     if (!REQUEST_ID.test(requestId)) throw new NativeEngineError('invalid_request_id', 'host request id is invalid');
+    if (!Array.isArray(messages) || messages.length < 1 || messages.length > 64) throw new NativeEngineError('invalid_messages', 'native message history is invalid');
+    if (!['normal', 'deep'].includes(mode)) throw new NativeEngineError('invalid_mode', 'native mode is invalid');
     const localAbort = new AbortController(); const relay = () => { localAbort.abort(); };
     signal?.addEventListener('abort', relay, { once: true }); const active = { abort: localAbort, nativeRequestId: null, cancelled: false }; this.active.set(requestId, active);
     try {
       const nativeSessionId = await this.ensureSession(sessionId ?? 'ses_native_default', localAbort.signal);
-      const payload = { model: 'fixture', session_id: nativeSessionId, messages, stream: true, max_tokens: Math.min(this.maxTokens, 64), mode };
+      const payload = { model: this.model, session_id: nativeSessionId, messages, stream: true, max_tokens: this.maxTokens, mode };
       const response = await this.request('/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) }, { signal: localAbort.signal });
       active.nativeRequestId = response.headers.get('x-request-id'); if (active.cancelled && active.nativeRequestId) void this.postCancel(active.nativeRequestId);
       for await (const chunk of sseEvents(response, localAbort.signal)) {

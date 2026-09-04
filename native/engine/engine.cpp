@@ -31,6 +31,10 @@ void Engine::set_state(LifecycleState next) {
 }
 
 void Engine::initialize(const BackendConfig& config) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    model_id_ = config.model_id;
+  }
   set_state(LifecycleState::VERIFYING_MODEL);
   set_state(LifecycleState::LOADING_MODEL);
   try {
@@ -61,6 +65,7 @@ LifecycleState Engine::state() const {
 }
 
 std::string Engine::backend_id() const { return backend_ ? backend_->id() : "none"; }
+std::string Engine::model_id() const { std::lock_guard<std::mutex> lock(mutex_); return model_id_; }
 
 SessionInfo Engine::create_session() {
   std::lock_guard<std::mutex> lock(mutex_);
