@@ -27,6 +27,11 @@ TOKEN_ENV = "LAE_EVAL_TOKEN"
 TOKEN_MAX_BYTES = 4096
 RESPONSE_MAX_BYTES = 1024 * 1024
 MODEL_OUTPUT_MAX_CHARS = 65536
+FIXTURE_MAX_BYTES = 256 * 1024
+MAX_MESSAGE_CHARS = 4096
+MAX_MESSAGES_PER_CASE = 8
+MAX_TOOLS = 16
+MAX_TOOL_SCHEMA_BYTES = 16384
 TOOL_CALL = re.compile(
     r"\A\s*<tool_call>\s*<function=([a-z][a-z0-9_.-]{1,95})>"
     r"(.*?)</function>\s*</tool_call>\s*\Z",
@@ -35,6 +40,21 @@ TOOL_CALL = re.compile(
 PARAMETER = re.compile(
     r"<parameter=([a-z][a-z0-9_.-]{0,95})>(.*?)</parameter>", re.DOTALL
 )
+STRUCTURAL_TAG = re.compile(r"</?(?:tool_call|function|parameter)(?:\s|=|>|/)", re.IGNORECASE)
+ENTITY = re.compile(r"&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]+);", re.IGNORECASE)
+
+
+class RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(request.full_url, code, "redirect_rejected", headers, fp)
+
+
+def _build_no_proxy_opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), RejectRedirectHandler())
+
+
+def _open_url(request: urllib.request.Request, timeout: float):
+    return _build_no_proxy_opener().open(request, timeout=timeout)
 
 
 def validate_endpoint(endpoint: str) -> str:
@@ -70,11 +90,36 @@ def _read_response(response: Any, limit: int) -> bytes:
 
 
 def load_fixture(path: Path = FIXTURE) -> dict[str, Any]:
-    fixture = json.loads(path.read_text(encoding="utf-8"))
-    if fixture.get("schema") != "local_bmo.tool-call-eval.v1" or not isinstance(fixture.get("cases"), list):
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read(FIXTURE_MAX_BYTES + 1)
+    except OSError as exc:
+        raise ValueError("fixture_unreadable") from exc
+    if len(raw) > FIXTURE_MAX_BYTES:
+        raise ValueError("fixture_too_large")
+    try:
+        fixture = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid_tool-call_fixture") from exc
+    if not isinstance(fixture, dict) or fixture.get("schema") != "local_bmo.tool-call-eval.v1" or not isinstance(fixture.get("cases"), list):
         raise ValueError("invalid tool-call evaluation fixture")
-    if len(fixture["cases"]) > int(fixture.get("limits", {}).get("max_cases", 8)):
+    limits = fixture.get("limits", {})
+    if not isinstance(limits, dict) or int(limits.get("max_cases", 8)) > 8:
         raise ValueError("fixture exceeds bounded case limit")
+    if len(fixture["cases"]) > min(int(limits.get("max_cases", 8)), 8):
+        raise ValueError("fixture exceeds bounded case limit")
+    tools = fixture.get("tools")
+    if not isinstance(tools, list) or len(tools) > MAX_TOOLS:
+        raise ValueError("fixture tools are unbounded")
+    for tool in tools:
+        if not isinstance(tool, dict) or len(json.dumps(tool, separators=(",", ":")).encode("utf-8")) > MAX_TOOL_SCHEMA_BYTES:
+            raise ValueError("fixture tool schema is unbounded")
+    for case in fixture["cases"]:
+        if not isinstance(case, dict) or not isinstance(case.get("messages"), list) or len(case["messages"]) > MAX_MESSAGES_PER_CASE:
+            raise ValueError("fixture messages are unbounded")
+        for message in case["messages"]:
+            if not isinstance(message, dict) or not isinstance(message.get("content"), str) or len(message["content"]) > MAX_MESSAGE_CHARS:
+                raise ValueError("fixture message is unbounded")
     return fixture
 
 
@@ -142,7 +187,10 @@ def parse_tool_call(text: str, tools: list[dict[str, Any]] | None = None) -> dic
         if parameter is None:
             raise ValueError("malformed_parameter")
         key, raw = parameter.groups()
-        if key in arguments or any(character in raw for character in "<>&"):
+        # Literal operators are valid argument data. Only XML control tags or
+        # entity syntax are rejected, so nested protocol structure cannot hide
+        # a second parameter/function while URLs and code remain representable.
+        if key in arguments or STRUCTURAL_TAG.search(raw) or ENTITY.search(raw):
             raise ValueError("malformed_parameter")
         value = raw.strip()
         try:
@@ -181,7 +229,7 @@ def _post(endpoint: str, token: str, payload: dict[str, Any], timeout: float) ->
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(session_request, timeout=timeout) as response:
+    with _open_url(session_request, timeout) as response:
         session = json.loads(_read_response(response, RESPONSE_MAX_BYTES).decode("utf-8"))
     if not isinstance(session.get("id"), str):
         raise ValueError("native engine returned no session id")
@@ -192,7 +240,7 @@ def _post(endpoint: str, token: str, payload: dict[str, Any], timeout: float) ->
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with _open_url(request, timeout) as response:
         data = json.loads(_read_response(response, RESPONSE_MAX_BYTES).decode("utf-8"))
     try:
         content = data["choices"][0]["message"]["content"]

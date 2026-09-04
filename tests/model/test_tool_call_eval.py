@@ -1,14 +1,20 @@
 import unittest
 import os
+import io
 import json
 import tempfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
 from scripts.test.evaluate_tool_calls import (
+    FIXTURE_MAX_BYTES,
     MODEL_OUTPUT_MAX_CHARS,
     RESPONSE_MAX_BYTES,
     TOKEN_MAX_BYTES,
+    RejectRedirectHandler,
+    _build_no_proxy_opener,
     _post,
     evaluate_case,
     load_bearer_token,
@@ -43,7 +49,7 @@ class ToolCallEvaluatorTests(unittest.TestCase):
         for malformed in (
             valid + " trailing",
             valid.replace("</function>", "<parameter=city>again</parameter></function>"),
-            valid.replace("Toronto", "<nested>Toronto</nested>"),
+            valid.replace("Toronto", "<parameter=evil>Toronto</parameter>"),
             valid.replace("Toronto", "&lt;Toronto&gt;"),
             valid.replace("weather.get", "shell.run"),
             valid.replace("<parameter=units>celsius</parameter>", ""),
@@ -127,7 +133,7 @@ class ToolCallEvaluatorTests(unittest.TestCase):
                 self.limit = limit
                 return b"x" * (RESPONSE_MAX_BYTES + 1)
 
-        with patch("scripts.test.evaluate_tool_calls.urllib.request.urlopen", return_value=OversizedResponse()):
+        with patch("scripts.test.evaluate_tool_calls._open_url", return_value=OversizedResponse()):
             with self.assertRaisesRegex(ValueError, "response_too_large"):
                 _post("http://127.0.0.1:49912/v1/chat/completions", "test-token-20260904", {}, 0.1)
 
@@ -146,9 +152,41 @@ class ToolCallEvaluatorTests(unittest.TestCase):
 
         session = FixedResponse(b'{"id":"s"}')
         body = json.dumps({"choices": [{"message": {"content": "x" * (MODEL_OUTPUT_MAX_CHARS + 1)}}]}).encode()
-        with patch("scripts.test.evaluate_tool_calls.urllib.request.urlopen", side_effect=[session, FixedResponse(body)]):
+        with patch("scripts.test.evaluate_tool_calls._open_url", side_effect=[session, FixedResponse(body)]):
             with self.assertRaisesRegex(ValueError, "model_output_too_large"):
                 _post("http://127.0.0.1:49912/v1/chat/completions", "test-token-20260904", {}, 0.1)
+
+    def test_literal_value_operators_are_allowed_but_entity_and_structure_are_not(self):
+        tools = load_fixture()["tools"]
+        output = "<tool_call><function=weather.get><parameter=city>Toronto <downtown> & west</parameter><parameter=units>celsius</parameter></function></tool_call>"
+        self.assertEqual(parse_tool_call(output, tools)["arguments"]["city"], "Toronto <downtown> & west")
+
+    def test_proxy_environment_is_ignored_and_redirects_fail_for_both_requests(self):
+        with patch.dict(os.environ, {"http_proxy": "http://attacker.invalid:8080", "HTTPS_PROXY": "http://attacker.invalid:8080"}):
+            with patch("scripts.test.evaluate_tool_calls.urllib.request.getproxies", side_effect=AssertionError("proxy lookup")):
+                opener = _build_no_proxy_opener()
+        self.assertFalse(any(hasattr(handler, "proxies") for handler in opener.handlers))
+        handler = RejectRedirectHandler()
+        for path in ("/v1/sessions", "/v1/chat/completions"):
+            with self.subTest(path=path):
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    handler.redirect_request(urllib.request.Request("http://127.0.0.1:49912" + path), io.BytesIO(), 302, "found", {}, "http://remote.invalid")
+                self.assertEqual(raised.exception.code, 302)
+                if raised.exception.fp is not None:
+                    raised.exception.fp.close()
+                raised.exception.close()
+
+    def test_fixture_file_and_nested_input_sizes_are_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixture.json"
+            path.write_bytes(b"x" * (FIXTURE_MAX_BYTES + 1))
+            with self.assertRaisesRegex(ValueError, "fixture_too_large"):
+                load_fixture(path)
+            fixture = load_fixture()
+            fixture["cases"][0]["messages"][0]["content"] = "x" * 4097
+            path.write_text(json.dumps(fixture), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "message is unbounded"):
+                load_fixture(path)
 
 
 if __name__ == "__main__":
