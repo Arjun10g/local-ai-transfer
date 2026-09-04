@@ -29,6 +29,7 @@ void PinnedChatTemplate::load(const std::string& source) {
 }
 
 std::string PinnedChatTemplate::render(const std::vector<GenerationRequest::ChatMessage>& messages,
+                                      const std::vector<GenerationRequest::ToolDefinition>& tools,
                                       bool enable_thinking) const {
   if (!impl_->program) throw std::runtime_error("llama chat template is not loaded");
   nlohmann::ordered_json serialized_messages = nlohmann::ordered_json::array();
@@ -41,6 +42,14 @@ std::string PinnedChatTemplate::render(const std::vector<GenerationRequest::Chat
     if (!message.tool_call_id.empty()) serialized["tool_call_id"] = message.tool_call_id;
     serialized_messages.push_back(std::move(serialized));
   }
+  nlohmann::ordered_json serialized_tools = nlohmann::ordered_json::array();
+  for (const auto& tool : tools) {
+    nlohmann::ordered_json parameters;
+    try { parameters = nlohmann::ordered_json::parse(tool.parameters_json); }
+    catch (...) { throw std::runtime_error("invalid tool parameter schema"); }
+    if (!parameters.is_object()) throw std::runtime_error("tool parameter schema must be an object");
+    serialized_tools.push_back({{"type", "function"}, {"function", {{"name", tool.name}, {"description", tool.description}, {"parameters", std::move(parameters)}}}});
+  }
   nlohmann::ordered_json inputs = {
       {"messages", std::move(serialized_messages)},
       {"bos_token", ""},
@@ -48,6 +57,7 @@ std::string PinnedChatTemplate::render(const std::vector<GenerationRequest::Chat
       {"enable_thinking", enable_thinking},
       {"add_generation_prompt", true},
   };
+  if (!serialized_tools.empty()) inputs["tools"] = std::move(serialized_tools);
   jinja::context context(impl_->source);
   jinja::global_from_json(context, inputs, false);
   jinja::runtime runtime(context);
@@ -64,6 +74,6 @@ PinnedChatTemplate::~PinnedChatTemplate() = default;
 PinnedChatTemplate::PinnedChatTemplate(PinnedChatTemplate&&) noexcept = default;
 PinnedChatTemplate& PinnedChatTemplate::operator=(PinnedChatTemplate&&) noexcept = default;
 void PinnedChatTemplate::load(const std::string&) { throw std::runtime_error("chat templates require llama.cpp"); }
-std::string PinnedChatTemplate::render(const std::vector<GenerationRequest::ChatMessage>&, bool) const { throw std::runtime_error("chat templates require llama.cpp"); }
+std::string PinnedChatTemplate::render(const std::vector<GenerationRequest::ChatMessage>&, const std::vector<GenerationRequest::ToolDefinition>&, bool) const { throw std::runtime_error("chat templates require llama.cpp"); }
 }  // namespace lae
 #endif

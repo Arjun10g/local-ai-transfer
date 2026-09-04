@@ -29,6 +29,13 @@ int main() {
   assert(parsed.generation.messages[1].content == "say \"hi\"");
   assert(parsed.generation.messages[2].name == "time.now");
   assert(parsed.stream && parsed.generation.max_tokens == 4 && !parsed.generation.enable_thinking);
+  ChatRequest tools_request;
+  assert(parse_chat_request(R"({"model":"fixture","messages":[{"role":"user","content":"use tool"}],"tools":[{"type":"function","function":{"name":"time.now","description":"Return time","parameters":{"type":"object","properties":{"format":{"type":"string"}},"required":["format"]}}}]})", tools_request, parse_error));
+  assert(tools_request.generation.tools.size() == 1);
+  assert(tools_request.generation.tools[0].name == "time.now");
+  assert(tools_request.generation.tools[0].parameters_json.find("properties") != std::string::npos);
+  assert(!parse_chat_request(R"({"model":"fixture","messages":[{"role":"user","content":"use tool"}],"tools":[{"type":"function","function":{"name":"time.now","description":"x","parameters":[]}}]})", parsed, parse_error));
+  assert(!parse_chat_request(R"({"model":"fixture","messages":[{"role":"user","content":"use tool"}],"tools":[{"type":"function","function":{"name":"Time.Now","description":"x","parameters":{}}}]})", parsed, parse_error));
   ChatRequest deep_request;
   assert(parse_chat_request(R"({"model":"fixture","messages":[{"role":"user","content":"hello"}],"mode":"deep"})", deep_request, parse_error));
   assert(deep_request.generation.enable_thinking);
@@ -38,6 +45,7 @@ int main() {
   PinnedChatTemplate template_fixture;
   template_fixture.load(R"jinja({% for message in messages %}{{ message.role }}:{{ message.content }}
 {% endfor %}{% if add_generation_prompt %}<|im_start|>assistant
+{{ tools[0].function.name }}
 {% if enable_thinking %}<think>
 {% else %}<think>
 
@@ -45,9 +53,11 @@ int main() {
 
 {% endif %}{% endif %})jinja");
   GenerationRequest::ChatMessage test_message{"user", "hello", "", ""};
-  const auto thinking_off = template_fixture.render({test_message}, false);
-  const auto thinking_on = template_fixture.render({test_message}, true);
+  GenerationRequest::ToolDefinition test_tool{"time.now", "Return time", R"({"type":"object","properties":{}})"};
+  const auto thinking_off = template_fixture.render({test_message}, {test_tool}, false);
+  const auto thinking_on = template_fixture.render({test_message}, {test_tool}, true);
   assert(thinking_off.find("<think>\n\n</think>\n\n") != std::string::npos);
+  assert(thinking_off.find("time.now") != std::string::npos);
   assert(thinking_on.find("<think>\n") != std::string::npos && thinking_on.find("</think>") == std::string::npos);
 #endif
   assert(!parse_chat_request(R"({"model":"fixture","messages":[{"role":"developer","content":"no"}]})", parsed, parse_error));

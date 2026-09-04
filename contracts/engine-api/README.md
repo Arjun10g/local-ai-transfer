@@ -41,7 +41,7 @@ unknown sessions return the typed error envelope in `../error-codes`.
 ## Chat request
 
 ```json
-{"model":"fixture","session_id":"optional","messages":[{"role":"user","content":"hello"}],"stream":true,"max_tokens":8}
+{"model":"fixture","session_id":"optional","messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function","function":{"name":"time.now","description":"Return local time","parameters":{"type":"object","properties":{}}}}],"stream":true,"max_tokens":8}
 ```
 
 `stream` defaults to false. `max_tokens` is an integer from 1 through 64.
@@ -55,6 +55,17 @@ message text but retains the complete ordered history and session boundary. A st
 response is `text/event-stream`, one JSON chunk per line (`data: ...\n\n`), and
 response is `text/event-stream`, one JSON chunk per line (`data: ...\n\n`), and
 terminates with `data: [DONE]\n\n`. Every response includes `X-Request-Id`.
+`tools` is optional and bounded to 32 OpenAI-compatible function definitions. Each
+definition has exactly `type:function` and a function `name`, `description`, and
+object-valued JSON-schema `parameters`; malformed or oversized schemas are rejected.
+The native real backend passes these definitions to the model-embedded, pinned
+chat-template evaluator. Qwen tool output is expected as one bounded XML call:
+`<tool_call><function=name><parameter=key>value</parameter></function></tool_call>`.
+Parameter values follow the pinned template rules (text scalars or JSON for
+objects/arrays); the host assigns the opaque correlation ID because this model
+format emits no ID. Incomplete, malformed, duplicate/unknown-tag, suffixed, or
+multiple calls fail closed and are never executed. Optional reasoning before the
+call is non-executable; XML tags are not exposed as assistant text.
 
 ## Cancellation and atomic state
 

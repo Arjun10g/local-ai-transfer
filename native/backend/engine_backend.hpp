@@ -25,7 +25,14 @@ struct GenerationRequest {
     std::string name;
     std::string tool_call_id;
   };
+  struct ToolDefinition {
+    std::string name;
+    std::string description;
+    // Canonical JSON object for the function parameter schema.
+    std::string parameters_json;
+  };
   std::vector<ChatMessage> messages;
+  std::vector<ToolDefinition> tools;
   unsigned max_tokens = 8;
   bool enable_thinking = false;
 };

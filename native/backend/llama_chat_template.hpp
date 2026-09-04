@@ -20,6 +20,7 @@ class PinnedChatTemplate final {
 
   void load(const std::string& source);
   std::string render(const std::vector<GenerationRequest::ChatMessage>& messages,
+                     const std::vector<GenerationRequest::ToolDefinition>& tools,
                      bool enable_thinking) const;
 
  private:
