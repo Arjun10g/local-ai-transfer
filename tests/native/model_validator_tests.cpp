@@ -79,6 +79,32 @@ int main() {
   auto result = validate(path, valid_bytes);
   assert(result.valid && result.code == "ok" && result.tensor_count == 1 && result.tensor_data_offset > 0);
   assert(result.sha256 == "1ac31355ef040452baa229950a231b2a8f651a809a9a5865fbcf622f15bc04cb");
+  assert(result.lease && result.lease->unchanged());
+  assert(!result.lease->authorized_load_path(result.canonical_path).empty());
+  const auto original_path = path.parent_path() / "fixture-original.gguf";
+#ifdef _WIN32
+  std::filesystem::rename(path, original_path, error);
+  assert(error);  // The held Windows handle denies replacement/deletion.
+  assert(!result.lease->authorized_load_path(result.canonical_path).empty());
+  error.clear();
+#else
+  std::filesystem::rename(path, original_path, error);
+  assert(!error);
+  {
+    std::ofstream replacement(path, std::ios::binary | std::ios::trunc);
+    replacement.write(reinterpret_cast<const char*>(valid_bytes.data()), static_cast<std::streamsize>(valid_bytes.size()));
+  }
+  assert(!result.lease->unchanged());
+  assert(result.lease->authorized_load_path(result.canonical_path).empty());
+  std::ifstream held(result.lease->load_path(), std::ios::binary);
+  char magic[4]{}; held.read(magic, sizeof(magic));
+  assert(std::string(magic, sizeof(magic)) == "GGUF");
+  result.lease.reset();
+  std::filesystem::remove(path, error); error.clear();
+  std::filesystem::rename(original_path, path, error);
+  assert(!error);
+#endif
+  result.lease.reset();
 
   result = validate(path, valid_bytes, std::string(64, '0'));
   assert(!result.valid && result.code == "model_hash_mismatch");

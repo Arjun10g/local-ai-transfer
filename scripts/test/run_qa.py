@@ -37,6 +37,15 @@ def discover_node_tests(root: Path) -> list[str]:
     return [path.relative_to(root).as_posix() for path in sorted(paths)]
 
 
+def discover_python_test_modules(root: Path) -> list[str]:
+    paths = sorted((root / "tests").glob("**/test_*.py"))
+    return [".".join(path.relative_to(root).with_suffix("").parts) for path in paths]
+
+
+def python_unittest_command(root: Path) -> list[str]:
+    return [sys.executable, "-m", "unittest", "-v", *discover_python_test_modules(root)]
+
+
 def skipped(test: str, reason: str, *, mandatory: bool = True) -> dict[str, object]:
     return {"status": "SKIP", "test": test, "reason": reason, "mandatory": mandatory, "evidence_state": "UNPROVEN"}
 
@@ -63,7 +72,8 @@ def main() -> int:
     args = parser.parse_args()
     root = Path(args.root).resolve()
     records: list[dict[str, object]] = []
-    records.append(run([sys.executable, "-m", "unittest", "discover", "-v"], root, test="QA-001-python-unit"))
+    python_tests = discover_python_test_modules(root)
+    records.append(run(python_unittest_command(root), root, test="QA-001-python-unit") if python_tests else skipped("QA-001-python-unit", "no-python-tests"))
     records.append(run([sys.executable, "-m", "qa.conformance.runner"], root, test="QA-001-conformance"))
     records.append(run([sys.executable, "-m", "qa.adversarial.run"], root, test="QA-001-adversarial"))
     node_tests = discover_node_tests(root)

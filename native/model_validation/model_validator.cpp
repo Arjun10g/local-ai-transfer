@@ -13,7 +13,167 @@
 #include <utility>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 namespace lae {
+
+struct ModelValidationLease::Impl {
+  std::string canonical_path;
+  std::uint64_t size = 0;
+#ifdef _WIN32
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  BY_HANDLE_FILE_INFORMATION identity{};
+#else
+  int descriptor = -1;
+  dev_t device = 0;
+  ino_t inode = 0;
+  std::int64_t modified_seconds = 0;
+  std::int64_t modified_nanoseconds = 0;
+#endif
+};
+
+namespace {
+#ifndef _WIN32
+std::pair<std::int64_t, std::int64_t> modification_time(const struct stat& value) {
+#ifdef __APPLE__
+  return {value.st_mtimespec.tv_sec, value.st_mtimespec.tv_nsec};
+#else
+  return {value.st_mtim.tv_sec, value.st_mtim.tv_nsec};
+#endif
+}
+#endif
+}  // namespace
+
+ModelValidationLease::ModelValidationLease(std::unique_ptr<Impl> impl)
+    : impl_(std::move(impl)) {}
+
+ModelValidationLease::~ModelValidationLease() {
+  if (!impl_) return;
+#ifdef _WIN32
+  if (impl_->handle != INVALID_HANDLE_VALUE) CloseHandle(impl_->handle);
+#else
+  if (impl_->descriptor >= 0) close(impl_->descriptor);
+#endif
+}
+
+std::shared_ptr<ModelValidationLease> ModelValidationLease::acquire(
+    const std::filesystem::path& canonical_path, std::uint64_t expected_size,
+    std::string& error) {
+  error.clear();
+  auto impl = std::make_unique<Impl>();
+  impl->canonical_path = canonical_path.string();
+  impl->size = expected_size;
+#ifdef _WIN32
+  impl->handle = CreateFileW(canonical_path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                             nullptr, OPEN_EXISTING,
+                             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+  if (impl->handle == INVALID_HANDLE_VALUE ||
+      !GetFileInformationByHandle(impl->handle, &impl->identity) ||
+      (impl->identity.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+      ((static_cast<std::uint64_t>(impl->identity.nFileSizeHigh) << 32) |
+       impl->identity.nFileSizeLow) != expected_size) {
+    if (impl->handle != INVALID_HANDLE_VALUE) CloseHandle(impl->handle);
+    impl->handle = INVALID_HANDLE_VALUE;
+    error = "model could not be locked as the expected regular file";
+    return nullptr;
+  }
+#else
+  impl->descriptor = open(canonical_path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  struct stat value{};
+  if (impl->descriptor < 0 || fstat(impl->descriptor, &value) != 0 ||
+      !S_ISREG(value.st_mode) || value.st_size < 0 ||
+      static_cast<std::uint64_t>(value.st_size) != expected_size) {
+    if (impl->descriptor >= 0) close(impl->descriptor);
+    impl->descriptor = -1;
+    error = "model could not be pinned as the expected regular file";
+    return nullptr;
+  }
+  impl->device = value.st_dev;
+  impl->inode = value.st_ino;
+  const auto modified = modification_time(value);
+  impl->modified_seconds = modified.first;
+  impl->modified_nanoseconds = modified.second;
+#endif
+  return std::shared_ptr<ModelValidationLease>(
+      new ModelValidationLease(std::move(impl)));
+}
+
+const std::string& ModelValidationLease::canonical_path() const {
+  return impl_->canonical_path;
+}
+
+std::string ModelValidationLease::load_path() const {
+#ifdef _WIN32
+  return impl_->canonical_path;
+#elif defined(__linux__)
+  if (impl_->descriptor < 0 || lseek(impl_->descriptor, 0, SEEK_SET) < 0) return {};
+  return "/proc/self/fd/" + std::to_string(impl_->descriptor);
+#else
+  if (impl_->descriptor < 0 || lseek(impl_->descriptor, 0, SEEK_SET) < 0) return {};
+  return "/dev/fd/" + std::to_string(impl_->descriptor);
+#endif
+}
+
+std::string ModelValidationLease::authorized_load_path(
+    const std::string& expected_canonical_path) const {
+  if (!impl_ || expected_canonical_path != impl_->canonical_path || !unchanged()) return {};
+  const std::string path = load_path();
+  if (path.empty() || !unchanged()) return {};
+  return path;
+}
+
+bool ModelValidationLease::unchanged() const {
+  if (!impl_) return false;
+#ifdef _WIN32
+  BY_HANDLE_FILE_INFORMATION held{};
+  if (impl_->handle == INVALID_HANDLE_VALUE ||
+      !GetFileInformationByHandle(impl_->handle, &held)) return false;
+  const DWORD attributes = GetFileAttributesW(std::filesystem::path(impl_->canonical_path).c_str());
+  if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) return false;
+  HANDLE current_handle = CreateFileW(std::filesystem::path(impl_->canonical_path).c_str(),
+                                      GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (current_handle == INVALID_HANDLE_VALUE) return false;
+  BY_HANDLE_FILE_INFORMATION current{};
+  const bool queried = GetFileInformationByHandle(current_handle, &current) != 0;
+  CloseHandle(current_handle);
+  const auto same = [&](const BY_HANDLE_FILE_INFORMATION& value) {
+    return value.dwVolumeSerialNumber == impl_->identity.dwVolumeSerialNumber &&
+           value.nFileIndexHigh == impl_->identity.nFileIndexHigh &&
+           value.nFileIndexLow == impl_->identity.nFileIndexLow &&
+           value.nFileSizeHigh == impl_->identity.nFileSizeHigh &&
+           value.nFileSizeLow == impl_->identity.nFileSizeLow &&
+           value.ftLastWriteTime.dwHighDateTime == impl_->identity.ftLastWriteTime.dwHighDateTime &&
+           value.ftLastWriteTime.dwLowDateTime == impl_->identity.ftLastWriteTime.dwLowDateTime;
+  };
+  return queried && same(held) && same(current);
+#else
+  struct stat held{};
+  struct stat current{};
+  if (impl_->descriptor < 0 || fstat(impl_->descriptor, &held) != 0 ||
+      lstat(impl_->canonical_path.c_str(), &current) != 0 || !S_ISREG(current.st_mode)) return false;
+  const auto held_modified = modification_time(held);
+  const auto current_modified = modification_time(current);
+  const auto matches = [&](const struct stat& value,
+                           const std::pair<std::int64_t, std::int64_t>& modified) {
+    return value.st_dev == impl_->device && value.st_ino == impl_->inode &&
+           value.st_size >= 0 && static_cast<std::uint64_t>(value.st_size) == impl_->size &&
+           modified.first == impl_->modified_seconds &&
+           modified.second == impl_->modified_nanoseconds;
+  };
+  return matches(held, held_modified) && matches(current, current_modified);
+#endif
+}
+
 namespace {
 
 constexpr std::uint64_t kMaxMetadataEntries = 4096;
@@ -594,11 +754,16 @@ ModelValidationResult validate_with_profile(const std::filesystem::path& input,
   const auto observed_write_time = std::filesystem::last_write_time(canonical, ec);
   if (ec) return invalid("model_stat_failed", "model modification time is unavailable");
 
-  std::ifstream file(canonical, std::ios::binary);
+  std::string lease_error;
+  auto lease = ModelValidationLease::acquire(canonical, size, lease_error);
+  if (!lease) return invalid("model_lock_failed", lease_error);
+
+  std::ifstream file(lease->load_path(), std::ios::binary);
   if (!file) return invalid("model_open_failed", "model file cannot be opened read-only");
   std::error_code opened_ec;
   if (!std::filesystem::equivalent(input, canonical, opened_ec) || opened_ec ||
-      std::filesystem::file_size(canonical, opened_ec) != size || opened_ec) {
+      std::filesystem::file_size(canonical, opened_ec) != size || opened_ec ||
+      !lease->unchanged()) {
     return invalid("model_changed_during_validation", "model changed while validation was starting");
   }
 
@@ -624,7 +789,8 @@ ModelValidationResult validate_with_profile(const std::filesystem::path& input,
   if (file.bad()) return invalid("model_read_failed", "model read failed during validation");
   const auto final_size = std::filesystem::file_size(canonical, ec);
   const auto final_write_time = std::filesystem::last_write_time(canonical, ec);
-  if (ec || final_size != size || final_write_time != observed_write_time) {
+  if (ec || final_size != size || final_write_time != observed_write_time ||
+      !lease->unchanged()) {
     return invalid("model_changed_during_validation", "model changed while validation was running");
   }
   const std::string hash = digest.finish();
@@ -638,6 +804,7 @@ ModelValidationResult validate_with_profile(const std::filesystem::path& input,
   result.canonical_path = canonical.string();
   result.sha256 = hash;
   result.size_bytes = size;
+  result.lease = std::move(lease);
   return result;
 }
 

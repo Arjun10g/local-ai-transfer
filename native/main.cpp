@@ -187,6 +187,7 @@ int main(int argc, char** argv) {
     if (!result.valid) { std::cerr << "model validation failed: " << result.code << "\n"; return 2; }
     backend_config.model_path = result.canonical_path;
     backend_config.model_id = lae::kProductModelId;
+    backend_config.model_lease = result.lease;
     backend_instance = std::make_unique<lae::LlamaBackend>();
   } else { std::cerr << "unsupported backend profile\n"; return 2; }
   lae::Engine engine(std::move(backend_instance));

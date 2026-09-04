@@ -115,7 +115,7 @@ int main() {
   std::error_code cleanup_error;
   assert(load_runtime_config(config_path, runtime_config, config_error));
   assert(runtime_config.model_path == model_text && runtime_config.backend_profile == "cpu" && runtime_config.context_tokens == 8192);
-  assert(runtime_config.gpu_layers == 0 && runtime_config.vulkan_device_name.empty());
+  assert(runtime_config.gpu_layers == 0 && runtime_config.vulkan_device_name.empty() && runtime_config.cuda_device_name.empty());
   {
     std::ofstream invalid_config(config_path, std::ios::trunc);
     invalid_config << "{\"model_path\":\"" << model_text << "\",\"model_path\":\"/other.gguf\"}";
@@ -149,6 +149,17 @@ int main() {
   }
   assert(load_runtime_config(config_path, runtime_config, config_error));
   assert(runtime_config.backend_profile == "intel-vulkan" && runtime_config.gpu_layers == 20 && runtime_config.vulkan_device_name == "Intel Graphics");
+  {
+    std::ofstream cuda_config(config_path, std::ios::trunc);
+    cuda_config << "{\"model_path\":\"" << model_text << "\",\"backend_profile\":\"cuda\",\"gpu_layers\":99,\"cuda_device_name\":\"NVIDIA Test GPU\"}";
+  }
+  assert(load_runtime_config(config_path, runtime_config, config_error));
+  assert(runtime_config.backend_profile == "cuda" && runtime_config.gpu_layers == 99 && runtime_config.cuda_device_name == "NVIDIA Test GPU");
+  {
+    std::ofstream cross_backend_config(config_path, std::ios::trunc);
+    cross_backend_config << "{\"model_path\":\"" << model_text << "\",\"backend_profile\":\"cuda\",\"gpu_layers\":99,\"cuda_device_name\":\"NVIDIA Test GPU\",\"vulkan_device_name\":\"Intel Graphics\"}";
+  }
+  assert(!load_runtime_config(config_path, runtime_config, config_error));
   const auto relative_config = std::filesystem::path("runtime-config.json");
   assert(!load_runtime_config(relative_config, runtime_config, config_error));
   const auto symlink_path = std::filesystem::temp_directory_path() / "lae-runtime-config-link.json";

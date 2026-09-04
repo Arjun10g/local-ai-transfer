@@ -22,6 +22,18 @@ class EvidenceTests(unittest.TestCase):
         self.assertIn("tests/security/permission-mode-adversarial.test.mjs", discovered)
         self.assertIn("tests/security/tool-calling-adversarial.test.mjs", discovered)
 
+    def test_canonical_python_discovery_includes_every_test_module(self):
+        discovered = run_qa.discover_python_test_modules(ROOT)
+        expected = [".".join(path.relative_to(ROOT).with_suffix("").parts) for path in sorted((ROOT / "tests").glob("**/test_*.py"))]
+        self.assertEqual(expected, discovered)
+        self.assertIn("tests.model.test_tool_call_eval", discovered)
+        self.assertIn("tests.performance.test_j1m_lifecycle", discovered)
+        self.assertIn("tests.qa.test_evidence", discovered)
+        self.assertIn("tests.release.test_package_scanner", discovered)
+        self.assertIn("tests.security.test_adversarial", discovered)
+        command = run_qa.python_unittest_command(ROOT)
+        self.assertEqual([run_qa.sys.executable, "-m", "unittest", "-v", *expected], command)
+
     def test_mandatory_skip_is_conditional_not_release_pass(self):
         summary = run_qa.summarize_records([
             {"status": "PASS", "test": "fixture", "mandatory": True},

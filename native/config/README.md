@@ -7,9 +7,10 @@ JSON whitespace is accepted; duplicate or unknown keys, nested/wrongly typed
 values and relative, UNC, device or alternate-stream model paths are rejected.
 
 The allowed keys are `model_path`, `backend_profile`, `context_tokens`,
-`gpu_layers`, and `vulkan_device_name`. `model_path` is required and absolute.
-The backend is `cpu` or `intel-vulkan`; context is 1–16,384. CPU forbids Vulkan
-settings. Vulkan requires an exact device name and 1–99 GPU layers. The model
+`gpu_layers`, `vulkan_device_name`, and `cuda_device_name`. `model_path` is
+required and absolute. The backend is `cpu`, `intel-vulkan`, or `cuda`; context
+is 1–16,384. CPU forbids accelerated settings. Each accelerated backend
+requires 1–99 GPU layers and only its own exact device-name field. The model
 filename, size, SHA-256, GGUF metadata and tensor inventory are compiled into
 the product and are not valid config keys.
 

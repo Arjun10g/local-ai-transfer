@@ -1,5 +1,6 @@
 #include "llama_backend.hpp"
 #include "llama_chat_template.hpp"
+#include "model_validation/model_validator.hpp"
 
 #include <stdexcept>
 
@@ -30,6 +31,7 @@ struct LlamaBackend::Impl {
   PinnedChatTemplate chat_template;
   ggml_backend_dev_t selected_device = nullptr;
   std::string active_backend = "cpu";
+  std::shared_ptr<ModelValidationLease> model_lease;
 };
 
 namespace {
@@ -48,6 +50,11 @@ std::string LlamaBackend::id() const {
 
 void LlamaBackend::initialize(const BackendConfig& config) {
   if (config.model_path.empty()) throw std::invalid_argument("model path is required");
+  if (!config.model_lease || config.model_lease->canonical_path() != config.model_path ||
+      !config.model_lease->unchanged()) {
+    throw std::runtime_error("model validation lease is missing, mismatched, or stale");
+  }
+  impl_->model_lease = config.model_lease;
 #if defined(LAE_ENABLE_LLAMA_VULKAN) && defined(LAE_ENABLE_LLAMA_CUDA)
   throw std::runtime_error("product cannot be built with both CUDA and Vulkan");
 #elif defined(LAE_ENABLE_LLAMA_VULKAN)
@@ -115,8 +122,14 @@ void LlamaBackend::initialize(const BackendConfig& config) {
   model_params.n_gpu_layers = (config.backend_profile == "intel-vulkan" || config.backend_profile == "cuda") ? static_cast<int32_t>(config.gpu_layers) : 0;
   model_params.check_tensors = true;
   model_params.load_mtp = false;
-  impl_->model = llama_model_load_from_file(config.model_path.c_str(), model_params);
+  const std::string load_path = impl_->model_lease->authorized_load_path(config.model_path);
+  if (load_path.empty()) throw std::runtime_error("model validation lease became stale before backend load");
+  impl_->model = llama_model_load_from_file(load_path.c_str(), model_params);
   if (!impl_->model) throw std::runtime_error("llama model load failed");
+  if (!impl_->model_lease->unchanged()) {
+    llama_model_free(impl_->model); impl_->model = nullptr;
+    throw std::runtime_error("model identity changed during backend load");
+  }
   const char* embedded_template = llama_model_chat_template(impl_->model, nullptr);
   if (!embedded_template || !*embedded_template) throw std::runtime_error("llama chat template unavailable; raw prompt mode is not accepted");
   impl_->chat_template.load(embedded_template);
@@ -187,6 +200,7 @@ void LlamaBackend::shutdown() {
   if (impl_->sampler) { llama_sampler_free(impl_->sampler); impl_->sampler = nullptr; }
   if (impl_->context) { llama_free(impl_->context); impl_->context = nullptr; }
   if (impl_->model) { llama_model_free(impl_->model); impl_->model = nullptr; }
+  impl_->model_lease.reset();
   if (impl_->backend_initialized) { llama_backend_free(); impl_->backend_initialized = false; }
 }
 }  // namespace lae

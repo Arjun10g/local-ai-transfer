@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
 
 namespace lae {
@@ -11,6 +12,32 @@ inline constexpr std::uint64_t kProductModelSizeBytes = 5629109088ULL;
 inline constexpr char kProductModelSha256[] =
     "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b";
 inline constexpr char kProductModelId[] = "qwen35-9b-q4-k-m";
+
+// Keeps the validated filesystem object pinned across backend load. Windows
+// uses a share-deny handle; POSIX loads through the held descriptor and checks
+// descriptor/path identity before and after llama.cpp accepts the model.
+class ModelValidationLease {
+ public:
+  ~ModelValidationLease();
+  ModelValidationLease(const ModelValidationLease&) = delete;
+  ModelValidationLease& operator=(const ModelValidationLease&) = delete;
+
+  static std::shared_ptr<ModelValidationLease> acquire(
+      const std::filesystem::path& canonical_path, std::uint64_t expected_size,
+      std::string& error);
+  const std::string& canonical_path() const;
+  std::string load_path() const;
+  // This is the backend/test seam: a stale or mismatched lease never yields a
+  // path that llama.cpp can open. Windows replacement is also denied by the
+  // held share mode; POSIX returns the held descriptor path.
+  std::string authorized_load_path(const std::string& expected_canonical_path) const;
+  bool unchanged() const;
+
+ private:
+  struct Impl;
+  explicit ModelValidationLease(std::unique_ptr<Impl> impl);
+  std::unique_ptr<Impl> impl_;
+};
 
 struct ModelValidationResult {
   bool valid = false;
@@ -23,6 +50,7 @@ struct ModelValidationResult {
   std::uint64_t tensor_count = 0;
   std::uint64_t metadata_count = 0;
   std::uint64_t tensor_data_offset = 0;
+  std::shared_ptr<ModelValidationLease> lease;
 };
 
 // Product verification has no caller-supplied size, digest, architecture, or

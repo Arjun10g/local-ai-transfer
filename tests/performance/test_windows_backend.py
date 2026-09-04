@@ -284,6 +284,9 @@ class WindowsBackendPlanTests(unittest.TestCase):
         self.assertIn("exact configured Vulkan integrated device is unavailable", backend)
         self.assertIn("ggml_backend_dev_description", backend)
         self.assertNotIn("intel-vulkan.*cpu", backend)
+        self.assertIn("model_lease->authorized_load_path(config.model_path)", backend)
+        self.assertIn("model_lease->unchanged()", backend)
+        self.assertIn("model validation lease is missing, mismatched, or stale", backend)
 
     def test_cli_accepts_vulkan_choice_and_reports_real_blocker(self):
         path = self.write_receipt(receipt(integrated=None))

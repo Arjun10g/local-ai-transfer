@@ -24,12 +24,16 @@ test executable behind `LAE_ENABLE_TEST_MODEL_IDENTITY`. That API is absent
 from `lae-engine`, including fixture builds, and cannot be selected through a
 product config or command-line option.
 
-Validation keeps the opened stream for structure checks and the full hash,
-then rechecks pathname equivalence, size, and modification time. Portable
-C++17 cannot turn a pathname into an immutable, share-deny handle on every
-target, so a concurrent replacement that evades those checks remains an
-OS-specific acceptance concern and is reported as
-`model_changed_during_validation` when detected.
+Validation retains an identity lease from before structure parsing through the
+backend/model lifecycle. Windows uses a read-only handle that denies
+write/delete sharing and rechecks volume/file ID, size, write time, reparse
+status, and current-path identity. POSIX parses and loads through the retained
+descriptor (`/proc/self/fd` or `/dev/fd`) and rechecks device/inode, size,
+nanosecond mtime, regular-file type, and current-path identity before and after
+load. A pathname replacement is therefore either blocked or rejected by the
+validation/backend load guard; direct hostile writes to an already-open
+inode remain governed by OS permissions on POSIX, which has no mandatory
+share-deny equivalent.
 
 The real adapter receives the complete ordered API message history and renders
 the fixed artifact's embedded template through the official same-pin llama.cpp

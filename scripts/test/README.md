@@ -6,6 +6,12 @@ From a clean checkout, run:
 python3 scripts/test/run_qa.py --output out/evidence/qa-local/summary.json
 ```
 
+This script is the canonical complete gate. It enumerates every
+`tests/**/test_*.py` module explicitly, avoiding the `tests/qa` versus top-level
+`qa` package shadowing that occurs with `unittest discover -s tests` when no
+top-level directory is supplied. For Python-only diagnosis, use
+`python3 -m unittest discover -s tests -t . -p 'test_*.py'`.
+
 The command runs Python fixture tests, contract conformance, adversarial
 fixtures, Node's built-in host and `tests/security` tests when Node is available, the REL-001
 skeleton scan, and local CMake/CTest if available. It never installs packages

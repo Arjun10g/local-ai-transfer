@@ -8,6 +8,8 @@
 
 namespace lae {
 
+class ModelValidationLease;
+
 struct BackendConfig {
   std::string model_path;
   std::string model_id = "fixture";
@@ -18,6 +20,7 @@ struct BackendConfig {
   unsigned gpu_layers = 20;
   std::string vulkan_device_name;
   std::string cuda_device_name;
+  std::shared_ptr<ModelValidationLease> model_lease;
 };
 
 struct GenerationRequest {
