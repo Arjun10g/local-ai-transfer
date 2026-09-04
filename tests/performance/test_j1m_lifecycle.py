@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import stat
+import shutil
 import tempfile
 import threading
 import time
@@ -529,11 +530,21 @@ class StaticSafetyTests(unittest.TestCase):
         j1m = load(ROOT / "scripts/j1m_runner.py", "j1m_eval_upload_config")
         uploads = orchestrator._eval_uploads(j1m.load_config(), "/scratch/j1m", Path("/tmp/Qwen3.5-9B-Q4_K_M.gguf"), Path("/tmp/model-manifest.json"))
         names = {local.name for local, _remote, _recursive in uploads}
-        self.assertEqual(names, {"Qwen3.5-9B-Q4_K_M.gguf", "model-manifest.json", "remote_model_eval.py", "evaluate_tool_calls.py", "tool_call_eval.json", "CMakeLists.txt", "native"})
+        self.assertEqual(names, {"Qwen3.5-9B-Q4_K_M.gguf", "model-manifest.json", "model-manifest.sha256", "remote_model_eval.py", "evaluate_tool_calls.py", "tool_call_eval.json", "CMakeLists.txt", "native"})
         self.assertTrue(any(recursive and local.name == "native" for local, _remote, recursive in uploads))
         native_upload = next(remote for local, remote, recursive in uploads if local.name == "native" and recursive)
         self.assertEqual(native_upload, "/scratch/j1m/engine")
         self.assertNotIn("/engine/native/native", native_upload)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "native"
+            (source / "engine").mkdir(parents=True)
+            (source / "engine" / "marker.txt").write_text("native", encoding="utf-8")
+            target = root / "engine"
+            target.mkdir()
+            shutil.copytree(source, target / source.name)
+            self.assertTrue((target / "native" / "engine" / "marker.txt").is_file())
+            self.assertFalse((target / "native" / "native").exists())
 
     def test_eval_artifact_identity_is_stream_hash_locked(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_eval_identity")
@@ -587,18 +598,58 @@ class StaticSafetyTests(unittest.TestCase):
 
     def test_eval_receipt_acceptance_is_hash_and_total_bound(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_eval_receipt")
-        artifact = {"name": "Qwen3.5-9B-Q4_K_M.gguf", "size_bytes": 4, "sha256": "a" * 64}
+        config = load(ROOT / "scripts/j1m_runner.py", "j1m_eval_receipt_config").load_config()
+        artifact = {"name": "Qwen3.5-9B-Q4_K_M.gguf", "size_bytes": 4, "sha256": "a" * 64, "llama_cpp_revision": config["llama_cpp"]["revision"]}
         with tempfile.TemporaryDirectory() as directory:
             receipt = Path(directory) / "eval-receipt.json"
             receipt.write_text(json.dumps({
                 "schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "verified", "artifact": artifact,
-                "metrics": {"case_count": 8, "passed": 7, "failed": 1, "errors": 0, "peak_rss_kib": 123},
+                "engine": {"llama_cpp_revision": config["llama_cpp"]["revision"], "compiled_backend": f"llama.cpp/{config['llama_cpp']['revision'][:8]}/cpu"},
+                "metrics": {"case_count": 8, "passed": 8, "failed": 0, "errors": 0, "peak_rss_kib": 123},
                 "prompt_response_logging": False, "token_logging": False,
             }), encoding="utf-8")
             self.assertEqual(orchestrator._verify_eval_receipt(receipt, artifact)["metrics"]["case_count"], 8)
-            receipt.write_text(receipt.read_text().replace('"case_count": 8', '"case_count": 9'), encoding="utf-8")
+            failed = json.loads(receipt.read_text())
+            failed["status"] = "completed_with_failures"
+            failed["metrics"] = {"case_count": 8, "passed": 7, "failed": 1, "errors": 0, "peak_rss_kib": 123}
+            receipt.write_text(json.dumps(failed), encoding="utf-8")
+            self.assertEqual(orchestrator._verify_eval_receipt(receipt, artifact)["status"], "completed_with_failures")
+            failed["status"] = "verified"
+            receipt.write_text(json.dumps(failed), encoding="utf-8")
             with self.assertRaises(ValueError):
                 orchestrator._verify_eval_receipt(receipt, artifact)
+            failed["status"] = "completed_with_failures"
+            failed["metrics"] = {"case_count": 8, "passed": 8, "failed": 0, "errors": 0, "peak_rss_kib": 123}
+            receipt.write_text(json.dumps(failed), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                orchestrator._verify_eval_receipt(receipt, artifact)
+
+    def test_remote_eval_metrics_reject_bool_missing_and_bad_totals(self):
+        remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_metrics")
+        self.assertEqual(remote._validate_metrics({"case_count": 8, "passed": 8, "failed": 0, "errors": 0, "peak_rss_kib": None})["passed"], 8)
+        for invalid in (
+            {"case_count": 8, "passed": True, "failed": 0, "errors": 0},
+            {"case_count": 8, "passed": 7, "failed": 0, "errors": 0},
+            {"case_count": 8, "passed": 8, "failed": 0, "errors": 0, "peak_rss_kib": -1},
+        ):
+            with self.assertRaises(ValueError):
+                remote._validate_metrics(invalid)
+
+    def test_remote_eval_main_returns_success_for_case_failures_and_emits_failed_receipt_on_shape_error(self):
+        remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_main_status")
+        artifact = {"name": "Qwen3.5-9B-Q4_K_M.gguf", "size_bytes": 4, "sha256": "a" * 64, "llama_cpp_revision": "b" * 40}
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = Path(directory) / "eval-receipt.json"
+            args = ["--model", "m", "--model-manifest", "mm", "--model-manifest-lock", "ml", "--source-revision", "c" * 40, "--llama-revision", "b" * 40, "--llama-checkout", "checkout", "--engine", "engine", "--evaluator", "eval", "--fixture", "fixture", "--token-file", "token", "--receipt", str(receipt)]
+            failed_metrics = {"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "completed_with_failures", "artifact": artifact, "engine": {"llama_cpp_revision": "b" * 40, "compiled_backend": "llama.cpp/bbbbbbbb/cpu"}, "metrics": {"case_count": 8, "passed": 7, "failed": 1, "errors": 0, "peak_rss_kib": 1}, "prompt_response_logging": False, "token_logging": False}
+            with mock.patch.object(remote, "verify_artifact", return_value=artifact), mock.patch.object(remote, "_launch_and_evaluate", return_value=failed_metrics):
+                self.assertEqual(remote.main(args), 0)
+            self.assertEqual(json.loads(receipt.read_text())["status"], "completed_with_failures")
+            with mock.patch.object(remote, "verify_artifact", return_value=artifact), mock.patch.object(remote, "_launch_and_evaluate", side_effect=KeyError("metrics")):
+                self.assertEqual(remote.main(args), 1)
+            malformed = json.loads(receipt.read_text())
+            self.assertEqual(malformed["status"], "failed")
+            self.assertNotIn("metrics", malformed)
 
 
 class LoopbackLifecycleTests(unittest.TestCase):

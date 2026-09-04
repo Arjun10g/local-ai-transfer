@@ -53,11 +53,17 @@ def _pin(value: Any, label: str) -> str:
     return value
 
 
-def verify_artifact(model: Path, manifest_path: Path, *, source_revision: str, llama_revision: str) -> dict[str, Any]:
+def verify_artifact(model: Path, manifest_path: Path, *, source_revision: str, llama_revision: str, manifest_lock_path: Path | None = None) -> dict[str, Any]:
     if model.name != MODEL_NAME or not model.is_file():
         raise ValueError("q4_artifact_missing_or_wrong_name")
     source_revision = _pin(source_revision, "source")
     llama_revision = _pin(llama_revision, "llama")
+    manifest_lock_path = manifest_lock_path or manifest_path.with_name("model-manifest.sha256")
+    lock_parts = manifest_lock_path.read_text(encoding="utf-8").strip().split()
+    if len(lock_parts) != 2 or lock_parts[1] != manifest_path.name or len(lock_parts[0]) != 64 or any(character not in PIN_RE for character in lock_parts[0]):
+        raise ValueError("model_manifest_lock_invalid")
+    if sha256(manifest_path) != lock_parts[0]:
+        raise ValueError("model_manifest_lock_mismatch")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict) or manifest.get("schema_version") != "1.1.0":
         raise ValueError("model_manifest_invalid")
@@ -141,6 +147,20 @@ def _engine_build_info(engine: Path, expected_llama: str) -> dict[str, Any]:
     return {key: payload[key] for key in ("engine_version", "api_version", "compiled_backend", "llama_cpp_revision", "model") if key in payload}
 
 
+def _validate_metrics(metrics: Any) -> dict[str, Any]:
+    if not isinstance(metrics, dict):
+        raise ValueError("evaluator_metrics_invalid")
+    counts = ("case_count", "passed", "failed", "errors")
+    if any(isinstance(metrics.get(key), bool) or not isinstance(metrics.get(key), int) or metrics[key] < 0 for key in counts):
+        raise ValueError("evaluator_metrics_invalid")
+    if metrics["case_count"] != 8 or sum(metrics[key] for key in counts[1:]) != 8:
+        raise ValueError("evaluator_metrics_total_invalid")
+    peak = metrics.get("peak_rss_kib")
+    if peak is not None and (isinstance(peak, bool) or not isinstance(peak, int) or peak < 0):
+        raise ValueError("evaluator_rss_invalid")
+    return {key: metrics.get(key) for key in (*counts, "peak_rss_kib")}
+
+
 def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any]) -> dict[str, Any]:
     engine = Path(args.engine)
     if not engine.is_file():
@@ -198,11 +218,13 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any]) -> 
             metrics = json.loads(result.get("stdout", ""))
         except (TypeError, json.JSONDecodeError) as exc:
             raise ValueError("evaluator_receipt_invalid") from exc
-        if not isinstance(metrics, dict) or metrics.get("case_count") != 8 or not all(isinstance(metrics.get(key), int) for key in ("passed", "failed", "errors")):
-            raise ValueError("evaluator_metrics_invalid")
+        metrics = _validate_metrics(metrics)
+        all_passed = metrics["passed"] == 8 and metrics["failed"] == 0 and metrics["errors"] == 0
+        has_failure = metrics["failed"] > 0 or metrics["errors"] > 0
+        status = "verified" if all_passed else "completed_with_failures" if has_failure else "failed"
         return {
             "schema": "local_bmo.j1m.real-tool-eval-receipt.v1",
-            "status": "verified" if metrics["errors"] == 0 and metrics["failed"] == 0 else "completed_with_failures",
+            "status": status,
             "artifact": artifact,
             "engine": build_info,
             "metrics": {key: metrics[key] for key in ("case_count", "passed", "failed", "errors", "peak_rss_kib")},
@@ -232,6 +254,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True)
     parser.add_argument("--model-manifest", required=True)
+    parser.add_argument("--model-manifest-lock", required=True)
     parser.add_argument("--source-revision", required=True)
     parser.add_argument("--llama-revision", required=True)
     parser.add_argument("--llama-checkout", required=True)
@@ -246,10 +269,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if not 1 <= args.timeout <= 900:
             raise ValueError("eval_timeout_invalid")
-        artifact = verify_artifact(Path(args.model), Path(args.model_manifest), source_revision=args.source_revision, llama_revision=args.llama_revision)
+        artifact = verify_artifact(Path(args.model), Path(args.model_manifest), source_revision=args.source_revision, llama_revision=args.llama_revision, manifest_lock_path=Path(args.model_manifest_lock))
         receipt = _launch_and_evaluate(args, artifact)
-        status = 0 if receipt["status"] == "verified" else 1
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        status = 0 if receipt["status"] in {"verified", "completed_with_failures"} else 1
+    except (OSError, ValueError, TypeError, KeyError, IndexError, RecursionError, OverflowError, subprocess.SubprocessError) as exc:
         receipt = {"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "failed", "error_type": type(exc).__name__, "prompt_response_logging": False, "token_logging": False}
         status = 1
     output = Path(args.receipt)

@@ -118,7 +118,13 @@ def _verify_eval_artifact(path: Path, manifest_path: Path, config: dict[str, Any
     digest = j1m_runner._sha256(path)
     if artifact.get("expected_size_bytes") != size or artifact.get("sha256") != digest:
         raise ValueError("eval artifact size or SHA-256 does not match the approved manifest")
-    return {"name": expected_name, "size_bytes": size, "sha256": digest}
+    return {
+        "name": expected_name,
+        "size_bytes": size,
+        "sha256": digest,
+        "source_revision": config["source"]["revision"],
+        "llama_cpp_revision": config["llama_cpp"]["revision"],
+    }
 
 
 def _eval_uploads(config: dict[str, Any], remote_root: str, artifact_path: Path, manifest_path: Path) -> list[tuple[Path, str, bool]]:
@@ -127,6 +133,7 @@ def _eval_uploads(config: dict[str, Any], remote_root: str, artifact_path: Path,
     return [
         (artifact_path, f"{remote_root}/model/Qwen3.5-9B-Q4_K_M.gguf", False),
         (manifest_path, f"{remote_root}/model-manifest.json", False),
+        (manifest_path.with_name("model-manifest.sha256"), f"{remote_root}/model-manifest.sha256", False),
         (ROOT / "scripts" / "test" / "remote_model_eval.py", f"{remote_root}/remote_model_eval.py", False),
         (ROOT / "scripts" / "test" / "evaluate_tool_calls.py", f"{remote_root}/evaluate_tool_calls.py", False),
         (ROOT / "tests" / "model" / "tool_call_eval.json", f"{remote_root}/tool_call_eval.json", False),
@@ -152,7 +159,7 @@ def _eval_remote_commands(config: dict[str, Any], remote_root: str) -> list[list
         ["cp", "-a", checkout, f"{engine_root}/vendor/llama.cpp"],
         ["cmake", "-S", engine_root, "-B", build_root, "-DCMAKE_BUILD_TYPE=Release", "-DLAE_ENABLE_LLAMA_CPP=ON"],
         ["cmake", "--build", build_root, "--target", "lae-engine", "--parallel", "2"],
-        ["python3", f"{remote_root}/remote_model_eval.py", "--model", f"{remote_root}/model/Qwen3.5-9B-Q4_K_M.gguf", "--model-manifest", f"{remote_root}/model-manifest.json", "--source-revision", config["source"]["revision"], "--llama-revision", llama["revision"], "--llama-checkout", checkout, "--engine", f"{build_root}/native/lae-engine", "--evaluator", f"{remote_root}/evaluate_tool_calls.py", "--fixture", f"{remote_root}/tool_call_eval.json", "--token-file", f"{remote_root}/engine-token", "--receipt", f"{remote_root}/artifacts/eval-receipt.json", "--timeout", "600"],
+        ["python3", f"{remote_root}/remote_model_eval.py", "--model", f"{remote_root}/model/Qwen3.5-9B-Q4_K_M.gguf", "--model-manifest", f"{remote_root}/model-manifest.json", "--model-manifest-lock", f"{remote_root}/model-manifest.sha256", "--source-revision", config["source"]["revision"], "--llama-revision", llama["revision"], "--llama-checkout", checkout, "--engine", f"{build_root}/native/lae-engine", "--evaluator", f"{remote_root}/evaluate_tool_calls.py", "--fixture", f"{remote_root}/tool_call_eval.json", "--token-file", f"{remote_root}/engine-token", "--receipt", f"{remote_root}/artifacts/eval-receipt.json", "--timeout", "600"],
     ]
 
 
@@ -179,12 +186,20 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
         raise ValueError("eval receipt metrics invalid")
     if sum(metrics[key] for key in ("passed", "failed", "errors")) != 8:
         raise ValueError("eval receipt metric totals invalid")
+    status = payload["status"]
+    all_passed = metrics["passed"] == 8 and metrics["failed"] == 0 and metrics["errors"] == 0
+    has_failure = metrics["failed"] > 0 or metrics["errors"] > 0
+    if (status == "verified") != all_passed or (status == "completed_with_failures") != has_failure:
+        raise ValueError("eval receipt status does not match metrics")
+    engine = payload.get("engine")
+    if not isinstance(engine, dict) or engine.get("llama_cpp_revision") != artifact.get("llama_cpp_revision") or engine.get("compiled_backend") != f"llama.cpp/{artifact.get('llama_cpp_revision', '')[:8]}/cpu":
+        raise ValueError("eval receipt engine identity mismatch")
     peak_rss = metrics.get("peak_rss_kib")
     if peak_rss is not None and (isinstance(peak_rss, bool) or not isinstance(peak_rss, int) or peak_rss < 0):
         raise ValueError("eval receipt RSS metric invalid")
     if payload.get("prompt_response_logging") is not False or payload.get("token_logging") is not False:
         raise ValueError("eval receipt logging policy missing")
-    return {"status": payload.get("status"), "metrics": {key: metrics[key] for key in ("case_count", "passed", "failed", "errors", "peak_rss_kib")}}
+    return {"status": status, "metrics": {key: metrics[key] for key in ("case_count", "passed", "failed", "errors", "peak_rss_kib")}}
 
 
 def _salvage(
@@ -228,6 +243,10 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             raise ValueError("eval requires --model-artifact; no implicit or alternate model is accepted")
         model_manifest = model_manifest or model_artifact.parent / "model-manifest.json"
         eval_artifact = _verify_eval_artifact(model_artifact, model_manifest, config)
+        # The approved catalogue target is an A100, but this composed path
+        # deliberately builds the CPU backend.  Do not spend on an A100 while
+        # presenting a CPU-only job as cost-efficient evaluation.
+        raise sf.ShadeformError("eval execution is blocked: CPU-only evaluation does not justify the approved A100; accelerated backend review is required")
     else:
         eval_artifact = None
     env = sf.load_env(env_file)
@@ -464,7 +483,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 lifecycle["salvage"] = [{"status": "salvage_failed", "error_type": type(exc).__name__}]
             if mode == "prove" and lifecycle.get("job", {}).get("status") == "completed" and not any(item.get("name") == "proving-receipt.json" and item.get("status") == "completed" for item in lifecycle["salvage"]):
                 lifecycle["receipt_error"] = "proving receipt was not salvaged before teardown"
-            if mode == "eval" and lifecycle.get("job", {}).get("status") == "completed":
+            if mode == "eval":
                 saved_receipt = next((item for item in lifecycle["salvage"] if item.get("name") == "eval-receipt.json" and item.get("status") == "completed"), None)
                 if saved_receipt is None:
                     lifecycle["receipt_error"] = "eval receipt was not salvaged before teardown"
@@ -473,7 +492,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                         lifecycle["eval_receipt"] = _verify_eval_receipt(artifact_destination / "eval-receipt.json", eval_artifact)
                     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
                         lifecycle["receipt_error"] = type(exc).__name__
-                if lifecycle.get("receipt_error"):
+                if lifecycle.get("receipt_error") or lifecycle.get("eval_receipt", {}).get("status") != "verified":
                     lifecycle["status"] = "failed"
             # The shared teardown performs exact deletion before cost/key
             # bookkeeping and emits a receipt, while remote salvage above is
@@ -549,6 +568,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.mode == "eval":
         plan["commands"] = _eval_remote_commands(config, "/scratch/j1m")
         plan["artifact"] = "--model-artifact is required at execution; no model is copied during planning"
+        plan["quality_only"] = True
+        plan["execution_blocked"] = "CPU-only eval on approved A100 pending accelerated backend review"
     if not args.execute:
         plan["orchestrator"] = "dry-run; no provider API mutation"
         print(json.dumps(plan, indent=2, sort_keys=True))
