@@ -10,10 +10,8 @@ import { ConversationController } from '../../host/agent/controller.mjs';
 
 const root = join(import.meta.dirname, '..', '..');
 const model = process.env.LAE_QWEN35_MODEL;
-const size = process.env.LAE_QWEN35_MODEL_SIZE;
-const sha256 = process.env.LAE_QWEN35_MODEL_SHA256;
 const executable = process.env.LAE_QWEN35_ENGINE ?? join(root, 'out', 'build-real', 'native', process.platform === 'win32' ? 'lae-engine.exe' : 'lae-engine');
-const enabled = Boolean(model && size && sha256 && existsSync(executable));
+const enabled = Boolean(model && existsSync(executable));
 
 function stop(child) {
   return new Promise(resolveStop => {
@@ -25,7 +23,7 @@ function stop(child) {
 }
 
 async function startReal(token) {
-  const child = spawn(executable, ['serve', '--port', '0', '--backend', 'cpu', '--model', resolve(model), '--size', size, '--sha256', sha256, '--context', '512', '--token-stdin'], { stdio: ['pipe', 'pipe', 'pipe'] }); child.stdin.end(`${token}\n`);
+  const child = spawn(executable, ['serve', '--port', '0', '--backend', 'cpu', '--model', resolve(model), '--context', '512', '--token-stdin'], { stdio: ['pipe', 'pipe', 'pipe'] }); child.stdin.end(`${token}\n`);
   let stdout = ''; let stderr = '';
   child.stderr.on('data', chunk => { stderr = `${stderr}${chunk}`.slice(-8192); });
   const ready = await new Promise((resolveReady, reject) => {

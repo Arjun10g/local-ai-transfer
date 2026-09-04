@@ -1,4 +1,5 @@
 #include "http_server.hpp"
+#include "model_validation/model_validator.hpp"
 #include "chat_request.hpp"
 
 #include <algorithm>
@@ -392,7 +393,7 @@ void HttpServer::handle(Socket client) {
   } else if (method == "GET" && path == "/version") {
     respond(client, 200, "application/json", "{\"api_version\":\"" LAE_API_VERSION "\",\"engine_version\":\"" LAE_ENGINE_VERSION "\"}", request_id);
   } else if (method == "GET" && path == "/build-info") {
-    respond(client, 200, "application/json", "{\"engine_version\":\"" LAE_ENGINE_VERSION "\",\"api_version\":\"" LAE_API_VERSION "\",\"backend\":\"" + json_escape(engine_.backend_id()) + "\",\"llama_cpp_revision\":\"" LAE_LLAMA_CPP_REVISION "\",\"model\":\"" + json_escape(engine_.model_id()) + "\"}", request_id);
+    respond(client, 200, "application/json", "{\"engine_version\":\"" LAE_ENGINE_VERSION "\",\"api_version\":\"" LAE_API_VERSION "\",\"backend\":\"" + json_escape(engine_.backend_id()) + "\",\"llama_cpp_revision\":\"" LAE_LLAMA_CPP_REVISION "\",\"model\":\"" + json_escape(engine_.model_id()) + "\",\"product_model_size_bytes\":" + std::to_string(kProductModelSizeBytes) + ",\"product_model_sha256\":\"" + kProductModelSha256 + "\"}", request_id);
   } else if (method == "GET" && path == "/probe") {
     respond(client, 200, "application/json", "{\"bind\":\"127.0.0.1\",\"backend\":\"" + engine_.backend_id() + "\",\"platform\":\"" +
 #ifdef _WIN32

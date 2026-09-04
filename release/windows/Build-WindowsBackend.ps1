@@ -47,8 +47,11 @@ if ($modelHash -ne 'c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268
 
 New-Item -ItemType Directory -Path $buildRootFull | Out-Null
 $planPath = Join-Path $buildRootFull 'backend-plan.json'
-$planner = Join-Path $repoRoot 'scripts/windows_backend_plan.py'
-$plannerArguments = @($planner, '--backend', $Backend, '--receipt', $receipt, '--model-path', $model, '--model-size', ([string]$modelItem.Length), '--model-sha256', $modelHash, '--output', $planPath)
+$planner = Join-Path $releaseRoot 'windows_backend_plan.py'
+$plannerItem = Get-Item -LiteralPath $planner -ErrorAction SilentlyContinue
+if (-not $plannerItem -or $plannerItem.LinkType -or $plannerItem.PSIsContainer) { throw 'packaged backend planner is missing or is not a regular non-link file' }
+if (-not (Get-Command $PythonCommand -ErrorAction SilentlyContinue)) { throw "required preinstalled Python interpreter is unavailable: $PythonCommand" }
+$plannerArguments = @($plannerItem.FullName, '--backend', $Backend, '--receipt', $receipt, '--model-path', $model, '--output', $planPath)
 if ($Backend -eq 'intel-vulkan-conservative') {
     if ([string]::IsNullOrWhiteSpace($VulkanAttestation)) { throw 'Vulkan requires -VulkanAttestation bound to this receipt' }
     $attestationItem = Get-Item -LiteralPath $VulkanAttestation
@@ -89,7 +92,7 @@ if ($Backend -eq 'cpu-safe' -or $Backend -eq 'intel-vulkan-conservative') {
     # The caller must already be in a oneAPI/Visual Studio environment.  We do
     # not source a script or download it because that would make provenance
     # and mutation boundaries opaque.
-    $flags = @('-S', $source, '-B', $BuildRoot, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release', '-DGGML_SYCL=ON', '-DGGML_SYCL_TARGET=INTEL', '-DGGML_SYCL_F16=ON')
+    $flags = @('-S', $source, '-B', $buildRootFull, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release', '-DGGML_SYCL=ON', '-DGGML_SYCL_TARGET=INTEL', '-DGGML_SYCL_F16=ON')
     Invoke-Checked 'cmake' $flags
     Invoke-Checked 'cmake' @('--build', $buildRootFull, '--config', 'Release')
     $binary = Join-Path $buildRootFull 'bin/llama-cli.exe'

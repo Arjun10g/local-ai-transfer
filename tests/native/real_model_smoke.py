@@ -23,10 +23,8 @@ def stop_process(process):
 
 def main():
     path = os.environ.get("LAE_QWEN35_MODEL")
-    size = os.environ.get("LAE_QWEN35_MODEL_SIZE")
-    sha256 = os.environ.get("LAE_QWEN35_MODEL_SHA256")
-    if not (path and size and sha256):
-        print("real model smoke: SKIP (set LAE_QWEN35_MODEL, LAE_QWEN35_MODEL_SIZE, and LAE_QWEN35_MODEL_SHA256)")
+    if not path:
+        print("real model smoke: SKIP (set LAE_QWEN35_MODEL to the compiled product artifact)")
         return 0
     request_timeout = float(os.environ.get("LAE_REAL_MODEL_TIMEOUT_SECONDS", "180"))
     if request_timeout < 1 or request_timeout > 600:
@@ -34,7 +32,7 @@ def main():
     with tempfile.TemporaryFile(mode="w+t") as stderr_log:
         # Keep token material out of the approved artifact directory on every
         # platform; the native process consumes an inherited stdin pipe.
-        process = subprocess.Popen([sys.argv[1], "serve", "--backend", "cpu", "--model", path, "--size", size, "--sha256", sha256, "--context", "512", "--token-stdin"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr_log, text=True)
+        process = subprocess.Popen([sys.argv[1], "serve", "--backend", "cpu", "--model", path, "--context", "512", "--token-stdin"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr_log, text=True)
         process.stdin.write("real-model-smoke\n")
         process.stdin.close()
         try:

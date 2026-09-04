@@ -1,22 +1,92 @@
-# Local Assistant Engine — Windows x64 fixture package
+# Local Assistant Engine — Windows x64 portable package source
 
-This is a REL-001 package skeleton, not a runnable release. It contains no
-model weights, compiler, Node modules, credentials, or installer. The approved
-Qwen3.5-9B Q4_K_M model must remain a separately verified local file. Set the
-absolute `model_path`, exact `model_size_bytes`, and exact `model_sha256` in
-`config.local.json`; `backend_profile` defaults to `cpu` and no model fallback
-is permitted. Supply `LAE_ENGINE_TOKEN` through the protected launch
-environment before invoking `Start-LocalAssistant.ps1`.
+This directory is the inspected source template, not a release artifact. Build
+the portable CPU tree from the repository root with an already-built Windows
+CPU engine:
+
+```text
+python scripts/package/build_portable.py --source . --engine D:\build\lae-engine-cpu.exe --node D:\approved\node.exe --node-license D:\approved\node-v24.20.0-LICENSE --output D:\package\LocalBMO
+```
+
+The checked-in `RELEASE_MANIFEST.json` is intentionally a `fixture-skeleton`
+manifest and `CHECKSUMS.sha256` is only a placeholder. `Verify-Release.ps1`
+therefore applies only to the generated package directory produced by the
+approved package builder; the source template must not be reported as a
+finished package.
+
+`node.exe` must be the official Node.js v24.20.0 Windows x64 executable with
+SHA-256 `5c976096e04e5c2c1f091938926234cc9fbebfe9787ddd149351b3b0ecc707b5`;
+the builder rejects any other bytes. Python is a packaging-machine tool only.
+`node-provenance.json` records the official release URLs, platform, version, and
+independently verified executable SHA-256 used by that gate.
+The matching Node v24.20.0 `LICENSE` file is also mandatory (SHA-256
+`5888dbb9a1d2b18f2c3e6c5f6af1b39de658372b402a0577b002777f14c62ace`),
+and the generated package carries both Node and llama.cpp license texts.
+The generated target package contains the pinned Node runtime and
+the exact Node host/controller/tool/provider source closure, UI, CPU engine,
+manifest, checksums, notices, and a foreground supervisor. The target requires
+Windows x64, but no preinstalled Node or Python. It contains no model
+weights, compiler, credentials, or installer. The approved
+Qwen3.5-9B Q4_K_M model must remain a separately verified local file. Its
+filename, 5,629,109,088-byte size, SHA-256, GGUF metadata and tensor inventory
+are compiled into the engine and planner; caller-supplied identity values are
+not accepted. `config.example.json` documents the strict native config;
+`host-config.example.json` is the separate supervisor/tool-provider config and
+cannot substitute engine identity or launch values.
+
+On the target, first run `Verify-Release.ps1`, then
+`Start-LocalAssistant.ps1 -ModelPath D:\ApprovedModels\Qwen3.5-9B-Q4_K_M.gguf`.
+The supervisor refuses non-Windows/non-x64 hosts, linked or renamed engine/model
+files, duplicate/unknown config keys, and a binary whose compiled identity is
+not the pinned CPU product. It passes the exact model/backend/context plan to
+the engine, generates the engine bearer in memory, sends it only through stdin,
+and supervises engine plus host as one foreground lifetime. No credential is
+placed in argv or the environment.
+
+The launcher creates current-user-only named pipes before starting the
+supervisor. It assigns the supervisor to the kill-on-close Job and only then
+opens a launch gate, so the native engine cannot be created in the assignment
+window. The supervisor passes the 60-second, one-time bootstrap URL back
+through the second pipe, and the launcher passes it to the Windows shell
+through the COM API. Default stdout/stderr contain neither the nonce nor either
+bearer. The explicit diagnostic pair `-NoBrowser -RevealBootstrapUrl` prints
+the URL when shell launch is prohibited. The launcher never constructs a
+browser command line containing the nonce. Its
+nonce is a URL fragment (never an HTTP query), is removed by
+`history.replaceState` before the exchange, and the exchange explicitly uses
+`no-referrer`; the bearer returned by the exchange remains in page memory.
+Static assets are unauthenticated so normal navigation works, while every API
+remains bearer-protected. Hostile origin/referrer, malformed/duplicate bodies,
+and replay are rejected. A Windows kill-on-close Job contains the Node
+supervisor and its native engine child, including abrupt launcher termination.
 
 ## Explicit Windows backend choice
 
+The following build/planner/diagnostic scripts belong to this source template;
+they are intentionally not copied into the CPU portable package. They may use
+Python and toolchains on an engineering machine without creating a target
+Python/npm/install prerequisite. `Start-LocalAssistant.ps1` is the only
+generated-package runtime entry point.
+
 `backend-profiles.json` and `backend-runtime.example.json` describe a
-receipt-gated choice with no fallback. Run `Build-WindowsBackend.ps1 -Backend cpu-safe ...` for
+receipt-gated choice with no fallback. The planner requires Windows x64/AMD64,
+at least 24 GiB installed and 12 GiB currently available RAM, and an absolute
+pinned model path. A nonexistent path can produce only a `planning-only` plan;
+an exact verified artifact advances it to `launch-preconditions-verified`.
+Neither state is called execution-ready: binary identity, model-load and startup
+self-test evidence remain `UNPROVEN` until actual execution.
+
+Run `Build-WindowsBackend.ps1 -Backend cpu-safe ...` for
 the product CPU engine, or select
 `-Backend intel-sycl-experimental -AllowExperimentalSycl ...` for an explicit
 upstream llama.cpp SYCL CLI diagnostic build (still experimental and blocked
 until a separate acceptance review). `Run-WindowsBackend.ps1` requires the
-same choice and never changes it to CPU when SYCL is unavailable. The SYCL
+same choice and never changes it to CPU when SYCL is unavailable. It consumes
+the planner's exact JSON, checks engine build identity, and passes that plan's
+exact model, backend, context, device and offload values to the engine; an
+unrelated config cannot substitute launch values. For the product engine,
+`LAE_ENGINE_TOKEN` is removed from the child environment and sent only through
+stdin, never argv. The SYCL
 runtime selects `SYCL0` and emits bounded one-token output through
 `llama-cli`; it does not expose an unauthenticated server and is not a
 promoted product backend until a separate review approves its compatibility.
@@ -53,7 +123,10 @@ machine: 8 GiB OS/application reserve, approximately 5.25 GiB resident Q4,
 fresh target measurement. “Core Ultra 7 vPro” is a family description, not an
 exact SKU; no macOS run or family-name inference is target validation.
 
-Before any release claim, provide the real `lae-engine-cpu.exe`, run the
-allowlist/dependency/secret/weight scanner, generate checksums and SBOM, and
-complete native Windows launch and offline acceptance. No Shadeform, Intel,
-real-model, or native-Windows evidence is implied by this tree.
+Before any release claim, provide the real `lae-engine-cpu.exe`, build and scan
+the generated package, then complete native Windows launch, exact model-load,
+tool-provider, and offline acceptance. The package builder and static mocked
+tests prove dependency closure and launch wiring only. They do not prove the
+Node executable, PE/DLL loader, 5.6 GB artifact, Intel target, or providers on
+the actual laptop. No Shadeform, Intel, real-model, or native-Windows evidence
+is implied by this source tree.

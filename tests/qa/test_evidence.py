@@ -1,4 +1,5 @@
 import json
+import importlib.util
 import os
 from pathlib import Path
 import tempfile
@@ -7,7 +8,51 @@ import unittest
 from qa.harness.evidence import audit_environment, build_evidence_manifest, validate_evidence_manifest
 
 
+ROOT = Path(__file__).resolve().parents[2]
+_qa_spec = importlib.util.spec_from_file_location("canonical_run_qa", ROOT / "scripts/test/run_qa.py")
+assert _qa_spec and _qa_spec.loader
+run_qa = importlib.util.module_from_spec(_qa_spec)
+_qa_spec.loader.exec_module(run_qa)
+
+
 class EvidenceTests(unittest.TestCase):
+    def test_canonical_node_discovery_includes_security_tests(self):
+        discovered = run_qa.discover_node_tests(ROOT)
+        self.assertTrue(any(name.startswith("tests/host/") for name in discovered))
+        self.assertIn("tests/security/permission-mode-adversarial.test.mjs", discovered)
+        self.assertIn("tests/security/tool-calling-adversarial.test.mjs", discovered)
+
+    def test_canonical_python_discovery_includes_every_test_module(self):
+        discovered = run_qa.discover_python_test_modules(ROOT)
+        expected = [".".join(path.relative_to(ROOT).with_suffix("").parts) for path in sorted((ROOT / "tests").glob("**/test_*.py"))]
+        self.assertEqual(expected, discovered)
+        self.assertIn("tests.model.test_tool_call_eval", discovered)
+        self.assertIn("tests.performance.test_j1m_lifecycle", discovered)
+        self.assertIn("tests.qa.test_evidence", discovered)
+        self.assertIn("tests.release.test_package_scanner", discovered)
+        self.assertIn("tests.security.test_adversarial", discovered)
+        command = run_qa.python_unittest_command(ROOT)
+        self.assertEqual([run_qa.sys.executable, "-m", "unittest", "-v", *expected], command)
+
+    def test_mandatory_skip_is_conditional_not_release_pass(self):
+        summary = run_qa.summarize_records([
+            {"status": "PASS", "test": "fixture", "mandatory": True},
+            run_qa.skipped("real-target", "not-run"),
+        ])
+        self.assertEqual(summary["status"], "CONDITIONAL_PASS")
+        self.assertTrue(summary["passed"])
+        self.assertFalse(summary["release_passed"])
+        self.assertEqual(summary["mandatory_unproven"], ["real-target"])
+
+    def test_failure_is_not_masked_by_conditional_evidence(self):
+        summary = run_qa.summarize_records([
+            {"status": "FAIL", "test": "fixture", "mandatory": True},
+            run_qa.skipped("real-target", "not-run"),
+        ])
+        self.assertEqual(summary["status"], "FAIL")
+        self.assertFalse(summary["passed"])
+        self.assertFalse(summary["release_passed"])
+
     def test_manifest_has_valid_schema_and_no_environment_values(self):
         with tempfile.TemporaryDirectory() as directory:
             manifest = build_evidence_manifest(source_root=directory, build_id="test-build")

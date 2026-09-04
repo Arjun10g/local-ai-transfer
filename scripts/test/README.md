@@ -6,11 +6,20 @@ From a clean checkout, run:
 python3 scripts/test/run_qa.py --output out/evidence/qa-local/summary.json
 ```
 
+This script is the canonical complete gate. It enumerates every
+`tests/**/test_*.py` module explicitly, avoiding the `tests/qa` versus top-level
+`qa` package shadowing that occurs with `unittest discover -s tests` when no
+top-level directory is supplied. For Python-only diagnosis, use
+`python3 -m unittest discover -s tests -t . -p 'test_*.py'`.
+
 The command runs Python fixture tests, contract conformance, adversarial
-fixtures, Node's built-in host tests when Node is available, the REL-001
+fixtures, Node's built-in host and `tests/security` tests when Node is available, the REL-001
 skeleton scan, and local CMake/CTest if available. It never installs packages
 or contacts a network. Any unavailable/native-Windows/real-model/Shadeform
-capability is recorded as `SKIP`, not `PASS`.
+capability is recorded as mandatory `SKIP`/`UNPROVEN`, not `PASS`. A successful
+fixture run is therefore a typed `CONDITIONAL_PASS` with `release_passed=false`
+until every mandatory target-evidence record is proven. Node 24 specifically is
+mandatory release evidence even if a different local Node version runs the tests.
 
 ## Local Qwen tool-call evaluation
 

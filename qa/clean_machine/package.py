@@ -13,6 +13,8 @@ _module = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_module)
 
 PACKAGE_ALLOWLIST = _module.PACKAGE_ALLOWLIST
+HOST_RUNTIME_FILES = _module.HOST_RUNTIME_FILES
+PORTABLE_RUNTIME_REQUIRED = _module.PORTABLE_RUNTIME_REQUIRED
 REQUIRED_STATIC = _module.REQUIRED_STATIC
 scan_secrets = _module.scan_secrets
 scan_tree = _module.scan_tree

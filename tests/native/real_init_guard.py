@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""Proves a validated model reaches LlamaBackend initialization (no weights)."""
+"""Proves shallow GGUFs cannot replace the compiled product artifact identity."""
 
-import hashlib
 import json
-import signal
 import subprocess
 import sys
 import tempfile
@@ -11,12 +9,10 @@ from pathlib import Path
 
 
 def main():
-    # Header has the required architecture key but no tensor payload; validator
-    # passes it, while llama.cpp must reject it during model initialization.
-    key = b"general.architecture"
-    value = b"qwen35"
-    fixture = b"GGUF" + (3).to_bytes(4, "little") + (1).to_bytes(8, "little") + (1).to_bytes(8, "little")
-    fixture += len(key).to_bytes(8, "little") + key + (8).to_bytes(4, "little") + len(value).to_bytes(8, "little") + value
+    # A superficially GGUF-shaped 70-byte file used to pass when callers
+    # supplied matching --size/--sha256 values. Product identity is compiled,
+    # so it must fail before llama.cpp initialization.
+    fixture = b"GGUF" + (3).to_bytes(4, "little") + bytes(62)
     with tempfile.TemporaryDirectory() as directory:
         model = Path(directory) / "Qwen3.5-9B-Q4_K_M.gguf"
         model.write_bytes(fixture)
@@ -24,10 +20,20 @@ def main():
         token.write_text("init-guard-token")
         token.chmod(0o600)
         token_args = ["--token-stdin"] if sys.platform.startswith("win") else ["--token-file", str(token)]
-        process = subprocess.run([sys.argv[1], "serve", "--backend", "cpu", "--model", str(model), "--size", str(len(fixture)), "--sha256", hashlib.sha256(fixture).hexdigest(), *token_args], input="init-guard-token\n" if sys.platform.startswith("win") else None, capture_output=True, text=True, timeout=30)
-    if process.returncode != 1 or "llama model load failed" not in process.stderr:
-        raise AssertionError(f"backend initialization was not reached: rc={process.returncode} stderr={process.stderr!r}")
-    print("real backend initialization guard: PASS")
+        process = subprocess.run([sys.argv[1], "serve", "--backend", "cpu", "--model", str(model), *token_args], input="init-guard-token\n" if sys.platform.startswith("win") else None, capture_output=True, text=True, timeout=30)
+        if process.returncode != 2 or "model_size_mismatch" not in process.stderr:
+            raise AssertionError(f"shallow GGUF was not rejected by compiled identity: rc={process.returncode} stderr={process.stderr!r}")
+
+        config = Path(directory) / "config.local.json"
+        config.write_text(json.dumps({
+            "model_path": str(model),
+            "model_size_bytes": len(fixture),
+            "model_sha256": "0" * 64,
+        }))
+        overridden = subprocess.run([sys.argv[1], "serve", "--config", str(config), *token_args], input="init-guard-token\n" if sys.platform.startswith("win") else None, capture_output=True, text=True, timeout=30)
+        if overridden.returncode != 2 or "unknown key" not in overridden.stderr:
+            raise AssertionError(f"runtime config could override compiled identity: rc={overridden.returncode} stderr={overridden.stderr!r}")
+    print("compiled product model identity guard: PASS")
 
 
 if __name__ == "__main__":
