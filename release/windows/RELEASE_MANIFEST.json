@@ -10,5 +10,5 @@
   ],
   "native_windows_launch": "UNPROVEN",
   "real_engine": "UNPROVEN",
-  "model_artifact": "EXTERNAL_AND_UNPROVEN"
+  "model_artifact": "EXTERNAL_AND_VERIFIED_SEPARATELY"
 }

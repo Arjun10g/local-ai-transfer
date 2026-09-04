@@ -1,5 +1,7 @@
 {
   "model_path": "D:/ApprovedModels/Qwen3.5-9B-Q4_K_M.gguf",
+  "model_size_bytes": 5629109088,
+  "model_sha256": "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b",
   "backend_profile": "cpu",
   "context_tokens": 8192,
   "network_provider": "disabled",
