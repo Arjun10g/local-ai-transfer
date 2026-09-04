@@ -54,6 +54,8 @@ class J1MConfigTests(unittest.TestCase):
         self.assertTrue(any(any("gguf-py" in part for part in command) for command in plan["commands"]))
         self.assertTrue(any("--no-index" in command and "gguf" in command and "-e" not in command for command in plan["commands"]))
         self.assertNotIn("--token-file", [part for command in plan["commands"] for part in command])
+        self.assertIn(["sudo", "apt-get", "update"], plan["commands"])
+        self.assertIn(["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "python3-venv"], plan["commands"])
         self.assertTrue(any("--verify-llama" in command for command in plan["commands"]))
         self.assertTrue(any("--inspect-tensors" in command for command in plan["commands"]))
         hf_commands = [command for command in plan["commands"] if any(part == "download" for part in command)]
@@ -267,6 +269,17 @@ class J1MConfigTests(unittest.TestCase):
             persisted = json.loads(receipt_path.read_text(encoding="utf-8"))
             self.assertEqual(len(persisted), 1)
             self.assertEqual(persisted[0]["argv"], ["source-check"])
+
+    def test_failed_stage_receipt_has_bounded_redacted_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            receipt_path = root / "command-receipt.json"
+            command = [os.sys.executable, "-c", "import sys; print('token=do-not-retain ' * 300, file=sys.stderr); raise SystemExit(7)"]
+            result = self.j1m.run_commands([command], root / "progress.json", receipt_path=receipt_path)
+            self.assertEqual(result[0]["exit_code"], 7)
+            self.assertLessEqual(len(result[0]["stderr_tail"]), 1200)
+            self.assertNotIn("do-not-retain", result[0]["stderr_tail"])
+            self.assertIn("<redacted>", result[0]["stderr_tail"])
 
     def test_hf_token_is_injected_only_into_download_stage(self):
         with tempfile.TemporaryDirectory() as directory:

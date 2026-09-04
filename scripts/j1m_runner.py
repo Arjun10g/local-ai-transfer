@@ -14,6 +14,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import secrets
 import stat
 import subprocess
@@ -32,6 +33,7 @@ CHILD_ENV_ALLOWLIST = frozenset({
     "PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "PYTHONUNBUFFERED",
     "HF_HOME", "HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE",
 })
+_COMMAND_LOG_TAIL_LIMIT = 1200
 
 
 def utc_now() -> str:
@@ -318,6 +320,8 @@ def command_plan(config: dict[str, Any], source: str = "/scratch/hf/Qwen3.5-9B",
     return [
         ["git", "clone", "--filter=blob:none", config["llama_cpp"]["repository"], llama["checkout"]],
         ["git", "-C", llama["checkout"], "checkout", "--detach", llama["revision"]],
+        ["sudo", "apt-get", "update"],
+        ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "python3-venv"],
         ["python3", "-m", "venv", "/scratch/j1m/venv"],
         ["mkdir", "-p", wheelhouse],
         ["/scratch/j1m/venv/bin/pip", "wheel", "--disable-pip-version-check", "--no-input", "--wheel-dir", wheelhouse, "-r", f"{llama['checkout']}/{config['python_dependencies']['requirements_file']}", f"{llama['checkout']}/{config['python_dependencies']['local_gguf_package']}"],
@@ -362,6 +366,15 @@ def read_token_file(path: Path) -> str:
     return token
 
 
+def _bounded_command_tail(stream: Any) -> str:
+    stream.flush()
+    size = stream.tell()
+    stream.seek(max(0, size - (_COMMAND_LOG_TAIL_LIMIT * 4)))
+    value = stream.read().decode("utf-8", errors="replace")
+    value = re.sub(r"(?i)(api[_-]?key|token|password|secret)(\s*[=:]\s*)\S+", r"\1\2<redacted>", value)
+    return value[-_COMMAND_LOG_TAIL_LIMIT:]
+
+
 def run_commands(commands: list[list[str]], progress_path: Path, *, cwd: Path | None = None, token_file: Path | None = None, receipt_path: Path | None = None) -> list[dict[str, Any]]:
     """Run an already-reviewed argv plan, recording progress before each stage."""
 
@@ -381,8 +394,24 @@ def run_commands(commands: list[list[str]], progress_path: Path, *, cwd: Path | 
             environment = {key: os.environ[key] for key in CHILD_ENV_ALLOWLIST if key in os.environ}
             if token_file is not None and any(part == "download" for part in command):
                 environment[TOKEN_ENV] = read_token_file(token_file)
-            completed = subprocess.run(command, cwd=cwd, check=False, timeout=6 * 60 * 60, env=environment)
+            # Keep verbose converter/download output off the SSH transport and
+            # retain only bounded, redacted tails when a stage fails.
+            with tempfile.TemporaryFile() as stdout_log, tempfile.TemporaryFile() as stderr_log:
+                completed = subprocess.run(
+                    command,
+                    cwd=cwd,
+                    check=False,
+                    timeout=6 * 60 * 60,
+                    env=environment,
+                    stdout=stdout_log,
+                    stderr=stderr_log,
+                )
+                stdout_tail = _bounded_command_tail(stdout_log)
+                stderr_tail = _bounded_command_tail(stderr_log)
             stage_receipt = {"stage": index + 1, "argv": command, "started_at_utc": started_at, "ended_at_utc": utc_now(), "exit_code": completed.returncode, "status": "completed" if completed.returncode == 0 else "failed"}
+            if completed.returncode != 0:
+                stage_receipt["stdout_tail"] = stdout_tail
+                stage_receipt["stderr_tail"] = stderr_tail
         except subprocess.TimeoutExpired:
             stage_receipt = {"stage": index + 1, "argv": command, "started_at_utc": started_at, "ended_at_utc": utc_now(), "exit_code": None, "status": "transport_timeout"}
         # Manifest creation and intermediate cleanup are administrative stages;
@@ -493,7 +522,17 @@ def main(argv: list[str] | None = None) -> int:
             if dependency_lock.get("schema") != "local_bmo.j1m.wheelhouse-lock.v1" or not dependency_lock.get("artifacts"):
                 raise ValueError("toolchain receipt requires a nonempty dependency wheelhouse lock")
         head = subprocess.run(["git", "-C", str(checkout), "rev-parse", "HEAD"], check=True, capture_output=True, text=True, timeout=30).stdout.strip()
-        payload = {"schema": "local_bmo.j1m.toolchain.v1", "llama_cpp_head": head, "python": version([sys.executable, "--version"]), "cmake": version(["cmake", "--version"]), "compiler": version(["cc", "--version"]), "pip_freeze": freeze, "dependency_wheelhouse_lock": dependency_lock}
+        try:
+            os_packages = subprocess.run(
+                ["dpkg-query", "-W", "-f=${binary:Package}=${Version}\\n", "python3-venv"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            ).stdout.strip().splitlines()
+        except (OSError, subprocess.SubprocessError):
+            os_packages = ["unavailable"]
+        payload = {"schema": "local_bmo.j1m.toolchain.v1", "llama_cpp_head": head, "python": version([sys.executable, "--version"]), "cmake": version(["cmake", "--version"]), "compiler": version(["cc", "--version"]), "os_packages": os_packages, "pip_freeze": freeze, "dependency_wheelhouse_lock": dependency_lock}
         args.toolchain.parent.mkdir(parents=True, exist_ok=True)
         args.toolchain.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return 0
