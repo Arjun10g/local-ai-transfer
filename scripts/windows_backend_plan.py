@@ -246,7 +246,7 @@ def build_plan(
         "device_selector": "SYCL0",
         "gpu_offload": True,
         "promotion_rank": 2,
-        "build_flags": SYCL_BUILD_FLAGS,
+        "cmake_flags": SYCL_BUILD_FLAGS,
         "device": {
             "name": adapter.get("name"),
             "pnp_device_id": adapter["pnp_device_id"],
@@ -261,7 +261,7 @@ def build_plan(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend", required=True, choices=("cpu-safe", "intel-sycl-experimental"))
+    parser.add_argument("--backend", required=True, choices=("cpu-safe", "intel-vulkan-conservative", "intel-sycl-experimental"))
     parser.add_argument("--receipt", required=True, type=Path)
     parser.add_argument("--model-path")
     parser.add_argument("--model-size", type=int, default=MODEL_SIZE_BYTES)

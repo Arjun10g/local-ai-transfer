@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -177,7 +179,8 @@ class WindowsBackendPlanTests(unittest.TestCase):
         self.assertTrue(sycl["requires_explicit_sycl_probe"])
         self.assertTrue(sycl["diagnostic_only"])
         self.assertFalse(sycl["operator_selectable"])
-        self.assertIn("GGML_VULKAN", profiles["profiles"][1]["product_cmake_flags"][-1])
+        self.assertIn("GGML_VULKAN", profiles["profiles"][1]["cmake_flags"][-1])
+        self.assertEqual(profiles["profiles"][1]["status"], "blocked")
         docs = (ROOT / "release/windows/README-OPERATOR.md").read_text(encoding="utf-8")
         self.assertIn("exact SKU", docs)
         self.assertIn("no fallback", docs.lower())
@@ -199,6 +202,16 @@ class WindowsBackendPlanTests(unittest.TestCase):
         self.assertIn("exact configured Vulkan integrated device is unavailable", backend)
         self.assertIn("ggml_backend_dev_description", backend)
         self.assertNotIn("intel-vulkan.*cpu", backend)
+
+    def test_cli_accepts_vulkan_choice_and_reports_real_blocker(self):
+        path = self.write_receipt(receipt(integrated=None))
+        result = subprocess.run(
+            [sys.executable, str(MODULE_PATH), "--backend", "intel-vulkan-conservative", "--receipt", str(path)],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("source/shader closure", result.stdout)
+        self.assertNotIn("invalid choice", result.stderr)
 
 
 if __name__ == "__main__":

@@ -43,7 +43,7 @@
     ],
     "device_selector": "SYCL0",
     "runtime": "bounded-upstream-llama-cli-diagnostic",
-    "build_flags": ["-DGGML_SYCL=ON", "-DGGML_SYCL_TARGET=INTEL", "-DGGML_SYCL_F16=ON"]
+    "cmake_flags": ["-DGGML_SYCL=ON", "-DGGML_SYCL_TARGET=INTEL", "-DGGML_SYCL_F16=ON"]
   },
   "provenance": {
     "llama_cpp_revision": "3581ba0cf591b3f772fbb002de0f70e294bc0396",

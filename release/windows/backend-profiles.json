@@ -35,9 +35,10 @@
       "operator_selectable": false,
       "requires_receipt": true,
       "promotion_rank": 1,
-      "reason": "reserved until the product engine has an approved Vulkan backend",
-      "product_cmake_flags": ["-DLAE_ENABLE_LLAMA_CPP=ON", "-DGGML_VULKAN=ON"],
-      "implementation_status": "blocked_missing_pinned_ggml_vulkan_source_closure",
+      "status": "blocked",
+      "blocked_reason": "missing_pinned_ggml_vulkan_source_closure",
+      "cmake_flags": ["-DLAE_ENABLE_LLAMA_CPP=ON", "-DGGML_VULKAN=ON"],
+      "implementation_status": "blocked",
       "gpu_layers_default": 20,
       "gpu_layers_max": 99,
       "requires_explicit_gpu_layer_policy": true
@@ -49,6 +50,8 @@
       "diagnostic_only": true,
       "operator_selectable": false,
       "blocked_until": "intel-vulkan-conservative product profile is implemented and reviewed",
+      "status": "blocked",
+      "blocked_reason": "requires_reviewed_vulkan_product_profile",
       "requires_hardware_receipt": true,
       "requires_explicit_sycl_probe": true,
       "requires_exact_integrated_gpu_identity": true,
@@ -56,7 +59,7 @@
       "gpu_offload": true,
       "runtime": "bounded-upstream-llama-cli-diagnostic",
       "device_selector": "SYCL0",
-      "build_flags": ["-DGGML_SYCL=ON", "-DGGML_SYCL_TARGET=INTEL", "-DGGML_SYCL_F16=ON"],
+      "cmake_flags": ["-DGGML_SYCL=ON", "-DGGML_SYCL_TARGET=INTEL", "-DGGML_SYCL_F16=ON"],
       "promotion_rank": 2
     }
   ]
