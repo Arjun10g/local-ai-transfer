@@ -21,9 +21,9 @@
 | TOOL-015 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-013, TOOL-014 | S0, S4 | `197649d`, `2e4c2fc`, `c706a2b`, `acca535`; create-new/base-hash atomic patch, final target recheck, preview tests |
 | TOOL-016 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-013 | S0, S4 | `197649d`, `2e4c2fc`, `c706a2b`; typed Windows clipboard modules/offline tests and strict args |
 | TOOL-017 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-013 | S0, S4 | `197649d`, `2e4c2fc`, `c706a2b`; allowlisted app/browser argv, external-egress gating/preview, strict args tests |
-| TOOL-022 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-003, SOL-003 | S0, S4 | `2f811f1`, `e30b06c`; strict provider contract/controller schema wiring; explicit config mapping; T0 enum validation; disabled/unconfigured/fake-only status evidence; focused 18/18 |
+| TOOL-022 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-003, SOL-003 | S0, S4 | `2f811f1`, `e30b06c`, `a1230c8`; strict provider contract/controller schema wiring; explicit config mapping; T0 enum validation; browser-action schemas/status; disabled/unconfigured/fake-only evidence; focused browser/security 47-test run |
 | TOOL-023 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-022, SOL-003 | S0, S4 | `2f811f1`, `e30b06c`; Graph Outlook/Teams endpoints, bounded hostile response projections, host revisions, at-most-once writes, profile/grant tests, explicit account/profile/scope mapping |
-| TOOL-024 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-022, SOL-003 | S0, S4 | `2f811f1`, `e30b06c`; prompt-only Copilot stdin bridge with supported flags, minimal env, redaction/version/cancel tests, isolated provider status |
+| TOOL-024 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-022, SOL-003 | S0, S4 | `2f811f1`, `e30b06c`, `a1230c8`; prompt-only Copilot stdin bridge with supported flags, minimal env, redaction/version/cancel tests, isolated provider status |
 | QA-001 | S4 | `luna/qa-release` | CLAIMED | SOL-001 | S0 | pending |
 | SEC-001 | S4 | `luna/qa-release` | CLAIMED | QA-001, SOL-003 | S0 | pending |
 | RUN-019 | S1 | `main` | IN_PROGRESS | RUN-010, MODEL-004 | S0, S4 | real tool-role/template pipeline and tests pending |
