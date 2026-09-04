@@ -68,16 +68,16 @@ test('tool-call validation rejects prototype keys, shape confusion, invalid IDs,
     '{"id":"call_ok01","name":"time.now","arguments":{' + Array.from({ length: 33 }, (_, i) => `"k${i}":${i}`).join(',') + '}}'
   ];
   for (const input of invalid) assert.throws(() => parseToolCall(input), EnvelopeError, input);
-  // This key is intentionally covered by the explicit TODO below: the
-  // hand-written parser currently turns it into an inherited property before
-  // validateToolCall can reject it.
+  // Parsed objects are normalized without invoking Object.prototype setters.
   const parsed = parseToolCall('{"id":"call_ok01","name":"time.now","arguments":{"format":"utc"}}');
   assert.equal(Object.getPrototypeOf(parsed.arguments), Object.prototype);
 });
 
-test('KNOWN GAP: tool-call parser must not turn __proto__ into an inherited argument', { todo: 'parser currently loses the key during object assignment' }, () => {
+test('tool-call parser preserves __proto__ as inert own data', () => {
   const parsed = parseToolCall('{"id":"call_proto1","name":"time.now","arguments":{"__proto__":{"polluted":true}}}');
   assert.equal(Object.hasOwn(parsed.arguments, '__proto__'), true);
+  assert.equal(parsed.arguments.polluted, undefined);
+  assert.equal(Object.getPrototypeOf(parsed.arguments), Object.prototype);
 });
 
 test('tool-result validation is strict and output construction clamps untrusted text', () => {
@@ -166,11 +166,34 @@ test('controller treats a tool result with the wrong correlation ID as a failure
   });
   const result = await controller.runTurn({ sessionId: 'ses_result', requestId: 'req_result', message: 'result', onEvent: () => {} });
   assert.equal(result.state, 'FAILED');
+  assert.equal(result.error, 'tool_result_mismatch');
 });
 
-test.todo('KNOWN GAP: controller must validate full tool result schema/name/status before continuing');
-
-test.todo('KNOWN GAP: controller should preserve a typed tool_result_mismatch error code');
+test('controller validates the full tool-result schema before continuing', async () => {
+  let continuation = false;
+  const controller = new ConversationController({
+    engine: {
+      async *generate({ messages }) {
+        if (!messages.some(message => message.role === 'tool')) {
+          yield { kind: 'tool_call_chunk', text: JSON.stringify(call('test.invalid_result', {}, 'call_invalid_result')) };
+          return;
+        }
+        continuation = true;
+        yield { kind: 'text_delta', text: 'must not continue' };
+      }
+    },
+    toolRegistry: {
+      'test.invalid_result': {
+        name: 'test.invalid_result',
+        execute: async () => ({ id: 'call_invalid_result', name: 'test.invalid_result', status: 'running', content: [], metadata: { truncated: false, duration_ms: 0 } })
+      }
+    }
+  });
+  const result = await controller.runTurn({ sessionId: 'ses_invalid_result', requestId: 'req_invalid_result', message: 'run', onEvent: () => {} });
+  assert.equal(result.state, 'FAILED');
+  assert.equal(result.error, 'invalid_tool_result');
+  assert.equal(continuation, false);
+});
 
 test('provider/tool failures fail closed without a continuation or hidden fallback', async () => {
   let continuation = false;
@@ -190,7 +213,27 @@ test('provider/tool failures fail closed without a continuation or hidden fallba
   assert.equal(result.error, 'provider_timeout');
 });
 
-test.todo('KNOWN GAP: controller must enforce each definition timeout around a provider/tool execute promise');
+test('controller enforces each tool definition timeout and aborts the operation', async () => {
+  let aborted = false;
+  const controller = new ConversationController({
+    engine: oneToolEngine(call('test.timeout', {}, 'call_timeout1')),
+    toolRegistry: {
+      'test.timeout': {
+        name: 'test.timeout',
+        timeout_ms: 10,
+        execute: async value => await new Promise(resolve => {
+          value.signal.addEventListener('abort', () => { aborted = true; resolve(makeToolResult({ id: value.id, name: value.name, status: 'cancelled' })); }, { once: true });
+        })
+      }
+    }
+  });
+  const started = Date.now();
+  const result = await controller.runTurn({ sessionId: 'ses_timeout1', requestId: 'req_timeout1', message: 'run', onEvent: () => {} });
+  assert.equal(result.state, 'FAILED');
+  assert.equal(result.error, 'tool_timeout');
+  assert.equal(aborted, true);
+  assert.ok(Date.now() - started < 500);
+});
 
 test('filesystem argument schemas reject injection-shaped, oversized, non-integer, and extra arguments', () => {
   const names = ['fs.list', 'fs.read_text', 'fs.search_text', 'fs.write_new', 'fs.apply_patch', 'clipboard.write', 'app.open', 'browser.open_url'];
