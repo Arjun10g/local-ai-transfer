@@ -17,8 +17,12 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
-$receipt = (Resolve-Path -LiteralPath $HardwareReceipt).Path
-$model = (Resolve-Path -LiteralPath $ModelPath).Path
+$receiptItem = Get-Item -LiteralPath $HardwareReceipt
+if ($receiptItem.LinkType -or $receiptItem.PSIsContainer) { throw 'hardware receipt must be a regular non-link file' }
+$receipt = $receiptItem.FullName
+$modelItem = Get-Item -LiteralPath $ModelPath
+if ($modelItem.LinkType -or $modelItem.PSIsContainer) { throw 'model must be a regular non-link file' }
+$model = $modelItem.FullName
 $planner = Join-Path $repoRoot 'scripts/windows_backend_plan.py'
 $planPath = Join-Path ([IO.Path]::GetTempPath()) 'lae-windows-backend-plan.json'
 & $PythonCommand $planner --backend $Backend --receipt $receipt --model-path $model --output $planPath

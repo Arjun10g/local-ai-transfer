@@ -119,6 +119,8 @@ class WindowsBackendPlanTests(unittest.TestCase):
         self.assertIn("ValidateSet('cpu-safe', 'intel-sycl-experimental')", build)
         self.assertIn("AllowExperimentalSycl", build)
         self.assertIn("GGML_SYCL_TARGET=INTEL", build)
+        self.assertIn("LinkType", build)
+        self.assertIn("LinkType", run)
         self.assertIn("--device SYCL0", run)
         self.assertNotIn("fallback", run.lower())
 

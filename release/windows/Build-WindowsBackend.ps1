@@ -20,11 +20,13 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $releaseRoot = (Resolve-Path (Join-Path $PSScriptRoot '.')).Path
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
-$receipt = (Resolve-Path -LiteralPath $HardwareReceipt).Path
-$model = (Resolve-Path -LiteralPath $ModelPath).Path
+$receiptItem = Get-Item -LiteralPath $HardwareReceipt
+if ($receiptItem.LinkType -or $receiptItem.PSIsContainer) { throw 'hardware receipt must not be a symlink or directory' }
+$receipt = $receiptItem.FullName
+$modelItem = Get-Item -LiteralPath $ModelPath
+if ($modelItem.LinkType -or $modelItem.PSIsContainer) { throw 'model must be an existing regular file, not a link or directory' }
+$model = $modelItem.FullName
 
-if (-not (Test-Path -LiteralPath $model -PathType Leaf)) { throw 'model must be an existing regular file' }
-$modelItem = Get-Item -LiteralPath $model
 if ($modelItem.Length -ne 5629109088) { throw 'model size is not the approved Q4_K_M size' }
 $modelHash = (Get-FileHash -LiteralPath $model -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($modelHash -ne 'c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b') { throw 'model SHA-256 is not the approved Q4_K_M digest' }
