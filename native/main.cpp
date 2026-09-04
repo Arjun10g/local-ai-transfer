@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <chrono>
 #include <thread>
+#include <cstring>
+#include <stdexcept>
 
 namespace {
 lae::Engine* active_engine = nullptr;
@@ -26,14 +28,24 @@ int main(int argc, char** argv) {
   const std::string command = argc > 1 ? argv[1] : "help";
   if (command == "version") { std::cout << "0.1.0\n"; return 0; }
   if (command == "print-build-info") {
-    std::cout << "{\"engine_version\":\"0.1.0\",\"api_version\":\"0.1.0\",\"backend\":\"fixture-cpu/0.1.0\",\"llama_cpp_revision\":\"3581ba0cf591b3f772fbb002de0f70e294bc0396\",\"model\":\"none\"}\n";
+#if LAE_COMPILED_LLAMA_CPP
+    constexpr const char* compiled_backend = "llama.cpp/3581ba0c/cpu";
+#else
+    constexpr const char* compiled_backend = "fixture-cpu/0.1.0";
+#endif
+    std::cout << "{\"engine_version\":\"0.1.0\",\"api_version\":\"0.1.0\",\"compiled_backend\":\"" << compiled_backend << "\",\"llama_cpp_revision\":\"3581ba0cf591b3f772fbb002de0f70e294bc0396\",\"selected_backend\":\"runtime-config\",\"model\":\"external-manifest\"}\n";
     return 0;
   }
   if (command == "probe") {
-#ifdef _WIN32
-    std::cout << "{\"bind\":\"127.0.0.1\",\"platform\":\"windows\",\"backend\":\"fixture-cpu/0.1.0\"}\n";
+#if LAE_COMPILED_LLAMA_CPP
+    constexpr const char* compiled_backend = "llama.cpp/3581ba0c/cpu";
 #else
-    std::cout << "{\"bind\":\"127.0.0.1\",\"platform\":\"posix\",\"backend\":\"fixture-cpu/0.1.0\"}\n";
+    constexpr const char* compiled_backend = "fixture-cpu/0.1.0";
+#endif
+#ifdef _WIN32
+    std::cout << "{\"bind\":\"127.0.0.1\",\"platform\":\"windows\",\"compiled_backend\":\"" << compiled_backend << "\"}\n";
+#else
+    std::cout << "{\"bind\":\"127.0.0.1\",\"platform\":\"posix\",\"compiled_backend\":\"" << compiled_backend << "\"}\n";
 #endif
     return 0;
   }
@@ -42,17 +54,19 @@ int main(int argc, char** argv) {
   unsigned port = 0; unsigned context_tokens = 8192; std::uint64_t model_size = 0;
   std::string token; bool token_seen = false; std::string backend = "fixture-cpu";
   std::string model_path; std::string model_sha256;
+  try {
   for (int i = 2; i < argc; ++i) {
     const std::string arg = argv[i];
-    if (arg == "--port" && i + 1 < argc) port = static_cast<unsigned>(std::stoul(argv[++i]));
+    if (arg == "--port" && i + 1 < argc) { size_t end = 0; const auto value = std::stoull(argv[++i], &end); if (end != std::strlen(argv[i]) || value > 65535) throw std::invalid_argument("invalid port"); port = static_cast<unsigned>(value); }
     else if (arg == "--token" && i + 1 < argc) { token = argv[++i]; token_seen = true; }
     else if (arg == "--backend" && i + 1 < argc) backend = argv[++i];
     else if (arg == "--model" && i + 1 < argc) model_path = argv[++i];
-    else if (arg == "--size" && i + 1 < argc) model_size = std::stoull(argv[++i]);
+    else if (arg == "--size" && i + 1 < argc) { size_t end = 0; model_size = std::stoull(argv[++i], &end); if (end != std::strlen(argv[i])) throw std::invalid_argument("invalid model size"); }
     else if (arg == "--sha256" && i + 1 < argc) model_sha256 = argv[++i];
-    else if (arg == "--context" && i + 1 < argc) context_tokens = static_cast<unsigned>(std::stoul(argv[++i]));
+    else if (arg == "--context" && i + 1 < argc) { size_t end = 0; const auto value = std::stoull(argv[++i], &end); if (end != std::strlen(argv[i]) || value > 16384) throw std::invalid_argument("invalid context"); context_tokens = static_cast<unsigned>(value); }
     else { std::cerr << "unknown argument\n"; return 2; }
   }
+  } catch (const std::exception& error) { std::cerr << "invalid numeric argument: " << error.what() << "\n"; return 2; }
   if (command == "verify-model") {
     if (model_path.empty()) { std::cerr << "verify-model requires --model\n"; return 2; }
     lae::ModelProfile profile; profile.expected_size_bytes = model_size; profile.expected_sha256 = model_sha256;
@@ -76,7 +90,7 @@ int main(int argc, char** argv) {
     backend_instance = std::make_unique<lae::LlamaBackend>();
   } else { std::cerr << "unsupported backend profile\n"; return 2; }
   lae::Engine engine(std::move(backend_instance));
-  try { engine.initialize(); } catch (const std::exception& error) { std::cerr << error.what() << "\n"; return 1; }
+  try { engine.initialize(backend_config); } catch (const std::exception& error) { std::cerr << error.what() << "\n"; return 1; }
   lae::HttpServer server(engine, token);
   try { server.start(port); } catch (const std::exception& error) { std::cerr << error.what() << "\n"; return 1; }
   active_engine = &engine; active_server = &server;

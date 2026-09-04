@@ -1,6 +1,7 @@
 #include "../../native/backend/fixture_backend.hpp"
 #include "../../native/engine/engine.hpp"
 #include "../../native/model_validation/model_validator.hpp"
+#include "../../native/server/http_server.hpp"
 
 #include <cassert>
 #include <iostream>
@@ -11,6 +12,7 @@
 
 int main() {
   using namespace lae;
+  assert(json_escape("\"\\\n\t\x01") == "\\\"\\\\\\n\\t\\u0001");
   Engine engine(std::make_unique<FixtureBackend>());
   assert(engine.state() == LifecycleState::NEW);
   engine.initialize();

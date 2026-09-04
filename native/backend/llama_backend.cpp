@@ -18,6 +18,7 @@ struct LlamaBackend::Impl {
   llama_sampler* sampler = nullptr;
   unsigned context_tokens = 8192;
   Cancellation cancellation;
+  bool backend_initialized = false;
 };
 
 namespace {
@@ -34,6 +35,7 @@ std::string LlamaBackend::id() const { return "llama.cpp/3581ba0c/cpu"; }
 void LlamaBackend::initialize(const BackendConfig& config) {
   if (config.model_path.empty()) throw std::invalid_argument("model path is required");
   llama_backend_init();
+  impl_->backend_initialized = true;
   auto model_params = llama_model_default_params();
   model_params.n_gpu_layers = 0;
   model_params.check_tensors = true;
@@ -104,7 +106,7 @@ void LlamaBackend::shutdown() {
   if (impl_->sampler) { llama_sampler_free(impl_->sampler); impl_->sampler = nullptr; }
   if (impl_->context) { llama_free(impl_->context); impl_->context = nullptr; }
   if (impl_->model) { llama_model_free(impl_->model); impl_->model = nullptr; }
-  llama_backend_free();
+  if (impl_->backend_initialized) { llama_backend_free(); impl_->backend_initialized = false; }
 }
 }  // namespace lae
 #else

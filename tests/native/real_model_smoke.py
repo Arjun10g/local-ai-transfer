@@ -27,6 +27,10 @@ def main():
         connection.close()
         if response.status != 200:
             raise AssertionError(f"real model request failed: {response.status} {body[:200]}")
+        result = json.loads(body)
+        content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if not isinstance(content, str) or not content.strip():
+            raise AssertionError(f"real model returned an empty response: {body[:200]}")
     finally:
         process.send_signal(signal.SIGTERM)
         process.wait(timeout=30)
