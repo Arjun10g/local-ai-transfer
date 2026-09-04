@@ -98,6 +98,24 @@ test('Microsoft HTTPS transport uses redirect errors, JSON framing, and safe ret
   let calls = 0; const transport = new MicrosoftGraphHttpsTransport({ requestTimeoutMs: 1000, sleep: async () => {}, fetchImpl: async (_url, options) => { calls += 1; assert.equal(options.redirect, 'error'); return new Response('{"error":"busy"}', { status: 503, headers: { 'content-type': 'application/json' } }); } }); const response = await transport.request({ origin: 'https://graph.microsoft.com', method: 'POST', path: '/v1.0/me/messages', body: { subject: 'x' } }); assert.equal(response.status, 503); assert.equal(calls, 1); await assert.rejects(() => transport.request({ origin: 'https://graph.microsoft.com', method: 'GET', path: '/v1.0/me', headers: { 'x-forwarded-for': 'evil' } }), error => error.code === 'provider_destination_rejected');
 });
 
+test('Graph send accepts an empty 202 response exactly once', async () => {
+  let calls = 0;
+  const transport = new MicrosoftGraphHttpsTransport({
+    requestTimeoutMs: 1000,
+    sleep: async () => {},
+    fetchImpl: async (url, options) => {
+      calls += 1;
+      assert.equal(new URL(url).pathname, '/v1.0/me/messages/draft-202/send');
+      assert.equal(options.method, 'POST');
+      return new Response(null, { status: 202 });
+    },
+  });
+  const response = await transport.request({ origin: 'https://graph.microsoft.com', method: 'POST', path: '/v1.0/me/messages/draft-202/send' });
+  assert.equal(response.status, 202);
+  assert.deepEqual(response.body, {});
+  assert.equal(calls, 1);
+});
+
 test('Graph writes are at-most-once across concurrent and timeout retries', async () => {
   let dispatches = 0; const transport = { request: async request => { dispatches += 1; await new Promise((resolve, reject) => request.signal.addEventListener('abort', () => reject(Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' })))); } };
   const tools = createMicrosoftGraphTools({ enabled: true, requestTimeoutMs: 100, credentialSource: { getAccessToken: async () => 'synthetic-token' }, transport }); const draft = call('mail.create_draft', { to: ['alice@example.com'], subject: 'x', body: 'x' }, 'call_once'); await tools['mail.create_draft'].preview(draft); const authorization = { kind: 'user_confirmation' }; const first = tools['mail.create_draft'].execute({ ...draft, authorization }); await new Promise(resolve => setImmediate(resolve)); const concurrent = value(await tools['mail.create_draft'].execute({ ...draft, authorization })); assert.equal(concurrent.code, 'provider_write_already_attempted'); const timedOut = value(await first); assert.equal(timedOut.code, 'provider_timeout'); const retry = value(await tools['mail.create_draft'].execute({ ...draft, authorization })); assert.equal(retry.code, 'provider_timeout'); assert.equal(retry.idempotency, 'replayed'); assert.equal(dispatches, 1);
@@ -118,8 +136,8 @@ test('provider configuration is strict, secret-free, and preserves injected runt
   const config = mergeConfig({ providers: { microsoft_graph: { enabled: true, permission_profile: 'ask_before_writes', account_fingerprint: 'acct', scope: 'account' }, copilot: { enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], version: '1.2.3' }, browser_actions: { enabled: true, executable: '/approved/chrome', allowlist: ['/approved/chrome'] } } }); assert.equal(config.providers.microsoft_graph.enabled, true); assert.equal(config.providers.browser_actions.enabled, true); assert.throws(() => validateConfig({ providers: { microsoft_graph: { token: 'must-not-be-configured' } } }), /unknown key/); assert.throws(() => validateConfig({ providers: { browser_actions: { token: 'must-not-be-configured' } } }), /unknown key/); assert.throws(() => validateConfig({ providers: { unknown: {} } }), /unknown key/); assert.throws(() => validateConfig({ providers: { copilot: { enabled: true, executable: 'copilot', allowlist: ['copilot'], version: 'latest' } } }), /executable invalid/); for (const executable of ['//server/copilot', '\\\\server\\copilot']) assert.throws(() => validateConfig({ providers: { copilot: { executable, allowlist: [executable] } } }), /executable invalid/); assert.throws(() => validateConfig({ providers: { copilot: { version: '1.2' } } }), /version invalid/); const registry = createExternalToolRegistry({ config: config.providers }); assert.equal(registry['mail.list_messages'].execute !== undefined, true); assert.equal(registry['mail.list_messages'].parameters.additionalProperties, false); assert.equal(registry.providerStatus().copilot, 'ready'); const injectedSpawn = createExternalToolRegistry({ config: config.providers, copilot: { spawn: () => new FakeChild() } }); assert.equal(injectedSpawn.providerStatus().copilot, 'unconfigured');
 });
 
-test('Graph auth configuration is explicit and full access requires an expected fingerprint', () => {
-  const auth = mergeConfig({ providers: { microsoft_graph: { enabled: true, tenant: 'organizations', client_id: '00001111-aaaa-2222-bbbb-3333cccc4444', scopes: ['User.Read', 'ChatMessage.Send'] } } }); assert.deepEqual(auth.providers.microsoft_graph.scopes, ['User.Read', 'ChatMessage.Send']); assert.throws(() => validateConfig({ providers: { microsoft_graph: { permission_profile: 'full_access' } } }), /fingerprint required/); assert.throws(() => validateConfig({ providers: { microsoft_graph: { scopes: ['Mail.Read'] } } }), /scopes invalid/); assert.throws(() => validateConfig({ providers: { microsoft_graph: { scopes: ['User.Read', 'User.Read'] } } }), /scopes invalid/);
+test('Graph auth configuration is explicit and full access requires an expected fingerprint', async () => {
+  const auth = mergeConfig({ providers: { microsoft_graph: { enabled: true, tenant: 'organizations', client_id: '00001111-aaaa-2222-bbbb-3333cccc4444', scopes: ['User.Read', 'ChatMessage.Send'] } } }); assert.deepEqual(auth.providers.microsoft_graph.scopes, ['User.Read', 'ChatMessage.Send']); assert.throws(() => validateConfig({ providers: { microsoft_graph: { permission_profile: 'full_access' } } }), /fingerprint required/); assert.throws(() => validateConfig({ providers: { microsoft_graph: { scopes: ['Mail.Read'] } } }), /scopes invalid/); assert.throws(() => validateConfig({ providers: { microsoft_graph: { scopes: ['User.Read', 'User.Read'] } } }), /scopes invalid/); assert.throws(() => mergeConfig({ providers: { microsoft_graph: { scopes: ['User.Read', 'User.Read'] } } }), /scopes invalid/); const schema = JSON.parse(await readFile(new URL('../../contracts/config-schema/v0.1.0.json', import.meta.url), 'utf8')); assert.equal(schema.properties.providers.properties.microsoft_graph.properties.scopes.uniqueItems, true); assert.deepEqual(schema.properties.providers.properties.microsoft_graph.properties.scopes.contains, { const: 'User.Read' });
 });
 
 test('registry maps protected config keys explicitly and exposes provider state separately', async () => {

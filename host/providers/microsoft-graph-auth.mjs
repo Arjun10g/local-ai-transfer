@@ -18,11 +18,11 @@ const waitDefault = (milliseconds, signal) => new Promise((resolve, reject) => {
 const raceAbort = (promise, signal) => { if (!signal) return promise; checkAborted(signal); return new Promise((resolve, reject) => { const abort = () => { signal.removeEventListener('abort', abort); reject(new ProviderToolError('provider_cancelled')); }; signal.addEventListener('abort', abort, { once: true }); promise.then(value => { signal.removeEventListener('abort', abort); resolve(value); }, error => { signal.removeEventListener('abort', abort); reject(error); }); }); };
 
 async function readBoundedJson(response, maxBytes = MAX_AUTH_BODY_BYTES) {
-  if (!response?.body) return {};
+  if (!response?.body) return { value: {}, bytes: 0 };
   const chunks = []; let bytes = 0;
   for await (const chunk of response.body) { const buffer = Buffer.from(chunk); bytes += buffer.byteLength; if (bytes > maxBytes) throw new ProviderToolError('provider_response_too_large'); chunks.push(buffer); }
-  if (!chunks.length) return {};
-  try { const value = JSON.parse(Buffer.concat(chunks).toString('utf8')); return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; } catch { throw new ProviderToolError('provider_invalid_response'); }
+  if (!chunks.length) return { value: {}, bytes: 0 };
+  try { const value = JSON.parse(Buffer.concat(chunks).toString('utf8')); return { value: value && typeof value === 'object' && !Array.isArray(value) ? value : {}, bytes }; } catch { throw new ProviderToolError('provider_invalid_response'); }
 }
 
 const retryAfter = headers => { const raw = headers?.get?.('retry-after') ?? headers?.['retry-after']; const seconds = Number(raw); return Number.isFinite(seconds) && seconds >= 0 && seconds <= 30 ? seconds * 1000 : 500; };
@@ -58,8 +58,10 @@ export class MicrosoftGraphHttpsTransport {
       const rawLength = response.headers?.get?.('content-length'); if (rawLength !== undefined && rawLength !== null && (!/^\d+$/u.test(String(rawLength)) || Number(rawLength) > MAX_AUTH_BODY_BYTES)) throw new ProviderToolError('provider_response_too_large');
       if (canRetry && [429, 503].includes(response.status) && attempts++ < MAX_AUTH_RETRIES) { await readBoundedJson(response); await this.sleep(retryAfter(response.headers), signal); continue; }
       const parsed = await readBoundedJson(response);
-      const contentType = response.headers?.get?.('content-type') ?? ''; if (response.status !== 204 && !/^(?:application\/json|application\/[^;]+\+json)(?:;|$)/iu.test(contentType)) throw new ProviderToolError('provider_invalid_response');
-      return { status: response.status, headers: response.headers, body: parsed };
+      const contentType = response.headers?.get?.('content-type') ?? '';
+      const emptySuccess = parsed.bytes === 0 && [202, 204].includes(response.status);
+      if (!emptySuccess && !/^(?:application\/json|application\/[^;]+\+json)(?:;|$)/iu.test(contentType)) throw new ProviderToolError('provider_invalid_response');
+      return { status: response.status, headers: response.headers, body: parsed.value };
     }
   }
 }
