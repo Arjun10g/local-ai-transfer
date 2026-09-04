@@ -7,12 +7,15 @@ constructs it with `enabled: true`. The default `createExternalToolRegistry()`
 returns disabled Graph and Copilot tools, so fixture/native launcher runs remain
 offline.
 
-Graph requests are constrained to the configured HTTPS Graph origin and `/me`
-mail or existing-chat endpoint families. Results are projections with bounded
-text and no headers, attachments, tokens, or transport details. Writes require a
-proposal created by `preview`, are revalidated against that proposal, and use a
-call/proposal-derived idempotency key. Replaying the same call returns a typed
-`replayed` outcome without a second transport request.
+Graph requests are constrained to the fixed HTTPS Graph origin and `/me` mail,
+`/me/chats` listing, and `/chats/{id}/messages` existing-chat endpoint families.
+Mail body reads request Graph's plain-text projection and still sanitize HTML,
+entities, scripts, styles, UTF-8, and byte bounds defensively. Results are
+projections with no headers, attachments, tokens, or transport details. Writes
+require a preview; send-draft previews fetch and bind the current projected
+draft identity/content/ETag, then revalidate it before dispatch. A bounded
+pre-dispatch ledger records every write attempt, so ambiguous failures cannot
+be resent.
 
 `OperatorGrantStore` is an in-memory, provider/account/scope-bound operator
 grant. `full_access` can suppress confirmation only for routine draft creation
@@ -22,12 +25,15 @@ model call; grants are not persisted and model arguments cannot create or alter
 them.
 
 `CopilotCliProvider` is a prompt-only cloud bridge. It requires an explicitly
-allowlisted executable and version check, sends the prompt/context over stdin,
-passes only a minimal environment, uses fixed argv with `shell: false`, and
-enforces output, timeout, and cancellation bounds. It never accepts shell,
-write, URL, MCP, plugin, or `--allow-all*` arguments. Its preview discloses the
-cloud destination, selected paths, categories, and byte estimate. Context is
-read only through an injected workspace-bound reader.
+allowlisted executable and version check, snapshots and hashes selected context
+at preview, rechecks it at execute, passes the prompt over stdin to bare
+`copilot`, and uses supported silent/no-update/no-custom-instructions/no-remote/
+no-MCP/no-tools flags. It passes only a minimal credential-store environment,
+uses fixed argv with `shell: false`, and enforces output, timeout, cancellation,
+UTF-8, and injected process-tree-kill bounds. It never accepts shell, write,
+URL, MCP, plugin, or `--allow-all*` arguments. Its preview discloses the cloud
+destination, selected paths, categories, and exact combined byte count. Context
+is read only through an injected workspace-bound reader.
 
 Live Graph/Copilot authorization, organization approval, Windows process
 evidence, and synthetic release-account evidence are not present in this

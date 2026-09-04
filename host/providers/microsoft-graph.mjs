@@ -7,6 +7,9 @@ const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/u;
 const CAP_MAIL = 'microsoft.graph.mail';
 const CAP_TEAMS = 'microsoft.graph.teams';
 const REQUEST_TIMEOUT_MS = 10000;
+const MAX_TOKEN_BYTES = 4096;
+const MAX_PROPOSALS = 128;
+const MAX_WRITE_RECORDS = 256;
 const schema = (properties, required = []) => ({ type: 'object', additionalProperties: false, required, properties });
 const string = (max, extra = {}) => ({ type: 'string', maxLength: max, ...extra });
 const identifier = string(512, { minLength: 1 });
@@ -80,6 +83,12 @@ const projectionMessage = (value, maxPreview = 1024) => {
   const preview = normalizeText(value.bodyPreview, maxPreview);
   return { id: value.id.slice(0, 512), received_at: typeof value.receivedDateTime === 'string' ? value.receivedDateTime : null, from: projectionAddress(value.from?.emailAddress), subject: typeof value.subject === 'string' ? value.subject.slice(0, 998) : '', unread: value.isRead === false, importance: ['low', 'normal', 'high'].includes(value.importance) ? value.importance : 'normal', preview: preview.text, preview_truncated: preview.truncated };
 };
+const projectionDraft = value => {
+  if (!value || typeof value !== 'object' || typeof value.id !== 'string' || value.id.length < 1) return null;
+  const body = normalizeText(value.body?.content, 4096); const recipients = [...safeArray(value.toRecipients), ...safeArray(value.ccRecipients)].map(item => item?.emailAddress?.address).filter(address => typeof address === 'string' && EMAIL.test(address)).slice(0, 40);
+  return { id: value.id.slice(0, 512), subject: typeof value.subject === 'string' ? value.subject.slice(0, 998) : '', body_preview: body.text.slice(0, 512), recipients, etag: typeof value['@odata.etag'] === 'string' ? value['@odata.etag'].slice(0, 512) : null };
+};
+const putBounded = (map, key, value, max) => { if (map.size >= max && !map.has(key)) map.delete(map.keys().next().value); map.set(key, value); };
 
 export class MicrosoftGraphProvider {
   constructor({ enabled = false, credentialSource, transport, origin = 'https://graph.microsoft.com', permissionProfile = 'always_ask', grantStore, accountFingerprint = 'unknown', scope = 'account', now = () => Date.now(), requestTimeoutMs = REQUEST_TIMEOUT_MS } = {}) {
@@ -105,7 +114,7 @@ export class MicrosoftGraphProvider {
   async token(signal) {
     checkAborted(signal); if (!this.enabled) throw new ProviderToolError('provider_disabled'); if (!this.credentialSource || !this.transport) throw new ProviderToolError('provider_unconfigured');
     let value; try { value = typeof this.credentialSource === 'function' ? await this.credentialSource() : await this.credentialSource.getAccessToken?.(); } catch { throw new ProviderToolError('provider_unauthorized'); }
-    if (typeof value !== 'string' || !value) throw new ProviderToolError('provider_unauthorized'); return value;
+    if (typeof value !== 'string' || !value || Buffer.byteLength(value, 'utf8') > MAX_TOKEN_BYTES || /[\u0000-\u001f\u007f]/u.test(value)) throw new ProviderToolError('provider_unauthorized'); return value;
   }
   async request({ method, path, query, headers = {}, body, signal }) {
     const bearer = await this.token(signal); checkAborted(signal); const deadline = new AbortController(); let rejectAbort; const relay = () => { deadline.abort(); rejectAbort?.(Object.assign(new Error('provider cancelled'), { code: 'provider_cancelled' })); }; signal?.addEventListener('abort', relay, { once: true }); let timer;
@@ -123,7 +132,7 @@ export class MicrosoftGraphProvider {
     if (response.status < 200 || response.status >= 300) throw new ProviderToolError(providerError(response.status));
     return jsonResponse(response);
   }
-  remember(call, args) { const capability = this.capability(call.name); const grant = this.grantStore?.get(capability); const revision = digest({ call: call.name, args, nonce: `${this.now()}:${call.id}` }); this.proposals.set(call.id, { name: call.name, digest: digest(args), revision, grantGeneration: grant?.generation ?? null }); return revision; }
+  remember(call, args) { const capability = this.capability(call.name); const grant = this.grantStore?.get(capability); const revision = digest({ call: call.name, args, nonce: `${this.now()}:${call.id}` }); putBounded(this.proposals, call.id, { name: call.name, digest: digest(args), revision, grantGeneration: grant?.generation ?? null }, MAX_PROPOSALS); return revision; }
   assertProposal(call, args) { const saved = this.proposals.get(call.id); if (!saved || saved.name !== call.name || saved.digest !== digest(args)) throw new ProviderToolError('provider_permission_insufficient', 'write proposal no longer matches'); return saved; }
   async authorize(call) {
     const args = this.validate(call.name, call.arguments); const saved = this.assertProposal(call, args); const capability = this.capability(call.name);
@@ -146,7 +155,7 @@ export class MicrosoftGraphProvider {
       return { provider: 'microsoft_graph', action: 'create_draft', destination: '/me', recipients: [...args.to, ...(args.cc ?? [])], subject: args.subject, body_preview: args.body.slice(0, 512), proposal_revision: proposalRevision, data_categories: ['recipient', 'subject', 'message_body'], permission_profile: this.permissionProfile };
     }
     if (call.name === 'mail.send_draft') {
-      return { provider: 'microsoft_graph', action: 'send_draft', destination: '/me', draft_id: args.draft_id, proposal_revision: proposalRevision, data_categories: ['existing_draft_content'], permission_profile: this.permissionProfile };
+      const draftResponse = await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(args.draft_id)}`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$select': 'id,subject,body,toRecipients,ccRecipients' }, signal: call.signal }); const draft = projectionDraft(draftResponse); if (!draft) throw new ProviderToolError('provider_invalid_response', 'draft projection unavailable'); const saved = this.proposals.get(call.id); saved.draftBinding = digest(draft); return { provider: 'microsoft_graph', action: 'send_draft', destination: '/me', draft_id: draft.id, subject: draft.subject, body_preview: draft.body_preview, recipients: draft.recipients, etag: draft.etag, proposal_revision: proposalRevision, data_categories: ['recipient', 'subject', 'existing_draft_content'], permission_profile: this.permissionProfile };
     }
     if (call.name === 'mail.mark_read') {
       return { provider: 'microsoft_graph', action: 'mark_read', destination: '/me', message_id: args.message_id, is_read: args.is_read, proposal_revision: proposalRevision, permission_profile: this.permissionProfile };
@@ -169,7 +178,7 @@ export class MicrosoftGraphProvider {
       const body = await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(args.message_id)}`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$select': 'id,receivedDateTime,from,subject,isRead,importance,body' }, signal: call.signal }); const message = projectionMessage({ ...body, bodyPreview: body.body?.content }); const content = normalizeText(body.body?.content, Math.min(args.max_bytes ?? 60000, 60000)); return result(call, 'ok', { provider: 'microsoft_graph', state: 'ready', message: { ...message, text: content.text, text_truncated: content.truncated } }, { truncated: content.truncated });
     }
     if (call.name === 'teams.list_chats') {
-      const body = await this.request({ method: 'GET', path: `${API}/chats`, query: { '$top': args.limit ?? 25, '$select': 'id,topic,chatType,lastUpdatedDateTime' }, signal: call.signal }); const chats = safeArray(body.value).filter(value => value && typeof value.id === 'string').slice(0, args.limit ?? 25).map(value => ({ id: value.id.slice(0, 512), topic: typeof value.topic === 'string' ? value.topic.slice(0, 512) : '', type: typeof value.chatType === 'string' ? value.chatType : 'unknown', last_updated: typeof value.lastUpdatedDateTime === 'string' ? value.lastUpdatedDateTime : null, participants: [] })); return result(call, 'ok', { provider: 'microsoft_graph', state: 'ready', chats, truncated: safeArray(body.value).length > chats.length });
+      const body = await this.request({ method: 'GET', path: `${API}/me/chats`, query: { '$top': args.limit ?? 25, '$select': 'id,topic,chatType,lastUpdatedDateTime' }, signal: call.signal }); const chats = safeArray(body.value).filter(value => value && typeof value.id === 'string').slice(0, args.limit ?? 25).map(value => ({ id: value.id.slice(0, 512), topic: typeof value.topic === 'string' ? value.topic.slice(0, 512) : '', type: typeof value.chatType === 'string' ? value.chatType : 'unknown', last_updated: typeof value.lastUpdatedDateTime === 'string' ? value.lastUpdatedDateTime : null, participants: [] })); return result(call, 'ok', { provider: 'microsoft_graph', state: 'ready', chats, truncated: safeArray(body.value).length > chats.length });
     }
     if (call.name === 'teams.list_messages') {
       const body = await this.request({ method: 'GET', path: `${API}/chats/${encodeURIComponent(args.chat_id)}/messages`, query: { '$top': args.limit ?? 50 }, signal: call.signal }); const messages = safeArray(body.value).filter(value => value && typeof value.id === 'string').slice(0, args.limit ?? 50).map(value => { const content = normalizeText(value.body?.content, 512); return { id: value.id.slice(0, 512), time: typeof value.createdDateTime === 'string' ? value.createdDateTime : null, sender: typeof value.from?.user?.displayName === 'string' ? value.from.user.displayName.slice(0, 256) : '', text: content.text, text_truncated: content.truncated, importance: ['low', 'normal', 'high'].includes(value.importance) ? value.importance : 'normal', web_url: safeTeamsUrl(value.webUrl) }; }); return result(call, 'ok', { provider: 'microsoft_graph', state: 'ready', messages, truncated: safeArray(body.value).length > messages.length });
@@ -178,6 +187,7 @@ export class MicrosoftGraphProvider {
     const saved = this.assertProposal(call, args);
     const capability = this.capability(call.name);
     const authorization = call.authorization;
+    if (authorization !== undefined && (!authorization || typeof authorization !== 'object' || Array.isArray(authorization) || !['user_confirmation', 'operator_grant', 'policy'].includes(authorization.kind) || Object.keys(authorization).some(key => !['kind', 'generation'].includes(key)) || (authorization.kind === 'operator_grant' && (typeof authorization.generation !== 'string' || authorization.generation.length !== 32)))) throw new ProviderToolError('provider_permission_insufficient');
     if (authorization?.kind === 'operator_grant') {
       const grant = this.grantStore?.get(capability); if (!grant || grant.profile !== 'full_access' || grant.generation !== saved.grantGeneration || grant.generation !== authorization.generation || !this.grantValid(capability)) throw new ProviderToolError('provider_permission_revoked');
     } else if (authorization?.kind !== 'user_confirmation' && this.confirmationRequired(call.name)) throw new ProviderToolError('provider_permission_insufficient');
@@ -186,13 +196,14 @@ export class MicrosoftGraphProvider {
       const previous = this.writeLedger.get(key); if (previous.result) return previous.result;
       return failureResult(call, new ProviderToolError('provider_write_already_attempted'));
     }
-    const ledger = { result: null }; this.writeLedger.set(key, ledger);
+    const ledger = { result: null }; putBounded(this.writeLedger, key, ledger, MAX_WRITE_RECORDS);
     const operation = this.beginOperation(capability, call.signal);
     let body; let response;
     try {
       if (call.name === 'mail.create_draft') {
         response = await this.request({ method: 'POST', path: `${API}/me/messages`, body: { subject: args.subject, body: { contentType: 'Text', content: args.body }, toRecipients: args.to.map(address), ccRecipients: (args.cc ?? []).map(address) }, signal: operation.signal });
       } else if (call.name === 'mail.send_draft') {
+        const current = projectionDraft(await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(args.draft_id)}`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$select': 'id,subject,body,toRecipients,ccRecipients' }, signal: operation.signal })); if (!current || current.id !== args.draft_id || digest(current) !== this.proposals.get(call.id)?.draftBinding) throw new ProviderToolError('provider_permission_insufficient', 'draft changed after preview');
         response = await this.request({ method: 'POST', path: `${API}/me/messages/${encodeURIComponent(args.draft_id)}/send`, headers: { 'Idempotency-Key': key }, signal: operation.signal });
       } else if (call.name === 'mail.mark_read') {
         response = await this.request({ method: 'PATCH', path: `${API}/me/messages/${encodeURIComponent(args.message_id)}`, body: { isRead: args.is_read }, signal: operation.signal });
@@ -201,9 +212,9 @@ export class MicrosoftGraphProvider {
       } else throw new ProviderToolError('provider_invalid_response');
       if (authorization?.kind === 'operator_grant' && !this.grantValid(capability)) throw new ProviderToolError('provider_permission_revoked');
       checkAborted(operation.signal); body = response; const fallbackId = call.name === 'mail.mark_read' ? args.message_id : call.name === 'mail.send_draft' ? args.draft_id : call.name === 'teams.send_message' ? args.chat_id : null; const payload = { provider: 'microsoft_graph', state: 'ready', resource_id: typeof body.id === 'string' ? body.id.slice(0, 512) : fallbackId, accepted: true, completed: true, timestamp: new Date(this.now()).toISOString(), idempotency: 'new' };
-      const output = result(call, 'ok', payload); ledger.result = output; this.idempotent.set(key, output); return output;
+      const output = result(call, 'ok', payload); ledger.result = output; putBounded(this.idempotent, key, output, MAX_WRITE_RECORDS); return output;
     } catch (error) {
-      const output = failureResult(call, error); ledger.result = output; this.idempotent.set(key, output); return output;
+      const output = failureResult(call, error); ledger.result = output; putBounded(this.idempotent, key, output, MAX_WRITE_RECORDS); return output;
     } finally { operation.close(); }
   }
 }
