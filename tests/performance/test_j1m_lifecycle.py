@@ -519,9 +519,12 @@ class StaticSafetyTests(unittest.TestCase):
 
     def test_progress_wrapper_accepts_stage_detail_without_collision(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_progress_wrapper")
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(orchestrator.j1m_runner, "write_progress") as writer:
-            orchestrator._progress(Path(directory) / "progress.json", "eval-stage-starting", phase_id="p", stage="eval-bootstrap:mkdir")
-        writer.assert_called_once_with(Path(directory) / "progress.json", "eval-stage-starting", phase_id="p", stage="eval-bootstrap:mkdir")
+        with tempfile.TemporaryDirectory() as directory:
+            progress = Path(directory) / "progress.json"
+            orchestrator._progress(progress, "eval-stage-starting", phase_id="p", operation_stage="eval-bootstrap:mkdir")
+            payload = json.loads(progress.read_text(encoding="utf-8"))
+        self.assertEqual(payload["stage"], "eval-stage-starting")
+        self.assertEqual(payload["operation_stage"], "eval-bootstrap:mkdir")
 
     def test_salvage_timeout_is_size_aware_and_deadline_bounded(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_timeout")

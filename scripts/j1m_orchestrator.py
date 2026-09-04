@@ -534,10 +534,10 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 bootstrap_timeouts = (30.0, 120.0, 270.0)
                 for index, command in enumerate(eval_commands[:3]):
                     lifecycle["stage"] = f"eval-bootstrap:{command[0]}"
-                    _progress(progress_path, "eval-bootstrap-stage-starting", phase_id=phase_id, stage=lifecycle["stage"])
+                    _progress(progress_path, "eval-bootstrap-stage-starting", phase_id=phase_id, operation_stage=lifecycle["stage"])
                     stage = _remote(sf.ssh_base(info, identity, known_hosts) + command, timeout=_eval_timeout(provider_deadline, bootstrap_timeouts[index]))
                     lifecycle.setdefault("eval_stages", []).append(stage)
-                    _progress(progress_path, "eval-bootstrap-stage-result", phase_id=phase_id, stage=lifecycle["stage"], status=stage["status"], exit_code=stage.get("exit_code"))
+                    _progress(progress_path, "eval-bootstrap-stage-result", phase_id=phase_id, operation_stage=lifecycle["stage"], status=stage["status"], exit_code=stage.get("exit_code"))
                     if stage["status"] != "completed":
                         raise sf.ShadeformError("eval source preparation failed")
                 eval_uploads = _eval_uploads(config, remote_root, model_artifact, model_manifest)
@@ -545,7 +545,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 small_upload_timeout = float(config["modes"]["eval"]["stage_budgets_seconds"]["small_uploads"]) / max(1, small_upload_divisor)
                 for local, remote, recursive in eval_uploads:
                     lifecycle["stage"] = f"eval-upload:{local.name}"
-                    _progress(progress_path, "eval-upload-starting", phase_id=phase_id, stage=lifecycle["stage"])
+                    _progress(progress_path, "eval-upload-starting", phase_id=phase_id, operation_stage=lifecycle["stage"])
                     scp = sf.scp_base(info, identity, known_hosts)
                     if recursive:
                         scp = [scp[0], "-r", *scp[1:]]
@@ -554,15 +554,15 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     timeout = _eval_timeout(provider_deadline, requested_timeout)
                     upload_receipt = _remote(scp + [str(local), destination], timeout=timeout)
                     lifecycle.setdefault("eval_uploads", []).append({"name": local.name, **upload_receipt})
-                    _progress(progress_path, "eval-upload-result", phase_id=phase_id, stage=lifecycle["stage"], status=upload_receipt["status"], exit_code=upload_receipt.get("exit_code"))
+                    _progress(progress_path, "eval-upload-result", phase_id=phase_id, operation_stage=lifecycle["stage"], status=upload_receipt["status"], exit_code=upload_receipt.get("exit_code"))
                     if upload_receipt["status"] != "completed":
                         raise sf.ShadeformError("required eval upload failed")
                 for command in eval_commands[3:]:
                     lifecycle["stage"] = f"eval-stage:{command[0]}"
-                    _progress(progress_path, "eval-stage-starting", phase_id=phase_id, stage=lifecycle["stage"])
+                    _progress(progress_path, "eval-stage-starting", phase_id=phase_id, operation_stage=lifecycle["stage"])
                     stage = _remote(sf.ssh_base(info, identity, known_hosts) + command, timeout=_eval_timeout(provider_deadline, _eval_stage_timeout(config, command)))
                     lifecycle.setdefault("eval_stages", []).append(stage)
-                    _progress(progress_path, "eval-stage-result", phase_id=phase_id, stage=lifecycle["stage"], status=stage["status"], exit_code=stage.get("exit_code"))
+                    _progress(progress_path, "eval-stage-result", phase_id=phase_id, operation_stage=lifecycle["stage"], status=stage["status"], exit_code=stage.get("exit_code"))
                     if stage["status"] != "completed":
                         raise sf.ShadeformError("eval build or evaluation failed")
                 lifecycle["job"] = lifecycle["eval_stages"][-1]
