@@ -21,7 +21,7 @@ export function isWithinDirectory(root, target) {
 
 function json(res, status, value) { const body = JSON.stringify(value); res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store', ...securityHeaders() }); res.end(body); }
 function securityHeaders() { return { 'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'", 'x-content-type-options': 'nosniff', 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'permissions-policy': 'camera=(), microphone=(), geolocation=()' }; }
-function tokenMatch(actual, expected) { if (typeof actual !== 'string' || actual.length !== expected.length) return false; return timingSafeEqual(Buffer.from(actual), Buffer.from(expected)); }
+function tokenMatch(actual, expected) { if (typeof actual !== 'string' || typeof expected !== 'string') return false; const actualBytes = Buffer.from(actual, 'utf8'); const expectedBytes = Buffer.from(expected, 'utf8'); if (actualBytes.length !== expectedBytes.length) return false; return timingSafeEqual(actualBytes, expectedBytes); }
 function jsonContentType(req) { return /^application\/json(?:\s*;\s*charset\s*=\s*(?:utf-8|utf8))?$/i.test(req.headers['content-type'] ?? ''); }
 function exactBody(input, allowed, required = []) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw Object.assign(new Error('invalid_request_body'), { code: 'invalid_request_body' });

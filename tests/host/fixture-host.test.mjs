@@ -165,6 +165,7 @@ test('host enforces loopback auth/origin, static allowlist, and streams fixture 
   const address = await host.listen(0); t.after(() => host.close());
   const health = await fetch(`${address.url}/healthz`); assert.equal(health.status, 200);
   const unauthorized = await fetch(`${address.url}/api/status`); assert.equal(unauthorized.status, 401);
+  const multibyteUnauthorized = await fetch(`${address.url}/api/status`, { headers: { authorization: `Bearer ${'é'.repeat(43)}` } }); assert.equal(multibyteUnauthorized.status, 401);
   const forbidden = await fetch(`${address.url}/api/status`, { headers: { ...auth(address.token), origin: 'https://attacker.invalid' } }); assert.equal(forbidden.status, 403);
   const page = await fetch(`${address.url}/`); assert.equal(page.status, 200); const pageText = await page.text(); assert.equal(pageText.includes(address.token), false); assert.equal(pageText.includes('lae-token'), false); assert.equal(pageText.includes('__LAE_BOOTSTRAP__'), false);
   const sessionResponse = await fetch(`${address.url}/api/sessions`, { method: 'POST', headers: { ...auth(address.token), 'content-type': 'application/json' }, body: '{}' }); assert.equal(sessionResponse.status, 201); const session = await sessionResponse.json();

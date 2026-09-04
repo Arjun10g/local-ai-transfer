@@ -25,7 +25,7 @@ function Get-RegularNonLinkFile {
     param([string] $Value, [string] $Label)
     Assert-SafePathInput $Value $Label
     $item = Get-Item -LiteralPath $Value
-    if ($item.LinkType -or $item.PSIsContainer) { throw "$Label must be a regular non-link file" }
+    if ($item.LinkType -or $item.PSIsContainer -or (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) { throw "$Label must be a regular non-link file" }
     return $item
 }
 

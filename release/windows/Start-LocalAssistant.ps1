@@ -19,8 +19,22 @@ function Get-RegularNonLinkFile {
         throw "$Label must be a local non-device path"
     }
     $item = Get-Item -LiteralPath $Value
-    if ($item.LinkType -or $item.PSIsContainer) { throw "$Label must be a regular non-link file" }
+    if ($item.LinkType -or $item.PSIsContainer -or (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) { throw "$Label must be a regular non-link file" }
     return $item.FullName
+}
+
+function Wait-PipeConnectionBounded {
+    param([System.IO.Pipes.NamedPipeServerStream] $Pipe, [string] $Label, [int] $TimeoutMilliseconds = 15000)
+    $wait = $Pipe.BeginWaitForConnection($null, $null)
+    try {
+        if (-not $wait.AsyncWaitHandle.WaitOne($TimeoutMilliseconds)) {
+            try { $Pipe.Dispose() } catch { }
+            throw "$Label connection timed out"
+        }
+        $Pipe.EndWaitForConnection($wait)
+    } finally {
+        $wait.AsyncWaitHandle.Close()
+    }
 }
 
 if ($Backend -ne 'cpu-safe') { throw 'the portable UI release contains only the exact CPU-safe product backend' }
@@ -97,14 +111,14 @@ try {
     $process.StartInfo = $start
     if (-not $process.Start()) { throw 'portable supervisor process could not start' }
     [LocalAssistantJob]::Assign($job, $process.Handle)
-    $launchGatePipe.WaitForConnection()
+    Wait-PipeConnectionBounded $launchGatePipe 'launch gate'
     $gateWriter = [System.IO.StreamWriter]::new($launchGatePipe, [System.Text.UTF8Encoding]::new($false), 256, $true)
     $gateWriter.Write("GO`n")
     $gateWriter.Flush()
     $gateWriter.Dispose()
     $launchGatePipe.Dispose()
     $launchGatePipe = $null
-    $bootstrapPipe.WaitForConnection()
+    Wait-PipeConnectionBounded $bootstrapPipe 'bootstrap'
     $reader = [System.IO.StreamReader]::new($bootstrapPipe, [System.Text.UTF8Encoding]::new($false), $false, 256, $true)
     $bootstrapUrl = $reader.ReadLine()
     $reader.Dispose()

@@ -29,6 +29,10 @@ class PackageScannerTests(unittest.TestCase):
         self.assertIn("if ($RevealBootstrapUrl) { Write-Output $bootstrapUrl }", start)
         self.assertEqual(1, start.count("Write-Output $bootstrapUrl"))
         self.assertNotIn("Write-Host $bootstrapUrl", start)
+        self.assertIn("FileAttributes]::ReparsePoint", start)
+        self.assertIn("Wait-PipeConnectionBounded", start)
+        run = Path("release/windows/Run-WindowsBackend.ps1").read_text(encoding="utf-8")
+        self.assertIn("FileAttributes]::ReparsePoint", run)
 
     def test_builder_closes_host_dependencies_without_target_python(self):
         with tempfile.TemporaryDirectory() as directory:
