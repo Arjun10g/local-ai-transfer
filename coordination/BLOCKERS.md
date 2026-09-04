@@ -2,9 +2,9 @@
 
 ## B-001 — Exact target receipt incomplete
 
-- Fact: the user confirmed a Dell Intel Core Ultra 7 vPro Enterprise-class platform, but no redacted `hardware-receipt.json`, exact CPU SKU, GPU device ID, driver, or memory topology is present.
+- Fact: operator-supplied partial facts identify a Dell Intel Core Ultra 7 vPro Enterprise-class platform, one integrated `Intel Graphics` adapter with no discrete GPU, display driver `32.0.101.8247`, 32 GB DDR5-class memory reported at 5600 MT/s, and motherboard `039NNG` revision `A00`. No redacted `hardware-receipt.json`, exact CPU SKU, GPU PNP/device ID, usable/shared GPU memory, Windows build, Vulkan capability, or measured available-memory topology is present.
 - Impact: Intel backend promotion and Phase 8 target acceptance cannot complete.
-- Workaround: implement the read-only probe, use Core Ultra 7 as the CPU-family matching input, keep CPU mandatory, and label all GPU Shadeform machines as directional analogs until the adapter/driver fields are captured.
+- Workaround: run the implemented read-only probe, use Core Ultra 7 as the CPU-family matching input, keep CPU mandatory, and label all GPU Shadeform machines as directional analogs until the remaining adapter/runtime fields are captured.
 - Needed from: target operator, after S2/S4 approve the probe.
 - State: OPEN; does not block fixture, model-build, CPU, host, tool, or packaging work.
 

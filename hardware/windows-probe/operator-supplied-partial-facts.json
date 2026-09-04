@@ -1,0 +1,28 @@
+{
+  "schema": "local_bmo.operator-supplied-partial-hardware-facts.v1",
+  "recorded_at_utc": "2026-09-04T04:02:58Z",
+  "source": "target operator statement; not probe-generated or independently verified",
+  "platform_family": "Intel Core Ultra 7 vPro Enterprise-class",
+  "cpu_exact_sku": null,
+  "gpu": {
+    "reported_name": "Intel Graphics",
+    "integrated": true,
+    "separate_discrete_gpu_detected": false,
+    "driver_version": "32.0.101.8247",
+    "pnp_device_id": null,
+    "shared_memory_bytes": null,
+    "vulkan_capability": null
+  },
+  "memory": {
+    "installed_gib": 32,
+    "reported_transfer_rate_mts": 5600,
+    "reported_type_normalized": "DDR5",
+    "normalization_note": "User wrote 'DDRS'; treated as a likely DDR5 typo pending probe confirmation.",
+    "available_memory_bytes": null
+  },
+  "motherboard": {
+    "product": "039NNG",
+    "revision": "A00"
+  },
+  "acceptance_use": "partial planning input only; not a hardware receipt or accelerated-backend approval"
+}
