@@ -13,6 +13,8 @@
 | Local loopback serving | APPROVED_WITH_CONDITIONS | S1/S3/S4 | Auth, origin, limits, security tests |
 | Local filesystem/process tools | APPROVED_WITH_CONDITIONS | S3/S4 | Workspace bounds, confirmation, no shell, adversarial tests |
 | Live web/search provider | UNASSESSED | S0/S3 | Provider approval and synthetic live-run evidence |
+| Microsoft Graph mail/Teams read provider | REQUESTED | S0/S3/S4 | Delegated scope/admin consent, synthetic account, redaction and live package evidence |
+| Isolated browser action provider | REQUESTED | S0/S3/S4 | Approved existing browser, temporary-profile/CDP policy, synthetic Windows action evidence |
+| GitHub Copilot CLI bridge | REQUESTED | S0/S3/S4 | Existing approved CLI/license, explicit cloud-egress approval, synthetic prompt-only evidence |
 | Release signing/attestation | UNASSESSED | S0/S4 | Corporate mechanism and credential handling |
 | Target transfer and acceptance | UNASSESSED | S0 | Operator approval, target receipt, approved transfer route |
-
