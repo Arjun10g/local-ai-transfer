@@ -21,6 +21,29 @@ fixture run is therefore a typed `CONDITIONAL_PASS` with `release_passed=false`
 until every mandatory target-evidence record is proven. Node 24 specifically is
 mandatory release evidence even if a different local Node version runs the tests.
 
+## Remote external-tool QA
+
+`remote_external_tools_qa.mjs` is a bounded hostile-emulator harness for the
+Graph, browser CDP/proxy, Copilot ACP, and operator-grant boundaries. It uses
+synthetic credentials, loopback emulators, injected fake ACP/CDP processes, and
+never contacts a real account or provider. The emulator/fuzz/soak path refuses
+to start unless a remote orchestrator supplies both the exact marker and a
+bounded run ID:
+
+```text
+LAE_REMOTE_QA_MARKER=REMOTE-EXTERNAL-TOOLS-V1 \
+LAE_REMOTE_RUN_ID=remote-2026-09-04-a \
+node scripts/test/remote_external_tools_qa.mjs \
+  --seed=17,31,73 --fuzz-cases=64 --soak-iterations=25 \
+  --output=out/evidence/remote-external-tools.json
+```
+
+The receipt contains aggregate case IDs/counters, deterministic seeds, bounds,
+and typed outcomes only; prompt text, response content, headers, tokens, and
+other credential material are excluded. Receipt writes are bounded and atomic.
+`--self-test` is the only lightweight local execution mode; a local run without
+the marker exits with status 2 and emits `remote_marker_required`.
+
 ## Local Qwen tool-call evaluation
 
 The deterministic eight-case fixture covers tool selection, exact arguments,
