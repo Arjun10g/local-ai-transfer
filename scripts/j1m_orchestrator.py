@@ -84,6 +84,124 @@ def _remote_job_command(mode: str, remote_root: str, required_scratch_gib: int) 
     raise ValueError(f"unsupported J1M mode: {mode}")
 
 
+def _verify_eval_artifact(path: Path, manifest_path: Path, config: dict[str, Any]) -> dict[str, Any]:
+    """Verify the local Q4 identity before any provider call is possible."""
+
+    expected_name = "Qwen3.5-9B-Q4_K_M.gguf"
+    if path.name != expected_name or not path.is_file():
+        raise ValueError("eval requires the exact local Q4_K_M artifact")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != "1.1.0":
+        raise ValueError("eval model manifest is invalid")
+    source = manifest.get("source")
+    conversion = manifest.get("conversion")
+    artifact = manifest.get("artifact")
+    if not isinstance(source, dict) or source.get("revision") != config["source"]["revision"]:
+        raise ValueError("eval source revision does not match the pinned source")
+    if source.get("organization") != "Qwen" or source.get("repository") != "Qwen3.5-9B":
+        raise ValueError("eval source identity is not the approved Qwen repository")
+    if not isinstance(conversion, dict) or conversion.get("llama_cpp_revision") != config["llama_cpp"]["revision"]:
+        raise ValueError("eval llama.cpp revision does not match the pinned converter")
+    if not isinstance(artifact, dict) or artifact.get("expected_file_name") != expected_name:
+        raise ValueError("eval artifact manifest has the wrong model")
+    if artifact.get("modality_profile") != "text_only_no_mmproj" or artifact.get("quantization_profile") != "Q4_K_M":
+        raise ValueError("eval artifact modality or quantization is not approved")
+    manifest_lock = manifest_path.with_name("model-manifest.sha256")
+    if not manifest_lock.is_file():
+        raise ValueError("eval model manifest has no checksum lock")
+    lock_parts = manifest_lock.read_text(encoding="utf-8").strip().split()
+    if len(lock_parts) != 2 or lock_parts[1] != manifest_path.name or len(lock_parts[0]) != 64 or any(character not in "0123456789abcdef" for character in lock_parts[0]):
+        raise ValueError("eval model manifest checksum lock is invalid")
+    if j1m_runner._sha256(manifest_path) != lock_parts[0]:
+        raise ValueError("eval model manifest checksum mismatch")
+    size = path.stat().st_size
+    digest = j1m_runner._sha256(path)
+    if artifact.get("expected_size_bytes") != size or artifact.get("sha256") != digest:
+        raise ValueError("eval artifact size or SHA-256 does not match the approved manifest")
+    return {
+        "name": expected_name,
+        "size_bytes": size,
+        "sha256": digest,
+        "source_revision": config["source"]["revision"],
+        "llama_cpp_revision": config["llama_cpp"]["revision"],
+    }
+
+
+def _eval_uploads(config: dict[str, Any], remote_root: str, artifact_path: Path, manifest_path: Path) -> list[tuple[Path, str, bool]]:
+    """Local files to upload for eval; the GGUF and receipts stay allowlisted."""
+
+    return [
+        (artifact_path, f"{remote_root}/model/Qwen3.5-9B-Q4_K_M.gguf", False),
+        (manifest_path, f"{remote_root}/model-manifest.json", False),
+        (manifest_path.with_name("model-manifest.sha256"), f"{remote_root}/model-manifest.sha256", False),
+        (ROOT / "scripts" / "test" / "remote_model_eval.py", f"{remote_root}/remote_model_eval.py", False),
+        (ROOT / "scripts" / "test" / "evaluate_tool_calls.py", f"{remote_root}/evaluate_tool_calls.py", False),
+        (ROOT / "tests" / "model" / "tool_call_eval.json", f"{remote_root}/tool_call_eval.json", False),
+        (ROOT / "CMakeLists.txt", f"{remote_root}/engine/CMakeLists.txt", False),
+        # Recursive scp copies the source directory beneath its destination;
+        # target the engine parent so the result is exactly engine/native.
+        (ROOT / "native", f"{remote_root}/engine", True),
+    ]
+
+
+def _eval_remote_commands(config: dict[str, Any], remote_root: str) -> list[list[str]]:
+    """Build the reviewed, non-shell argv stages for native CPU eval."""
+
+    llama = config["llama_cpp"]
+    checkout = f"{remote_root}/llama.cpp"
+    engine_root = f"{remote_root}/engine"
+    build_root = f"{remote_root}/engine-build"
+    return [
+        ["mkdir", "-p", f"{remote_root}/model", f"{engine_root}/native", f"{engine_root}/vendor", f"{remote_root}/artifacts"],
+        ["git", "clone", "--filter=blob:none", llama["repository"], checkout],
+        ["git", "-C", checkout, "checkout", "--detach", llama["revision"]],
+        ["git", "-C", checkout, "rev-parse", "HEAD"],
+        ["cp", "-a", checkout, f"{engine_root}/vendor/llama.cpp"],
+        ["cmake", "-S", engine_root, "-B", build_root, "-DCMAKE_BUILD_TYPE=Release", "-DLAE_ENABLE_LLAMA_CPP=ON"],
+        ["cmake", "--build", build_root, "--target", "lae-engine", "--parallel", "2"],
+        ["python3", f"{remote_root}/remote_model_eval.py", "--model", f"{remote_root}/model/Qwen3.5-9B-Q4_K_M.gguf", "--model-manifest", f"{remote_root}/model-manifest.json", "--model-manifest-lock", f"{remote_root}/model-manifest.sha256", "--source-revision", config["source"]["revision"], "--llama-revision", llama["revision"], "--llama-checkout", checkout, "--engine", f"{build_root}/native/lae-engine", "--evaluator", f"{remote_root}/evaluate_tool_calls.py", "--fixture", f"{remote_root}/tool_call_eval.json", "--token-file", f"{remote_root}/engine-token", "--receipt", f"{remote_root}/artifacts/eval-receipt.json", "--timeout", "600"],
+    ]
+
+
+def _eval_timeout(provider_deadline: float, requested: float, *, reserve: float = 120.0) -> float:
+    """Return a stage timeout that cannot extend beyond the provider clock."""
+
+    remaining = provider_deadline - time.monotonic() - reserve
+    if remaining < 30.0:
+        raise sf.ShadeformError("eval provider deadline has no cleanup-safe stage budget remaining")
+    return min(float(requested), remaining)
+
+
+def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]:
+    """Accept only the bounded aggregate receipt produced by remote eval."""
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or payload.get("schema") != "local_bmo.j1m.real-tool-eval-receipt.v1":
+        raise ValueError("eval receipt schema mismatch")
+    recorded = payload.get("artifact")
+    if not isinstance(recorded, dict) or recorded.get("name") != artifact["name"] or recorded.get("size_bytes") != artifact["size_bytes"] or recorded.get("sha256") != artifact["sha256"]:
+        raise ValueError("eval receipt artifact mismatch")
+    metrics = payload.get("metrics")
+    if not isinstance(metrics, dict) or payload.get("status") not in {"verified", "completed_with_failures"} or metrics.get("case_count") != 8 or any(isinstance(metrics.get(key), bool) or not isinstance(metrics.get(key), int) or metrics[key] < 0 for key in ("passed", "failed", "errors")):
+        raise ValueError("eval receipt metrics invalid")
+    if sum(metrics[key] for key in ("passed", "failed", "errors")) != 8:
+        raise ValueError("eval receipt metric totals invalid")
+    status = payload["status"]
+    all_passed = metrics["passed"] == 8 and metrics["failed"] == 0 and metrics["errors"] == 0
+    has_failure = metrics["failed"] > 0 or metrics["errors"] > 0
+    if (status == "verified") != all_passed or (status == "completed_with_failures") != has_failure:
+        raise ValueError("eval receipt status does not match metrics")
+    engine = payload.get("engine")
+    if not isinstance(engine, dict) or engine.get("llama_cpp_revision") != artifact.get("llama_cpp_revision") or engine.get("compiled_backend") != f"llama.cpp/{artifact.get('llama_cpp_revision', '')[:8]}/cpu":
+        raise ValueError("eval receipt engine identity mismatch")
+    peak_rss = metrics.get("peak_rss_kib")
+    if peak_rss is not None and (isinstance(peak_rss, bool) or not isinstance(peak_rss, int) or peak_rss < 0):
+        raise ValueError("eval receipt RSS metric invalid")
+    if payload.get("prompt_response_logging") is not False or payload.get("token_logging") is not False:
+        raise ValueError("eval receipt logging policy missing")
+    return {"status": status, "metrics": {key: metrics[key] for key in ("case_count", "passed", "failed", "errors", "peak_rss_kib")}}
+
+
 def _salvage(
     info: dict[str, Any],
     identity: Path,
@@ -118,8 +236,19 @@ def _salvage(
     return results
 
 
-def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, artifact_destination: Path, mode: str = "prove") -> dict[str, Any]:
+def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, artifact_destination: Path, mode: str = "prove", model_artifact: Path | None = None, model_manifest: Path | None = None) -> dict[str, Any]:
     config = j1m_runner.load_config(config_path)
+    if mode == "eval":
+        if model_artifact is None:
+            raise ValueError("eval requires --model-artifact; no implicit or alternate model is accepted")
+        model_manifest = model_manifest or model_artifact.parent / "model-manifest.json"
+        eval_artifact = _verify_eval_artifact(model_artifact, model_manifest, config)
+        # The approved catalogue target is an A100, but this composed path
+        # deliberately builds the CPU backend.  Do not spend on an A100 while
+        # presenting a CPU-only job as cost-efficient evaluation.
+        raise sf.ShadeformError("eval execution is blocked: CPU-only evaluation does not justify the approved A100; accelerated backend review is required")
+    else:
+        eval_artifact = None
     env = sf.load_env(env_file)
     api_key = sf.require_env(env, "SHADEFORM_API_KEY")
     runtime = float(config["modes"][mode]["runtime_hours"])
@@ -145,6 +274,8 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
         record: sf.OwnedResource | None = None
         known_hosts = temp_root / "known_hosts"
         lifecycle: dict[str, Any] = {"phase_id": phase_id, "status": "starting", "mode": mode}
+        if eval_artifact is not None:
+            lifecycle["artifact"] = eval_artifact
         def cancel(_signum: int, _frame: Any) -> None:
             raise OperatorCancelled("operator cancellation signal")
         previous_handlers = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)}
@@ -255,7 +386,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     + _remote_job_command(mode, remote_root, int(config["resources"]["required_scratch_gib"])),
                     timeout=120,
                 )
-            else:
+            elif mode == "build":
                 # Qwen3.5-9B is public at the pinned revision. Do not place
                 # HF_TOKEN on the ephemeral host; the runner downloads it
                 # unauthenticated and child environments remain sanitized.
@@ -265,6 +396,32 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 j1m_runner.write_progress(progress_path, "remote-build-starting", phase_id=phase_id)
                 transfer_reserve = float(config["modes"][mode].get("transfer_reserve_seconds", 0))
                 lifecycle["job"] = _remote(remote_job, timeout=max(30, provider_deadline - time.monotonic() - transfer_reserve - 120))
+            else:
+                eval_commands = _eval_remote_commands(config, remote_root)
+                # The clone and immutable revision check precede uploads; the
+                # remaining stages consume the uploaded source/evaluator.
+                for command in eval_commands[:4]:
+                    stage = _remote(sf.ssh_base(info, identity, known_hosts) + command, timeout=_eval_timeout(provider_deadline, 300))
+                    lifecycle.setdefault("eval_stages", []).append(stage)
+                    if stage["status"] != "completed":
+                        raise sf.ShadeformError("eval source preparation failed")
+                for local, remote, recursive in _eval_uploads(config, remote_root, model_artifact, model_manifest):
+                    scp = sf.scp_base(info, identity, known_hosts)
+                    if recursive:
+                        scp = [scp[0], "-r", *scp[1:]]
+                    destination = f"{ssh_user}@{info['ip']}:{remote}"
+                    requested_timeout = max(600.0, float(eval_artifact["size_bytes"]) / (1024**3) * 180.0) if local == model_artifact else 180.0
+                    timeout = _eval_timeout(provider_deadline, requested_timeout)
+                    upload_receipt = _remote(scp + [str(local), destination], timeout=timeout)
+                    lifecycle.setdefault("eval_uploads", []).append({"name": local.name, **upload_receipt})
+                    if upload_receipt["status"] != "completed":
+                        raise sf.ShadeformError("required eval upload failed")
+                for command in eval_commands[4:]:
+                    stage = _remote(sf.ssh_base(info, identity, known_hosts) + command, timeout=_eval_timeout(provider_deadline, 600))
+                    lifecycle.setdefault("eval_stages", []).append(stage)
+                    if stage["status"] != "completed":
+                        raise sf.ShadeformError("eval build or evaluation failed")
+                lifecycle["job"] = lifecycle["eval_stages"][-1]
             if lifecycle["job"]["status"] != "completed":
                 lifecycle["status"] = lifecycle["job"]["status"]
                 raise sf.ShadeformError("J1M remote job did not complete")
@@ -305,7 +462,11 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                         watchdog.wait(timeout=10)
                     except (OSError, subprocess.TimeoutExpired):
                         pass
-            fetch_allowlist = config["artifacts"]["local_fetch_allowlist"] if mode == "build" else config["artifacts"]["prove_fetch_allowlist"]
+            fetch_allowlist = (
+                config["artifacts"]["local_fetch_allowlist"] if mode == "build"
+                else config["artifacts"]["eval_fetch_allowlist"] if mode == "eval"
+                else config["artifacts"]["prove_fetch_allowlist"]
+            )
             try:
                 lifecycle["salvage"] = _salvage(
                     {"phase_id": phase_id, "instance_info": lifecycle.get("instance_info", {})},
@@ -322,6 +483,17 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 lifecycle["salvage"] = [{"status": "salvage_failed", "error_type": type(exc).__name__}]
             if mode == "prove" and lifecycle.get("job", {}).get("status") == "completed" and not any(item.get("name") == "proving-receipt.json" and item.get("status") == "completed" for item in lifecycle["salvage"]):
                 lifecycle["receipt_error"] = "proving receipt was not salvaged before teardown"
+            if mode == "eval":
+                saved_receipt = next((item for item in lifecycle["salvage"] if item.get("name") == "eval-receipt.json" and item.get("status") == "completed"), None)
+                if saved_receipt is None:
+                    lifecycle["receipt_error"] = "eval receipt was not salvaged before teardown"
+                else:
+                    try:
+                        lifecycle["eval_receipt"] = _verify_eval_receipt(artifact_destination / "eval-receipt.json", eval_artifact)
+                    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                        lifecycle["receipt_error"] = type(exc).__name__
+                if lifecycle.get("receipt_error") or lifecycle.get("eval_receipt", {}).get("status") != "verified":
+                    lifecycle["status"] = "failed"
             # The shared teardown performs exact deletion before cost/key
             # bookkeeping and emits a receipt, while remote salvage above is
             # best-effort and independent for each allowlisted artifact.
@@ -383,7 +555,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--phase-id", default="j1m-proving-run")
     parser.add_argument("--run-id", default="J1M")
     parser.add_argument("--artifact-destination", type=Path, default=ROOT / "artifacts" / "qwen35-9b")
-    parser.add_argument("--mode", choices=("prove", "build"), default="prove")
+    parser.add_argument("--mode", choices=("prove", "build", "eval"), default="prove")
+    parser.add_argument("--model-artifact", type=Path, help="exact approved local Q4_K_M artifact required by --mode eval")
+    parser.add_argument("--model-manifest", type=Path, help="approved model manifest paired with --model-artifact")
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args(argv)
     config = j1m_runner.load_config(args.config)
@@ -391,13 +565,18 @@ def main(argv: list[str] | None = None) -> int:
     plan["mode"] = args.mode
     plan["mode_runtime_hours"] = config["modes"][args.mode]["runtime_hours"]
     plan["mode_active_cost_usd"] = config["modes"][args.mode]["active_cost_usd"]
+    if args.mode == "eval":
+        plan["commands"] = _eval_remote_commands(config, "/scratch/j1m")
+        plan["artifact"] = "--model-artifact is required at execution; no model is copied during planning"
+        plan["quality_only"] = True
+        plan["execution_blocked"] = "CPU-only eval on approved A100 pending accelerated backend review"
     if not args.execute:
         plan["orchestrator"] = "dry-run; no provider API mutation"
         print(json.dumps(plan, indent=2, sort_keys=True))
         return 0
     if os.environ.get("SOL_J1M_REVIEWED") != "1":
         raise SystemExit("refusing mutation: Sol must set SOL_J1M_REVIEWED=1 after reviewing the plan")
-    print(json.dumps(execute(args.env_file, config_path=args.config, phase_id=args.phase_id, run_id=args.run_id, artifact_destination=args.artifact_destination, mode=args.mode), sort_keys=True))
+    print(json.dumps(execute(args.env_file, config_path=args.config, phase_id=args.phase_id, run_id=args.run_id, artifact_destination=args.artifact_destination, mode=args.mode, model_artifact=args.model_artifact, model_manifest=args.model_manifest), sort_keys=True))
     return 0
 
 

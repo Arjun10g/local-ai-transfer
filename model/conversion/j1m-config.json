@@ -52,6 +52,14 @@
       "provider_backstop_hours": 1.5625,
       "transfer_reserve_seconds": 360,
       "active_cost_usd": 1.6875
+    },
+    "eval": {
+      "runtime_hours": 0.75,
+      "external_watchdog_seconds": 2700,
+      "host_shutdown_delay_minutes": 36,
+      "provider_backstop_hours": 0.9375,
+      "transfer_reserve_seconds": 900,
+      "active_cost_usd": 1.0125
     }
   },
   "resources": {
@@ -90,6 +98,7 @@
       "post-cleanup-receipt.json"
     ],
     "prove_fetch_allowlist": ["proving-receipt.json"],
+    "eval_fetch_allowlist": ["eval-receipt.json"],
     "vision_projection": "excluded"
   },
   "budget_policy": {

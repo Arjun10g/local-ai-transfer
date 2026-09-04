@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import stat
+import shutil
 import tempfile
 import threading
 import time
@@ -505,6 +506,150 @@ class StaticSafetyTests(unittest.TestCase):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_build_argv")
         command = orchestrator._remote_job_command("build", "/scratch/j1m", 70)
         self.assertEqual(command, ["python3", "/scratch/j1m/j1m_runner.py", "--run", "--config", "/scratch/j1m/j1m-config.json"])
+
+    def test_eval_plan_is_bounded_and_builds_pinned_cpu_backend(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_eval_plan")
+        j1m = load(ROOT / "scripts/j1m_runner.py", "j1m_eval_plan_config")
+        config = j1m.load_config()
+        plan = j1m.build_plan(config, "eval")
+        self.assertEqual(plan["active_run_cost_usd"], 1.0125)
+        self.assertEqual(plan["provider_backstop_cost_usd"], 1.2656)
+        self.assertGreater(config["modes"]["eval"]["provider_backstop_hours"], config["modes"]["eval"]["runtime_hours"])
+        self.assertEqual(config["artifacts"]["eval_fetch_allowlist"], ["eval-receipt.json"])
+        commands = orchestrator._eval_remote_commands(config, "/scratch/j1m")
+        flattened = [part for command in commands for part in command]
+        self.assertIn(config["llama_cpp"]["revision"], flattened)
+        self.assertIn("-DLAE_ENABLE_LLAMA_CPP=ON", flattened)
+        self.assertIn("--token-file", flattened)
+        self.assertIn("remote_model_eval.py", " ".join(flattened))
+        self.assertNotIn("--token", flattened)
+        self.assertTrue(all(";" not in part and "&&" not in part for part in flattened))
+
+    def test_eval_uploads_exact_model_and_repo_evaluator_sources(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_eval_uploads")
+        j1m = load(ROOT / "scripts/j1m_runner.py", "j1m_eval_upload_config")
+        uploads = orchestrator._eval_uploads(j1m.load_config(), "/scratch/j1m", Path("/tmp/Qwen3.5-9B-Q4_K_M.gguf"), Path("/tmp/model-manifest.json"))
+        names = {local.name for local, _remote, _recursive in uploads}
+        self.assertEqual(names, {"Qwen3.5-9B-Q4_K_M.gguf", "model-manifest.json", "model-manifest.sha256", "remote_model_eval.py", "evaluate_tool_calls.py", "tool_call_eval.json", "CMakeLists.txt", "native"})
+        self.assertTrue(any(recursive and local.name == "native" for local, _remote, recursive in uploads))
+        native_upload = next(remote for local, remote, recursive in uploads if local.name == "native" and recursive)
+        self.assertEqual(native_upload, "/scratch/j1m/engine")
+        self.assertNotIn("/engine/native/native", native_upload)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "native"
+            (source / "engine").mkdir(parents=True)
+            (source / "engine" / "marker.txt").write_text("native", encoding="utf-8")
+            target = root / "engine"
+            target.mkdir()
+            shutil.copytree(source, target / source.name)
+            self.assertTrue((target / "native" / "engine" / "marker.txt").is_file())
+            self.assertFalse((target / "native" / "native").exists())
+
+    def test_eval_artifact_identity_is_stream_hash_locked(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_eval_identity")
+        j1m = load(ROOT / "scripts/j1m_runner.py", "j1m_eval_identity_config")
+        config = j1m.load_config()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact = root / "Qwen3.5-9B-Q4_K_M.gguf"
+            artifact.write_bytes(b"approved q4 fixture")
+            digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+            manifest = root / "model-manifest.json"
+            manifest.write_text(json.dumps({
+                "schema_version": "1.1.0",
+                "source": {"organization": "Qwen", "repository": "Qwen3.5-9B", "revision": config["source"]["revision"]},
+                "conversion": {"llama_cpp_revision": config["llama_cpp"]["revision"]},
+                "artifact": {"expected_file_name": artifact.name, "expected_size_bytes": artifact.stat().st_size, "sha256": digest, "modality_profile": "text_only_no_mmproj", "quantization_profile": "Q4_K_M"},
+            }), encoding="utf-8")
+            (root / "model-manifest.sha256").write_text(f"{hashlib.sha256(manifest.read_bytes()).hexdigest()}  model-manifest.json\n", encoding="utf-8")
+            identity = orchestrator._verify_eval_artifact(artifact, manifest, config)
+            self.assertEqual(identity["sha256"], digest)
+            artifact.write_bytes(b"tampered")
+            with self.assertRaises(ValueError):
+                orchestrator._verify_eval_artifact(artifact, manifest, config)
+
+    def test_remote_eval_redacts_diagnostics_and_never_accepts_bearer_argv(self):
+        remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_security")
+        self.assertNotIn('"--token",', (ROOT / "scripts/test/remote_model_eval.py").read_text(encoding="utf-8"))
+        self.assertNotIn("secret-value", remote._tail("token=secret-value"))
+        self.assertIn("<redacted>", remote._tail("token=secret-value"))
+
+    def test_remote_eval_verifies_same_model_manifest_identity(self):
+        remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_identity")
+        config = load(ROOT / "scripts/j1m_runner.py", "remote_model_eval_identity_config").load_config()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "Qwen3.5-9B-Q4_K_M.gguf"
+            model.write_bytes(b"q4 fixture")
+            manifest = root / "model-manifest.json"
+            manifest.write_text(json.dumps({
+                "schema_version": "1.1.0",
+                "source": {"organization": "Qwen", "repository": "Qwen3.5-9B", "revision": config["source"]["revision"]},
+                "conversion": {"llama_cpp_revision": config["llama_cpp"]["revision"]},
+                "artifact": {"expected_file_name": model.name, "expected_size_bytes": model.stat().st_size, "sha256": hashlib.sha256(model.read_bytes()).hexdigest(), "modality_profile": "text_only_no_mmproj", "quantization_profile": "Q4_K_M"},
+            }), encoding="utf-8")
+            (root / "model-manifest.sha256").write_text(f"{hashlib.sha256(manifest.read_bytes()).hexdigest()}  model-manifest.json\n", encoding="utf-8")
+            receipt = remote.verify_artifact(model, manifest, source_revision=config["source"]["revision"], llama_revision=config["llama_cpp"]["revision"])
+            self.assertEqual(receipt["llama_cpp_revision"], config["llama_cpp"]["revision"])
+            manifest.write_text(manifest.read_text().replace(config["llama_cpp"]["revision"], "0" * 40), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                remote.verify_artifact(model, manifest, source_revision=config["source"]["revision"], llama_revision=config["llama_cpp"]["revision"])
+
+    def test_eval_receipt_acceptance_is_hash_and_total_bound(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_eval_receipt")
+        config = load(ROOT / "scripts/j1m_runner.py", "j1m_eval_receipt_config").load_config()
+        artifact = {"name": "Qwen3.5-9B-Q4_K_M.gguf", "size_bytes": 4, "sha256": "a" * 64, "llama_cpp_revision": config["llama_cpp"]["revision"]}
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = Path(directory) / "eval-receipt.json"
+            receipt.write_text(json.dumps({
+                "schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "verified", "artifact": artifact,
+                "engine": {"llama_cpp_revision": config["llama_cpp"]["revision"], "compiled_backend": f"llama.cpp/{config['llama_cpp']['revision'][:8]}/cpu"},
+                "metrics": {"case_count": 8, "passed": 8, "failed": 0, "errors": 0, "peak_rss_kib": 123},
+                "prompt_response_logging": False, "token_logging": False,
+            }), encoding="utf-8")
+            self.assertEqual(orchestrator._verify_eval_receipt(receipt, artifact)["metrics"]["case_count"], 8)
+            failed = json.loads(receipt.read_text())
+            failed["status"] = "completed_with_failures"
+            failed["metrics"] = {"case_count": 8, "passed": 7, "failed": 1, "errors": 0, "peak_rss_kib": 123}
+            receipt.write_text(json.dumps(failed), encoding="utf-8")
+            self.assertEqual(orchestrator._verify_eval_receipt(receipt, artifact)["status"], "completed_with_failures")
+            failed["status"] = "verified"
+            receipt.write_text(json.dumps(failed), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                orchestrator._verify_eval_receipt(receipt, artifact)
+            failed["status"] = "completed_with_failures"
+            failed["metrics"] = {"case_count": 8, "passed": 8, "failed": 0, "errors": 0, "peak_rss_kib": 123}
+            receipt.write_text(json.dumps(failed), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                orchestrator._verify_eval_receipt(receipt, artifact)
+
+    def test_remote_eval_metrics_reject_bool_missing_and_bad_totals(self):
+        remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_metrics")
+        self.assertEqual(remote._validate_metrics({"case_count": 8, "passed": 8, "failed": 0, "errors": 0, "peak_rss_kib": None})["passed"], 8)
+        for invalid in (
+            {"case_count": 8, "passed": True, "failed": 0, "errors": 0},
+            {"case_count": 8, "passed": 7, "failed": 0, "errors": 0},
+            {"case_count": 8, "passed": 8, "failed": 0, "errors": 0, "peak_rss_kib": -1},
+        ):
+            with self.assertRaises(ValueError):
+                remote._validate_metrics(invalid)
+
+    def test_remote_eval_main_returns_success_for_case_failures_and_emits_failed_receipt_on_shape_error(self):
+        remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_main_status")
+        artifact = {"name": "Qwen3.5-9B-Q4_K_M.gguf", "size_bytes": 4, "sha256": "a" * 64, "llama_cpp_revision": "b" * 40}
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = Path(directory) / "eval-receipt.json"
+            args = ["--model", "m", "--model-manifest", "mm", "--model-manifest-lock", "ml", "--source-revision", "c" * 40, "--llama-revision", "b" * 40, "--llama-checkout", "checkout", "--engine", "engine", "--evaluator", "eval", "--fixture", "fixture", "--token-file", "token", "--receipt", str(receipt)]
+            failed_metrics = {"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "completed_with_failures", "artifact": artifact, "engine": {"llama_cpp_revision": "b" * 40, "compiled_backend": "llama.cpp/bbbbbbbb/cpu"}, "metrics": {"case_count": 8, "passed": 7, "failed": 1, "errors": 0, "peak_rss_kib": 1}, "prompt_response_logging": False, "token_logging": False}
+            with mock.patch.object(remote, "verify_artifact", return_value=artifact), mock.patch.object(remote, "_launch_and_evaluate", return_value=failed_metrics):
+                self.assertEqual(remote.main(args), 0)
+            self.assertEqual(json.loads(receipt.read_text())["status"], "completed_with_failures")
+            with mock.patch.object(remote, "verify_artifact", return_value=artifact), mock.patch.object(remote, "_launch_and_evaluate", side_effect=KeyError("metrics")):
+                self.assertEqual(remote.main(args), 1)
+            malformed = json.loads(receipt.read_text())
+            self.assertEqual(malformed["status"], "failed")
+            self.assertNotIn("metrics", malformed)
 
 
 class LoopbackLifecycleTests(unittest.TestCase):
