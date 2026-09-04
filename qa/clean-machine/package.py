@@ -21,6 +21,7 @@ HOST_RUNTIME_FILES = frozenset({
     "host/engine/native-engine-client.mjs",
     "host/providers/browser-actions.mjs",
     "host/providers/copilot-cli.mjs",
+    "host/providers/copilot-context.mjs",
     "host/providers/index.mjs",
     "host/providers/microsoft-graph-auth.mjs",
     "host/providers/microsoft-graph.mjs",

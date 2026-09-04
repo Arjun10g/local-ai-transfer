@@ -42,6 +42,7 @@ class PackageScannerTests(unittest.TestCase):
             self.assertEqual("PASS", result["status"], result)
             packaged = {p.relative_to(output).as_posix() for p in output.rglob("*") if p.is_file()}
             self.assertTrue(HOST_RUNTIME_FILES.issubset(packaged))
+            self.assertIn("host/providers/copilot-context.mjs", packaged)
             manifest = __import__("json").loads((output / "RELEASE_MANIFEST.json").read_text(encoding="utf-8"))
             self.assertFalse(manifest["python_required_on_target"])
             self.assertNotIn("windows_backend_plan.py", manifest["files"])
