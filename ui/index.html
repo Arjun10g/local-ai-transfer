@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Local Assistant</title><link rel="stylesheet" href="/styles.css"></head>
+<body>
+  <main class="shell" aria-labelledby="title">
+    <header><div><p class="eyebrow">LOCAL ASSISTANT ENGINE</p><h1 id="title">BMO</h1><p id="status" role="status">Connecting to local host…</p></div><div class="controls"><button id="normal" aria-pressed="true">Normal</button><button id="deep" aria-pressed="false">Deep</button><button id="reset">Reset</button><button id="stop">Stop</button></div></header>
+    <section class="status-grid" aria-label="Runtime status"><div><span>Engine</span><strong id="engine">fixture</strong></div><div><span>Backend</span><strong id="backend">CPU/fixture</strong></div><div><span>Network</span><strong id="network">disabled</strong></div></section>
+    <section id="transcript" class="transcript" aria-live="polite"></section>
+    <form id="chat"><label for="message">Message</label><textarea id="message" maxlength="32768" rows="3" placeholder="Ask the local assistant…" required></textarea><button type="submit">Send</button></form>
+    <p class="notice">Core assistant features are offline. Network tools, when enabled, disclose destination and require confirmation.</p>
+  </main>
+  <script>window.__LAE_TOKEN__ = '__LAE_BOOTSTRAP__';</script><script src="/app.js" defer></script>
+</body>
+</html>

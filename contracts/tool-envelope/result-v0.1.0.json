@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "lae://contracts/tool-envelope/result/0.1.0",
+  "title": "Local Assistant Tool Result",
+  "version": "0.1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "name", "status", "content", "metadata"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,96}$"},
+    "name": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{1,95}$"},
+    "status": {"enum": ["ok", "denied", "cancelled", "failed"]},
+    "content": {"type": "array", "maxItems": 16, "items": {"type": "object", "additionalProperties": false, "required": ["type", "text"], "properties": {"type": {"const": "text"}, "text": {"type": "string", "maxLength": 65536}}}},
+    "metadata": {"type": "object", "additionalProperties": false, "required": ["truncated", "duration_ms"], "properties": {"truncated": {"type": "boolean"}, "duration_ms": {"type": "integer", "minimum": 0, "maximum": 600000}}}
+  }
+}
