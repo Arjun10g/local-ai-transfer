@@ -538,7 +538,7 @@ def _engine_model_preflight(
             raise ValueError("engine_model_preflight_failed")
         try:
             payload = _strict_json_object(result.get("stdout", ""))
-        except (TypeError, json.JSONDecodeError) as exc:
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError("engine_model_preflight_invalid") from exc
         if not isinstance(payload, dict) or set(payload) != {"valid", "code", "size_bytes", "sha256", "gguf_version"}:
             raise ValueError("engine_model_preflight_invalid")

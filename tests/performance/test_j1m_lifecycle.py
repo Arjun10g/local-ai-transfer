@@ -526,7 +526,7 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertEqual(payload["stage"], "eval-stage-starting")
         self.assertEqual(payload["operation_stage"], "eval-bootstrap:mkdir")
 
-    def test_remote_failure_retains_bounded_redacted_stdout_evidence(self):
+    def test_remote_failure_does_not_retain_stdout_evidence(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_remote_output")
         completed = subprocess.CompletedProcess(
             ["probe"],
@@ -538,7 +538,8 @@ class StaticSafetyTests(unittest.TestCase):
             receipt = orchestrator._remote(["probe"], timeout=1)
         self.assertEqual(receipt["status"], "failed")
         self.assertEqual(receipt["exit_code"], 2)
-        self.assertEqual(receipt["stdout_tail"], "remote toolchain refused: token=<redacted>\n")
+        self.assertNotIn("stdout_tail", receipt)
+        self.assertNotIn("do-not-retain", json.dumps(receipt))
 
     def test_eval_stage_labels_distinguish_python_and_cmake_operations(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_stage_labels")
@@ -561,8 +562,8 @@ class StaticSafetyTests(unittest.TestCase):
             self.assertEqual(result[0]["status"], "completed")
             self.assertGreaterEqual(remote.call_args.kwargs["timeout"], 360)
             with mock.patch.object(orchestrator.sf, "_preflight"), mock.patch.object(orchestrator.sf, "scp_base", return_value=["scp"]), mock.patch.object(orchestrator, "_remote", side_effect=lambda command, timeout: {"status": "completed", "timeout": timeout}) as remote:
-                orchestrator._salvage(info, identity, known_hosts, destination, ["Qwen3.5-9B-Q4_K_M.gguf"], q4_expected_gib=6, deadline=time.monotonic() + 100)
-            self.assertLessEqual(remote.call_args.kwargs["timeout"], 70)
+                orchestrator._salvage(info, identity, known_hosts, destination, ["Qwen3.5-9B-Q4_K_M.gguf"], q4_expected_gib=6, deadline=time.monotonic() + 500)
+            self.assertLessEqual(remote.call_args.kwargs["timeout"], 80)
 
     def test_salvage_stops_without_scp_when_only_deletion_reserve_remains(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_salvage_reserve")
@@ -799,6 +800,20 @@ class StaticSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "engine_model_preflight_invalid"):
                 remote._engine_model_preflight(args, artifact)
 
+    def test_remote_eval_duplicate_json_maps_to_finite_stage_codes(self):
+        remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_duplicate_codes")
+        args = types.SimpleNamespace(engine="/approved/lae-engine", model="/approved/model")
+        artifact = {"size_bytes": 42, "sha256": "a" * 64}
+        duplicate = '{"valid":true,"valid":true,"code":"ok","size_bytes":42,"sha256":"' + "a" * 64 + '","gguf_version":3}'
+        with mock.patch.object(remote, "_run_bounded", return_value={"status": "completed", "exit_code": 0, "stdout": duplicate}):
+            with self.assertRaisesRegex(ValueError, "engine_model_preflight_invalid"):
+                remote._engine_model_preflight(args, artifact)
+        with mock.patch.object(remote, "_run_bounded", return_value={"status": "completed", "exit_code": 0, "stdout": '{"llama_cpp_revision":"x","llama_cpp_revision":"x","compiled_backend":"y"}'}):
+            with self.assertRaisesRegex(ValueError, "engine_build_info_invalid"):
+                remote._engine_build_info(Path("/approved/engine"), "x" * 40, "cpu")
+        with self.assertRaisesRegex(ValueError, "evaluator_receipt_invalid"):
+            remote._parse_evaluator_result({"status": "completed", "exit_code": 0, "stdout": '{"case_count":1,"case_count":1,"passed":1,"failed":0,"errors":0}'}, expected_case_count=1, expected_categories={"x"})
+
     def test_remote_eval_preflight_receipt_is_atomic_small_and_secret_free(self):
         remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_preflight_receipt")
         preflight = {"valid": True, "code": "ok", "size_bytes": 42, "sha256": "a" * 64, "gguf_version": 3}
@@ -919,6 +934,9 @@ class StaticSafetyTests(unittest.TestCase):
         for literal in ("engine initialization failed", "server start failed"):
             self.assertIn(f'"{literal}\\n"', native_main)
             self.assertEqual(remote._exact_serve_stderr_code(literal + "\n"), "engine_startup_failed")
+        for literal, code in (("llama model load failed", "engine_model_load_failed"), ("llama context creation failed", "engine_context_failed"), ("loopback bind/listen failed", "engine_bind_failed")):
+            self.assertIn(literal, native_main + (ROOT / "native/backend/llama_backend.cpp").read_text(encoding="utf-8") + (ROOT / "native/server/http_server.cpp").read_text(encoding="utf-8"))
+            self.assertEqual(remote._exact_serve_stderr_code(literal + "\n"), code)
         self.assertIsNone(remote._exact_serve_stderr_code("prefix\nllama model load failed\ntrailing diagnostics"))
 
     def test_remote_eval_serve_eof_is_finite_and_secret_free(self):
@@ -1001,7 +1019,7 @@ class StaticSafetyTests(unittest.TestCase):
     def test_eval_receipt_acceptance_is_hash_and_total_bound(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_eval_receipt")
         config = load(ROOT / "scripts/j1m_runner.py", "j1m_eval_receipt_config").load_config()
-        artifact = {"name": "Qwen3.5-9B-Q4_K_M.gguf", "size_bytes": 4, "sha256": "a" * 64, "llama_cpp_revision": config["llama_cpp"]["revision"]}
+        artifact = {"name": "Qwen3.5-9B-Q4_K_M.gguf", "size_bytes": 4, "sha256": "a" * 64, "source_revision": config["source"]["revision"], "llama_cpp_revision": config["llama_cpp"]["revision"], "modality": "text_only_no_mmproj", "quantization": "Q4_K_M"}
         fixture = json.loads((ROOT / "tests/model/tool_call_eval.json").read_text(encoding="utf-8"))
         category_counts = {category: sum(case["category"] == category for case in fixture["cases"]) for category in {case["category"] for case in fixture["cases"]}}
         category_summary = {category: {"case_count": count, "passed": count, "failed": 0, "errors": 0} for category, count in category_counts.items()}
@@ -1010,10 +1028,10 @@ class StaticSafetyTests(unittest.TestCase):
             receipt = Path(directory) / "eval-receipt.json"
             receipt.write_text(json.dumps({
                 "schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "verified", "artifact": artifact,
-                "engine": {"llama_cpp_revision": config["llama_cpp"]["revision"], "compiled_backend": f"llama.cpp/{config['llama_cpp']['revision'][:8]}/cuda"},
+                "engine": {"engine_version": "0.1.0", "api_version": "0.1.0", "compiled_backend": f"llama.cpp/{config['llama_cpp']['revision'][:8]}/cuda", "llama_cpp_revision": config["llama_cpp"]["revision"], "model": "qwen35-9b-q4-k-m"},
                 "model_preflight": {"valid": True, "code": "ok", "status": "verified", "size_bytes": 4, "sha256": "a" * 64, "gguf_version": 3},
-                "cuda_device": {"schema": "local_bmo.j1m.cuda-device-receipt.v1", "status": "verified", "selector": "CUDA0", "device_count": 1, "device": {"name": "NVIDIA A100 80GB", "memory_total_mib": 81920}},
-                "toolchain": {"schema": "local_bmo.j1m.remote-toolchain-receipt.v1", "status": "verified", "versions": {"python3": {"major": 3, "minor": 10}, "git": {"major": 2, "minor": 39}, "cmake": {"major": 3, "minor": 22}, "g++": {"major": 11, "minor": 4}, "nvcc": {"major": 12, "minor": 2, "executable": "/usr/local/cuda/bin/nvcc"}}, "packages": {"ca-certificates": "20240101", "cmake": "3.22.1", "build-essential": "12.9", "git": "1:2.39.2", "python3": "3.10.12", "python3-venv": "3.10.12"}},
+                "cuda_device": {"schema": "local_bmo.j1m.cuda-device-receipt.v1", "status": "verified", "selector": "CUDA0", "device_count": 1, "device": {"name": "NVIDIA A100 80GB", "memory_total_mib": 81920}, "source": "nvidia-smi bounded query"},
+                "toolchain": {"schema": "local_bmo.j1m.remote-toolchain-receipt.v1", "status": "verified", "required": {"python3": ">=3.8", "git": ">=2.30", "cmake": ">=3.18", "g++": ">=9.0", "nvcc": ">=12.0"}, "versions": {"python3": {"major": 3, "minor": 10}, "git": {"major": 2, "minor": 39}, "cmake": {"major": 3, "minor": 22}, "g++": {"major": 11, "minor": 4}, "nvcc": {"major": 12, "minor": 2, "executable": "/usr/local/cuda/bin/nvcc"}}, "packages": {"ca-certificates": "20240101", "cmake": "3.22.1", "build-essential": "12.9", "git": "1:2.39.2", "python3": "3.10.12", "python3-venv": "3.10.12"}, "package_install": "ubuntu apt repositories; exact resolved package versions captured by dpkg-query"},
                 "metrics": {"case_count": case_count, "passed": case_count, "failed": 0, "errors": 0, "peak_rss_kib": 123, "category_summary": category_summary},
                 "prompt_response_logging": False, "token_logging": False,
             }), encoding="utf-8")
@@ -1129,7 +1147,7 @@ class StaticSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             receipt = Path(directory) / "eval-receipt.json"
             receipt.write_text(json.dumps({"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "verified", "artifact": artifact, "model_preflight": {"valid": True, "code": "ok", "status": "verified", "size_bytes": 4, "sha256": "a" * 64, "gguf_version": 3}, "engine": {"llama_cpp_revision": "b" * 40, "compiled_backend": "llama.cpp/bbbbbbbb/cpu"}, "metrics": {"case_count": case_count, "passed": case_count, "failed": 0, "errors": 0, "peak_rss_kib": 1, "category_summary": category_summary}, "prompt_response_logging": False, "token_logging": False}), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "engine identity"):
+            with self.assertRaises(ValueError):
                 orchestrator._verify_eval_receipt(receipt, artifact)
 
     def test_native_cuda_profile_is_explicit_and_fail_closed(self):

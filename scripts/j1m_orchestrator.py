@@ -34,6 +34,7 @@ _STDERR_TAIL_LIMIT = 1200
 _EVAL_FIXTURE_MAX_BYTES = 256 * 1024
 _EVAL_RECEIPT_MAX_BYTES = 64 * 1024
 _PREFLIGHT_RECEIPT_MAX_BYTES = 1024
+_DELETION_RESERVE_SECONDS = 420.0
 
 
 class OperatorCancelled(Exception):
@@ -151,7 +152,7 @@ def _verify_eval_artifact(path: Path | None, manifest_path: Path, config: dict[s
     expected_name = "Qwen3.5-9B-Q4_K_M.gguf"
     if path is not None and (path.name != expected_name or not path.is_file()):
         raise ValueError("eval artifact has the wrong name or is missing")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = _bounded_json(manifest_path, _EVAL_FIXTURE_MAX_BYTES)
     if not isinstance(manifest, dict) or manifest.get("schema_version") != "1.1.0":
         raise ValueError("eval model manifest is invalid")
     source = manifest.get("source")
@@ -170,7 +171,16 @@ def _verify_eval_artifact(path: Path | None, manifest_path: Path, config: dict[s
     manifest_lock = manifest_path.with_name("model-manifest.sha256")
     if not manifest_lock.is_file():
         raise ValueError("eval model manifest has no checksum lock")
-    lock_parts = manifest_lock.read_text(encoding="utf-8").strip().split()
+    if manifest_lock.stat().st_size > 4096:
+        raise ValueError("eval model manifest checksum lock is invalid")
+    with manifest_lock.open("rb") as lock_stream:
+        lock_bytes = lock_stream.read(4097)
+    if len(lock_bytes) > 4096:
+        raise ValueError("eval model manifest checksum lock is invalid")
+    try:
+        lock_parts = lock_bytes.decode("utf-8").strip().split()
+    except UnicodeDecodeError as exc:
+        raise ValueError("eval model manifest checksum lock is invalid") from exc
     if len(lock_parts) != 2 or lock_parts[1] != manifest_path.name or len(lock_parts[0]) != 64 or any(character not in "0123456789abcdef" for character in lock_parts[0]):
         raise ValueError("eval model manifest checksum lock is invalid")
     if j1m_runner._sha256(manifest_path) != lock_parts[0]:
@@ -264,7 +274,7 @@ def _eval_remote_commands(config: dict[str, Any], remote_root: str) -> list[list
     ]
 
 
-def _eval_timeout(provider_deadline: float, requested: float, *, reserve: float = 120.0) -> float:
+def _eval_timeout(provider_deadline: float, requested: float, *, reserve: float = _DELETION_RESERVE_SECONDS) -> float:
     """Return a stage timeout that cannot extend beyond the provider clock."""
 
     remaining = provider_deadline - time.monotonic() - reserve
@@ -345,6 +355,8 @@ def _eval_deadline_ceiling(config: dict[str, Any]) -> dict[str, float]:
         raise ValueError("eval sequential budget does not fit watchdog/run/provider clocks")
     if watchdog_seconds - host_shutdown_seconds < 120.0:
         raise ValueError("eval host shutdown backstop lacks watchdog jitter margin")
+    if host_shutdown_seconds - ceiling < 120.0:
+        raise ValueError("eval host shutdown backstop precedes cleanup reserve")
     return {
         "work_seconds": work,
         "cleanup_reserve_seconds": cleanup,
@@ -377,6 +389,9 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     if (not isinstance(recorded, dict) or set(recorded) - {"name", "size_bytes", "sha256", "source_revision", "llama_cpp_revision", "modality", "quantization"} or
             recorded.get("name") != artifact["name"] or recorded.get("size_bytes") != artifact["size_bytes"] or recorded.get("sha256") != artifact["sha256"]):
         raise ValueError("eval receipt artifact mismatch")
+    for key in ("source_revision", "llama_cpp_revision", "modality", "quantization"):
+        if key in artifact and recorded.get(key) != artifact[key]:
+            raise ValueError("eval receipt artifact identity mismatch")
     model_preflight = payload.get("model_preflight")
     if (not isinstance(model_preflight, dict) or set(model_preflight) != {"valid", "code", "status", "size_bytes", "sha256", "gguf_version"} or
             model_preflight.get("valid") is not True or model_preflight.get("code") != "ok" or
@@ -415,6 +430,8 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     if (not isinstance(engine, dict) or set(engine) - {"engine_version", "api_version", "compiled_backend", "llama_cpp_revision", "model"} or
             engine.get("llama_cpp_revision") != artifact.get("llama_cpp_revision") or engine.get("compiled_backend") != f"llama.cpp/{artifact.get('llama_cpp_revision', '')[:8]}/cuda"):
         raise ValueError("eval receipt engine identity mismatch")
+    if engine.get("engine_version") != "0.1.0" or engine.get("api_version") != "0.1.0" or engine.get("model") != "qwen35-9b-q4-k-m":
+        raise ValueError("eval receipt engine identity mismatch")
     for key in ("engine_version", "api_version", "model"):
         if key in engine and (not isinstance(engine[key], str) or not 1 <= len(engine[key]) <= 256 or any(ord(char) < 0x20 for char in engine[key])):
             raise ValueError("eval receipt engine identity mismatch")
@@ -424,6 +441,8 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
             cuda_device.get("schema") != "local_bmo.j1m.cuda-device-receipt.v1" or cuda_device.get("status") != "verified" or cuda_device.get("selector") != "CUDA0" or cuda_device.get("device_count") != 1 or
             not isinstance(device, dict) or set(device) - {"index", "name", "memory_total_mib", "driver_version"} or "a100" not in str(device.get("name", "")).lower() or not isinstance(device.get("memory_total_mib"), int) or device["memory_total_mib"] < 70000):
         raise ValueError("eval receipt CUDA placement attestation invalid")
+    if cuda_device.get("source") != "nvidia-smi bounded query":
+        raise ValueError("eval receipt CUDA placement attestation invalid")
     if (not isinstance(device.get("index", 0), int) or isinstance(device.get("index", 0), bool) or device.get("index", 0) < 0 or
             not isinstance(device.get("name"), str) or not 1 <= len(device["name"]) <= 160 or
             ("driver_version" in device and (not isinstance(device["driver_version"], str) or not 1 <= len(device["driver_version"]) <= 80)) or
@@ -432,8 +451,11 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     toolchain = payload.get("toolchain")
     versions = toolchain.get("versions") if isinstance(toolchain, dict) else None
     minimums = {"python3": (3, 8), "git": (2, 30), "cmake": (3, 18), "g++": (9, 0), "nvcc": (12, 0)}
-    if (not isinstance(toolchain, dict) or set(toolchain) - {"schema", "status", "required", "versions", "packages", "package_install"} or
+    if (not isinstance(toolchain, dict) or set(toolchain) != {"schema", "status", "required", "versions", "packages", "package_install"} or
             toolchain.get("schema") != "local_bmo.j1m.remote-toolchain-receipt.v1" or toolchain.get("status") != "verified" or not isinstance(versions, dict)):
+        raise ValueError("eval receipt toolchain evidence invalid")
+    expected_required = {"python3": ">=3.8", "git": ">=2.30", "cmake": ">=3.18", "g++": ">=9.0", "nvcc": ">=12.0"}
+    if toolchain.get("required") != expected_required or toolchain.get("package_install") != "ubuntu apt repositories; exact resolved package versions captured by dpkg-query":
         raise ValueError("eval receipt toolchain evidence invalid")
     for name, minimum in minimums.items():
         version = versions.get(name)
@@ -503,9 +525,11 @@ def _verify_startup_preflight_receipt(path: Path, artifact: dict[str, Any]) -> d
                 payload.get("size_bytes") != artifact["size_bytes"] or payload.get("sha256") != artifact["sha256"] or
                 payload.get("gguf_version") != 3):
             raise ValueError("startup preflight receipt identity invalid")
+        return {"status": "verified", "size_bytes": payload["size_bytes"], "sha256": payload["sha256"], "gguf_version": 3}
     elif status == "not_started":
         if set(payload) != {"schema", "status", "error_code"} or payload.get("error_code") != "engine_model_preflight_not_started":
             raise ValueError("startup preflight receipt not_started outcome invalid")
+        return {"status": "not_started", "error_code": payload["error_code"]}
     elif status in {"rejected", "timeout", "oversize", "terminated", "failed"}:
         if not set(payload) <= {"schema", "status", "error_code", "validator_code", "child"}:
             raise ValueError("startup preflight receipt outcome invalid")
@@ -542,7 +566,12 @@ def _verify_startup_preflight_receipt(path: Path, artifact: dict[str, Any]) -> d
             raise ValueError("startup preflight receipt outcome invalid")
     else:
         raise ValueError("startup preflight receipt outcome invalid")
-    return {"status": status}
+    selected = {"status": status, "error_code": error_code}
+    if "validator_code" in payload:
+        selected["validator_code"] = payload["validator_code"]
+    if isinstance(child, dict):
+        selected["child"] = dict(child)
+    return selected
 
 
 def _salvage(
@@ -560,7 +589,7 @@ def _salvage(
     destination.mkdir(parents=True, exist_ok=True)
     results = []
     for name in names:
-        if deadline is not None and deadline - time.monotonic() - 30.0 <= 0.0:
+        if deadline is not None and deadline - time.monotonic() - _DELETION_RESERVE_SECONDS <= 0.0:
             results.append({"name": name, "status": "salvage_failed", "error_code": "salvage_deadline_reserve"})
             continue
         try:
@@ -573,7 +602,7 @@ def _salvage(
             # provider deadline and retaining a cleanup reserve.
             timeout = max(120.0, float(q4_expected_gib) * 60.0) if name.endswith("Q4_K_M.gguf") else 30.0
             if deadline is not None:
-                remaining = deadline - time.monotonic() - 30.0
+                remaining = deadline - time.monotonic() - _DELETION_RESERVE_SECONDS
                 if remaining <= 0.0:
                     results.append({"name": name, "status": "salvage_failed", "error_code": "salvage_deadline_reserve"})
                     continue
@@ -671,7 +700,8 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 created_monotonic = time.monotonic()
                 provider_deadline = created_monotonic + float(config["modes"][mode]["provider_backstop_hours"]) * 3600
                 run_deadline = created_monotonic + runtime * 3600
-                execution_deadline = min(provider_deadline, run_deadline)
+                watchdog_deadline = created_monotonic + float(config["modes"][mode]["external_watchdog_seconds"])
+                execution_deadline = min(provider_deadline, run_deadline, watchdog_deadline)
             except Exception as exc:
                 incident = {
                     "phase_id": phase_id,
@@ -715,7 +745,10 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             ]
             if launcher_start_marker is not None:
                 watchdog_command.extend(["--launcher-start-marker", launcher_start_marker])
+            watchdog_started = time.monotonic()
             watchdog = subprocess.Popen(watchdog_command)
+            watchdog_deadline = watchdog_started + float(config["modes"][mode]["external_watchdog_seconds"])
+            execution_deadline = min(provider_deadline, run_deadline, watchdog_deadline)
             lifecycle["watchdog_pid"] = watchdog.pid
             sf.append_cost_event({"instance_id": instance_id, "phase_id": phase_id, "status": "pending", "estimated_cost_usd": round(candidate.hourly_usd * float(config["modes"][mode]["provider_backstop_hours"]), 6)})
             # The instance reservation is now superseded by its exact

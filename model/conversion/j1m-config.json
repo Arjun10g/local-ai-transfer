@@ -61,8 +61,8 @@
       "cuda_device_name": "CUDA0",
       "gpu_layers": 99,
       "runtime_hours": 1.94,
-      "external_watchdog_seconds": 6600,
-      "host_shutdown_delay_minutes": 92,
+      "external_watchdog_seconds": 6900,
+      "host_shutdown_delay_minutes": 97,
       "provider_backstop_hours": 2.425,
       "transfer_reserve_seconds": 300,
       "activation_timeout_seconds": 600,
@@ -75,7 +75,7 @@
         "configure": 180,
         "build": 750,
         "evaluation": 480,
-        "cleanup_reserve": 300
+        "cleanup_reserve": 420
       },
       "active_cost_usd": 2.619
     }

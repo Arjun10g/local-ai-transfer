@@ -32,6 +32,44 @@ void usage() {
   std::cout << "lae-engine 0.1.0\ncommands: serve verify-model version print-build-info probe\nserve options: --config <absolute-json> --backend cpu|intel-vulkan|cuda --model <absolute-gguf> --context <tokens> --gpu-layers <0..99> --vulkan-device-name <exact-name> --cuda-device-name <exact-name> (--token-file <protected-file> | --token-stdin)\nmodel filename, size, SHA-256, GGUF metadata, and tensor profile are compiled product identity and cannot be supplied by callers\n";
 }
 
+// Backend and socket implementations may throw implementation-specific
+// exceptions. Only the reviewed, finite app-owned messages below cross the
+// process boundary; every other exception is deliberately collapsed.
+const char* stable_initialize_error(const std::exception& error) {
+  const std::string message = error.what();
+  if (message == "product cannot be built with both CUDA and Vulkan") return "product cannot be built with both CUDA and Vulkan";
+  if (message == "intel-vulkan requested but product was not built with LAE_ENABLE_LLAMA_VULKAN") return "intel-vulkan requested but product was not built with LAE_ENABLE_LLAMA_VULKAN";
+  if (message == "cuda requested but product was not built with LAE_ENABLE_LLAMA_CUDA") return "cuda requested but product was not built with LAE_ENABLE_LLAMA_CUDA";
+  if (message == "multiple Vulkan devices match the exact configured name") return "multiple Vulkan devices match the exact configured name";
+  if (message == "exact configured Vulkan integrated device is unavailable") return "exact configured Vulkan integrated device is unavailable";
+  if (message == "multiple CUDA devices match the exact configured name") return "multiple CUDA devices match the exact configured name";
+  if (message == "exact configured CUDA device is unavailable") return "exact configured CUDA device is unavailable";
+  if (message == "model validation lease is missing, mismatched, or stale") return "model validation lease is missing, mismatched, or stale";
+  if (message == "model validation lease became stale before backend load") return "model validation lease became stale before backend load";
+  if (message == "llama model load failed") return "llama model load failed";
+  if (message == "model identity changed during backend load") return "model identity changed during backend load";
+  if (message == "llama chat template unavailable; raw prompt mode is not accepted") return "llama chat template unavailable; raw prompt mode is not accepted";
+  if (message == "llama chat template parse failed") return "llama chat template parse failed";
+  if (message == "llama chat template is not loaded") return "llama chat template is not loaded";
+  if (message == "invalid tool parameter schema") return "invalid tool parameter schema";
+  if (message == "tool parameter schema must be an object") return "tool parameter schema must be an object";
+  if (message == "llama chat template rendered an empty prompt") return "llama chat template rendered an empty prompt";
+  if (message == "llama context creation failed") return "llama context creation failed";
+  if (message == "llama sampler creation failed") return "llama sampler creation failed";
+  if (message == "llama backend is not initialized") return "llama backend is not initialized";
+  if (message == "real backend disabled; configure LAE_ENABLE_LLAMA_CPP=ON") return "real backend disabled; configure LAE_ENABLE_LLAMA_CPP=ON";
+  return "engine initialization failed";
+}
+
+const char* stable_server_error(const std::exception& error) {
+  const std::string message = error.what();
+  if (message == "server already started") return "server already started";
+  if (message == "winsock initialization failed") return "winsock initialization failed";
+  if (message == "socket creation failed") return "socket creation failed";
+  if (message == "loopback bind/listen failed") return "loopback bind/listen failed";
+  return "server start failed";
+}
+
 bool read_token_file(const std::string& path, std::string& token) {
   if (path.empty() || path.size() > 4096 || !std::filesystem::path(path).is_absolute()) return false;
 #ifndef _WIN32
@@ -192,9 +230,9 @@ int main(int argc, char** argv) {
     backend_instance = std::make_unique<lae::LlamaBackend>();
   } else { std::cerr << "unsupported backend profile\n"; return 2; }
   lae::Engine engine(std::move(backend_instance));
-  try { engine.initialize(backend_config); } catch (const std::exception&) { std::cerr << "engine initialization failed\n"; return 1; }
+  try { engine.initialize(backend_config); } catch (const std::exception& error) { std::cerr << stable_initialize_error(error) << "\n"; return 1; } catch (...) { std::cerr << "engine initialization failed\n"; return 1; }
   lae::HttpServer server(engine, token);
-  try { server.start(port); } catch (const std::exception&) { std::cerr << "server start failed\n"; return 1; }
+  try { server.start(port); } catch (const std::exception& error) { std::cerr << stable_server_error(error) << "\n"; return 1; } catch (...) { std::cerr << "server start failed\n"; return 1; }
   active_engine = &engine; active_server = &server;
   std::signal(SIGINT, on_signal); std::signal(SIGTERM, on_signal);
   std::cout << "{\"event\":\"ready\",\"port\":" << server.port() << ",\"bind\":\"127.0.0.1\",\"token_required\":true}\n" << std::flush;
