@@ -21,11 +21,15 @@ PinnedChatTemplate& PinnedChatTemplate::operator=(PinnedChatTemplate&&) noexcept
 
 void PinnedChatTemplate::load(const std::string& source) {
   if (source.empty()) throw std::runtime_error("llama chat template unavailable");
-  jinja::lexer lexer;
-  auto tokens = lexer.tokenize(source);
-  auto program = jinja::parse_from_tokens(tokens);
-  impl_->source = tokens.source;
-  impl_->program = std::make_unique<jinja::program>(std::move(program));
+  try {
+    jinja::lexer lexer;
+    auto tokens = lexer.tokenize(source);
+    auto program = jinja::parse_from_tokens(tokens);
+    impl_->source = tokens.source;
+    impl_->program = std::make_unique<jinja::program>(std::move(program));
+  } catch (...) {
+    throw std::runtime_error("llama chat template parse failed");
+  }
 }
 
 std::string PinnedChatTemplate::render(const std::vector<GenerationRequest::ChatMessage>& messages,

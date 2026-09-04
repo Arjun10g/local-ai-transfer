@@ -743,6 +743,43 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertNotIn("--size", launch)
         self.assertNotIn("--sha256", launch)
 
+    def test_remote_eval_native_model_preflight_is_strict_and_bounded(self):
+        remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_preflight")
+        args = types.SimpleNamespace(engine="/approved/lae-engine", model="/approved/Qwen3.5-9B-Q4_K_M.gguf")
+        artifact = {"size_bytes": 42, "sha256": "a" * 64}
+        payload = {"valid": True, "code": "ok", "size_bytes": 42, "sha256": "a" * 64, "gguf_version": 3}
+        with mock.patch.object(remote, "_run_bounded", return_value={"status": "completed", "exit_code": 0, "stdout": json.dumps(payload)}) as bounded:
+            self.assertEqual(remote._engine_model_preflight(args, artifact), payload)
+        bounded.assert_called_once_with(["/approved/lae-engine", "verify-model", "--model", args.model], timeout=30, output_limit=remote.MAX_ENGINE_LINE)
+        for hostile in ({**payload, "path": "/secret/model"}, {**payload, "sha256": "b" * 64}, {**payload, "size_bytes": 43}):
+            with mock.patch.object(remote, "_run_bounded", return_value={"status": "completed", "exit_code": 0, "stdout": json.dumps(hostile)}):
+                with self.assertRaisesRegex(ValueError, "engine_model_preflight_invalid"):
+                    remote._engine_model_preflight(args, artifact)
+
+    def test_remote_eval_serve_eof_is_finite_and_secret_free(self):
+        remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_eof")
+
+        class Child:
+            def __init__(self, returncode):
+                self.returncode = returncode
+            def wait(self, timeout):
+                return self.returncode
+            def poll(self):
+                return self.returncode
+
+        exited = remote._classify_serve_eof(Child(2))
+        self.assertEqual(str(exited), "engine_not_ready")
+        self.assertEqual(exited.child_status, {"exit_code": 2})
+        signalled = remote._classify_serve_eof(Child(-9))
+        self.assertEqual(str(signalled), "engine_terminated_by_signal")
+        self.assertEqual(signalled.child_status, {"signal": 9})
+        self.assertEqual(str(remote._classify_serve_eof(Child(None))), "engine_ready_eof")
+
+    def test_remote_eval_jinja_parse_errors_are_redacted(self):
+        source = (ROOT / "native/backend/llama_chat_template.cpp").read_text(encoding="utf-8")
+        self.assertIn('throw std::runtime_error("llama chat template parse failed")', source)
+        self.assertNotIn("throw std::runtime_error(error.what())", source)
+
     def test_remote_eval_failure_code_is_bounded_and_secret_free(self):
         remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_error_code")
         self.assertEqual(remote._safe_error_code(ValueError("engine_not_ready:token=secret-value")), "engine_not_ready")
@@ -958,6 +995,12 @@ class StaticSafetyTests(unittest.TestCase):
             malformed = json.loads(receipt.read_text())
             self.assertEqual(malformed["status"], "failed")
             self.assertNotIn("metrics", malformed)
+            startup = remote.EngineStartupFailure("engine_not_ready", {"exit_code": 2})
+            with mock.patch.object(remote, "verify_artifact", return_value=artifact), mock.patch.object(remote, "_launch_and_evaluate", side_effect=startup):
+                self.assertEqual(remote.main(args), 1)
+            startup_receipt = json.loads(receipt.read_text())
+            self.assertEqual(startup_receipt["error_code"], "engine_not_ready")
+            self.assertEqual(startup_receipt["child"], {"exit_code": 2})
 
 
 class LoopbackLifecycleTests(unittest.TestCase):

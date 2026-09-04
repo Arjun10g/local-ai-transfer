@@ -31,8 +31,10 @@ PIN_RE = set("0123456789abcdef")
 SAFE_ERROR_CODES = frozenset({
     "artifact_manifest_invalid", "cuda_device_receipt_invalid", "engine_binary_missing",
     "engine_build_info_failed", "engine_build_info_invalid", "engine_llama_identity_mismatch",
-    "engine_not_ready", "engine_ready_identity_invalid", "engine_ready_receipt_invalid",
+    "engine_model_preflight_failed", "engine_model_preflight_invalid", "engine_not_ready",
+    "engine_ready_eof", "engine_ready_identity_invalid", "engine_ready_receipt_invalid",
     "engine_ready_timeout", "engine_stdout_unavailable", "engine_token_file_not_private",
+    "engine_terminated_by_signal",
     "eval_timeout_invalid", "evaluation_backend_invalid", "evaluator_category_summary_invalid",
     "evaluator_category_summary_total_invalid", "evaluator_expected_count_invalid",
     "evaluator_fixture_categories_invalid", "evaluator_fixture_count_invalid",
@@ -52,6 +54,14 @@ FIXTURE_MAX_BYTES = 256 * 1024
 MAX_EVAL_CASES = 40
 
 
+class EngineStartupFailure(ValueError):
+    """Bounded startup failure carrying no engine stderr or filesystem paths."""
+
+    def __init__(self, error_code: str, child_status: dict[str, int] | None = None):
+        super().__init__(error_code)
+        self.child_status = child_status
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -64,6 +74,34 @@ def _tail(value: object) -> str:
     text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value or "")
     text = re.sub(r"(?i)(api[_-]?key|token|password|secret)(\s*[=:]\s*)\S+", r"\1\2<redacted>", text)
     return text[-TAIL_LIMIT:]
+
+
+def _bounded_child_status(process: Any) -> dict[str, int] | None:
+    """Expose only a small exit/signal identity, never child diagnostics."""
+
+    value = process.poll()
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not -255 <= value <= 255:
+        return None
+    return {"signal": -value} if value < 0 else {"exit_code": value}
+
+
+def _classify_serve_eof(process: Any) -> EngineStartupFailure:
+    """Classify a finite ready-stream EOF without reading stderr."""
+
+    try:
+        process.wait(timeout=1)
+    except (AttributeError, OSError, subprocess.TimeoutExpired):
+        pass
+    child_status = _bounded_child_status(process)
+    if child_status and "signal" in child_status:
+        code = "engine_terminated_by_signal"
+    elif child_status:
+        code = "engine_not_ready"
+    else:
+        code = "engine_ready_eof"
+    return EngineStartupFailure(code, child_status)
 
 
 def _pin(value: Any, label: str) -> str:
@@ -171,6 +209,29 @@ def _engine_build_info(engine: Path, expected_llama: str, expected_backend: str)
     if not isinstance(payload, dict) or payload.get("llama_cpp_revision") != expected_llama or payload.get("compiled_backend") != f"llama.cpp/{expected_llama[:8]}/{expected_backend}":
         raise ValueError("engine_llama_identity_mismatch")
     return {key: payload[key] for key in ("engine_version", "api_version", "compiled_backend", "llama_cpp_revision", "model") if key in payload}
+
+
+def _engine_model_preflight(args: argparse.Namespace, artifact: dict[str, Any]) -> dict[str, Any]:
+    """Verify native compiled model identity before attempting server startup."""
+
+    result = _run_bounded([os.fspath(args.engine), "verify-model", "--model", args.model], timeout=30, output_limit=MAX_ENGINE_LINE)
+    if result.get("status") != "completed" or result.get("exit_code") != 0:
+        raise ValueError("engine_model_preflight_failed")
+    try:
+        payload = json.loads(result.get("stdout", ""))
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("engine_model_preflight_invalid") from exc
+    if not isinstance(payload, dict) or set(payload) != {"valid", "code", "size_bytes", "sha256", "gguf_version"}:
+        raise ValueError("engine_model_preflight_invalid")
+    if payload.get("valid") is not True or payload.get("code") != "ok":
+        raise ValueError("engine_model_preflight_invalid")
+    if isinstance(payload.get("size_bytes"), bool) or not isinstance(payload.get("size_bytes"), int) or payload["size_bytes"] != artifact.get("size_bytes"):
+        raise ValueError("engine_model_preflight_invalid")
+    if not isinstance(payload.get("sha256"), str) or len(payload["sha256"]) != 64 or set(payload["sha256"]) - PIN_RE or payload["sha256"] != artifact.get("sha256"):
+        raise ValueError("engine_model_preflight_invalid")
+    if isinstance(payload.get("gguf_version"), bool) or not isinstance(payload.get("gguf_version"), int) or not 1 <= payload["gguf_version"] <= 3:
+        raise ValueError("engine_model_preflight_invalid")
+    return {"valid": True, "code": "ok", "size_bytes": payload["size_bytes"], "sha256": payload["sha256"], "gguf_version": payload["gguf_version"]}
 
 
 def _engine_launch_argv(args: argparse.Namespace, token_file: Path, backend: str) -> list[str]:
@@ -297,6 +358,7 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any]) -> 
     expected_packages = {"ca-certificates", "cmake", "build-essential", "git", "python3", "python3-venv"}
     if not isinstance(packages, dict) or set(packages) != expected_packages or any(not isinstance(value, str) or not value or len(value) > 160 for value in packages.values()):
         raise ValueError("toolchain_receipt_invalid")
+    model_preflight = _engine_model_preflight(args, artifact)
     build_info = _engine_build_info(engine, artifact["llama_cpp_revision"], backend)
     token_file = Path(args.token_file)
     _write_token(token_file)
@@ -320,7 +382,7 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any]) -> 
             raise ValueError("engine_ready_timeout")
         ready_line = process.stdout.readline(MAX_ENGINE_LINE)
         if not ready_line:
-            raise ValueError(f"engine_not_ready:{_file_tail(engine_stderr)}")
+            raise _classify_serve_eof(process)
         try:
             ready = json.loads(ready_line)
         except json.JSONDecodeError as exc:
@@ -346,6 +408,7 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any]) -> 
             "status": status,
             "artifact": artifact,
             "engine": build_info,
+            "model_preflight": model_preflight,
             **({"cuda_device": cuda_receipt} if cuda_receipt is not None else {}),
             "toolchain": toolchain,
             "metrics": {key: metrics[key] for key in ("case_count", "passed", "failed", "errors", "peak_rss_kib", "category_summary")},
@@ -399,6 +462,9 @@ def main(argv: list[str] | None = None) -> int:
         status = 0 if receipt["status"] in {"verified", "completed_with_failures"} else 1
     except (OSError, ValueError, TypeError, KeyError, IndexError, RecursionError, OverflowError, subprocess.SubprocessError) as exc:
         receipt = {"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "failed", "error_type": type(exc).__name__, "error_code": _safe_error_code(exc), "prompt_response_logging": False, "token_logging": False}
+        child_status = getattr(exc, "child_status", None)
+        if isinstance(child_status, dict) and set(child_status) in ({"exit_code"}, {"signal"}):
+            receipt["child"] = child_status
         status = 1
     output = Path(args.receipt)
     output.parent.mkdir(parents=True, exist_ok=True)
