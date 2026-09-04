@@ -29,6 +29,7 @@ import contextlib
 import base64
 import fcntl
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -187,6 +188,14 @@ def validate_phase_id(value: str) -> str:
 def validate_resource_id(value: object, *, field: str = "resource id") -> str:
     if not isinstance(value, str) or RESOURCE_ID.fullmatch(value) is None:
         raise ValueError(f"invalid {field}")
+    return value
+
+
+def validate_ssh_user(value: object) -> str:
+    """Validate the provider-selected Unix account before argv interpolation."""
+
+    if not isinstance(value, str) or re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", value) is None:
+        raise ShadeformError("provider returned an unsafe SSH username")
     return value
 
 
@@ -1224,9 +1233,15 @@ def _transport_options(known_hosts: Path) -> list[str]:
 
 def _endpoint(info: dict[str, Any]) -> tuple[str, str, Any]:
     ip, user, port = info.get("ip"), info.get("ssh_user"), info.get("ssh_port")
-    if not isinstance(ip, str) or not isinstance(user, str) or not port:
+    if not isinstance(ip, str) or not isinstance(user, str) or isinstance(port, bool) or not isinstance(port, int):
         raise ShadeformError("instance has no complete SSH endpoint")
-    return ip, user, port
+    try:
+        parsed_ip = str(ipaddress.ip_address(ip))
+    except ValueError:
+        raise ShadeformError("provider returned an invalid SSH IP address") from None
+    if not 1 <= port <= 65535:
+        raise ShadeformError("provider returned an invalid SSH port")
+    return parsed_ip, validate_ssh_user(user), port
 
 
 def ssh_base(info: dict[str, Any], identity: Path, known_hosts: Path) -> list[str]:

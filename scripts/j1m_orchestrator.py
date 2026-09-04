@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import signal
 import subprocess
 import tempfile
@@ -28,18 +29,40 @@ from scripts import j1m_runner, shadeform_lifecycle as sf
 from scripts.shadeform_teardown import teardown_exact
 
 ROOT = Path(__file__).resolve().parents[1]
+_STDERR_TAIL_LIMIT = 1200
 
 
 class OperatorCancelled(Exception):
     pass
 
 
+def _redacted_stderr_tail(value: object) -> str:
+    """Return bounded stderr evidence without allowing credential-shaped text."""
+
+    text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value or "")
+    text = re.sub(r"(?i)(api[_-]?key|token|password|secret)(\s*[=:]\s*)\S+", r"\1\2<redacted>", text)
+    return text[-_STDERR_TAIL_LIMIT:]
+
+
+def _persist_lifecycle(phase_id: str, lifecycle: dict[str, Any]) -> None:
+    """Durably retain bounded local failure/progress evidence before teardown."""
+
+    path = sf.runtime_ledger_path(phase_id).with_name(f"{phase_id}.lifecycle-receipt.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps({"schema": "local_bmo.j1m.lifecycle-receipt.v1", **lifecycle}, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
 def _remote(command: list[str], *, timeout: float) -> dict[str, Any]:
     try:
         result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return {"status": "transport_timeout", "exit_code": None}
-    return {"status": "completed" if result.returncode == 0 else "failed", "exit_code": result.returncode}
+    except subprocess.TimeoutExpired as exc:
+        return {"status": "transport_timeout", "exit_code": None, "error_type": type(exc).__name__, "stderr_tail": _redacted_stderr_tail(exc.stderr)}
+    receipt = {"status": "completed" if result.returncode == 0 else "failed", "exit_code": result.returncode, "stderr_tail": _redacted_stderr_tail(result.stderr)}
+    if result.returncode != 0:
+        receipt["error_type"] = "remote_exit"
+    return receipt
 
 
 def _salvage(
@@ -179,21 +202,31 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             info = sf.wait_active(api_key, phase_id, instance_id, timeout_seconds=wait_budget)
             lifecycle["instance_info"] = info
             sf.verify_instance_ownership(info, instance_id=instance_id, phase_id=phase_id, nonce=nonce, expected_name=sf.owned_instance_name(run_id, nonce), ssh_key_id=key_id, expected_cloud=candidate.cloud, expected_region=candidate.region, expected_instance_type=candidate.instance_type, expected_hourly_usd=candidate.hourly_usd, expected_gpu=candidate.gpu, expected_gpu_count=1, expected_vram_gb=candidate.vram_gb, expected_os_image=candidate.os_image)
+            ssh_user = sf.validate_ssh_user(info["ssh_user"])
             lifecycle["host_key"] = sf.acquire_pinned_host_key(info, known_hosts)
             lifecycle["status"] = "active"
             remote_root = "/scratch/j1m"
-            lifecycle["remote_workspace"] = _remote(sf.ssh_base(info, identity, known_hosts) + ["mkdir", "-p", remote_root], timeout=30)
-            if lifecycle["remote_workspace"]["status"] != "completed":
-                raise sf.ShadeformError("remote workspace setup failed")
+            workspace_stages = (
+                ("scratch_root", ["sudo", "mkdir", "-p", "/scratch"]),
+                ("scratch_owner", ["sudo", "chown", ssh_user, "/scratch"]),
+                ("remote_workspace", ["mkdir", "-p", remote_root]),
+                ("scratch_df", ["df", "-P", "-k", "/scratch"]),
+                ("scratch_writable", ["test", "-w", "/scratch"]),
+            )
+            for stage_name, stage_argv in workspace_stages:
+                result = _remote(sf.ssh_base(info, identity, known_hosts) + stage_argv, timeout=30)
+                lifecycle[stage_name] = result
+                if result["status"] != "completed":
+                    raise sf.ShadeformError(f"remote {stage_name} preflight failed")
             shutdown_minutes = str(config["modes"][mode]["host_shutdown_delay_minutes"])
             lifecycle["host_shutdown_backstop"] = _remote(sf.ssh_base(info, identity, known_hosts) + ["sudo", "shutdown", "-h", f"+{shutdown_minutes}"], timeout=30)
             if lifecycle["host_shutdown_backstop"]["status"] != "completed":
                 raise sf.ShadeformError("host shutdown backstop could not be armed")
-            upload = sf.scp_base(info, identity, known_hosts) + [str(config_path), f"{info['ssh_user']}@{info['ip']}:{remote_root}/j1m-config.json"]
+            upload = sf.scp_base(info, identity, known_hosts) + [str(config_path), f"{ssh_user}@{info['ip']}:{remote_root}/j1m-config.json"]
             lifecycle["upload"] = _remote(upload, timeout=120)
             source_lock = ROOT / config["source"]["lock"]
             for local, remote in ((ROOT / "scripts" / "j1m_runner.py", f"{remote_root}/j1m_runner.py"), (source_lock, f"{remote_root}/qwen35-9b.source-lock.json")):
-                upload_receipt = _remote(sf.scp_base(info, identity, known_hosts) + [str(local), f"{info['ssh_user']}@{info['ip']}:{remote}"], timeout=120)
+                upload_receipt = _remote(sf.scp_base(info, identity, known_hosts) + [str(local), f"{ssh_user}@{info['ip']}:{remote}"], timeout=120)
                 lifecycle.setdefault("uploads", []).append(upload_receipt)
                 if upload_receipt["status"] != "completed":
                     raise sf.ShadeformError("required J1M upload failed")
@@ -216,15 +249,21 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             if instance_id is None and not ambiguous_create:
                 settle_attempt_after_cleanup = True
             raise
-        except Exception:
+        except Exception as exc:
             # Key upload/ownership validation and other definitive local
             # failures occur outside the create-specific handler. They still
             # reconcile the pre-create reservation after finally cleanup when
             # no instance POST could have succeeded.
             if instance_id is None and not ambiguous_create:
                 settle_attempt_after_cleanup = True
+            lifecycle["status"] = lifecycle.get("status") if lifecycle.get("status") not in {None, "starting", "active"} else "failed"
+            lifecycle["failure"] = {"error_type": type(exc).__name__}
             raise
         finally:
+            try:
+                _persist_lifecycle(phase_id, lifecycle)
+            except Exception:
+                pass
             if watchdog is not None and watchdog.poll() is None:
                 try:
                     watchdog.terminate()
@@ -303,6 +342,10 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                         sf.append_incident({"phase_id": phase_id, "incident": "attempt-reservation-settlement-failed", "nonce": nonce, "error_type": type(exc).__name__})
                     except Exception:
                         pass
+            try:
+                _persist_lifecycle(phase_id, lifecycle)
+            except Exception:
+                pass
             for number, handler in previous_handlers.items():
                 signal.signal(number, handler)
         return lifecycle
