@@ -31,7 +31,6 @@ from scripts.shadeform_teardown import teardown_exact
 ROOT = Path(__file__).resolve().parents[1]
 _STDERR_TAIL_LIMIT = 1200
 _EVAL_FIXTURE_MAX_BYTES = 256 * 1024
-_LEGACY_EVAL_CASES = 8
 
 
 class OperatorCancelled(Exception):
@@ -343,26 +342,21 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     if not isinstance(metrics, dict) or payload.get("status") not in {"verified", "completed_with_failures"} or any(isinstance(metrics.get(key), bool) or not isinstance(metrics.get(key), int) or metrics[key] < 0 for key in ("case_count", "passed", "failed", "errors")):
         raise ValueError("eval receipt metrics invalid")
     summary = metrics.get("category_summary")
-    if summary is not None:
-        expected_count, expected_categories = _tool_eval_contract()
-        if metrics["case_count"] != expected_count or not isinstance(summary, dict) or set(summary) != expected_categories:
-            raise ValueError("eval receipt metrics invalid")
-        category_total = 0
-        for category in expected_categories:
-            item = summary[category]
-            if not isinstance(item, dict) or set(item) != {"case_count", "passed", "failed", "errors"}:
-                raise ValueError("eval receipt category summary invalid")
-            if any(isinstance(item.get(key), bool) or not isinstance(item.get(key), int) or item[key] < 0 for key in ("case_count", "passed", "failed", "errors")):
-                raise ValueError("eval receipt category summary invalid")
-            if item["passed"] + item["failed"] + item["errors"] != item["case_count"]:
-                raise ValueError("eval receipt category summary invalid")
-            category_total += item["case_count"]
-        if category_total != expected_count:
-            raise ValueError("eval receipt category summary total invalid")
-    else:
-        # Receipts from the original eight-case smoke lane remain readable for
-        # audit history; all expanded receipts carry the category contract.
-        expected_count = _LEGACY_EVAL_CASES
+    expected_count, expected_categories = _tool_eval_contract()
+    if metrics["case_count"] != expected_count or not isinstance(summary, dict) or set(summary) != expected_categories:
+        raise ValueError("eval receipt metrics invalid")
+    category_total = 0
+    for category in expected_categories:
+        item = summary[category]
+        if not isinstance(item, dict) or set(item) != {"case_count", "passed", "failed", "errors"}:
+            raise ValueError("eval receipt category summary invalid")
+        if any(isinstance(item.get(key), bool) or not isinstance(item.get(key), int) or item[key] < 0 for key in ("case_count", "passed", "failed", "errors")):
+            raise ValueError("eval receipt category summary invalid")
+        if item["passed"] + item["failed"] + item["errors"] != item["case_count"]:
+            raise ValueError("eval receipt category summary invalid")
+        category_total += item["case_count"]
+    if category_total != expected_count:
+        raise ValueError("eval receipt category summary total invalid")
     if metrics["case_count"] != expected_count or sum(metrics[key] for key in ("passed", "failed", "errors")) != expected_count:
         raise ValueError("eval receipt metric totals invalid")
     status = payload["status"]

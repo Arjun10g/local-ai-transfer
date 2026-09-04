@@ -744,6 +744,10 @@ class StaticSafetyTests(unittest.TestCase):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_eval_receipt")
         config = load(ROOT / "scripts/j1m_runner.py", "j1m_eval_receipt_config").load_config()
         artifact = {"name": "Qwen3.5-9B-Q4_K_M.gguf", "size_bytes": 4, "sha256": "a" * 64, "llama_cpp_revision": config["llama_cpp"]["revision"]}
+        fixture = json.loads((ROOT / "tests/model/tool_call_eval.json").read_text(encoding="utf-8"))
+        category_counts = {category: sum(case["category"] == category for case in fixture["cases"]) for category in {case["category"] for case in fixture["cases"]}}
+        category_summary = {category: {"case_count": count, "passed": count, "failed": 0, "errors": 0} for category, count in category_counts.items()}
+        case_count = len(fixture["cases"])
         with tempfile.TemporaryDirectory() as directory:
             receipt = Path(directory) / "eval-receipt.json"
             receipt.write_text(json.dumps({
@@ -751,13 +755,17 @@ class StaticSafetyTests(unittest.TestCase):
                 "engine": {"llama_cpp_revision": config["llama_cpp"]["revision"], "compiled_backend": f"llama.cpp/{config['llama_cpp']['revision'][:8]}/cuda"},
                 "cuda_device": {"schema": "local_bmo.j1m.cuda-device-receipt.v1", "status": "verified", "selector": "CUDA0", "device_count": 1, "device": {"name": "NVIDIA A100 80GB", "memory_total_mib": 81920}},
                 "toolchain": {"schema": "local_bmo.j1m.remote-toolchain-receipt.v1", "status": "verified", "versions": {"python3": {"major": 3, "minor": 10}, "git": {"major": 2, "minor": 39}, "cmake": {"major": 3, "minor": 22}, "g++": {"major": 11, "minor": 4}, "nvcc": {"major": 12, "minor": 2, "executable": "/usr/local/cuda/bin/nvcc"}}, "packages": {"ca-certificates": "20240101", "cmake": "3.22.1", "build-essential": "12.9", "git": "1:2.39.2", "python3": "3.10.12", "python3-venv": "3.10.12"}},
-                "metrics": {"case_count": 8, "passed": 8, "failed": 0, "errors": 0, "peak_rss_kib": 123},
+                "metrics": {"case_count": case_count, "passed": case_count, "failed": 0, "errors": 0, "peak_rss_kib": 123, "category_summary": category_summary},
                 "prompt_response_logging": False, "token_logging": False,
             }), encoding="utf-8")
-            self.assertEqual(orchestrator._verify_eval_receipt(receipt, artifact)["metrics"]["case_count"], 8)
+            self.assertEqual(orchestrator._verify_eval_receipt(receipt, artifact)["metrics"]["case_count"], case_count)
             failed = json.loads(receipt.read_text())
             failed["status"] = "completed_with_failures"
-            failed["metrics"] = {"case_count": 8, "passed": 7, "failed": 1, "errors": 0, "peak_rss_kib": 123}
+            failed["metrics"]["passed"] -= 1
+            failed["metrics"]["failed"] += 1
+            failed_category = next(iter(failed["metrics"]["category_summary"].values()))
+            failed_category["passed"] -= 1
+            failed_category["failed"] += 1
             receipt.write_text(json.dumps(failed), encoding="utf-8")
             self.assertEqual(orchestrator._verify_eval_receipt(receipt, artifact)["status"], "completed_with_failures")
             failed["status"] = "verified"
@@ -765,15 +773,20 @@ class StaticSafetyTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 orchestrator._verify_eval_receipt(receipt, artifact)
             failed["status"] = "completed_with_failures"
-            failed["metrics"] = {"case_count": 8, "passed": 8, "failed": 0, "errors": 0, "peak_rss_kib": 123}
+            failed["metrics"] = {"case_count": case_count, "passed": case_count, "failed": 0, "errors": 0, "peak_rss_kib": 123, "category_summary": category_summary}
             receipt.write_text(json.dumps(failed), encoding="utf-8")
             with self.assertRaises(ValueError):
                 orchestrator._verify_eval_receipt(receipt, artifact)
             failed["status"] = "verified"
-            failed["metrics"] = {"case_count": 8, "passed": 8, "failed": 0, "errors": 0, "peak_rss_kib": 123}
+            failed["metrics"] = {"case_count": case_count, "passed": case_count, "failed": 0, "errors": 0, "peak_rss_kib": 123, "category_summary": category_summary}
             failed.pop("toolchain", None)
             receipt.write_text(json.dumps(failed), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "toolchain"):
+                orchestrator._verify_eval_receipt(receipt, artifact)
+            failed["toolchain"] = json.loads(receipt.read_text(encoding="utf-8")).get("toolchain")
+            failed["metrics"] = {"case_count": 8, "passed": 8, "failed": 0, "errors": 0, "peak_rss_kib": 123}
+            receipt.write_text(json.dumps(failed), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "metrics"):
                 orchestrator._verify_eval_receipt(receipt, artifact)
 
     def test_remote_eval_metrics_reject_bool_missing_and_bad_totals(self):
