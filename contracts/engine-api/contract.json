@@ -1,0 +1,13 @@
+{
+  "api_version": "0.1.0",
+  "lifecycle_states": ["NEW", "VERIFYING_MODEL", "LOADING_MODEL", "WARMING", "READY", "BUSY", "DEGRADED", "STOPPING", "STOPPED", "FAILED"],
+  "limits": {"max_body_bytes": 65536, "max_tokens": 64, "max_active_generations": 1},
+  "routes": [
+    {"method":"GET","path":"/healthz","auth":false}, {"method":"GET","path":"/readyz","auth":true},
+    {"method":"GET","path":"/version","auth":true}, {"method":"GET","path":"/build-info","auth":true},
+    {"method":"GET","path":"/probe","auth":true}, {"method":"GET","path":"/metrics","auth":true},
+    {"method":"POST","path":"/v1/sessions","auth":true}, {"method":"DELETE","path":"/v1/sessions/{id}","auth":true},
+    {"method":"POST","path":"/v1/chat/completions","auth":true}, {"method":"POST","path":"/v1/cancel/{request_id}","auth":true}
+  ],
+  "stream": {"media_type":"text/event-stream","terminator":"data: [DONE]\\n\\n","finish_reasons":["stop","length","cancelled"]}
+}
