@@ -48,13 +48,25 @@ them.
 `CopilotCliProvider` is a prompt-only cloud bridge. It requires an explicitly
 allowlisted executable and version check, snapshots and hashes selected context
 at preview, rechecks it at execute, passes the prompt over stdin to bare
-`copilot`, and uses supported silent/no-update/no-custom-instructions/no-remote/
-no-MCP/no-tools flags. It passes only a minimal credential-store environment,
+`copilot --acp --stdio`, and uses supported no-update/no-custom-instructions/
+no-remote/no-MCP/no-tools flags. It passes only a minimal credential-store environment,
 uses fixed argv with `shell: false`, and enforces output, timeout, cancellation,
 UTF-8, and injected process-tree-kill bounds. It never accepts shell, write,
 URL, MCP, plugin, or `--allow-all*` arguments. Its preview discloses the cloud
 destination, selected paths, categories, and exact combined byte count. Context
-is read only through an injected workspace-bound reader.
+is read only through a `WorkspacePolicy`-backed descriptor-held reader supplied
+by `lae-host` from configured workspace roots. Arbitrary context-reader
+injection is rejected unless explicitly marked test-only. The bridge remains
+disabled until its stdin protocol is independently verified against the pinned
+Copilot CLI release.
+
+`BrowserActionProvider` starts an allowlisted browser with a fresh temporary
+profile behind the validating public-HTTPS proxy. Page inspection exposes only
+bounded visible text and opaque IDs for visible controls. Field entry and
+activation require a page-revision-bound preview and user confirmation; static
+provider-authored CDP expressions are used, never model selectors or scripts.
+Password/file/hidden and sensitive controls are rejected, with bounded cleanup
+of the owned process, profile, and proxy.
 
 Live Graph/Copilot authorization, organization approval, Windows process
 evidence, and synthetic release-account evidence are not present in this

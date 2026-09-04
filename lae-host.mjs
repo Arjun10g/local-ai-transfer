@@ -28,7 +28,7 @@ const engine = mode === 'native' ? new NativeEngineClient({ endpoint, token, mod
 if (mode === 'native') await engine.waitReady();
 const grantStore = new OperatorGrantStore();
 const operatorGrants = new OperatorGrantControl({ store: grantStore, bindings: buildOperatorGrantBindings(config) });
-const externalTools = createExternalToolRegistry({ config: config.providers, graph: { grantStore } });
+const externalTools = createExternalToolRegistry({ config: config.providers, workspaceRoots: config.workspace_roots, graph: { grantStore } });
 const processEnvironment = Object.fromEntries(['SystemRoot', 'WINDIR'].filter(key => typeof process.env[key] === 'string').map(key => [key, process.env[key]]));
 const controller = new ConversationController({ engine, toolRegistry: { ...createLocalToolRegistry({ workspaces: config.workspace_roots, applications: config.applications, process_actions: config.process_actions, processEnvironment, networkProvider: config.network.provider, grantControl: operatorGrants }), ...externalTools } });
 const host = new HostServer({ controller, engine, config, providers: externalTools.providerStatus, providerAuth: externalTools.providerAuthControl, providerShutdown: externalTools.shutdown, operatorGrants });
