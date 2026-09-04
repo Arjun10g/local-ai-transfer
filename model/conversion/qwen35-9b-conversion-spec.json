@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0.0",
+  "spec_id": "qwen35-9b-controlled-conversion-v1",
+  "source_lock": "model/source-lock/qwen35-9b.source-lock.json",
+  "execution_job": "J1M",
+  "execution_policy": {"environment": "Shadeform", "target_download": false, "target_conversion": false, "network": "source-fetch-only-on-approved-build", "weights_in_git": false},
+  "stages": [
+    {"id": "source_verify", "purpose": "Verify immutable HF revision and archive README/LICENSE/card hashes", "input": "official_source_revision", "output": "source-model-receipt.json"},
+    {"id": "convert_reference", "purpose": "Convert language component only to a high-precision GGUF reference", "output": "reference-artifact-id"},
+    {"id": "quantize_q8", "purpose": "Produce same-source Q8_0 evaluation comparator when practical", "output": "q8-comparator-artifact-id"},
+    {"id": "quantize_q4", "purpose": "Produce deployable Q4_K_M GGUF", "output": "Qwen3.5-9B-Q4_K_M.gguf"},
+    {"id": "validate", "purpose": "Validate GGUF bounds, tensors, hybrid profile, tokenizer/template and text-only modality", "output": "model-receipt.json"}
+  ],
+  "command_receipts": {"required": true, "argv_only": true, "shell_string_prohibited": true, "record": ["converter_revision", "quantizer_revision", "compiler", "flags", "commands", "exit_codes", "timestamps"]},
+  "artifact_outputs": {"deployable": "Q4_K_M", "comparators": ["reference", "Q8_0"], "vision_projection": "excluded", "content_addressed_storage": true, "required_receipts": ["source-model-receipt.json", "conversion-receipt.json", "model-receipt.json", "checksums.sha256", "scan-receipt.json"]},
+  "rejection_rules": ["floating_source_revision", "community_quant", "unverified_template", "missing_tensor_inventory", "vision_projection_required_for_text_only", "hash_mismatch", "missing_license_receipt", "unbounded_command", "artifact_in_git"]
+}
