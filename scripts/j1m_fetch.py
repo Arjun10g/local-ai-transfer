@@ -34,6 +34,14 @@ LOCAL_ALLOWLIST = frozenset({
 })
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def select_local_artifacts(names: list[str]) -> list[str]:
     selected = []
     for name in names:
@@ -55,18 +63,51 @@ def copy_selected(remote_dir: Path, local_dir: Path, names: list[str]) -> list[d
         if not source.is_file():
             raise FileNotFoundError(source)
         target = local_dir / name
-        shutil.copy2(source, target)
+        temporary = target.with_name(f".{target.name}.partial")
+        try:
+            shutil.copy2(source, temporary)
+            temporary.replace(target)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
         receipt.append({"name": name, "size_bytes": target.stat().st_size})
     return receipt
 
 
 def verify_local_bundle(local_dir: Path) -> None:
     manifest = json.loads((local_dir / "manifest.json").read_text(encoding="utf-8"))
-    expected = {item["name"]: item["sha256"] for item in manifest["artifacts"]}
+    expected = {}
+    for item in manifest.get("artifacts", []):
+        if not isinstance(item, dict) or set(item) != {"name", "size_bytes", "sha256"}:
+            raise ValueError("manifest contains an invalid artifact entry")
+        name = str(item["name"])
+        _safe_artifact_name(name)
+        if name not in LOCAL_ALLOWLIST or name in expected:
+            raise ValueError(f"manifest contains a non-deployable or duplicate artifact: {name}")
+        expected[name] = str(item["sha256"])
+    if "Qwen3.5-9B-Q4_K_M.gguf" not in expected:
+        raise ValueError("manifest does not contain the deployable Q4 artifact")
+    checksum_lines = (local_dir / "checksums.sha256").read_text(encoding="utf-8").splitlines()
+    checksums: dict[str, str] = {}
+    for line in checksum_lines:
+        parts = line.split("  ", 1)
+        if len(parts) != 2 or len(parts[0]) != 64:
+            raise ValueError("malformed checksum entry")
+        digest, name = parts
+        _safe_artifact_name(name)
+        if name in checksums or name not in {*expected, "manifest.json"}:
+            raise ValueError(f"checksum contains an unexpected or duplicate artifact: {name}")
+        checksums[name] = digest
+    if set(checksums) != {*expected, "manifest.json"}:
+        raise ValueError("checksum set does not exactly match the deployable manifest")
     for name, digest in expected.items():
+        if checksums[name] != digest:
+            raise ValueError(f"manifest/checksum disagreement: {name}")
         path = local_dir / name
-        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+        if not path.is_file() or path.stat().st_size != next(item["size_bytes"] for item in manifest["artifacts"] if item["name"] == name) or _sha256(path) != digest:
             raise ValueError(f"local bundle checksum mismatch: {name}")
+    if _sha256(local_dir / "manifest.json") != checksums["manifest.json"]:
+        raise ValueError("manifest checksum mismatch")
 
 
 def main(argv: list[str] | None = None) -> int:

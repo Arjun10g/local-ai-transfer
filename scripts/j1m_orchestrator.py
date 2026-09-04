@@ -41,7 +41,16 @@ def _remote(command: list[str], *, timeout: float) -> dict[str, Any]:
     return {"status": "completed" if result.returncode == 0 else "failed", "exit_code": result.returncode}
 
 
-def _salvage(info: dict[str, Any], identity: Path, known_hosts: Path, destination: Path, names: list[str]) -> list[dict[str, Any]]:
+def _salvage(
+    info: dict[str, Any],
+    identity: Path,
+    known_hosts: Path,
+    destination: Path,
+    names: list[str],
+    *,
+    deadline: float | None = None,
+    q4_expected_gib: float = 6.0,
+) -> list[dict[str, Any]]:
     """Attempt each allowlisted receipt independently; one missing file cannot stop cleanup."""
 
     destination.mkdir(parents=True, exist_ok=True)
@@ -52,7 +61,13 @@ def _salvage(info: dict[str, Any], identity: Path, known_hosts: Path, destinatio
             command = sf.scp_base(info["instance_info"], identity, known_hosts) + [
                 f"{info['instance_info']['ssh_user']}@{info['instance_info']['ip']}:/scratch/j1m/artifacts/{name}", str(destination / name),
             ]
-            receipt = _remote(command, timeout=120)
+            # Receipts are small, but the sole deployable Q4 artifact is not.
+            # Give its transfer a size-aware floor while still honoring the
+            # provider deadline and retaining a cleanup reserve.
+            timeout = max(120.0, float(q4_expected_gib) * 60.0) if name.endswith("Q4_K_M.gguf") else 120.0
+            if deadline is not None:
+                timeout = min(timeout, max(30.0, deadline - time.monotonic() - 30.0))
+            receipt = _remote(command, timeout=timeout)
         except Exception as exc:
             receipt = {"status": "salvage_failed", "error_type": type(exc).__name__}
         receipt["name"] = name
@@ -157,7 +172,8 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     remote_job = sf.ssh_base(info, identity, known_hosts) + ["python3", f"{remote_root}/j1m_runner.py", "--run", "--config", f"{remote_root}/j1m-config.json", "--token-file", f"{remote_root}/hf-token.env"]
                     j1m_runner.write_progress(progress_path, "remote-build-starting", phase_id=phase_id)
                     try:
-                        lifecycle["job"] = _remote(remote_job, timeout=max(30, provider_deadline - time.monotonic() - 120))
+                        transfer_reserve = float(config["modes"][mode].get("transfer_reserve_seconds", 0))
+                        lifecycle["job"] = _remote(remote_job, timeout=max(30, provider_deadline - time.monotonic() - transfer_reserve - 120))
                     finally:
                         lifecycle["token_delete"] = _remote(sf.ssh_base(info, identity, known_hosts) + ["rm", "-f", f"{remote_root}/hf-token.env"], timeout=30)
                         token_remote = lifecycle["token_delete"]["status"] != "completed"
@@ -188,7 +204,15 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     except (OSError, subprocess.TimeoutExpired):
                         pass
             fetch_allowlist = config["artifacts"]["local_fetch_allowlist"] if mode == "build" else config["artifacts"]["prove_fetch_allowlist"]
-            lifecycle["salvage"] = _salvage({"phase_id": phase_id, "instance_info": lifecycle.get("instance_info", {})}, identity, known_hosts, artifact_destination, fetch_allowlist) if lifecycle.get("instance_info") else []
+            lifecycle["salvage"] = _salvage(
+                {"phase_id": phase_id, "instance_info": lifecycle.get("instance_info", {})},
+                identity,
+                known_hosts,
+                artifact_destination,
+                fetch_allowlist,
+                deadline=provider_deadline if "provider_deadline" in locals() else None,
+                q4_expected_gib=float(config["resources"].get("expected_q4_gib", 6.0)),
+            ) if lifecycle.get("instance_info") else []
             if mode == "prove" and lifecycle.get("job", {}).get("status") == "completed" and not any(item.get("name") == "proving-receipt.json" and item.get("status") == "completed" for item in lifecycle["salvage"]):
                 lifecycle["receipt_error"] = "proving receipt was not salvaged before teardown"
             # The shared teardown performs exact deletion before cost/key

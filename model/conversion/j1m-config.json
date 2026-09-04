@@ -40,6 +40,7 @@
       "external_watchdog_seconds": 1080,
       "host_shutdown_delay_minutes": 18,
       "provider_backstop_hours": 0.3125,
+      "transfer_reserve_seconds": 180,
       "active_cost_usd": 0.3375
     },
     "build": {
@@ -47,12 +48,14 @@
       "external_watchdog_seconds": 5400,
       "host_shutdown_delay_minutes": 90,
       "provider_backstop_hours": 1.5625,
+      "transfer_reserve_seconds": 360,
       "active_cost_usd": 1.6875
     }
   },
   "resources": {
     "required_scratch_gib": 70,
     "expected_peak_gib": 58,
+    "expected_q4_gib": 6,
     "progress_path": "experiments/runtime/J1M.progress.json"
   },
   "artifacts": {

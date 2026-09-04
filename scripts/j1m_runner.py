@@ -59,6 +59,30 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _normalize_gguf_value(value: Any) -> Any:
+    """Turn gguf ReaderField contents into JSON/scalar text without ndarray reprs."""
+
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if isinstance(value, list) and len(value) == 1:
+        value = value[0]
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="strict")
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except ValueError:
+            pass
+    return value
+
+
+def _reader_field_value(field: Any) -> Any:
+    contents = field.contents() if callable(getattr(field, "contents", None)) else getattr(field, "contents", None)
+    if contents is None and hasattr(field, "parts"):
+        contents = field.parts[-1]
+    return _normalize_gguf_value(contents)
+
+
 def verify_source(source_dir: Path, lock_path: Path = SOURCE_LOCK) -> dict[str, Any]:
     """Verify the local source checkout against the frozen lock.
 
@@ -106,7 +130,14 @@ def scan_artifacts(output_dir: Path) -> dict[str, Any]:
     records = [{"name": name, "size_bytes": (output_dir / name).stat().st_size, "sha256": _sha256(output_dir / name)} for name in names]
     if any("mmproj" in path.name.lower() for path in output_dir.iterdir()):
         raise ValueError("vision/mmproj artifact is forbidden")
-    payload = {"schema": "local_bmo.j1m.scan-receipt.v1", "status": "verified", "text_only": True, "artifacts": records, "vision_projection_present": False}
+    tensor_path = output_dir / "tensor-metadata.json"
+    if not tensor_path.is_file():
+        raise ValueError("tensor metadata is required before the artifact scan")
+    tensor_metadata = json.loads(tensor_path.read_text(encoding="utf-8"))
+    vision_present = tensor_metadata.get("vision_projection_present")
+    if vision_present is not False:
+        raise ValueError("GGUF inspection did not prove absence of vision/mmproj tensors")
+    payload = {"schema": "local_bmo.j1m.scan-receipt.v1", "status": "verified", "text_only": True, "artifacts": records, "vision_projection_present": vision_present}
     (output_dir / "scan-receipt.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return payload
 
@@ -186,7 +217,8 @@ def write_artifacts(output_dir: Path, names: list[str], *, source_lock: Path = S
             raise ValueError(f"{required} is required before final manifest")
     command_receipt = json.loads((output_dir / "command-receipt.json").read_text(encoding="utf-8"))
     scan_receipt = json.loads((output_dir / "scan-receipt.json").read_text(encoding="utf-8"))
-    if not isinstance(command_receipt, list) or not command_receipt or scan_receipt.get("status") != "verified":
+    required_receipt_fields = {"stage", "argv", "started_at_utc", "ended_at_utc", "exit_code", "status"}
+    if not isinstance(command_receipt, list) or not command_receipt or any(not isinstance(item, dict) or not required_receipt_fields.issubset(item) for item in command_receipt) or scan_receipt.get("status") != "verified":
         raise ValueError("command and scan receipts are not complete")
     converter_commands = [command for command in (commands or []) if any("convert_hf_to_gguf.py" in part for part in command) or "Q4_K_M" in command]
     (output_dir / "conversion-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.conversion-receipt.v1", "status": "conversion-complete", "text_only": True, "source_revision": source.get("revision"), "llama_cpp_revision": llama_revision, "artifacts": artifact_hashes, "converter_and_quantizer_argv": converter_commands, "command_receipt_sha256": _sha256(output_dir / "command-receipt.json"), "toolchain": toolchain, "no_mmproj": True, "no_mtp": True}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -195,7 +227,15 @@ def write_artifacts(output_dir: Path, names: list[str], *, source_lock: Path = S
     # securely removed. Intermediate BF16/Q8 hashes remain in conversion
     # receipt, but are intentionally absent from the shipped bundle.
     deployable = ["Qwen3.5-9B-Q4_K_M.gguf", "tensor-metadata.json", "source-model-receipt.json", "conversion-receipt.json", "model-receipt.json", "toolchain.json"]
-    manifest = artifact_manifest(output_dir, [*deployable, "command-receipt.json", "scan-receipt.json"])
+    bounded_tensor_metadata = {
+        "status": tensor["status"],
+        "tensor_count": tensor.get("tensor_count"),
+        "tensor_inventory_sha256": _sha256(tensor_path),
+        "gguf_metadata": {key: value for key, value in tensor.get("gguf_metadata", {}).items() if key != "tokenizer.chat_template"},
+        "chat_template_sha256": tensor.get("chat_template_sha256"),
+        "vision_projection_present": tensor.get("vision_projection_present"),
+    }
+    manifest = artifact_manifest(output_dir, [*deployable, "command-receipt.json", "scan-receipt.json"], tensor_metadata=bounded_tensor_metadata)
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     checksum_names = [item["name"] for item in manifest["artifacts"]] + ["manifest.json"]
     checksums = "".join(f"{_sha256(output_dir / name)}  {name}\n" for name in checksum_names)
@@ -229,7 +269,7 @@ def command_plan(config: dict[str, Any], source: str = "/scratch/hf/Qwen3.5-9B",
         [python_exec, converter, source, "--outfile", f"{output}/Qwen3.5-9B-bf16.gguf", "--outtype", "bf16", "--no-mtp"],
         [python_exec, converter, source, "--outfile", f"{output}/Qwen3.5-9B-Q8_0.gguf", "--outtype", "q8_0", "--no-mtp"],
         [f"{llama['quantizer']}", f"{output}/Qwen3.5-9B-bf16.gguf", f"{output}/Qwen3.5-9B-Q4_K_M.gguf", "Q4_K_M"],
-        [python_exec, runner, "--inspect-tensors", f"{output}/Qwen3.5-9B-Q4_K_M.gguf", f"{output}/tensor-metadata.json"],
+        [python_exec, runner, "--inspect-tensors", f"{output}/Qwen3.5-9B-Q4_K_M.gguf", f"{output}/tensor-metadata.json", "--source-receipt", f"{output}/source-model-receipt.json"],
         [python_exec, runner, "--scan", output],
         [python_exec, runner, "--config", config_path, "--manifest", output],
         ["rm", "-f", f"{output}/Qwen3.5-9B-bf16.gguf", f"{output}/Qwen3.5-9B-Q8_0.gguf"],
@@ -254,6 +294,7 @@ def run_commands(commands: list[list[str]], progress_path: Path, *, cwd: Path | 
     """Run an already-reviewed argv plan, recording progress before each stage."""
 
     receipts = []
+    all_stage_receipts = []
     if receipt_path:
         receipt_path.parent.mkdir(parents=True, exist_ok=True)
         receipt_path.write_text("[]\n", encoding="utf-8")
@@ -261,21 +302,36 @@ def run_commands(commands: list[list[str]], progress_path: Path, *, cwd: Path | 
         if not command or any("\x00" in str(part) for part in command):
             raise ValueError("invalid empty/NUL command")
         write_progress(progress_path, f"stage-{index + 1}-starting", argv=command)
+        started_at = utc_now()
         try:
             environment = None
             if token_file is not None:
-                environment = {**os.environ, TOKEN_ENV: read_token_file(token_file)}
+                # The token is needed only by the HF download.  Every other
+                # subprocess receives a sanitized environment, preventing
+                # accidental leakage to git/build/conversion tooling.
+                environment = dict(os.environ)
+                environment.pop(TOKEN_ENV, None)
+                if any(part == "download" for part in command):
+                    environment[TOKEN_ENV] = read_token_file(token_file)
             completed = subprocess.run(command, cwd=cwd, check=False, timeout=6 * 60 * 60, env=environment)
-            receipt = {"stage": index + 1, "exit_code": completed.returncode, "status": "completed" if completed.returncode == 0 else "failed"}
+            stage_receipt = {"stage": index + 1, "argv": command, "started_at_utc": started_at, "ended_at_utc": utc_now(), "exit_code": completed.returncode, "status": "completed" if completed.returncode == 0 else "failed"}
         except subprocess.TimeoutExpired:
-            receipt = {"stage": index + 1, "exit_code": None, "status": "transport_timeout"}
-        receipts.append(receipt)
-        if receipt_path:
-            receipt_path.write_text(json.dumps(receipts, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        write_progress(progress_path, f"stage-{index + 1}-{receipt['status']}", **receipt)
-        if receipt["status"] != "completed":
+            stage_receipt = {"stage": index + 1, "argv": command, "started_at_utc": started_at, "ended_at_utc": utc_now(), "exit_code": None, "status": "transport_timeout"}
+        # Manifest creation and intermediate cleanup are administrative stages;
+        # they intentionally do not mutate the immutable conversion receipt.
+        administrative = "--manifest" in command or (command and command[0] == "rm")
+        all_stage_receipts.append(stage_receipt)
+        if not administrative:
+            receipts.append(stage_receipt)
+            if receipt_path:
+                receipt_path.write_text(json.dumps(receipts, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        progress_details = {key: value for key, value in stage_receipt.items() if key != "stage"}
+        write_progress(progress_path, f"stage-{index + 1}-{stage_receipt['status']}", **progress_details)
+        if stage_receipt["status"] != "completed":
             break
-    return receipts
+    # Return administrative failures to the caller while keeping them out of
+    # the immutable conversion receipt hashed by the manifest.
+    return all_stage_receipts
 
 
 def build_plan(config: dict[str, Any], mode: str = "prove") -> dict[str, Any]:
@@ -325,6 +381,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--toolchain", type=Path)
     parser.add_argument("--llama-checkout", type=Path)
     parser.add_argument("--inspect-tensors", nargs=2, metavar=("GGUF", "OUTPUT"))
+    parser.add_argument("--source-receipt", type=Path)
     parser.add_argument("--scan", type=Path)
     parser.add_argument("--execute", action="store_true", help="reserved for an already-approved host; never provisions")
     args = parser.parse_args(argv)
@@ -360,10 +417,28 @@ def main(argv: list[str] | None = None) -> int:
             from gguf import GGUFReader
             reader = GGUFReader(str(gguf_path))
             tensors = [{"name": tensor.name, "shape": list(tensor.shape), "type": str(tensor.tensor_type)} for tensor in reader.tensors]
-            fields = {str(key): str(value.parts[-1] if hasattr(value, "parts") else value) for key, value in reader.fields.items() if str(key) in {"general.architecture", "general.file_type", "general.version", "tokenizer.chat_template"}}
-            if fields.get("general.architecture", "").lower() not in {"qwen35", "qwen3_5"}:
+            wanted_fields = {"general.architecture", "general.file_type", "general.version", "tokenizer.chat_template"}
+            fields = {str(key): _reader_field_value(value) for key, value in reader.fields.items() if str(key) in wanted_fields}
+            architecture = str(fields.get("general.architecture", "")).lower().replace(".", "").replace("_", "")
+            if architecture != "qwen35":
                 raise ValueError("GGUF architecture is not qwen35")
-            payload = {"schema": "local_bmo.j1m.tensor-metadata.v1", "status": "verified", "text_only": True, "tensor_count": len(tensors), "tensors": tensors, "gguf_metadata": fields, "vision_projection_present": False}
+            chat_template = str(fields.get("tokenizer.chat_template", ""))
+            if not chat_template:
+                raise ValueError("GGUF has no embedded tokenizer chat template")
+            if args.source_receipt is not None:
+                source_receipt = json.loads(args.source_receipt.read_text(encoding="utf-8"))
+                expected_chat_hash = str(source_receipt.get("chat_template_sha256", ""))
+                actual_chat_hash = hashlib.sha256(chat_template.encode("utf-8")).hexdigest()
+                if not expected_chat_hash or actual_chat_hash != expected_chat_hash:
+                    raise ValueError("GGUF chat template does not match the verified source receipt")
+            metadata_names = [str(key).lower() for key in reader.fields]
+            tensor_names = [str(tensor.name).lower() for tensor in reader.tensors]
+            vision_terms = ("vision", "mmproj", "visual", "image")
+            vision_projection_present = any(any(term in name for term in vision_terms) for name in [*metadata_names, *tensor_names])
+            if vision_projection_present:
+                raise ValueError("vision/mmproj metadata or tensor is forbidden")
+            fields["gguf.version"] = _normalize_gguf_value(getattr(reader, "version", "unknown"))
+            payload = {"schema": "local_bmo.j1m.tensor-metadata.v1", "status": "verified", "text_only": True, "tensor_count": len(tensors), "tensors": tensors, "gguf_metadata": fields, "vision_projection_present": vision_projection_present, "chat_template_sha256": hashlib.sha256(chat_template.encode("utf-8")).hexdigest()}
         except Exception as exc:
             payload = {"schema": "local_bmo.j1m.tensor-metadata.v1", "status": "inspection_failed", "error_type": type(exc).__name__, "text_only": True}
             raise

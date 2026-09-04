@@ -1,10 +1,13 @@
 import importlib.util
+import hashlib
 import json
 import os
 import subprocess
 import stat
 import tempfile
 import threading
+import time
+import types
 import unittest
 from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -71,10 +74,12 @@ class J1MConfigTests(unittest.TestCase):
             (root / "source-model-receipt.json").write_text(json.dumps({"status": "verified", "revision": "a" * 40, "tokenizer_sha256": "b" * 64, "chat_template_sha256": "c" * 64, "license_sha256": "d" * 64}), encoding="utf-8")
             (root / "tensor-metadata.json").write_text(json.dumps({"status": "verified", "tensor_count": 3}), encoding="utf-8")
             (root / "toolchain.json").write_text(json.dumps({"schema": "local_bmo.j1m.toolchain.v1", "llama_cpp_head": "e" * 40}), encoding="utf-8")
-            (root / "command-receipt.json").write_text("[{\"stage\": 1, \"status\": \"completed\"}]\n", encoding="utf-8")
+            (root / "command-receipt.json").write_text(json.dumps([{"stage": 1, "argv": ["source-check"], "started_at_utc": "2026-01-01T00:00:00+00:00", "ended_at_utc": "2026-01-01T00:00:01+00:00", "exit_code": 0, "status": "completed"}]) + "\n", encoding="utf-8")
             (root / "scan-receipt.json").write_text(json.dumps({"status": "verified"}), encoding="utf-8")
             manifest = self.j1m.write_artifacts(root, names)
             self.assertEqual(len(manifest["artifacts"]), 8)
+            self.assertEqual(manifest["tensor_metadata"]["status"], "verified")
+            self.assertNotEqual(manifest["tensor_metadata"]["status"], "pending_converter_receipt")
             self.assertTrue((root / "manifest.json").is_file())
             self.assertTrue((root / "checksums.sha256").is_file())
 
@@ -89,7 +94,7 @@ class J1MConfigTests(unittest.TestCase):
             (remote / "source-model-receipt.json").write_text(json.dumps({"status": "verified", "revision": "a" * 40, "tokenizer_sha256": "b" * 64, "chat_template_sha256": "c" * 64, "license_sha256": "d" * 64}), encoding="utf-8")
             (remote / "tensor-metadata.json").write_text(json.dumps({"status": "verified"}), encoding="utf-8")
             (remote / "toolchain.json").write_text(json.dumps({"schema": "local_bmo.j1m.toolchain.v1"}), encoding="utf-8")
-            (remote / "command-receipt.json").write_text("[{\"stage\": 1, \"status\": \"completed\"}]\n", encoding="utf-8")
+            (remote / "command-receipt.json").write_text(json.dumps([{"stage": 1, "argv": ["source-check"], "started_at_utc": "2026-01-01T00:00:00+00:00", "ended_at_utc": "2026-01-01T00:00:01+00:00", "exit_code": 0, "status": "completed"}]) + "\n", encoding="utf-8")
             (remote / "scan-receipt.json").write_text(json.dumps({"status": "verified"}), encoding="utf-8")
             self.j1m.write_artifacts(remote, ["Qwen3.5-9B-bf16.gguf", "Qwen3.5-9B-Q8_0.gguf", "Qwen3.5-9B-Q4_K_M.gguf"])
             (remote / "Qwen3.5-9B-bf16.gguf").unlink()
@@ -113,6 +118,83 @@ class J1MConfigTests(unittest.TestCase):
             self.j1m.main(["--toolchain", str(output / "toolchain.json"), "--llama-checkout", str(ROOT)])
             receipt = json.loads((output / "toolchain.json").read_text())
             self.assertIn("example-package==1.2.3", receipt["pip_freeze"])
+
+    def test_readerfield_contents_and_source_chat_template_hash_are_verified(self):
+        chat_template = "{{ messages[0]['content'] }}"
+
+        class ReaderField:
+            def __init__(self, value):
+                self.value = value
+            def contents(self):
+                return self.value
+
+        class Tensor:
+            name = "blk.0.attn.weight"
+            shape = [2, 2]
+            tensor_type = "Q4_K_M"
+
+        class Reader:
+            version = 3
+            fields = {
+                "general.architecture": ReaderField(["qwen35"]),
+                "general.file_type": ReaderField([15]),
+                "general.version": ReaderField([3]),
+                "tokenizer.chat_template": ReaderField([chat_template.encode("utf-8")]),
+            }
+            tensors = [Tensor()]
+
+            def __init__(self, _path):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gguf = root / "model.gguf"
+            metadata = root / "tensor-metadata.json"
+            source = root / "source-model-receipt.json"
+            gguf.write_bytes(b"fixture")
+            source.write_text(json.dumps({"chat_template_sha256": hashlib.sha256(chat_template.encode()).hexdigest()}), encoding="utf-8")
+            fake_gguf = types.SimpleNamespace(GGUFReader=Reader)
+            with mock.patch.dict("sys.modules", {"gguf": fake_gguf}):
+                self.j1m.main(["--inspect-tensors", str(gguf), str(metadata), "--source-receipt", str(source)])
+            receipt = json.loads(metadata.read_text(encoding="utf-8"))
+            self.assertEqual(receipt["gguf_metadata"]["general.architecture"], "qwen35")
+            self.assertEqual(receipt["gguf_metadata"]["general.file_type"], 15)
+            self.assertEqual(receipt["vision_projection_present"], False)
+            self.assertEqual(receipt["chat_template_sha256"], hashlib.sha256(chat_template.encode()).hexdigest())
+
+    def test_administrative_failure_is_returned_without_mutating_conversion_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            receipt_path = root / "command-receipt.json"
+            progress = root / "progress.json"
+            outcomes = iter([0, 1])
+
+            def fake_run(*_args, **_kwargs):
+                return types.SimpleNamespace(returncode=next(outcomes))
+
+            with mock.patch.object(subprocess, "run", side_effect=fake_run):
+                result = self.j1m.run_commands([["source-check"], ["python", "j1m_runner.py", "--manifest", str(root)], ["rm", "-f", "intermediate"]], progress, receipt_path=receipt_path)
+            self.assertEqual(result[-1]["status"], "failed")
+            persisted = json.loads(receipt_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(persisted), 1)
+            self.assertEqual(persisted[0]["argv"], ["source-check"])
+
+    def test_hf_token_is_injected_only_into_download_stage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            token_file = root / "token.env"
+            token_file.write_text("HF_TOKEN=token-not-logged\n", encoding="utf-8")
+            token_file.chmod(0o600)
+            captured = []
+
+            def fake_run(*_args, **kwargs):
+                captured.append(kwargs.get("env", {}))
+                return types.SimpleNamespace(returncode=0)
+
+            with mock.patch.object(subprocess, "run", side_effect=fake_run):
+                self.j1m.run_commands([["cmake", "--version"], ["hf", "download", "Qwen/model"]], root / "progress.json", token_file=token_file)
+            self.assertNotIn("HF_TOKEN", captured[0])
+            self.assertEqual(captured[1]["HF_TOKEN"], "token-not-logged")
 
     def test_ephemeral_key_generation_does_not_interpret_provider_identifier(self):
         from scripts import shadeform_lifecycle as sf
@@ -175,6 +257,23 @@ class StaticSafetyTests(unittest.TestCase):
             selected = config["modes"][mode]
             self.assertGreater(selected["provider_backstop_hours"], selected["runtime_hours"])
             self.assertLess(selected["external_watchdog_seconds"], selected["provider_backstop_hours"] * 3600)
+            self.assertGreater(selected["transfer_reserve_seconds"], 0)
+        self.assertEqual(config["resources"]["expected_q4_gib"], 6)
+
+    def test_salvage_timeout_is_size_aware_and_deadline_bounded(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_timeout")
+        info = {"phase_id": "j1m-test", "instance_info": {"ssh_user": "u", "ip": "127.0.0.1"}}
+        with tempfile.TemporaryDirectory() as directory:
+            identity = Path(directory) / "id"
+            known_hosts = Path(directory) / "known_hosts"
+            destination = Path(directory) / "artifacts"
+            with mock.patch.object(orchestrator.sf, "_preflight"), mock.patch.object(orchestrator.sf, "scp_base", return_value=["scp"]), mock.patch.object(orchestrator, "_remote", side_effect=lambda command, timeout: {"status": "completed", "timeout": timeout}) as remote:
+                result = orchestrator._salvage(info, identity, known_hosts, destination, ["Qwen3.5-9B-Q4_K_M.gguf"], q4_expected_gib=6, deadline=time.monotonic() + 1000)
+            self.assertEqual(result[0]["status"], "completed")
+            self.assertGreaterEqual(remote.call_args.kwargs["timeout"], 360)
+            with mock.patch.object(orchestrator.sf, "_preflight"), mock.patch.object(orchestrator.sf, "scp_base", return_value=["scp"]), mock.patch.object(orchestrator, "_remote", side_effect=lambda command, timeout: {"status": "completed", "timeout": timeout}) as remote:
+                orchestrator._salvage(info, identity, known_hosts, destination, ["Qwen3.5-9B-Q4_K_M.gguf"], q4_expected_gib=6, deadline=time.monotonic() + 100)
+            self.assertLessEqual(remote.call_args.kwargs["timeout"], 70)
 
 
 class LoopbackLifecycleTests(unittest.TestCase):
