@@ -489,6 +489,59 @@ class StaticSafetyTests(unittest.TestCase):
         with self.assertRaises(sf.ShadeformError):
             sf.verify_instance_ownership(info, instance_id="instance-owned-1", phase_id="phase-a", nonce=nonce, ssh_key_id="key-owned-1")
 
+    def test_malformed_owned_ledger_refuses_before_provider_delete(self):
+        from scripts import shadeform_lifecycle as sf
+        from scripts import shadeform_teardown as teardown
+        phase = "malformed-owned-ledger"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original_root = sf.RUNTIME_ROOT
+            sf.RUNTIME_ROOT = root / "runtime"
+            sf.RUNTIME_ROOT.mkdir()
+            try:
+                payload = {
+                    "phase_id": phase, "run_id": "test", "instance_id": "instance-owned-1",
+                    "ownership_nonce": "0123456789abcdef0123456789abcdef", "ssh_key_id": "key-owned-1",
+                    "ssh_key_name": "key", "gpu": "A100", "cloud": "hyperstack", "region": "r",
+                    "hourly_usd": 1.0, "created_at_utc": sf.utc_now().isoformat(), "status": "created",
+                }
+                ledger = sf.runtime_ledger_path(phase)
+                for field, value in (("created_at_utc", "2026-01-01T00:00:00"), ("hourly_usd", float("nan"))):
+                    invalid = {**payload, field: value}
+                    ledger.write_text(json.dumps(invalid), encoding="utf-8")
+                    with mock.patch.object(teardown.shadeform, "_delete_instance") as delete:
+                        with self.assertRaises(sf.ShadeformError):
+                            teardown.teardown_exact(phase, "instance-owned-1", env_file=root / "missing.env")
+                    delete.assert_not_called()
+            finally:
+                sf.RUNTIME_ROOT = original_root
+
+    def test_cost_bookkeeping_failure_still_revokes_key_after_confirmed_delete(self):
+        from scripts import shadeform_lifecycle as sf
+        from scripts import shadeform_teardown as teardown
+        phase = "cost-bookkeeping-key-cleanup"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            originals = (sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER)
+            sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = root / "runtime", root / "ledger.md", root / "cost.jsonl"
+            sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
+            env = root / "env"
+            env.write_text("SHADEFORM_API_KEY=stub-api\n", encoding="utf-8")
+            sf.write_owned_resource(sf.OwnedResource(
+                phase_id=phase, run_id="test", instance_id="instance-cost-1", ownership_nonce="0123456789abcdef0123456789abcdef",
+                ssh_key_id="key-cost-1", ssh_key_name="key", gpu="A100", cloud="hyperstack", region="r", hourly_usd=1.0,
+                created_at_utc=sf.utc_now().isoformat(),
+            ))
+            try:
+                with mock.patch.object(teardown.shadeform, "_delete_instance", return_value={"success": True}), \
+                        mock.patch.object(teardown.shadeform, "append_cost_event", side_effect=ValueError("ledger shape")), \
+                        mock.patch.object(teardown.shadeform, "delete_ssh_key", return_value={"success": True}) as key_delete:
+                    receipt = teardown.teardown_exact(phase, "instance-cost-1", env_file=env)
+                key_delete.assert_called_once_with("stub-api", phase, "key-cost-1")
+                self.assertEqual(receipt["cost_bookkeeping_error_type"], "ValueError")
+            finally:
+                sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = originals
+
     def test_teardown_deletes_after_salvage_failure_and_revokes_key_on_delete_failure(self):
         from scripts import shadeform_lifecycle as sf
         from scripts import shadeform_teardown as teardown
@@ -599,6 +652,27 @@ class StaticSafetyTests(unittest.TestCase):
             for event in invalid:
                 with self.subTest(event=event), self.assertRaises(ValueError):
                     sf.append_cost_event(event)
+
+    def test_markdown_cost_fallback_requires_known_status_and_pending_blocks(self):
+        from scripts import shadeform_lifecycle as sf
+        with tempfile.TemporaryDirectory() as directory:
+            original_cost, original_markdown = sf.COST_LEDGER, sf.MARKDOWN_LEDGER
+            sf.COST_LEDGER = Path(directory) / "missing-cost.jsonl"
+            sf.MARKDOWN_LEDGER = Path(directory) / "ledger.md"
+            try:
+                sf.MARKDOWN_LEDGER.write_text("\n".join([
+                    sf.LEDGER_HEADER,
+                    "| 2026-01-01 | phase-a | instance-md-1 | A100 | $1.0000 | run | pending | $0.0000 | 0.0 |",
+                ]) + "\n", encoding="utf-8")
+                self.assertEqual(sf.ledger_spend(), (0.0, ["instance-md-1"]))
+                sf.MARKDOWN_LEDGER.write_text("\n".join([
+                    sf.LEDGER_HEADER,
+                    "| 2026-01-01 | phase-a | instance-md-1 | A100 | $1.0000 | run | bogus | $0.0000 | 0.0 |",
+                ]) + "\n", encoding="utf-8")
+                with self.assertRaises(sf.ShadeformError):
+                    sf.ledger_spend()
+            finally:
+                sf.COST_LEDGER, sf.MARKDOWN_LEDGER = original_cost, original_markdown
 
     def test_candidate_budget_includes_backstop_margin(self):
         from scripts import shadeform_lifecycle as sf

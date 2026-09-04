@@ -93,9 +93,12 @@ def _teardown_exact_locked(phase_id: str, exact: str, *, env_file: Path, salvage
         raise RuntimeError("provider did not confirm exact-resource deletion")
     receipt = {"schema": "local_bmo.shadeform.deletion-receipt.v1", "phase_id": phase_id, "instance_id": exact, "deletion": deletion, "salvage": salvage_receipt}
     record.status = "deleted"
-    elapsed_hours = max(0.0, (datetime.now(timezone.utc) - datetime.fromisoformat(record.created_at_utc)).total_seconds() / 3600.0)
-    settled_cost = round(record.hourly_usd * elapsed_hours, 6)
     try:
+        created_at = datetime.fromisoformat(record.created_at_utc)
+        elapsed_hours = max(0.0, (datetime.now(timezone.utc) - created_at).total_seconds() / 3600.0)
+        settled_cost = round(record.hourly_usd * elapsed_hours, 6)
+        if not shadeform._valid_cost(settled_cost):
+            raise ValueError("computed settled cost is not finite and nonnegative")
         shadeform.append_cost_event({"instance_id": exact, "phase_id": phase_id, "status": "settled", "actual_cost_usd": settled_cost})
         receipt["actual_cost_usd"] = settled_cost
         record.cost_usd = settled_cost
@@ -124,11 +127,18 @@ def _teardown_exact_locked(phase_id: str, exact: str, *, env_file: Path, salvage
             shadeform.write_owned_resource(record)
         except Exception as exc:
             receipt["record_bookkeeping_error_type"] = type(exc).__name__
-    # Persist the confirmed deletion before clearing ownership. If this write
-    # fails, the still-owned ledger is the safe retry handle; never make a
-    # missing receipt look like an already-cleaned phase.
-    _write_deletion_receipt(phase_id, receipt)
-    if key_cleanup_ok:
+    # Persist only after key cleanup has been attempted, so a receipt/ledger
+    # write failure can never bypass exact key revocation. If this fails,
+    # retain ownership for a safe retry rather than claiming an already-cleaned
+    # phase.
+    receipt_persisted = False
+    try:
+        _write_deletion_receipt(phase_id, receipt)
+        receipt_persisted = True
+    except Exception as exc:
+        receipt["deletion_receipt_error_type"] = type(exc).__name__
+        receipt["retry_required"] = True
+    if key_cleanup_ok and receipt_persisted:
         try:
             shadeform.clear_owned_resource(phase_id, exact)
         except Exception as exc:
@@ -139,6 +149,8 @@ def _teardown_exact_locked(phase_id: str, exact: str, *, env_file: Path, salvage
                 _write_deletion_receipt(phase_id, receipt)
             except Exception:
                 pass
+    if not receipt_persisted:
+        raise RuntimeError("deletion confirmed but deletion receipt could not be persisted")
     return receipt
 
 

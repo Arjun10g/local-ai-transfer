@@ -173,6 +173,16 @@ class ShadeformPreflightTests(unittest.TestCase):
                 with self.subTest(event=event), self.assertRaises(ValueError):
                     self.module.read_ledger(ledger)
 
+    def test_invalid_historical_line_is_not_hidden_by_later_valid_event(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Path(directory) / "ledger.jsonl"
+            ledger.write_text("\n".join([
+                json.dumps({"instance_id": "attempt-1", "status": "settled", "actual_cost_usd": float("nan")}),
+                json.dumps({"instance_id": "attempt-1", "status": "settled", "actual_cost_usd": 0.5}),
+            ]) + "\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                self.module.read_ledger(ledger)
+
 
 class RemoteExternalToolsGateTests(unittest.TestCase):
     def test_inherited_remote_qa_cannot_reach_provider(self):

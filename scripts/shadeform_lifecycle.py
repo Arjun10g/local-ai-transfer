@@ -67,6 +67,7 @@ NONCE = re.compile(r"^[0-9a-f]{32}$")
 LEDGER_HEADER = "| date | phase | instance id | gpu | $/hr | purpose | status | cost logged | idle min |"
 # Statuses after which a ledger row is history and may not be rewritten.
 TERMINAL_STATUSES = frozenset({"deleted", "deleted-key-cleanup-failed", "deleted-cost-bookkeeping-failed"})
+LEDGER_LIFECYCLE_STATUSES = frozenset({"created", "active", "delete-failed"}) | TERMINAL_STATUSES
 
 
 class ShadeformError(RuntimeError):
@@ -248,29 +249,76 @@ def read_owned_resource(phase_id: str) -> OwnedResource | None:
     path = runtime_ledger_path(phase_id)
     if not path.exists():
         return None
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ShadeformError(f"malformed phase ledger: {path}")
-    record = OwnedResource(**payload)
-    validate_resource_id(record.instance_id, field="ledger instance id")
-    validate_resource_id(record.ssh_key_id, field="ledger SSH key id")
-    validate_nonce(record.ownership_nonce)
-    if (record.ssh_public_key_fingerprint is not None and
-            re.fullmatch(r"[A-Za-z0-9+/]{43}", record.ssh_public_key_fingerprint) is None):
-        raise ShadeformError("malformed ledger SSH public-key fingerprint")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("ledger payload is not an object")
+        record = OwnedResource(**payload)
+        _validate_owned_resource(record)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError, OverflowError) as exc:
+        raise ShadeformError(f"malformed phase ledger: {path}") from exc
     if record.phase_id != validate_phase_id(phase_id):
         raise ShadeformError("phase ledger is bound to a different phase")
     return record
 
 
-def write_owned_resource(record: OwnedResource) -> None:
+def _validate_owned_resource(record: OwnedResource) -> None:
+    """Validate every field used by exact cleanup before returning a record."""
+
     validate_phase_id(record.phase_id)
+    for value, field, limit in (
+        (record.run_id, "run id", 128),
+        (record.ssh_key_name, "SSH key name", 256),
+        (record.gpu, "GPU", 128),
+        (record.cloud, "cloud", 128),
+        (record.region, "region", 128),
+    ):
+        if (not isinstance(value, str) or not value or len(value) > limit or
+                any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)):
+            raise ValueError(f"{field} is invalid")
     validate_resource_id(record.instance_id, field="ledger instance id")
     validate_resource_id(record.ssh_key_id, field="ledger SSH key id")
     validate_nonce(record.ownership_nonce)
+    if (isinstance(record.hourly_usd, bool) or not isinstance(record.hourly_usd, (int, float)) or
+            not math.isfinite(float(record.hourly_usd)) or record.hourly_usd <= 0):
+        raise ValueError("ledger hourly_usd must be finite and positive")
+    if not isinstance(record.created_at_utc, str) or len(record.created_at_utc) > 64:
+        raise ValueError("ledger created_at_utc is invalid")
+    created = datetime.fromisoformat(record.created_at_utc)
+    if created.tzinfo is None or created.utcoffset() is None:
+        raise ValueError("ledger created_at_utc must be timezone-aware")
+    if record.status not in LEDGER_LIFECYCLE_STATUSES:
+        raise ValueError("ledger status is invalid")
+    if record.cost_usd is not None and (not _valid_cost(record.cost_usd)):
+        raise ValueError("ledger cost_usd is invalid")
+    if (isinstance(record.idle_minutes, bool) or not isinstance(record.idle_minutes, (int, float)) or
+            not math.isfinite(float(record.idle_minutes)) or record.idle_minutes < 0):
+        raise ValueError("ledger idle_minutes is invalid")
+    if record.launcher_pid is not None and (isinstance(record.launcher_pid, bool) or
+            not isinstance(record.launcher_pid, int) or record.launcher_pid < 0):
+        raise ValueError("ledger launcher_pid is invalid")
+    for value, field in ((record.provider_status, "provider status"),
+                         (record.instance_type, "instance type"),
+                         (record.launcher_start_marker, "launcher start marker")):
+        if value is not None and (not isinstance(value, str) or len(value) > 256 or
+                                   any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)):
+            raise ValueError(f"ledger {field} is invalid")
+    for value, field in ((record.active_deadline_utc, "active deadline"),
+                         (record.run_deadline_utc, "run deadline")):
+        if value is not None:
+            if not isinstance(value, str) or len(value) > 64:
+                raise ValueError(f"ledger {field} is invalid")
+            parsed = datetime.fromisoformat(value)
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ValueError(f"ledger {field} must be timezone-aware")
     if (record.ssh_public_key_fingerprint is not None and
-            re.fullmatch(r"[A-Za-z0-9+/]{43}", record.ssh_public_key_fingerprint) is None):
-        raise ValueError("invalid ledger SSH public-key fingerprint")
+            (not isinstance(record.ssh_public_key_fingerprint, str) or
+             re.fullmatch(r"[A-Za-z0-9+/]{43}", record.ssh_public_key_fingerprint) is None)):
+        raise ValueError("malformed ledger SSH public-key fingerprint")
+
+
+def write_owned_resource(record: OwnedResource) -> None:
+    _validate_owned_resource(record)
     path = runtime_ledger_path(record.phase_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -381,12 +429,20 @@ def ledger_spend() -> tuple[float, list[str]]:
         row = _parse_ledger_row(line)
         if row is None:
             continue
+        status = row["status"].strip().lower()
+        if status not in {"pending", "settled"} and status not in LEDGER_LIFECYCLE_STATUSES:
+            raise ShadeformError(f"markdown ledger entry {row['instance_id']} has an unknown status")
         cost = row["cost"].strip().lstrip("$")
-        try:
-            parsed_cost = float(cost)
-        except ValueError:
+        # Legacy operational rows remain pending until an exact terminal
+        # status (for example, ``deleted``) records a numeric cost. Numeric
+        # values on a nonterminal row must not make it look settled.
+        if status == "pending" or status not in TERMINAL_STATUSES | {"settled"}:
             pending.append(row["instance_id"])
             continue
+        try:
+            parsed_cost = float(cost)
+        except (TypeError, ValueError):
+            raise ShadeformError(f"markdown ledger entry {row['instance_id']} has invalid settled cost") from None
         if not math.isfinite(parsed_cost) or parsed_cost < 0:
             raise ShadeformError(f"markdown ledger entry {row['instance_id']} has invalid cost")
         spent += parsed_cost

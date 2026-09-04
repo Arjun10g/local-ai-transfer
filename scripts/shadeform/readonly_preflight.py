@@ -231,6 +231,14 @@ def read_ledger(path: Path | None) -> tuple[float, list[dict], bool]:
             raise ValueError(f"ledger line {number} is invalid JSON") from exc
         if not isinstance(event, dict):
             raise ValueError(f"ledger line {number} is not an object")
+        status = event.get("status", event.get("cost_status"))
+        if status not in {"pending", "settled"}:
+            raise ValueError(f"ledger line {number} has an unknown status")
+        if status == "pending":
+            if "actual_cost_usd" in event or not _valid_cost(event.get("estimated_cost_usd")):
+                raise ValueError(f"ledger line {number} has an invalid pending cost")
+        elif "estimated_cost_usd" in event or not _valid_cost(event.get("actual_cost_usd")):
+            raise ValueError(f"ledger line {number} has invalid settled actual cost")
         identity_key = event.get("instance_id") or event.get("run_id") or f"line:{number}"
         if not isinstance(identity_key, str) or not identity_key or len(identity_key) > 256:
             raise ValueError(f"ledger line {number} has an invalid identity")
