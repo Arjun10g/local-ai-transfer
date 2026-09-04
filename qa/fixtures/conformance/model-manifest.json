@@ -1,0 +1,1 @@
+{"positive":{"model":"Qwen3.5-9B","quantization":"Q4_K_M","modality":"text"},"negative":{"model":"Qwen3.5-9B","quantization":"Q4_K_M","modality":"vision"}}

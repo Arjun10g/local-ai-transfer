@@ -1,0 +1,17 @@
+{
+  "schema_version": "threat-inventory.v1",
+  "owner": "S4",
+  "evidence_kind": "fixture/static",
+  "threats": [
+    {"id":"THR-LOCALHOST-001","threat":"Non-loopback bind or unauthenticated state change","tests":["SEC-001-loopback"],"gate":"SOL-G0/SOL-G2","owner":"S1/S4","status":"fixture-covered"},
+    {"id":"THR-PATH-001","threat":"Traversal, ADS, UNC/device path escape","tests":["SEC-001-path"],"gate":"SOL-G0/SOL-G3","owner":"S3/S4","status":"fixture-covered"},
+    {"id":"THR-HTTP-001","threat":"Oversized or deeply nested JSON denial of service","tests":["SEC-001-json-limits"],"gate":"SOL-G1/SOL-G6","owner":"S1/S4","status":"fixture-covered"},
+    {"id":"THR-TOOL-001","threat":"Malformed tool envelope causes execution","tests":["SEC-001-tool-envelope"],"gate":"SOL-G4/SOL-G6","owner":"S3/S4","status":"fixture-covered"},
+    {"id":"THR-EGRESS-001","threat":"Unsafe URL or unconfirmed network destination","tests":["SEC-001-url"],"gate":"SOL-G4/SOL-G6","owner":"S3/S4","status":"fixture-covered"},
+    {"id":"THR-PROCESS-001","threat":"Shell/argument injection","tests":["SEC-001-process"],"gate":"SOL-G3/SOL-G4","owner":"S3/S4","status":"fixture-covered"},
+    {"id":"THR-SECRET-001","threat":"Environment or diagnostic output exposes credentials","tests":["SI-001-env-presence"],"gate":"SOL-G0/SOL-G6","owner":"S4","status":"regression-covered"},
+    {"id":"THR-MODEL-001","threat":"Tampered model/hash/vision artifact bypass","tests":[],"gate":"SOL-G2/SOL-G6","owner":"S1/S2/S4","status":"SKIP-no-model-contract"},
+    {"id":"THR-OFFLINE-001","threat":"Native inference makes network egress","tests":[],"gate":"SOL-G2/SOL-G6","owner":"S1/S4","status":"SKIP-no-engine"},
+    {"id":"THR-ORPHAN-001","threat":"Child process survives shutdown","tests":[],"gate":"SOL-G3/SOL-G6","owner":"S1/S3/S4","status":"SKIP-no-host"}
+  ]
+}

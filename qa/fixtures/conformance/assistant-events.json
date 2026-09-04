@@ -1,0 +1,1 @@
+{"positive":{"version":"0.1.0","event_id":"event_001","event":"message.started","request_id":"request_001","session_id":"session_001","sequence":0,"timestamp":"2026-09-03T00:00:00Z","data":{}},"negative":{"version":"0.1.0","event_id":"bad","event":"not-an-event","request_id":"request_001","session_id":"session_001","sequence":0,"timestamp":"2026-09-03T00:00:00Z","data":{}}}

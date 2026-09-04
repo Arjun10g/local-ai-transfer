@@ -1,14 +1,28 @@
 #!/usr/bin/env node
+import { readFile } from 'node:fs/promises';
 import { FixtureEngineClient } from './host/engine/fixture-engine.mjs';
+import { NativeEngineClient } from './host/engine/native-engine-client.mjs';
 import { ConversationController } from './host/agent/controller.mjs';
 import { HostServer } from './host/server/host-server.mjs';
 import { mergeConfig } from './host/agent/config.mjs';
 
-const config = mergeConfig({ engine: { mode: 'fixture' }, network: { provider: 'disabled' } });
-const engine = new FixtureEngineClient();
+const configPath = process.env.LAE_CONFIG_PATH;
+let fileConfig = {};
+if (configPath) { try { fileConfig = JSON.parse(await readFile(configPath, 'utf8')); } catch (error) { throw new Error(`config_load_failed: ${error.message}`); } }
+const configuredMode = fileConfig.engine?.mode;
+const envMode = process.env.LAE_ENGINE_MODE;
+if (envMode && !['fixture', 'native'].includes(envMode)) throw new Error('invalid LAE_ENGINE_MODE; expected fixture or native');
+if (envMode && configuredMode && envMode !== configuredMode) throw new Error('engine mode conflict between config and LAE_ENGINE_MODE');
+const mode = envMode ?? configuredMode ?? 'fixture';
+const endpoint = process.env.LAE_ENGINE_ENDPOINT ?? fileConfig.engine?.endpoint;
+const token = process.env.LAE_ENGINE_TOKEN;
+if (mode === 'fixture' && (endpoint || token)) throw new Error('native engine settings supplied while fixture mode is selected');
+const config = mergeConfig({ ...fileConfig, engine: { ...(fileConfig.engine ?? {}), mode } });
+const engine = mode === 'native' ? new NativeEngineClient({ endpoint, token }) : new FixtureEngineClient();
+if (mode === 'native') await engine.waitReady();
 const controller = new ConversationController({ engine });
 const host = new HostServer({ controller, engine, config });
 const address = await host.listen(Number(process.env.LAE_PORT ?? 0));
-console.log(JSON.stringify({ ready: true, host: address.host, port: address.port, engine: 'fixture-0.1.0', network: 'disabled' }));
+console.log(JSON.stringify({ ready: true, host: address.host, port: address.port, engine: mode, network: config.network.provider }));
 const shutdown = async () => { await host.close(); process.exit(0); };
 process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown);

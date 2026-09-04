@@ -17,6 +17,14 @@ contents. Clients must branch on `code`, not message text.
 | `request_cancelled` | 499 | Generation was cancelled |
 | `shutdown` | 503 | Engine is stopping/stopped |
 | `internal_error` | 500 | Unexpected fixture-engine failure |
+| `model_path_not_absolute` | 400 | Model path is not an explicit absolute local path |
+| `model_symlink_forbidden` | 400 | Model path resolves through a symlink |
+| `model_size_mismatch` | 400 | Model size differs from manifest profile |
+| `model_hash_mismatch` | 400 | Model SHA-256 differs from manifest profile |
+| `model_mmproj_forbidden` | 400 | Text-only runtime rejects a vision projection |
+| `gguf_magic_invalid` | 400 | GGUF magic is invalid |
+| `gguf_version_unsupported` | 400 | GGUF version is unsupported |
+| `model_architecture_mismatch` | 400 | GGUF architecture differs from Qwen3.5 profile |
 
 The fixture uses only these codes and never silently falls back to another
 backend or model.

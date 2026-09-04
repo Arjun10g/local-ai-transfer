@@ -1,0 +1,38 @@
+{
+  "schema_version": "evidence-index.v1",
+  "owner": "S4",
+  "tasks": ["QA-001", "QA-002", "SEC-001", "REL-001"],
+  "evidence_kind": "fixture/static",
+  "generated_from_commit": "f71791357ac7d2846a64e76fad88d2b740467404",
+  "machine": {"os": "Darwin", "architecture": "arm64", "python": "3.14.6", "target_windows": "UNPROVEN", "shadeform": "UNPROVEN", "intel_profile": "UNPROVEN"},
+  "commands": [
+    "python3 -m unittest discover -v",
+    "python3 -m qa.conformance.runner --output out/evidence/conformance.json",
+    "python3 -m qa.adversarial.run --output out/evidence/security.json",
+    "python3 -m qa.harness.runner run --build-id fixture-local --output out/evidence/manifest.json",
+    "python3 -m qa.harness.runner audit-env --input qa/fixtures/security/si-001.env --allow SAFE_MODE --output out/evidence/environment.json",
+    "python3 scripts/package/scan.py release/windows",
+    "python3 scripts/test/run_qa.py --output out/evidence/qa-local/summary.json",
+    "node --test tests/host/fixture-host.test.mjs",
+    "cmake -S . -B out/build/qa-local -DCMAKE_BUILD_TYPE=Release && cmake --build out/build/qa-local -j2 && ctest --test-dir out/build/qa-local --output-on-failure"
+  ],
+  "results": {
+    "python_unit": {"passed": 12, "failed": 0, "skipped": 0},
+    "contract_conformance": {"passed": 11, "failed": 0, "negative_cases": 11},
+    "security_fixtures": {"passed": 7, "failed": 0, "includes": ["SEC-001", "SI-001"]},
+    "node_host_fixture": {"passed": 10, "failed": 0},
+    "native_fixture_ctest": {"passed": 2, "failed": 0, "platform": "Darwin arm64"},
+    "portable_skeleton_scan": {"status": "PASS", "dependencies": "SKIP-no-binaries", "native_windows_launch": "SKIP"},
+    "shadeform_job_receipt": {"valid_fixture": "PASS", "invalid_cleanup_budget_fixture": "REJECTED_AS_EXPECTED", "provisioning": "NOT_RUN"},
+    "package_builder_without_engine": {"status": "REJECTED_AS_EXPECTED", "reason": "missing-required:lae-engine-cpu.exe"}
+  },
+  "si_001_regression": {"status": "PASS", "fixture": "qa/fixtures/security/si-001.env", "assertion": "only allowlisted SAFE_MODE key presence is emitted; git_access/API_TOKEN names and values are absent"},
+  "findings": [],
+  "limitations": [
+    "No accepted Qwen3.5-9B Q4_K_M GGUF, source/conversion receipt, tensor inventory, or oracle was available.",
+    "The CMake and Node runs are fixture evidence on local macOS arm64, not Shadeform or target Windows x64 evidence.",
+    "The Windows tree is a non-runnable skeleton without lae-engine-cpu.exe; no native DLL loader or clean-machine launch was performed.",
+    "No Intel Vulkan/SYCL, real-model parity, offline firewall/socket proof, performance, soak, or target hardware receipt was run."
+  ],
+  "gate_recommendation": {"qa_security_scaffolding": "CONDITIONAL_PASS", "phase_0_release_gate": "NOT_READY", "rationale": "Independent fixture/static checks are green, but mandatory real-model, Shadeform, native Windows, offline, and target-profile evidence remains unrun."}
+}

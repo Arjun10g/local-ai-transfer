@@ -6,6 +6,10 @@
     {"code":"invalid_request","http_status":400},{"code":"request_too_large","http_status":413},
     {"code":"not_ready","http_status":503},{"code":"busy","http_status":409},
     {"code":"request_cancelled","http_status":499},{"code":"shutdown","http_status":503},
-    {"code":"internal_error","http_status":500}
+    {"code":"internal_error","http_status":500},{"code":"model_path_not_absolute","http_status":400},
+    {"code":"model_symlink_forbidden","http_status":400},{"code":"model_size_mismatch","http_status":400},
+    {"code":"model_hash_mismatch","http_status":400},{"code":"model_mmproj_forbidden","http_status":400},
+    {"code":"gguf_magic_invalid","http_status":400},{"code":"gguf_version_unsupported","http_status":400},
+    {"code":"model_architecture_mismatch","http_status":400}
   ]
 }

@@ -58,7 +58,7 @@ export class ConversationController {
         if (controller.signal.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' });
         session.state = calls ? 'CONTINUING_MODEL' : 'INFERENCING'; emit('message.started', { mode, state: session.state, continuation: calls > 0 });
         let callText = ''; let gotCall = false; let usage;
-        for await (const frame of this.engine.generate({ requestId, messages: session.history, mode, signal: controller.signal })) {
+        for await (const frame of this.engine.generate({ requestId, sessionId: session.id, messages: session.history, mode, signal: controller.signal })) {
           if (frame.kind === 'text_delta') { text += frame.text; emit('message.delta', { text: frame.text }); }
           else if (frame.kind === 'tool_call_chunk') { gotCall = true; callText += frame.text; if (Buffer.byteLength(callText) > 32768) throw new EnvelopeError('tool_call_too_large', 'tool call exceeds limit'); }
           else if (frame.kind === 'done') usage = frame.usage;
