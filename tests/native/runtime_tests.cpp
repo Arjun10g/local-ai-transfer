@@ -2,6 +2,9 @@
 #include "../../native/engine/engine.hpp"
 #include "../../native/model_validation/model_validator.hpp"
 #include "../../native/server/http_server.hpp"
+#include "../../native/server/chat_request.hpp"
+#include "../../native/backend/llama_chat_template.hpp"
+#include "../../native/backend/llama_backend.hpp"
 
 #include <cassert>
 #include <iostream>
@@ -13,6 +16,46 @@
 int main() {
   using namespace lae;
   assert(json_escape("\"\\\n\t\x01") == "\\\"\\\\\\n\\t\\u0001");
+  assert(context_budget_fits(8, 8, 16));
+  assert(!context_budget_fits(8, 9, 16));
+  assert(!context_budget_fits(17, 1, 16));
+  assert(!context_budget_fits(0, 0, 0));
+  ChatRequest parsed;
+  std::string parse_error;
+  assert(parse_chat_request(R"({"model":"fixture","session_id":"s","messages":[{"role":"system","content":"policy"},{"role":"user","content":"say \"hi\""},{"role":"tool","name":"time.now","tool_call_id":"call-1","content":"noon"}],"stream":true,"max_tokens":4,"mode":"normal"})", parsed, parse_error));
+  assert(parsed.generation.messages.size() == 3);
+  assert(parsed.generation.messages[0].role == "system");
+  assert(parsed.generation.messages[1].content == "say \"hi\"");
+  assert(parsed.generation.messages[2].name == "time.now");
+  assert(parsed.stream && parsed.generation.max_tokens == 4 && !parsed.generation.enable_thinking);
+  ChatRequest deep_request;
+  assert(parse_chat_request(R"({"model":"fixture","messages":[{"role":"user","content":"hello"}],"mode":"deep"})", deep_request, parse_error));
+  assert(deep_request.generation.enable_thinking);
+#if LAE_ENABLE_LLAMA_CPP
+  // Test-only template fixture exercises the pinned Jinja input contract; no
+  // Qwen template source is embedded in production.
+  PinnedChatTemplate template_fixture;
+  template_fixture.load(R"jinja({% for message in messages %}{{ message.role }}:{{ message.content }}
+{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant
+{% if enable_thinking %}<think>
+{% else %}<think>
+
+</think>
+
+{% endif %}{% endif %})jinja");
+  GenerationRequest::ChatMessage test_message{"user", "hello", "", ""};
+  const auto thinking_off = template_fixture.render({test_message}, false);
+  const auto thinking_on = template_fixture.render({test_message}, true);
+  assert(thinking_off.find("<think>\n\n</think>\n\n") != std::string::npos);
+  assert(thinking_on.find("<think>\n") != std::string::npos && thinking_on.find("</think>") == std::string::npos);
+#endif
+  assert(!parse_chat_request(R"({"model":"fixture","messages":[{"role":"developer","content":"no"}]})", parsed, parse_error));
+  assert(parse_error == "invalid_request");
+  assert(!parse_chat_request(R"({"model":"fixture","messages":[{"role":"user","content":"ok","extra":true}]})", parsed, parse_error));
+  assert(!parse_chat_request(R"({"model":"fixture","messages":[{"role":"user","content":"ok"}],"unknown":1})", parsed, parse_error));
+  assert(!parse_chat_request(R"({"model":"fixture","messages":[{"role":"user","content":"unterminated}]})", parsed, parse_error));
+  assert(parse_error == "invalid_json");
+  assert(!parse_chat_request(std::string(R"({"model":"fixture","messages":[{"role":"user","content":" )") + std::string(32769, 'x') + R"("}]})", parsed, parse_error));
   Engine engine(std::make_unique<FixtureBackend>());
   assert(engine.state() == LifecycleState::NEW);
   engine.initialize();
@@ -21,10 +64,13 @@ int main() {
   const auto session = engine.create_session();
   assert(session.id == "sess-00000001");
   assert(engine.has_session(session.id));
+  GenerationRequest fixture_request;
+  fixture_request.prompt = "ignored";
+  fixture_request.max_tokens = 64;
 
   std::string output;
   auto cancellation = std::make_shared<std::atomic<bool>>(false);
-  auto result = engine.generate("req-test", session.id, {"ignored", 64}, cancellation,
+  auto result = engine.generate("req-test", session.id, fixture_request, cancellation,
                                [&](const std::string& token) { output += token; return true; });
   assert(result.finish_reason == "stop");
   assert(output == "fixture response ready for the local engine");
@@ -32,7 +78,8 @@ int main() {
   auto cancelled = std::make_shared<std::atomic<bool>>(false);
   cancelled->store(true);
   output.clear();
-  result = engine.generate("req-cancelled", session.id, {"ignored", 8}, cancelled,
+  fixture_request.max_tokens = 8;
+  result = engine.generate("req-cancelled", session.id, fixture_request, cancelled,
                            [&](const std::string& token) { output += token; return true; });
   assert(result.finish_reason == "cancelled");
   assert(output.empty());

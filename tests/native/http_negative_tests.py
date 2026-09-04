@@ -54,6 +54,18 @@ def main():
         lowered = {key.lower(): value for key, value in valid[1].items()}
         if "access-control-allow-origin" in lowered or any(value == "*" for value in lowered.values()):
             raise AssertionError("fixture server emitted permissive CORS headers")
+        chat_headers = {**auth, "Host": f"127.0.0.1:{port}", "Content-Type": "application/json"}
+        valid_chat = json.dumps({"model": "fixture", "messages": [{"role": "system", "content": "policy"}, {"role": "user", "content": "hello"}], "stream": False, "max_tokens": 2})
+        assert_status(request(port, "POST", "/v1/chat/completions", chat_headers, valid_chat), 200, "ordered message history")
+        negative_bodies = [
+            (json.dumps({"model": "fixture", "messages": [{"role": "developer", "content": "no"}]}), "unsupported role"),
+            (json.dumps({"model": "fixture", "messages": [{"role": "user", "content": "ok", "extra": True}]}), "unknown message field"),
+            (json.dumps({"model": "fixture", "messages": [{"role": "user", "content": "ok"}], "unknown": 1}), "unknown request field"),
+            (json.dumps({"model": "fixture", "messages": [{"role": "user", "content": "ok"}], "max_tokens": 1.5}), "fractional max_tokens"),
+            (json.dumps({"model": "fixture", "messages": [{"role": "user", "content": "ok"}, {"role": "system", "content": "late"}]}), "system ordering"),
+        ]
+        for body, label in negative_bodies:
+            assert_status(request(port, "POST", "/v1/chat/completions", chat_headers, body), 400, label)
     finally:
         process.send_signal(signal.SIGTERM)
         try:

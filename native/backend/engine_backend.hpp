@@ -16,7 +16,17 @@ struct BackendConfig {
 
 struct GenerationRequest {
   std::string prompt;
+  // Ordered host/native chat history. The fixture may ignore the content, but
+  // real backends must render this complete history through the model template.
+  struct ChatMessage {
+    std::string role;
+    std::string content;
+    std::string name;
+    std::string tool_call_id;
+  };
+  std::vector<ChatMessage> messages;
   unsigned max_tokens = 8;
+  bool enable_thinking = false;
 };
 
 struct GenerationResult {

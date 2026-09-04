@@ -1,6 +1,13 @@
 #include "llama_backend.hpp"
+#include "llama_chat_template.hpp"
 
 #include <stdexcept>
+
+namespace lae {
+bool context_budget_fits(size_t prompt_tokens, unsigned max_tokens, unsigned context_tokens) {
+  return context_tokens != 0 && prompt_tokens <= context_tokens && max_tokens <= context_tokens - prompt_tokens;
+}
+}  // namespace lae
 
 #ifdef LAE_ENABLE_LLAMA_CPP
 #include "llama.h"
@@ -19,6 +26,7 @@ struct LlamaBackend::Impl {
   unsigned context_tokens = 8192;
   Cancellation cancellation;
   bool backend_initialized = false;
+  PinnedChatTemplate chat_template;
 };
 
 namespace {
@@ -26,6 +34,7 @@ bool abort_callback(void* data) {
   const auto* cancellation = static_cast<const Cancellation*>(data);
   return cancellation && *cancellation && (*cancellation)->load();
 }
+
 }
 
 LlamaBackend::LlamaBackend() : impl_(new Impl()) {}
@@ -42,6 +51,9 @@ void LlamaBackend::initialize(const BackendConfig& config) {
   model_params.load_mtp = false;
   impl_->model = llama_model_load_from_file(config.model_path.c_str(), model_params);
   if (!impl_->model) throw std::runtime_error("llama model load failed");
+  const char* embedded_template = llama_model_chat_template(impl_->model, nullptr);
+  if (!embedded_template || !*embedded_template) throw std::runtime_error("llama chat template unavailable; raw prompt mode is not accepted");
+  impl_->chat_template.load(embedded_template);
   auto context_params = llama_context_default_params();
   context_params.n_ctx = config.context_tokens == 0 ? 8192 : config.context_tokens;
   context_params.n_batch = std::min<uint32_t>(context_params.n_ctx, 512);
@@ -67,12 +79,13 @@ GenerationResult LlamaBackend::generate(const GenerationRequest& request,
   impl_->cancellation = cancellation;
   reset();
   const auto* vocab = llama_model_get_vocab(impl_->model);
+  const std::string rendered = impl_->chat_template.render(request.messages, request.enable_thinking);
   std::vector<llama_token> prompt(4096);
-  int32_t count = llama_tokenize(vocab, request.prompt.c_str(), static_cast<int32_t>(request.prompt.size()), prompt.data(), static_cast<int32_t>(prompt.size()), true, false);
-  if (count < 0) { prompt.resize(static_cast<size_t>(-count)); count = llama_tokenize(vocab, request.prompt.c_str(), static_cast<int32_t>(request.prompt.size()), prompt.data(), -count, true, false); }
+  int32_t count = llama_tokenize(vocab, rendered.c_str(), static_cast<int32_t>(rendered.size()), prompt.data(), static_cast<int32_t>(prompt.size()), true, false);
+  if (count < 0) { prompt.resize(static_cast<size_t>(-count)); count = llama_tokenize(vocab, rendered.c_str(), static_cast<int32_t>(rendered.size()), prompt.data(), -count, true, false); }
   if (count <= 0) throw std::runtime_error("llama tokenization failed");
   prompt.resize(static_cast<size_t>(count));
-  if (prompt.size() >= impl_->context_tokens) throw std::invalid_argument("context limit exceeded");
+  if (!context_budget_fits(prompt.size(), request.max_tokens, impl_->context_tokens)) throw std::invalid_argument("context limit exceeded");
   llama_batch batch = llama_batch_init(static_cast<int32_t>(prompt.size()), 0, 1);
   for (size_t i = 0; i < prompt.size(); ++i) {
     batch.token[i] = prompt[i]; batch.pos[i] = static_cast<llama_pos>(i); batch.n_seq_id[i] = 1; batch.seq_id[i][0] = 0; batch.logits[i] = (i + 1 == prompt.size());

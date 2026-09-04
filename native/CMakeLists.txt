@@ -1,8 +1,10 @@
 add_library(lae_runtime
   backend/fixture_backend.cpp
   backend/llama_backend.cpp
+  backend/llama_chat_template.cpp
   engine/engine.cpp
   model_validation/model_validator.cpp
+  server/chat_request.cpp
   server/http_server.cpp
 )
 target_include_directories(lae_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -26,6 +28,15 @@ if(LAE_ENABLE_LLAMA_CPP)
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../vendor/llama.cpp llama.cpp EXCLUDE_FROM_ALL)
   target_compile_definitions(lae_runtime PUBLIC LAE_ENABLE_LLAMA_CPP LAE_COMPILED_LLAMA_CPP=1)
   target_include_directories(lae_runtime PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/llama.cpp/include)
+  target_include_directories(lae_runtime PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/llama.cpp/common ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/llama.cpp/vendor)
+  target_sources(lae_runtime PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/llama.cpp/common/unicode.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/llama.cpp/common/jinja/lexer.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/llama.cpp/common/jinja/parser.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/llama.cpp/common/jinja/runtime.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/llama.cpp/common/jinja/string.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/llama.cpp/common/jinja/value.cpp
+  )
   target_link_libraries(lae_runtime PRIVATE llama)
 else()
   target_compile_definitions(lae_runtime PUBLIC LAE_COMPILED_LLAMA_CPP=0)

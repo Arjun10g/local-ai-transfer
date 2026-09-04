@@ -18,7 +18,12 @@ validation first and then loads through the pinned llama.cpp adapter. Context is
 bounded to 8,192 by default and 16,384 maximum; CPU offload is mandatory and no
 Intel promotion is implied by this slice.
 
-The current adapter receives the API's extracted message content as a raw
-prompt. It does not yet apply the approved Qwen3.5 GGUF chat template or
-`enable_thinking` control, so this raw-prompt mode is non-accepted for Phase 2
-quality/parity and is retained only as an adapter/lifecycle bring-up path.
+The real adapter receives the complete ordered API message history and renders
+the GGUF-embedded template through the official same-pin llama.cpp Jinja
+evaluator (the selectively vendored `common/jinja` sources). It passes
+`enable_thinking=false` by default. Revision
+`3581ba0cf591b3f772fbb002de0f70e294bc0396` has no public template-kwargs API;
+the product therefore cannot override an embedded template's behavior beyond
+the official Jinja input and fails closed if that template is absent, cannot be
+parsed, or cannot render. No handwritten Qwen template or raw-prompt fallback
+is accepted.
