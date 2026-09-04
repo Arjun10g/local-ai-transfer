@@ -146,6 +146,25 @@ def scan_artifacts(output_dir: Path) -> dict[str, Any]:
     return payload
 
 
+def post_cleanup_verify(output_dir: Path) -> dict[str, Any]:
+    """Prove the remote filesystem no longer contains conversion intermediates."""
+
+    remaining_gguf = {path.name for path in output_dir.glob("*.gguf") if path.is_file()}
+    expected = {"Qwen3.5-9B-Q4_K_M.gguf"}
+    if remaining_gguf != expected:
+        raise ValueError("post-cleanup verification requires exactly the Q4 deployable GGUF")
+    forbidden_names = {
+        path.name for path in output_dir.iterdir()
+        if path.is_file() and any(term in path.name.lower() for term in ("mmproj", "vision"))
+    }
+    if forbidden_names:
+        raise ValueError("post-cleanup verification found a vision/mmproj artifact")
+    q4 = output_dir / "Qwen3.5-9B-Q4_K_M.gguf"
+    payload = {"schema": "local_bmo.j1m.post-cleanup-receipt.v1", "status": "verified", "inventory_scope": "post_cleanup_filesystem", "intermediates_absent": True, "remaining_gguf": sorted(remaining_gguf), "forbidden_artifacts": [], "q4": {"size_bytes": q4.stat().st_size, "sha256": _sha256(q4)}}
+    (output_dir / "post-cleanup-receipt.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return payload
+
+
 @contextlib.contextmanager
 def hf_token_file(token: str | None = None) -> Iterator[Path]:
     """Yield a 0600 token file and remove it on every exit path."""
@@ -243,18 +262,28 @@ def write_artifacts(output_dir: Path, names: list[str], *, source_lock: Path = S
     tensor = json.loads(tensor_path.read_text(encoding="utf-8"))
     if tensor.get("status") != "verified":
         raise ValueError("tensor metadata was not verified by the pinned GGUF reader")
-    artifact_hashes = {name: {"size_bytes": (output_dir / name).stat().st_size, "sha256": _sha256(output_dir / name)} for name in primary}
     toolchain_path = output_dir / "toolchain.json"
     if not toolchain_path.is_file():
         raise ValueError("toolchain receipt is required before model receipt")
     toolchain = json.loads(toolchain_path.read_text(encoding="utf-8"))
-    for required in ("command-receipt.json", "scan-receipt.json"):
+    for required in ("command-receipt.json", "scan-receipt.json", "post-cleanup-receipt.json"):
         if not (output_dir / required).is_file():
             raise ValueError(f"{required} is required before final manifest")
     command_receipt = json.loads((output_dir / "command-receipt.json").read_text(encoding="utf-8"))
     scan_receipt = json.loads((output_dir / "scan-receipt.json").read_text(encoding="utf-8"))
     required_receipt_fields = {"stage", "argv", "started_at_utc", "ended_at_utc", "exit_code", "status"}
-    if not isinstance(command_receipt, list) or not command_receipt or any(not isinstance(item, dict) or not required_receipt_fields.issubset(item) for item in command_receipt) or scan_receipt.get("status") != "verified" or scan_receipt.get("inventory_scope") != "pre_cleanup_conversion_outputs":
+    post_cleanup_receipt = json.loads((output_dir / "post-cleanup-receipt.json").read_text(encoding="utf-8"))
+    scan_artifacts = scan_receipt.get("artifacts")
+    expected_primary = {"Qwen3.5-9B-bf16.gguf", "Qwen3.5-9B-Q8_0.gguf", "Qwen3.5-9B-Q4_K_M.gguf"}
+    if not isinstance(scan_artifacts, list) or {item.get("name") for item in scan_artifacts if isinstance(item, dict)} != expected_primary or any(not isinstance(item, dict) or set(item) != {"name", "size_bytes", "sha256"} or not isinstance(item["size_bytes"], int) or not isinstance(item["sha256"], str) or len(item["sha256"]) != 64 for item in scan_artifacts):
+        raise ValueError("scan receipt does not contain exact validated intermediate hashes")
+    artifact_hashes = {item["name"]: {"size_bytes": item["size_bytes"], "sha256": item["sha256"]} for item in scan_artifacts}
+    q4 = output_dir / "Qwen3.5-9B-Q4_K_M.gguf"
+    current_q4 = {"size_bytes": q4.stat().st_size, "sha256": _sha256(q4)} if q4.is_file() else None
+    post_q4 = post_cleanup_receipt.get("q4")
+    if current_q4 != artifact_hashes.get("Qwen3.5-9B-Q4_K_M.gguf") or post_q4 != current_q4:
+        raise ValueError("Q4 hash/size does not agree across pre- and post-cleanup receipts")
+    if not isinstance(command_receipt, list) or not command_receipt or any(not isinstance(item, dict) or not required_receipt_fields.issubset(item) for item in command_receipt) or scan_receipt.get("status") != "verified" or scan_receipt.get("inventory_scope") != "pre_cleanup_conversion_outputs" or post_cleanup_receipt.get("status") != "verified" or post_cleanup_receipt.get("inventory_scope") != "post_cleanup_filesystem" or post_cleanup_receipt.get("intermediates_absent") is not True or post_cleanup_receipt.get("remaining_gguf") != ["Qwen3.5-9B-Q4_K_M.gguf"]:
         raise ValueError("command and scan receipts are not complete")
     converter_commands = [command for command in (commands or []) if any("convert_hf_to_gguf.py" in part for part in command) or "Q4_K_M" in command]
     (output_dir / "conversion-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.conversion-receipt.v1", "status": "conversion-complete", "text_only": True, "source_revision": source.get("revision"), "llama_cpp_revision": llama_revision, "artifacts": artifact_hashes, "converter_and_quantizer_argv": converter_commands, "command_receipt_sha256": _sha256(output_dir / "command-receipt.json"), "toolchain": toolchain, "no_mmproj": True, "no_mtp": True}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -262,7 +291,7 @@ def write_artifacts(output_dir: Path, names: list[str], *, source_lock: Path = S
     # The deployable manifest is self-verifiable after intermediates are
     # securely removed. Intermediate BF16/Q8 hashes remain in conversion
     # receipt, but are intentionally absent from the shipped bundle.
-    deployable = ["Qwen3.5-9B-Q4_K_M.gguf", "tensor-metadata.json", "source-model-receipt.json", "conversion-receipt.json", "model-receipt.json", "toolchain.json"]
+    deployable = ["Qwen3.5-9B-Q4_K_M.gguf", "tensor-metadata.json", "source-model-receipt.json", "conversion-receipt.json", "model-receipt.json", "toolchain.json", "post-cleanup-receipt.json"]
     bounded_tensor_metadata = {
         "status": tensor["status"],
         "tensor_count": tensor.get("tensor_count"),
@@ -313,8 +342,9 @@ def command_plan(config: dict[str, Any], source: str = "/scratch/hf/Qwen3.5-9B",
         [f"{llama['quantizer']}", f"{output}/Qwen3.5-9B-bf16.gguf", f"{output}/Qwen3.5-9B-Q4_K_M.gguf", "Q4_K_M"],
         [python_exec, runner, "--inspect-tensors", f"{output}/Qwen3.5-9B-Q4_K_M.gguf", f"{output}/tensor-metadata.json", "--source-receipt", f"{output}/source-model-receipt.json"],
         [python_exec, runner, "--scan", output],
-        [python_exec, runner, "--config", config_path, "--manifest", output],
         ["rm", "-f", f"{output}/Qwen3.5-9B-bf16.gguf", f"{output}/Qwen3.5-9B-Q8_0.gguf"],
+        [python_exec, runner, "--post-cleanup", output],
+        [python_exec, runner, "--config", config_path, "--manifest", output],
     ]
 
 
@@ -357,7 +387,7 @@ def run_commands(commands: list[list[str]], progress_path: Path, *, cwd: Path | 
             stage_receipt = {"stage": index + 1, "argv": command, "started_at_utc": started_at, "ended_at_utc": utc_now(), "exit_code": None, "status": "transport_timeout"}
         # Manifest creation and intermediate cleanup are administrative stages;
         # they intentionally do not mutate the immutable conversion receipt.
-        administrative = "--manifest" in command or (command and command[0] == "rm")
+        administrative = "--manifest" in command or "--post-cleanup" in command or (command and command[0] == "rm")
         all_stage_receipts.append(stage_receipt)
         if not administrative:
             receipts.append(stage_receipt)
@@ -425,6 +455,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--inspect-tensors", nargs=2, metavar=("GGUF", "OUTPUT"))
     parser.add_argument("--source-receipt", type=Path)
     parser.add_argument("--scan", type=Path)
+    parser.add_argument("--post-cleanup", type=Path)
     parser.add_argument("--execute", action="store_true", help="reserved for an already-approved host; never provisions")
     args = parser.parse_args(argv)
     config = load_config(args.config)
@@ -501,6 +532,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.scan:
         scan_artifacts(args.scan)
+        return 0
+    if args.post_cleanup:
+        post_cleanup_verify(args.post_cleanup)
         return 0
     if args.verify_source:
         receipt = verify_source(args.verify_source, args.lock)

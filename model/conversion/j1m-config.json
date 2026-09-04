@@ -19,7 +19,8 @@
   "python_dependencies": {
     "requirements_file": "requirements/requirements-convert_hf_to_gguf.txt",
     "local_gguf_package": "gguf-py",
-    "resolution_policy": "install only from pinned llama.cpp checkout requirements, then capture pip freeze"
+    "resolution_policy": "install only from pinned llama.cpp checkout requirements, then capture pip freeze",
+    "network_capture_boundary": "The first approved run may resolve wheels from the pinned checkout and records every wheel's exact filename, size, and SHA256 in wheelhouse-lock.json; all subsequent installation is offline from that verified wheelhouse and fails closed on any mismatch."
   },
   "text_only": true,
   "shadeform_target": {
@@ -70,9 +71,10 @@
       "source-model-receipt.json",
       "conversion-receipt.json",
       "model-receipt.json",
-      "toolchain.json"
-      ,"command-receipt.json",
-      "scan-receipt.json"
+      "toolchain.json",
+      "command-receipt.json",
+      "scan-receipt.json",
+      "post-cleanup-receipt.json"
     ],
     "local_fetch_allowlist": [
       "Qwen3.5-9B-Q4_K_M.gguf",
@@ -82,9 +84,10 @@
       "source-model-receipt.json",
       "conversion-receipt.json",
       "model-receipt.json",
-      "toolchain.json"
-      ,"command-receipt.json",
-      "scan-receipt.json"
+      "toolchain.json",
+      "command-receipt.json",
+      "scan-receipt.json",
+      "post-cleanup-receipt.json"
     ],
     "prove_fetch_allowlist": ["proving-receipt.json"],
     "vision_projection": "excluded"

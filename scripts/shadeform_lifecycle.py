@@ -26,6 +26,7 @@ What this repo changed from the donor:
 from __future__ import annotations
 
 import contextlib
+import base64
 import fcntl
 import hashlib
 import json
@@ -39,6 +40,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -50,6 +52,7 @@ API_BASE = "https://api.shadeform.ai/v1"
 RUNTIME_ROOT = ROOT / "experiments" / "runtime"
 MARKDOWN_LEDGER = ROOT / "experiments" / "LEDGER.md"
 COST_LEDGER = ROOT / "experiments" / "runtime" / "cost-ledger.jsonl"
+INCIDENTS = ROOT / "experiments" / "runtime" / "incidents.jsonl"
 # The donor's incident log lived in a sibling repository. Ours is in this lane,
 # in this repository, because a preflight that depends on a file outside the
 # checkout is a preflight that silently stops happening.
@@ -74,6 +77,14 @@ class ShadeformHTTPError(ShadeformError):
     def __init__(self, status: int, message: str) -> None:
         super().__init__(f"Shadeform HTTP {status}: {message}")
         self.status = status
+
+
+class AmbiguousProviderOutcome(ShadeformError):
+    """A create POST may have reached the provider but its result is unknown."""
+
+
+class MalformedProviderResponse(ShadeformError):
+    """A successful provider response could not be interpreted as its schema."""
 
 
 #: A backstop must exceed the run by this factor. Equality is not enough: at
@@ -132,6 +143,7 @@ class OwnedResource:
     active_deadline_utc: str | None = None
     run_deadline_utc: str | None = None
     instance_type: str | None = None
+    launcher_start_marker: str | None = None
 
 
 def utc_now() -> datetime:
@@ -192,6 +204,33 @@ def new_ownership_nonce() -> str:
 
 def runtime_ledger_path(phase_id: str) -> Path:
     return RUNTIME_ROOT / f"{validate_phase_id(phase_id)}.json"
+
+
+def process_start_marker(pid: int | None) -> str | None:
+    """Return Linux process start ticks, preventing PID reuse when available."""
+
+    if pid is None or pid <= 0:
+        return None
+    try:
+        stat_text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        after_comm = stat_text.rsplit(")", 1)[1].split()
+        return after_comm[19]  # field 22 (starttime), after pid/comm fields
+    except (OSError, IndexError):
+        return None
+
+
+@contextmanager
+def phase_cleanup_lock(phase_id: str):
+    """Serialize launcher/watchdog teardown for one phase without account scope."""
+
+    path = RUNTIME_ROOT / f"{validate_phase_id(phase_id)}.cleanup.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def read_owned_resource(phase_id: str) -> OwnedResource | None:
@@ -329,6 +368,34 @@ def append_cost_event(event: dict[str, Any]) -> None:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
 
+def append_incident(event: dict[str, Any]) -> None:
+    """Persist bounded incident metadata without recording secret material."""
+
+    if not isinstance(event, dict) or not event.get("incident") or not event.get("phase_id"):
+        raise ValueError("incident requires incident and phase_id")
+    INCIDENTS.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = INCIDENTS.with_suffix(".lock")
+    with lock_path.open("a+b") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        with INCIDENTS.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({**event, "recorded_at_utc": utc_now().isoformat()}, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def is_ambiguous_transport(exc: BaseException) -> bool:
+    """Classify only an explicitly wrapped create outcome as ambiguous.
+
+    ``HTTPError`` is a ``URLError`` subclass, so inspecting exception causes
+    here would incorrectly turn a definitive provider rejection into a pending
+    bill.  ``create_instance`` is the only caller that is allowed to establish
+    this classification.
+    """
+
+    return isinstance(exc, AmbiguousProviderOutcome)
+
+
 def update_markdown_ledger(record: OwnedResource) -> None:
     """Upsert exactly one human-readable row for one provisioned resource.
 
@@ -455,7 +522,7 @@ def request(
         raise ShadeformError(f"Shadeform request failed for {method} {path}: {exc}") from exc
     parsed = json.loads(raw or "{}")
     if not isinstance(parsed, dict):
-        raise ShadeformError("Shadeform response was not a JSON object")
+        raise MalformedProviderResponse("Shadeform response was not a JSON object")
     return parsed
 
 
@@ -693,6 +760,8 @@ def _rank_candidates(
 
 
 def create_keypair(directory: Path) -> tuple[Path, str]:
+    directory.mkdir(parents=True, exist_ok=True)
+    directory.chmod(stat.S_IRWXU)
     private = directory / "id_ed25519"
     subprocess.run(
         ["ssh-keygen", "-t", "ed25519", "-N", "", "-q", "-f", str(private)],
@@ -730,6 +799,24 @@ def add_ssh_key(api_key: str, phase_id: str, name: str, public_key: str) -> str:
     return validate_resource_id(response.get("id"), field="created SSH key id")
 
 
+def _canonical_public_key(value: object) -> tuple[str, str]:
+    """Validate one authorized-key line and ignore only its optional comment."""
+
+    if not isinstance(value, str):
+        raise ValueError("SSH public key is not text")
+    fields = value.strip().split()
+    if len(fields) < 2 or len(fields) > 3:
+        raise ValueError("SSH public key has malformed or extra fields")
+    algorithm, material = fields[:2]
+    if algorithm != "ssh-ed25519":
+        raise ValueError("ephemeral key must use ssh-ed25519")
+    try:
+        base64.b64decode(material.encode("ascii"), validate=True)
+    except (ValueError, UnicodeEncodeError):
+        raise ValueError("SSH public key material is not valid base64") from None
+    return algorithm, material
+
+
 def delete_ssh_key(api_key: str, phase_id: str, key_id: str) -> dict[str, Any]:
     exact = validate_resource_id(key_id, field="SSH key id")
     try:
@@ -747,7 +834,12 @@ def verify_ssh_key_ownership(api_key: str, phase_id: str, key_id: str, *, expect
     info = request(api_key, "GET", f"/sshkeys/{exact}/info", phase_id=phase_id)
     if validate_resource_id(info.get("id"), field="SSH key info id") != exact:
         raise ShadeformError("provider returned a different SSH key ID")
-    if info.get("name") != expected_name or info.get("public_key") != expected_public_key:
+    try:
+        provider_key = _canonical_public_key(info.get("public_key"))
+        expected_key = _canonical_public_key(expected_public_key)
+    except ValueError as exc:
+        raise ShadeformError(f"provider SSH key is malformed: {exc}") from None
+    if info.get("name") != expected_name or provider_key != expected_key:
         raise ShadeformError("provider SSH key info does not match this ephemeral ownership record")
     return info
 
@@ -832,10 +924,29 @@ def create_instance(
         ],
         "auto_delete": _auto_delete(env, max_runtime_hours),
     }
-    response = request(
-        api_key, "POST", "/instances/create", payload, phase_id=phase_id, timeout=180
-    )
-    return validate_resource_id(response.get("id"), field="created instance id")
+    try:
+        response = request(
+            api_key, "POST", "/instances/create", payload, phase_id=phase_id, timeout=180
+        )
+    except ShadeformHTTPError:
+        # A non-2xx response is definitive: the provider rejected the create.
+        raise
+    except (ShadeformError, TimeoutError, OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        # The request wrapper deliberately preserves its transport cause. Only
+        # this create boundary converts that into an unknown POST outcome.
+        cause = exc.__cause__
+        if isinstance(exc, (MalformedProviderResponse, json.JSONDecodeError)) or isinstance(exc, AmbiguousProviderOutcome) or isinstance(
+            exc, (TimeoutError, OSError, urllib.error.URLError)
+        ) or isinstance(cause, (TimeoutError, OSError, urllib.error.URLError)):
+            raise AmbiguousProviderOutcome("instance create outcome is unknown after transport failure") from exc
+        raise
+    try:
+        instance_id = response.get("id") if isinstance(response, dict) else None
+        return validate_resource_id(instance_id, field="created instance id")
+    except (TypeError, ValueError) as exc:
+        # A successful HTTP response with malformed JSON/schema may still have
+        # created a resource; preserve the nonce/key incident and pending cap.
+        raise AmbiguousProviderOutcome("instance create returned an unusable success response") from exc
 
 
 def owned_instance_name(run_id: str, nonce: str) -> str:
@@ -864,6 +975,10 @@ def verify_instance_ownership(
     expected_region: str | None = None,
     expected_instance_type: str | None = None,
     expected_hourly_usd: float | None = None,
+    expected_gpu: str | None = None,
+    expected_gpu_count: int | None = None,
+    expected_vram_gb: int | None = None,
+    expected_os_image: str | None = None,
 ) -> dict[str, Any]:
     """Require provider-returned identity/tags before opening SSH or HF custody."""
 
@@ -890,12 +1005,27 @@ def verify_instance_ownership(
         raise ShadeformError("provider instance region does not match the approved candidate")
     if expected_instance_type is not None and info.get("shade_instance_type") != expected_instance_type:
         raise ShadeformError("provider instance type does not match the approved candidate")
+    configuration = info.get("configuration")
+    if any(value is not None for value in (expected_gpu, expected_gpu_count, expected_vram_gb, expected_os_image)) and not isinstance(configuration, dict):
+        raise ShadeformError("provider instance has no exact hardware configuration")
+    if not isinstance(configuration, dict):
+        configuration = {}
+    if expected_gpu is not None and configuration.get("gpu_type") != expected_gpu:
+        raise ShadeformError("provider GPU type does not match the approved candidate")
+    if expected_gpu_count is not None and configuration.get("num_gpus") != expected_gpu_count:
+        raise ShadeformError("provider GPU count does not match the approved candidate")
+    if expected_vram_gb is not None and configuration.get("vram_per_gpu_in_gb") != expected_vram_gb:
+        raise ShadeformError("provider VRAM does not match the approved candidate")
+    if expected_os_image is not None and info.get("os") != expected_os_image:
+        raise ShadeformError("provider OS image does not match the approved candidate")
     if expected_hourly_usd is not None and info.get("hourly_price") is not None:
         try:
             if abs(float(info["hourly_price"]) / 100.0 - expected_hourly_usd) > 1e-6:
                 raise ShadeformError("provider hourly cents price does not match the approved candidate")
         except (TypeError, ValueError):
             raise ShadeformError("provider hourly price is not a valid cents value") from None
+    elif expected_hourly_usd is not None:
+        raise ShadeformError("provider hourly cents price is missing")
     return info
 
 
@@ -995,11 +1125,22 @@ def acquire_pinned_host_key(info: dict[str, Any], known_hosts: Path, *, provider
             raise ShadeformError("bounded host-key acquisition failed")
         return [line.strip() for line in scan.stdout.splitlines() if line.strip() and not line.lstrip().startswith("#")]
 
-    first_lines = scan_once()
-    second_lines = first_lines if fingerprint else scan_once()
+    acquisition_deadline = time.monotonic() + 120
+    def acquire_scan() -> list[str]:
+        last_error: Exception | None = None
+        while time.monotonic() < acquisition_deadline:
+            try:
+                return scan_once()
+            except (OSError, ShadeformError) as exc:
+                last_error = exc
+                time.sleep(min(5.0, max(0.1, acquisition_deadline - time.monotonic())))
+        raise ShadeformError("host-key acquisition exceeded its 120-second readiness window") from last_error
+
+    first_lines = acquire_scan()
+    second_lines = first_lines if fingerprint else acquire_scan()
     first_keys = {" ".join(line.split()[:3]) for line in first_lines if len(line.split()) >= 3}
     second_keys = {" ".join(line.split()[:3]) for line in second_lines if len(line.split()) >= 3}
-    if not first_keys or first_keys != second_keys:
+    if len(first_keys) != 1 or not first_keys or first_keys != second_keys:
         raise ShadeformError("independent host-key scans were empty or unstable")
     fingerprints: list[str] = []
     for line in sorted(first_keys):

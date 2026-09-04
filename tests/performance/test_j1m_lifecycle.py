@@ -1,5 +1,6 @@
 import importlib.util
 import hashlib
+import io
 import json
 import os
 import subprocess
@@ -8,6 +9,7 @@ import tempfile
 import threading
 import time
 import types
+import urllib.error
 import unittest
 from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -78,6 +80,45 @@ class J1MConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.j1m.verify_wheelhouse(wheelhouse, lock)
 
+    def test_create_outcome_classification_does_not_turn_http_rejection_pending(self):
+        from scripts import shadeform_lifecycle as sf
+        rejection = sf.ShadeformHTTPError(400, "validation rejected")
+        http_cause = urllib.error.HTTPError("https://127.0.0.1", 400, "bad", {}, io.BytesIO())
+        rejection.__cause__ = http_cause
+        try:
+            self.assertFalse(sf.is_ambiguous_transport(rejection))
+        finally:
+            http_cause.close()
+        self.assertTrue(sf.is_ambiguous_transport(sf.AmbiguousProviderOutcome("timeout")))
+
+    def test_create_unusable_success_is_ambiguous_but_http_failure_is_definitive(self):
+        from scripts import shadeform_lifecycle as sf
+        candidate = sf.Candidate("A100", "cloud", "region", "a100-80", 1.0, 80, "ubuntu", False)
+        with mock.patch.object(sf, "request", return_value={"status": "accepted"}):
+            with self.assertRaises(sf.AmbiguousProviderOutcome):
+                sf.create_instance("api", {}, phase_id="j1m-create-test", run_id="run", candidate=candidate, ssh_key_id="key-123456", nonce="a" * 32, max_runtime_hours=0.25)
+        with mock.patch.object(sf, "request", side_effect=sf.ShadeformHTTPError(400, "rejected")):
+            with self.assertRaises(sf.ShadeformHTTPError):
+                sf.create_instance("api", {}, phase_id="j1m-create-test", run_id="run", candidate=candidate, ssh_key_id="key-123456", nonce="b" * 32, max_runtime_hours=0.25)
+
+    def test_ssh_key_ownership_normalizes_comment_but_rejects_malformed_key(self):
+        from scripts import shadeform_lifecycle as sf
+        with mock.patch.object(sf, "request", return_value={"id": "key-123456", "name": "j1m-key", "public_key": "  ssh-ed25519   AAAA   provider-comment\n"}):
+            sf.verify_ssh_key_ownership("api", "j1m-key-test", "key-123456", expected_name="j1m-key", expected_public_key="ssh-ed25519 AAAA local-comment")
+        with mock.patch.object(sf, "request", return_value={"id": "key-123456", "name": "j1m-key", "public_key": "ssh-ed25519 not-base64!"}):
+            with self.assertRaises(sf.ShadeformError):
+                sf.verify_ssh_key_ownership("api", "j1m-key-test", "key-123456", expected_name="j1m-key", expected_public_key="ssh-ed25519 AAAA")
+
+    def test_post_cleanup_requires_exact_gguf_set_and_no_vision_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "Qwen3.5-9B-Q4_K_M.gguf").write_bytes(b"q4")
+            (root / "Qwen3.5-9B-mmproj.gguf").write_bytes(b"vision")
+            with self.assertRaises(ValueError):
+                self.j1m.post_cleanup_verify(root)
+            (root / "Qwen3.5-9B-mmproj.gguf").unlink()
+            self.assertEqual(self.j1m.post_cleanup_verify(root)["remaining_gguf"], ["Qwen3.5-9B-Q4_K_M.gguf"])
+
     def test_artifact_allowlist_rejects_traversal(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -91,13 +132,20 @@ class J1MConfigTests(unittest.TestCase):
             names = ["Qwen3.5-9B-bf16.gguf", "Qwen3.5-9B-Q8_0.gguf", "Qwen3.5-9B-Q4_K_M.gguf"]
             for name in names:
                 (root / name).write_bytes(b"fixture")
+            scan_records = [{"name": name, "size_bytes": (root / name).stat().st_size, "sha256": hashlib.sha256((root / name).read_bytes()).hexdigest()} for name in names]
+            with self.assertRaises(ValueError):
+                self.j1m.post_cleanup_verify(root)
+            (root / "Qwen3.5-9B-bf16.gguf").unlink()
+            (root / "Qwen3.5-9B-Q8_0.gguf").unlink()
+            post_cleanup = self.j1m.post_cleanup_verify(root)
+            self.assertEqual(post_cleanup["inventory_scope"], "post_cleanup_filesystem")
             (root / "source-model-receipt.json").write_text(json.dumps({"status": "verified", "revision": "a" * 40, "tokenizer_sha256": "b" * 64, "chat_template_sha256": "c" * 64, "license_sha256": "d" * 64}), encoding="utf-8")
             (root / "tensor-metadata.json").write_text(json.dumps({"status": "verified", "tensor_count": 3}), encoding="utf-8")
             (root / "toolchain.json").write_text(json.dumps({"schema": "local_bmo.j1m.toolchain.v1", "llama_cpp_head": "e" * 40}), encoding="utf-8")
             (root / "command-receipt.json").write_text(json.dumps([{"stage": 1, "argv": ["source-check"], "started_at_utc": "2026-01-01T00:00:00+00:00", "ended_at_utc": "2026-01-01T00:00:01+00:00", "exit_code": 0, "status": "completed"}]) + "\n", encoding="utf-8")
-            (root / "scan-receipt.json").write_text(json.dumps({"status": "verified", "inventory_scope": "pre_cleanup_conversion_outputs"}), encoding="utf-8")
+            (root / "scan-receipt.json").write_text(json.dumps({"status": "verified", "inventory_scope": "pre_cleanup_conversion_outputs", "artifacts": scan_records}), encoding="utf-8")
             manifest = self.j1m.write_artifacts(root, names)
-            self.assertEqual(len(manifest["artifacts"]), 8)
+            self.assertEqual(len(manifest["artifacts"]), 9)
             self.assertEqual(manifest["inventory_scope"], "post_cleanup_deployable_allowlist")
             self.assertEqual(manifest["deployable_model_artifacts"], ["Qwen3.5-9B-Q4_K_M.gguf"])
             self.assertEqual(manifest["tensor_metadata"]["status"], "verified")
@@ -117,11 +165,14 @@ class J1MConfigTests(unittest.TestCase):
             (remote / "tensor-metadata.json").write_text(json.dumps({"status": "verified"}), encoding="utf-8")
             (remote / "toolchain.json").write_text(json.dumps({"schema": "local_bmo.j1m.toolchain.v1"}), encoding="utf-8")
             (remote / "command-receipt.json").write_text(json.dumps([{"stage": 1, "argv": ["source-check"], "started_at_utc": "2026-01-01T00:00:00+00:00", "ended_at_utc": "2026-01-01T00:00:01+00:00", "exit_code": 0, "status": "completed"}]) + "\n", encoding="utf-8")
-            (remote / "scan-receipt.json").write_text(json.dumps({"status": "verified", "inventory_scope": "pre_cleanup_conversion_outputs"}), encoding="utf-8")
+            scan_records = [{"name": name, "size_bytes": (remote / name).stat().st_size, "sha256": hashlib.sha256((remote / name).read_bytes()).hexdigest()} for name in ("Qwen3.5-9B-bf16.gguf", "Qwen3.5-9B-Q8_0.gguf", "Qwen3.5-9B-Q4_K_M.gguf")]
+            (remote / "scan-receipt.json").write_text(json.dumps({"status": "verified", "inventory_scope": "pre_cleanup_conversion_outputs", "artifacts": scan_records}), encoding="utf-8")
+            q4 = remote / "Qwen3.5-9B-Q4_K_M.gguf"
+            (remote / "post-cleanup-receipt.json").write_text(json.dumps({"status": "verified", "inventory_scope": "post_cleanup_filesystem", "intermediates_absent": True, "remaining_gguf": [q4.name], "q4": {"size_bytes": q4.stat().st_size, "sha256": hashlib.sha256(q4.read_bytes()).hexdigest()}}), encoding="utf-8")
             self.j1m.write_artifacts(remote, ["Qwen3.5-9B-bf16.gguf", "Qwen3.5-9B-Q8_0.gguf", "Qwen3.5-9B-Q4_K_M.gguf"])
             (remote / "Qwen3.5-9B-bf16.gguf").unlink()
             (remote / "Qwen3.5-9B-Q8_0.gguf").unlink()
-            fetch.copy_selected(remote, local, ["Qwen3.5-9B-Q4_K_M.gguf", "manifest.json", "checksums.sha256", "tensor-metadata.json", "source-model-receipt.json", "conversion-receipt.json", "model-receipt.json", "toolchain.json", "command-receipt.json", "scan-receipt.json"])
+            fetch.copy_selected(remote, local, ["Qwen3.5-9B-Q4_K_M.gguf", "manifest.json", "checksums.sha256", "tensor-metadata.json", "source-model-receipt.json", "conversion-receipt.json", "model-receipt.json", "toolchain.json", "command-receipt.json", "scan-receipt.json", "post-cleanup-receipt.json"])
             fetch.verify_local_bundle(local)
 
     def test_local_fetch_allows_only_q4_and_receipts(self):
@@ -224,8 +275,9 @@ class J1MConfigTests(unittest.TestCase):
     def test_ephemeral_key_generation_does_not_interpret_provider_identifier(self):
         from scripts import shadeform_lifecycle as sf
         with tempfile.TemporaryDirectory() as directory:
-            private, public = sf.create_ephemeral_ssh_key({"SHADEFORM_SSH": "provider-uuid-123456789012345678901234"}, Path(directory))
+            private, public = sf.create_ephemeral_ssh_key({"SHADEFORM_SSH": "provider-uuid-123456789012345678901234"}, Path(directory) / "nested" / "ssh")
             self.assertEqual(stat.S_IMODE(private.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(private.parent.stat().st_mode), 0o700)
             self.assertTrue(public.startswith("ssh-ed25519 "))
 
 
@@ -263,6 +315,11 @@ class StaticSafetyTests(unittest.TestCase):
         nonce = "0123456789abcdef0123456789abcdef"
         info = {"id": "instance-owned-1", "name": f"ep-j1m-{nonce}", "tags": ["local-bmo-j1m", "ep-phase-phase-a", f"ep-run-{nonce}"], "ssh_key_id": "key-owned-1"}
         sf.verify_instance_ownership(info, instance_id="instance-owned-1", phase_id="phase-a", nonce=nonce, ssh_key_id="key-owned-1")
+        exact_profile = {**info, "cloud": "hyperstack", "region": "montreal-canada-2", "shade_instance_type": "A100_80G", "hourly_price": 135, "os": "ubuntu22.04_cuda12.2_shade_os", "configuration": {"gpu_type": "A100_80G", "num_gpus": 1, "vram_per_gpu_in_gb": 80}}
+        sf.verify_instance_ownership(exact_profile, instance_id="instance-owned-1", phase_id="phase-a", nonce=nonce, ssh_key_id="key-owned-1", expected_cloud="hyperstack", expected_region="montreal-canada-2", expected_instance_type="A100_80G", expected_hourly_usd=1.35, expected_gpu="A100_80G", expected_gpu_count=1, expected_vram_gb=80, expected_os_image="ubuntu22.04_cuda12.2_shade_os")
+        exact_profile["hourly_price"] = 136
+        with self.assertRaises(sf.ShadeformError):
+            sf.verify_instance_ownership(exact_profile, instance_id="instance-owned-1", phase_id="phase-a", nonce=nonce, ssh_key_id="key-owned-1", expected_hourly_usd=1.35)
         info["tags"] = ["local-bmo-j1m"]
         with self.assertRaises(sf.ShadeformError):
             sf.verify_instance_ownership(info, instance_id="instance-owned-1", phase_id="phase-a", nonce=nonce, ssh_key_id="key-owned-1")

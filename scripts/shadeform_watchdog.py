@@ -47,6 +47,19 @@ def alive(pid: int) -> bool:
     return True
 
 
+def identity_alive(pid: int, marker: str | None) -> bool:
+    # The watchdog is a direct child of the launcher. Once reparented after a
+    # launcher death, a reused PID must never be treated as the owner.
+    if os.getppid() != pid:
+        return False
+    if not alive(pid):
+        return False
+    if marker is None:
+        return True
+    from scripts import shadeform_lifecycle as shadeform
+    return shadeform.process_start_marker(pid) == marker
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--phase-id", required=True)
@@ -56,10 +69,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--env-file", type=Path, default=ROOT / ".env")
     parser.add_argument("--identity", type=Path)
     parser.add_argument("--known-hosts", type=Path)
+    parser.add_argument("--launcher-start-marker")
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     args = parser.parse_args(argv)
     deadline = time.monotonic() + args.max_seconds
-    while alive(args.launcher_pid) and time.monotonic() < deadline:
+    while identity_alive(args.launcher_pid, args.launcher_start_marker) and time.monotonic() < deadline:
         time.sleep(args.poll_seconds)
     record_path = ROOT / "experiments" / "runtime" / f"{args.phase_id}.json"
     if not alive(args.launcher_pid) and not record_path.exists():
@@ -77,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         ], timeout=900)
         result_code = result.returncode
     finally:
-        if alive(args.launcher_pid):
+        if identity_alive(args.launcher_pid, args.launcher_start_marker):
             try:
                 os.kill(args.launcher_pid, signal.SIGTERM)
             except (ProcessLookupError, PermissionError):

@@ -9,6 +9,7 @@ account, and tears down the exact resource in ``finally`` after salvage.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import signal
@@ -113,36 +114,51 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 instance_id = sf.create_instance(api_key, env, phase_id=phase_id, run_id=run_id, candidate=candidate, ssh_key_id=key_id, nonce=nonce, max_runtime_hours=runtime)
                 created_monotonic = time.monotonic()
                 provider_deadline = created_monotonic + float(config["modes"][mode]["provider_backstop_hours"]) * 3600
-            except Exception:
-                # A transport timeout after POST leaves the provider outcome
-                # unknown. Do not pretend it was absent: reserve a pending
-                # budget event, record the nonce for operator reconciliation,
-                # and refuse subsequent launches until settled.
-                sf.append_cost_event({"instance_id": f"ambiguous-{nonce}", "phase_id": phase_id, "status": "pending", "estimated_cost_usd": round(candidate.hourly_usd * max(0.25, runtime * 1.25), 6), "incident": "create-response-ambiguous"})
-                ambiguous_create = True
+            except Exception as exc:
+                incident = {
+                    "phase_id": phase_id,
+                    "incident": "create-response-ambiguous" if sf.is_ambiguous_transport(exc) else "create-definitive-failure",
+                    "nonce": nonce,
+                    "ssh_key_id": key_id,
+                    "ssh_key_name": f"j1m-{nonce}",
+                    "ssh_public_key_sha256": hashlib.sha256(public_key.encode("utf-8")).hexdigest(),
+                    "error_type": type(exc).__name__,
+                }
+                sf.append_incident(incident)
+                if sf.is_ambiguous_transport(exc):
+                    # A transport timeout after POST leaves the provider
+                    # outcome unknown. Preserve exact cleanup metadata and
+                    # reserve budget; subsequent launches remain refused.
+                    sf.append_cost_event({"instance_id": f"ambiguous-{nonce}", "phase_id": phase_id, "status": "pending", "estimated_cost_usd": round(candidate.hourly_usd * max(0.25, runtime * 1.25), 6), "incident": "create-response-ambiguous", "ssh_key_id": key_id, "ssh_key_name": f"j1m-{nonce}", "ssh_public_key_sha256": incident["ssh_public_key_sha256"], "nonce": nonce})
+                    ambiguous_create = True
                 raise
             lifecycle["instance_id"] = instance_id
-            record = sf.OwnedResource(phase_id=phase_id, run_id=run_id, instance_id=instance_id, ownership_nonce=nonce, ssh_key_id=key_id, ssh_key_name=f"j1m-{nonce}", gpu=candidate.gpu, cloud=candidate.cloud, region=candidate.region, hourly_usd=candidate.hourly_usd, created_at_utc=sf.utc_now().isoformat(), active_deadline_utc=(sf.utc_now() + sf.timedelta(minutes=30)).isoformat(), run_deadline_utc=(sf.utc_now() + sf.timedelta(hours=runtime)).isoformat(), instance_type=candidate.instance_type)
+            launcher_pid = os.getpid()
+            launcher_start_marker = sf.process_start_marker(launcher_pid)
+            record = sf.OwnedResource(phase_id=phase_id, run_id=run_id, instance_id=instance_id, ownership_nonce=nonce, ssh_key_id=key_id, ssh_key_name=f"j1m-{nonce}", gpu=candidate.gpu, cloud=candidate.cloud, region=candidate.region, hourly_usd=candidate.hourly_usd, created_at_utc=sf.utc_now().isoformat(), active_deadline_utc=(sf.utc_now() + sf.timedelta(minutes=30)).isoformat(), run_deadline_utc=(sf.utc_now() + sf.timedelta(hours=runtime)).isoformat(), instance_type=candidate.instance_type, launcher_pid=launcher_pid, launcher_start_marker=launcher_start_marker)
             # Ownership record is written before any poll/upload. If this
             # fails, the fallback below still deletes the exact returned ID.
             sf.write_owned_resource(record)
             recorded = True
-            sf.append_cost_event({"instance_id": instance_id, "phase_id": phase_id, "status": "pending", "estimated_cost_usd": round(candidate.hourly_usd * float(config["modes"][mode]["provider_backstop_hours"]), 6)})
             # Start the external watchdog immediately after ownership and
-            # pending-cost reservation. It protects the long pending_provider
-            # interval as well as the later SSH/build stages.
-            watchdog = subprocess.Popen([
+            # before any fallible cost-ledger append. It protects the long
+            # pending_provider interval as well as later SSH/build stages.
+            watchdog_command = [
                 os.sys.executable, str(ROOT / "scripts" / "shadeform_watchdog.py"),
                 "--phase-id", phase_id, "--instance-id", instance_id,
-                "--launcher-pid", str(os.getpid()), "--max-seconds", str(config["modes"][mode]["external_watchdog_seconds"]),
+                "--launcher-pid", str(launcher_pid), "--max-seconds", str(config["modes"][mode]["external_watchdog_seconds"]),
                 "--env-file", str(env_file), "--identity", str(identity), "--known-hosts", str(known_hosts),
-            ])
+            ]
+            if launcher_start_marker is not None:
+                watchdog_command.extend(["--launcher-start-marker", launcher_start_marker])
+            watchdog = subprocess.Popen(watchdog_command)
             lifecycle["watchdog_pid"] = watchdog.pid
+            sf.append_cost_event({"instance_id": instance_id, "phase_id": phase_id, "status": "pending", "estimated_cost_usd": round(candidate.hourly_usd * float(config["modes"][mode]["provider_backstop_hours"]), 6)})
             j1m_runner.write_progress(progress_path, "wait-active-starting", phase_id=phase_id)
             wait_budget = max(30, int(min(1800, provider_deadline - time.monotonic() - 120)))
             info = sf.wait_active(api_key, phase_id, instance_id, timeout_seconds=wait_budget)
             lifecycle["instance_info"] = info
-            sf.verify_instance_ownership(info, instance_id=instance_id, phase_id=phase_id, nonce=nonce, expected_name=sf.owned_instance_name(run_id, nonce), ssh_key_id=key_id, expected_cloud=candidate.cloud, expected_region=candidate.region, expected_instance_type=candidate.instance_type, expected_hourly_usd=candidate.hourly_usd)
+            sf.verify_instance_ownership(info, instance_id=instance_id, phase_id=phase_id, nonce=nonce, expected_name=sf.owned_instance_name(run_id, nonce), ssh_key_id=key_id, expected_cloud=candidate.cloud, expected_region=candidate.region, expected_instance_type=candidate.instance_type, expected_hourly_usd=candidate.hourly_usd, expected_gpu=candidate.gpu, expected_gpu_count=1, expected_vram_gb=candidate.vram_gb, expected_os_image=candidate.os_image)
             lifecycle["host_key"] = sf.acquire_pinned_host_key(info, known_hosts)
             lifecycle["status"] = "active"
             remote_root = "/scratch/j1m"
@@ -196,15 +212,20 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     except (OSError, subprocess.TimeoutExpired):
                         pass
             fetch_allowlist = config["artifacts"]["local_fetch_allowlist"] if mode == "build" else config["artifacts"]["prove_fetch_allowlist"]
-            lifecycle["salvage"] = _salvage(
-                {"phase_id": phase_id, "instance_info": lifecycle.get("instance_info", {})},
-                identity,
-                known_hosts,
-                artifact_destination,
-                fetch_allowlist,
-                deadline=provider_deadline if "provider_deadline" in locals() else None,
-                q4_expected_gib=float(config["resources"].get("expected_q4_gib", 6.0)),
-            ) if lifecycle.get("instance_info") else []
+            try:
+                lifecycle["salvage"] = _salvage(
+                    {"phase_id": phase_id, "instance_info": lifecycle.get("instance_info", {})},
+                    identity,
+                    known_hosts,
+                    artifact_destination,
+                    fetch_allowlist,
+                    deadline=provider_deadline if "provider_deadline" in locals() else None,
+                    q4_expected_gib=float(config["resources"].get("expected_q4_gib", 6.0)),
+                ) if lifecycle.get("instance_info") else []
+            except Exception as exc:
+                # Even an unexpected salvage/setup failure must leave the
+                # exact deletion and key cleanup paths reachable.
+                lifecycle["salvage"] = [{"status": "salvage_failed", "error_type": type(exc).__name__}]
             if mode == "prove" and lifecycle.get("job", {}).get("status") == "completed" and not any(item.get("name") == "proving-receipt.json" and item.get("status") == "completed" for item in lifecycle["salvage"]):
                 lifecycle["receipt_error"] = "proving receipt was not salvaged before teardown"
             # The shared teardown performs exact deletion before cost/key
@@ -216,12 +237,34 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 else:
                     # Ledger write failed: exact ID is still known, so delete
                     # it before attempting any key/bookkeeping cleanup.
-                    lifecycle["deletion"] = sf._delete_instance(api_key, phase_id, instance_id)
-                    if lifecycle["deletion"].get("success") is True and key_id is not None:
-                        sf.delete_ssh_key(api_key, phase_id, key_id)
+                    try:
+                        lifecycle["deletion"] = sf._delete_instance(api_key, phase_id, instance_id)
+                    except Exception as exc:
+                        lifecycle["deletion"] = {"success": False, "error_type": type(exc).__name__}
+                        try:
+                            sf.append_incident({"phase_id": phase_id, "incident": "post-instance-delete-failed", "instance_id": instance_id, "ssh_key_id": key_id, "nonce": nonce, "error_type": type(exc).__name__})
+                        except Exception:
+                            pass
+                    finally:
+                        if key_id is not None:
+                            try:
+                                lifecycle["key_cleanup"] = sf.delete_ssh_key(api_key, phase_id, key_id)
+                            except Exception as exc:
+                                lifecycle["key_cleanup"] = {"status": "failed", "error_type": type(exc).__name__}
+                                try:
+                                    sf.append_incident({"phase_id": phase_id, "incident": "post-instance-key-delete-failed", "instance_id": instance_id, "ssh_key_id": key_id, "nonce": nonce, "error_type": type(exc).__name__})
+                                except Exception:
+                                    pass
             elif key_id is not None and not ambiguous_create:
                 # Key creation succeeded but instance creation did not.
-                sf.delete_ssh_key(api_key, phase_id, key_id)
+                try:
+                    lifecycle["key_cleanup"] = sf.delete_ssh_key(api_key, phase_id, key_id)
+                except Exception as exc:
+                    lifecycle["key_cleanup"] = {"status": "failed", "error_type": type(exc).__name__}
+                    try:
+                        sf.append_incident({"phase_id": phase_id, "incident": "create-key-delete-failed", "ssh_key_id": key_id, "nonce": nonce, "error_type": type(exc).__name__})
+                    except Exception:
+                        pass
             for number, handler in previous_handlers.items():
                 signal.signal(number, handler)
         return lifecycle
