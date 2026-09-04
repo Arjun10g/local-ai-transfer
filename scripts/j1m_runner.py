@@ -17,6 +17,8 @@ import os
 import secrets
 import stat
 import subprocess
+import sys
+import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -91,6 +93,24 @@ def mark_source(source_dir: Path, revision: str) -> None:
     marker.write_text(revision + "\n", encoding="utf-8")
 
 
+def check_scratch(path: Path, required_gib: int) -> dict[str, Any]:
+    usage = shutil.disk_usage(path)
+    available_gib = usage.free / (1024 ** 3)
+    if available_gib < required_gib:
+        raise RuntimeError(f"insufficient scratch: {available_gib:.1f} GiB available; {required_gib} GiB required")
+    return {"path": str(path), "available_gib": round(available_gib, 2), "required_gib": required_gib}
+
+
+def scan_artifacts(output_dir: Path) -> dict[str, Any]:
+    names = ["Qwen3.5-9B-bf16.gguf", "Qwen3.5-9B-Q8_0.gguf", "Qwen3.5-9B-Q4_K_M.gguf"]
+    records = [{"name": name, "size_bytes": (output_dir / name).stat().st_size, "sha256": _sha256(output_dir / name)} for name in names]
+    if any("mmproj" in path.name.lower() for path in output_dir.iterdir()):
+        raise ValueError("vision/mmproj artifact is forbidden")
+    payload = {"schema": "local_bmo.j1m.scan-receipt.v1", "status": "verified", "text_only": True, "artifacts": records, "vision_projection_present": False}
+    (output_dir / "scan-receipt.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return payload
+
+
 @contextlib.contextmanager
 def hf_token_file(token: str | None = None) -> Iterator[Path]:
     """Yield a 0600 token file and remove it on every exit path."""
@@ -161,10 +181,21 @@ def write_artifacts(output_dir: Path, names: list[str], *, source_lock: Path = S
     if not toolchain_path.is_file():
         raise ValueError("toolchain receipt is required before model receipt")
     toolchain = json.loads(toolchain_path.read_text(encoding="utf-8"))
+    for required in ("command-receipt.json", "scan-receipt.json"):
+        if not (output_dir / required).is_file():
+            raise ValueError(f"{required} is required before final manifest")
+    command_receipt = json.loads((output_dir / "command-receipt.json").read_text(encoding="utf-8"))
+    scan_receipt = json.loads((output_dir / "scan-receipt.json").read_text(encoding="utf-8"))
+    if not isinstance(command_receipt, list) or not command_receipt or scan_receipt.get("status") != "verified":
+        raise ValueError("command and scan receipts are not complete")
     converter_commands = [command for command in (commands or []) if any("convert_hf_to_gguf.py" in part for part in command) or "Q4_K_M" in command]
-    (output_dir / "conversion-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.conversion-receipt.v1", "status": "conversion-complete", "text_only": True, "source_revision": source.get("revision"), "llama_cpp_revision": llama_revision, "artifacts": artifact_hashes, "converter_and_quantizer_argv": converter_commands, "toolchain": toolchain, "no_mmproj": True, "no_mtp": True}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (output_dir / "model-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.model-receipt.v1", "status": "checksums-and-tensor-inventory-verified", "text_only": True, "q4_artifact": artifact_hashes.get("Qwen3.5-9B-Q4_K_M.gguf"), "tensor_metadata_sha256": _sha256(tensor_path), "tokenizer_sha256": source.get("tokenizer_sha256"), "chat_template_sha256": source.get("chat_template_sha256"), "license_sha256": source.get("license_sha256")}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    manifest = artifact_manifest(output_dir, [*primary, "tensor-metadata.json", "source-model-receipt.json", "conversion-receipt.json", "model-receipt.json", "toolchain.json"])
+    (output_dir / "conversion-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.conversion-receipt.v1", "status": "conversion-complete", "text_only": True, "source_revision": source.get("revision"), "llama_cpp_revision": llama_revision, "artifacts": artifact_hashes, "converter_and_quantizer_argv": converter_commands, "command_receipt_sha256": _sha256(output_dir / "command-receipt.json"), "toolchain": toolchain, "no_mmproj": True, "no_mtp": True}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (output_dir / "model-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.model-receipt.v1", "status": "checksums-and-tensor-inventory-verified", "text_only": True, "q4_artifact": artifact_hashes.get("Qwen3.5-9B-Q4_K_M.gguf"), "tensor_metadata_sha256": _sha256(tensor_path), "gguf_metadata": tensor.get("gguf_metadata", {}), "vision_projection_present": tensor.get("vision_projection_present"), "scan_receipt_sha256": _sha256(output_dir / "scan-receipt.json"), "tokenizer_sha256": source.get("tokenizer_sha256"), "chat_template_sha256": source.get("chat_template_sha256"), "license_sha256": source.get("license_sha256")}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # The deployable manifest is self-verifiable after intermediates are
+    # securely removed. Intermediate BF16/Q8 hashes remain in conversion
+    # receipt, but are intentionally absent from the shipped bundle.
+    deployable = ["Qwen3.5-9B-Q4_K_M.gguf", "tensor-metadata.json", "source-model-receipt.json", "conversion-receipt.json", "model-receipt.json", "toolchain.json"]
+    manifest = artifact_manifest(output_dir, [*deployable, "command-receipt.json", "scan-receipt.json"])
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     checksum_names = [item["name"] for item in manifest["artifacts"]] + ["manifest.json"]
     checksums = "".join(f"{_sha256(output_dir / name)}  {name}\n" for name in checksum_names)
@@ -182,7 +213,7 @@ def command_plan(config: dict[str, Any], source: str = "/scratch/hf/Qwen3.5-9B",
         ["git", "-C", llama["checkout"], "checkout", "--detach", llama["revision"]],
         ["python3", "-m", "venv", "/scratch/j1m/venv"],
         ["/scratch/j1m/venv/bin/pip", "install", "--disable-pip-version-check", "--no-input", "-r", f"{llama['checkout']}/{config['python_dependencies']['requirements_file']}", "-e", f"{llama['checkout']}/{config['python_dependencies']['local_gguf_package']}"],
-        [python_exec, runner, "--pip-freeze", "/scratch/j1m/pip-freeze.txt"],
+        [python_exec, runner, "--pip-freeze", f"{output}/pip-freeze.txt"],
         [python_exec, runner, "--toolchain", f"{output}/toolchain.json", "--llama-checkout", llama["checkout"]],
         ["git", "--version"],
         ["cmake", "--version"],
@@ -191,13 +222,15 @@ def command_plan(config: dict[str, Any], source: str = "/scratch/hf/Qwen3.5-9B",
         ["python3", runner, "--verify-llama", llama["checkout"], llama["revision"]],
         ["cmake", "-S", llama["checkout"], "-B", f"{llama['checkout']}/build", "-DGGML_CUDA=OFF", "-DLLAMA_BUILD_TOOLS=ON"],
         ["cmake", "--build", f"{llama['checkout']}/build", "--target", "llama-quantize", "-j2"],
-        [hf_exec, "download", config["source"]["model_id"], "--revision", config["source"]["revision"], "--local-dir", source, "--local-dir-use-symlinks", "false"],
+        [python_exec, runner, "--scratch", "/scratch", "--min-scratch-gib", str(config["resources"]["required_scratch_gib"])],
+        [hf_exec, "download", config["source"]["model_id"], "--revision", config["source"]["revision"], "--local-dir", source],
         [python_exec, runner, "--mark-source", source, "--revision", config["source"]["revision"]],
         [python_exec, "-u", runner, "--verify-source", source, "--lock", "/scratch/j1m/qwen35-9b.source-lock.json", "--receipt", f"{output}/source-model-receipt.json"],
         [python_exec, converter, source, "--outfile", f"{output}/Qwen3.5-9B-bf16.gguf", "--outtype", "bf16", "--no-mtp"],
         [python_exec, converter, source, "--outfile", f"{output}/Qwen3.5-9B-Q8_0.gguf", "--outtype", "q8_0", "--no-mtp"],
         [f"{llama['quantizer']}", f"{output}/Qwen3.5-9B-bf16.gguf", f"{output}/Qwen3.5-9B-Q4_K_M.gguf", "Q4_K_M"],
         [python_exec, runner, "--inspect-tensors", f"{output}/Qwen3.5-9B-Q4_K_M.gguf", f"{output}/tensor-metadata.json"],
+        [python_exec, runner, "--scan", output],
         [python_exec, runner, "--config", config_path, "--manifest", output],
         ["rm", "-f", f"{output}/Qwen3.5-9B-bf16.gguf", f"{output}/Qwen3.5-9B-Q8_0.gguf"],
     ]
@@ -217,10 +250,13 @@ def read_token_file(path: Path) -> str:
     return token
 
 
-def run_commands(commands: list[list[str]], progress_path: Path, *, cwd: Path | None = None, token_file: Path | None = None) -> list[dict[str, Any]]:
+def run_commands(commands: list[list[str]], progress_path: Path, *, cwd: Path | None = None, token_file: Path | None = None, receipt_path: Path | None = None) -> list[dict[str, Any]]:
     """Run an already-reviewed argv plan, recording progress before each stage."""
 
     receipts = []
+    if receipt_path:
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        receipt_path.write_text("[]\n", encoding="utf-8")
     for index, command in enumerate(commands):
         if not command or any("\x00" in str(part) for part in command):
             raise ValueError("invalid empty/NUL command")
@@ -234,6 +270,8 @@ def run_commands(commands: list[list[str]], progress_path: Path, *, cwd: Path | 
         except subprocess.TimeoutExpired:
             receipt = {"stage": index + 1, "exit_code": None, "status": "transport_timeout"}
         receipts.append(receipt)
+        if receipt_path:
+            receipt_path.write_text(json.dumps(receipts, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         write_progress(progress_path, f"stage-{index + 1}-{receipt['status']}", **receipt)
         if receipt["status"] != "completed":
             break
@@ -254,7 +292,7 @@ def build_plan(config: dict[str, Any], mode: str = "prove") -> dict[str, Any]:
         "provider_backstop_cost_usd": round(rate * float(selected_mode["provider_backstop_hours"]), 4),
         "commands": command_plan(config) if mode == "build" else [["python3", "scripts/j1m_runner.py", "--prove"]],
         "artifact_allowlist": config["artifacts"]["allowlist"],
-        "expected_scratch_gib": config["resources"]["scratch_gib"],
+        "required_scratch_gib": config["resources"]["required_scratch_gib"],
     }
 
 
@@ -279,12 +317,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--verify-llama", nargs=2, metavar=("CHECKOUT", "REVISION"))
     parser.add_argument("--prove", action="store_true", help="write a cheap host receipt; no model conversion")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--scratch", type=Path)
+    parser.add_argument("--min-scratch-gib", type=int, default=0)
     parser.add_argument("--run", action="store_true", help="run the reviewed local argv plan")
     parser.add_argument("--token-file", type=Path, help="private remote token file; path only, never token material")
     parser.add_argument("--pip-freeze", type=Path)
     parser.add_argument("--toolchain", type=Path)
     parser.add_argument("--llama-checkout", type=Path)
     parser.add_argument("--inspect-tensors", nargs=2, metavar=("GGUF", "OUTPUT"))
+    parser.add_argument("--scan", type=Path)
     parser.add_argument("--execute", action="store_true", help="reserved for an already-approved host; never provisions")
     args = parser.parse_args(argv)
     config = load_config(args.config)
@@ -319,11 +360,17 @@ def main(argv: list[str] | None = None) -> int:
             from gguf import GGUFReader
             reader = GGUFReader(str(gguf_path))
             tensors = [{"name": tensor.name, "shape": list(tensor.shape), "type": str(tensor.tensor_type)} for tensor in reader.tensors]
-            payload = {"schema": "local_bmo.j1m.tensor-metadata.v1", "status": "verified", "text_only": True, "tensor_count": len(tensors), "tensors": tensors}
+            fields = {str(key): str(value.parts[-1] if hasattr(value, "parts") else value) for key, value in reader.fields.items() if str(key) in {"general.architecture", "general.file_type", "general.version", "tokenizer.chat_template"}}
+            if fields.get("general.architecture", "").lower() not in {"qwen35", "qwen3_5"}:
+                raise ValueError("GGUF architecture is not qwen35")
+            payload = {"schema": "local_bmo.j1m.tensor-metadata.v1", "status": "verified", "text_only": True, "tensor_count": len(tensors), "tensors": tensors, "gguf_metadata": fields, "vision_projection_present": False}
         except Exception as exc:
             payload = {"schema": "local_bmo.j1m.tensor-metadata.v1", "status": "inspection_failed", "error_type": type(exc).__name__, "text_only": True}
             raise
         metadata_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return 0
+    if args.scan:
+        scan_artifacts(args.scan)
         return 0
     if args.verify_source:
         receipt = verify_source(args.verify_source, args.lock)
@@ -344,14 +391,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.prove:
         import platform
         receipt = {"schema": "local_bmo.j1m.proving-receipt.v1", "host": platform.node(), "python": platform.python_version(), "text_only": True, "conversion": "not-run"}
+        if args.scratch and args.min_scratch_gib:
+            receipt["scratch"] = check_scratch(args.scratch, args.min_scratch_gib)
         if args.output:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(json.dumps(receipt, sort_keys=True))
         return 0
+    if args.scratch and args.min_scratch_gib:
+        print(json.dumps(check_scratch(args.scratch, args.min_scratch_gib), sort_keys=True))
+        return 0
     if args.run:
         commands = command_plan(config, runner=str(Path(__file__).resolve()), config_path="/scratch/j1m/j1m-config.json")
-        receipts = run_commands(commands, ROOT / config["resources"]["progress_path"], token_file=args.token_file)
+        receipts = run_commands(commands, ROOT / config["resources"]["progress_path"], token_file=args.token_file, receipt_path=Path("/scratch/j1m/artifacts/command-receipt.json"))
         return 0 if receipts and all(item["status"] == "completed" for item in receipts) else 1
     plan = build_plan(config)
     if args.plan:

@@ -38,10 +38,9 @@ def teardown_exact(phase_id: str, instance_id: str, *, env_file: Path = ROOT / "
     salvage_receipt = salvage_local(salvage, salvage_destination)
     env = shadeform.load_env(env_file)
     api_key = shadeform.require_env(env, "SHADEFORM_API_KEY")
-    record.status = "deleting"
-    shadeform.write_owned_resource(record)
-    # Deletion precedes cost and other fallible bookkeeping.
-    deletion = shadeform.delete_instance(api_key, phase_id, exact)
+    # Once ownership is validated, exact deletion is attempted first. A
+    # bookkeeping write must never become a precondition for cleanup.
+    deletion = shadeform._delete_instance(api_key, phase_id, exact)
     if deletion.get("success") is not True:
         record.status = "delete-failed"
         shadeform.write_owned_resource(record)
@@ -59,13 +58,20 @@ def teardown_exact(phase_id: str, instance_id: str, *, env_file: Path = ROOT / "
         # leave a visible settled-row update for the operator to reconcile.
         receipt["cost_bookkeeping_error_type"] = type(exc).__name__
         record.status = "deleted-cost-bookkeeping-failed"
-    shadeform.write_owned_resource(record)
-    # SSH key cleanup is exact and best effort after the instance is gone.
+    # All post-delete bookkeeping is best effort; key cleanup and ledger clear
+    # are independently attempted after confirmed instance deletion.
+    try:
+        shadeform.write_owned_resource(record)
+    except Exception as exc:
+        receipt["record_bookkeeping_error_type"] = type(exc).__name__
     try:
         shadeform.delete_ssh_key(api_key, phase_id, record.ssh_key_id)
     except Exception as exc:  # receipt retains the deletion even if bookkeeping fails
         receipt["ssh_key_cleanup_error_type"] = type(exc).__name__
-    shadeform.clear_owned_resource(phase_id, exact)
+    try:
+        shadeform.clear_owned_resource(phase_id, exact)
+    except Exception as exc:
+        receipt["clear_bookkeeping_error_type"] = type(exc).__name__
     return receipt
 
 

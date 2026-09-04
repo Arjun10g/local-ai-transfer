@@ -625,8 +625,9 @@ def _rank_candidates(
         price = _hourly_usd(raw.get("hourly_price"))
         if price is None or price > max_hourly:
             continue
-        # The worst case of this run is the full runtime cap at this price.
-        if price * max_runtime_hours > budget_usd:
+        # Reserve the provider safety backstop, not merely active work time.
+        backstop_hours = max(0.25, max_runtime_hours * 1.25)
+        if price * backstop_hours > budget_usd:
             continue
         config = raw.get("configuration") if isinstance(raw.get("configuration"), dict) else {}
         vram_value = config.get("vram_per_gpu_in_gb", raw.get("vram_per_gpu_in_gb", 0))
@@ -703,31 +704,16 @@ def create_keypair(directory: Path) -> tuple[Path, str]:
 
 
 def create_ephemeral_ssh_key(env: dict[str, str], directory: Path) -> tuple[Path, str]:
-    """Materialize operator ``SHADEFORM_SSH`` into a private attempt key.
+    """Generate a fresh per-attempt key; ``SHADEFORM_SSH`` is only an ownership input.
 
-    The value may be a path to an operator-owned private key or the key
-    material itself.  It is copied into a 0600 temporary attempt directory and
-    never logged.  The provider key ID is created later with :func:`add_ssh_key`,
-    so a stale/pre-existing ``SHADEFORM_SSH_KEY_ID`` is not a prerequisite.
+    The borrowed dotenv value can be a provider-style UUID rather than key
+    bytes. It is deliberately never interpreted as a path or printed. The
+    public half is uploaded as a new provider key and its ID is recorded in the
+    nonce-bound ownership record; no pre-existing key ID is reused.
     """
 
-    value = require_env(env, "SHADEFORM_SSH")
-    source = Path(value).expanduser()
-    private = directory / "id_ed25519"
-    directory.mkdir(parents=True, exist_ok=True)
-    if source.is_file():
-        private.write_bytes(source.read_bytes())
-    elif "PRIVATE KEY" in value:
-        private.write_text(value + ("\n" if not value.endswith("\n") else ""), encoding="utf-8")
-    else:
-        raise ShadeformError("SHADEFORM_SSH must be a private-key path or private-key material")
-    private.chmod(stat.S_IRUSR | stat.S_IWUSR)
-    public = subprocess.run(
-        ["ssh-keygen", "-y", "-f", str(private)], check=True, capture_output=True, text=True, timeout=30
-    ).stdout.strip()
-    if not public:
-        raise ShadeformError("SHADEFORM_SSH did not yield a public key")
-    return private, public
+    require_env(env, "SHADEFORM_SSH")
+    return create_keypair(directory)
 
 
 def add_ssh_key(api_key: str, phase_id: str, name: str, public_key: str) -> str:
@@ -881,7 +867,7 @@ def wait_active(
     raise TimeoutError(f"instance did not become active; last status={last}")
 
 
-def delete_instance(api_key: str, phase_id: str, instance_id: str) -> dict[str, Any]:
+def _delete_instance(api_key: str, phase_id: str, instance_id: str) -> dict[str, Any]:
     """Delete one exact instance and confirm it is gone. 404 counts as gone."""
 
     exact = validate_resource_id(instance_id, field="instance id")

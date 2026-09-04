@@ -34,7 +34,8 @@ def main(argv: list[str] | None = None) -> int:
     deadline = time.monotonic() + args.max_seconds
     while alive(args.launcher_pid) and time.monotonic() < deadline:
         time.sleep(args.poll_seconds)
-    if not alive(args.launcher_pid):
+    record_path = ROOT / "experiments" / "runtime" / f"{args.phase_id}.json"
+    if not alive(args.launcher_pid) and not record_path.exists():
         return 0
     # Exact deletion first: killing the launcher first would remove its only
     # cleanup actor. The teardown process salvages before deleting.

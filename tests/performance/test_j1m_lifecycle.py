@@ -6,6 +6,7 @@ import stat
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -44,6 +45,9 @@ class J1MConfigTests(unittest.TestCase):
         self.assertTrue(any("gguf-py" in command for command in plan["commands"][3]))
         self.assertTrue(any("--verify-llama" in command for command in plan["commands"]))
         self.assertTrue(any("--inspect-tensors" in command for command in plan["commands"]))
+        hf_commands = [command for command in plan["commands"] if any(part == "download" for part in command)]
+        self.assertEqual(len(hf_commands), 1)
+        self.assertNotIn("--local-dir-use-symlinks", hf_commands[0])
 
     def test_hf_token_file_is_private_and_removed(self):
         with self.j1m.hf_token_file("test-token-never-logged") as path:
@@ -67,10 +71,31 @@ class J1MConfigTests(unittest.TestCase):
             (root / "source-model-receipt.json").write_text(json.dumps({"status": "verified", "revision": "a" * 40, "tokenizer_sha256": "b" * 64, "chat_template_sha256": "c" * 64, "license_sha256": "d" * 64}), encoding="utf-8")
             (root / "tensor-metadata.json").write_text(json.dumps({"status": "verified", "tensor_count": 3}), encoding="utf-8")
             (root / "toolchain.json").write_text(json.dumps({"schema": "local_bmo.j1m.toolchain.v1", "llama_cpp_head": "e" * 40}), encoding="utf-8")
+            (root / "command-receipt.json").write_text("[{\"stage\": 1, \"status\": \"completed\"}]\n", encoding="utf-8")
+            (root / "scan-receipt.json").write_text(json.dumps({"status": "verified"}), encoding="utf-8")
             manifest = self.j1m.write_artifacts(root, names)
             self.assertEqual(len(manifest["artifacts"]), 8)
             self.assertTrue((root / "manifest.json").is_file())
             self.assertTrue((root / "checksums.sha256").is_file())
+
+    def test_deployable_bundle_remains_verifiable_without_intermediates(self):
+        fetch = load(ROOT / "scripts/j1m_fetch.py", "j1m_fetch_bundle")
+        with tempfile.TemporaryDirectory() as directory:
+            remote = Path(directory) / "remote"
+            local = Path(directory) / "local"
+            remote.mkdir()
+            for name in ("Qwen3.5-9B-bf16.gguf", "Qwen3.5-9B-Q8_0.gguf", "Qwen3.5-9B-Q4_K_M.gguf"):
+                (remote / name).write_bytes(name.encode())
+            (remote / "source-model-receipt.json").write_text(json.dumps({"status": "verified", "revision": "a" * 40, "tokenizer_sha256": "b" * 64, "chat_template_sha256": "c" * 64, "license_sha256": "d" * 64}), encoding="utf-8")
+            (remote / "tensor-metadata.json").write_text(json.dumps({"status": "verified"}), encoding="utf-8")
+            (remote / "toolchain.json").write_text(json.dumps({"schema": "local_bmo.j1m.toolchain.v1"}), encoding="utf-8")
+            (remote / "command-receipt.json").write_text("[{\"stage\": 1, \"status\": \"completed\"}]\n", encoding="utf-8")
+            (remote / "scan-receipt.json").write_text(json.dumps({"status": "verified"}), encoding="utf-8")
+            self.j1m.write_artifacts(remote, ["Qwen3.5-9B-bf16.gguf", "Qwen3.5-9B-Q8_0.gguf", "Qwen3.5-9B-Q4_K_M.gguf"])
+            (remote / "Qwen3.5-9B-bf16.gguf").unlink()
+            (remote / "Qwen3.5-9B-Q8_0.gguf").unlink()
+            fetch.copy_selected(remote, local, ["Qwen3.5-9B-Q4_K_M.gguf", "manifest.json", "checksums.sha256", "tensor-metadata.json", "source-model-receipt.json", "conversion-receipt.json", "model-receipt.json", "toolchain.json", "command-receipt.json", "scan-receipt.json"])
+            fetch.verify_local_bundle(local)
 
     def test_local_fetch_allows_only_q4_and_receipts(self):
         fetch = load(ROOT / "scripts/j1m_fetch.py", "j1m_fetch")
@@ -78,6 +103,23 @@ class J1MConfigTests(unittest.TestCase):
         self.assertEqual(selected[0], "Qwen3.5-9B-Q4_K_M.gguf")
         with self.assertRaises(ValueError):
             fetch.select_local_artifacts(["Qwen3.5-9B-bf16.gguf"])
+        self.assertIn("toolchain.json", fetch.LOCAL_ALLOWLIST)
+
+    def test_toolchain_receipt_contains_freeze_from_same_artifact_dir(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "artifacts"
+            output.mkdir()
+            (output / "pip-freeze.txt").write_text("example-package==1.2.3\n", encoding="utf-8")
+            self.j1m.main(["--toolchain", str(output / "toolchain.json"), "--llama-checkout", str(ROOT)])
+            receipt = json.loads((output / "toolchain.json").read_text())
+            self.assertIn("example-package==1.2.3", receipt["pip_freeze"])
+
+    def test_ephemeral_key_generation_does_not_interpret_provider_identifier(self):
+        from scripts import shadeform_lifecycle as sf
+        with tempfile.TemporaryDirectory() as directory:
+            private, public = sf.create_ephemeral_ssh_key({"SHADEFORM_SSH": "provider-uuid-123456789012345678901234"}, Path(directory))
+            self.assertEqual(stat.S_IMODE(private.stat().st_mode), 0o600)
+            self.assertTrue(public.startswith("ssh-ed25519 "))
 
 
 class StaticSafetyTests(unittest.TestCase):
@@ -114,6 +156,25 @@ class StaticSafetyTests(unittest.TestCase):
                 self.assertEqual(len(sf.COST_LEDGER.read_text().splitlines()), 2)
             finally:
                 sf.COST_LEDGER = original
+
+    def test_candidate_budget_includes_backstop_margin(self):
+        from scripts import shadeform_lifecycle as sf
+        raw = [{"gpu_type": "A100", "num_gpus": 1, "cloud": "cloud-a", "hourly_price": 90, "configuration": {"vram_per_gpu_in_gb": 80}, "availability": [{"region": "r1", "available": True}], "shade_instance_type": "a100-80"}]
+        env = {"SHADEFORM_GPU_TYPES": "A100", "SHADEFORM_MAX_HOURLY_COST_USD": "2", "SHADEFORM_EXCLUDED_CLOUDS": ""}
+        self.assertEqual(sf._rank_candidates(raw, env, min_vram_gb=80, max_runtime_hours=1.0, budget_usd=1.0), [])
+
+    def test_scratch_receipt_reports_observed_and_required(self):
+        j1m = load(ROOT / "scripts/j1m_runner.py", "j1m_scratch")
+        receipt = j1m.check_scratch(Path("/tmp"), 1)
+        self.assertGreaterEqual(receipt["available_gib"], receipt["required_gib"])
+
+    def test_deadline_backstops_exceed_watchdog_and_run(self):
+        j1m = load(ROOT / "scripts/j1m_runner.py", "j1m_deadline")
+        config = j1m.load_config()
+        for mode in ("prove", "build"):
+            selected = config["modes"][mode]
+            self.assertGreater(selected["provider_backstop_hours"], selected["runtime_hours"])
+            self.assertLess(selected["external_watchdog_seconds"], selected["provider_backstop_hours"] * 3600)
 
 
 class LoopbackLifecycleTests(unittest.TestCase):
@@ -163,13 +224,14 @@ class LoopbackLifecycleTests(unittest.TestCase):
                 ssh_key_name="j1m-test-key", gpu="A100_80G", cloud="hyperstack", region="Montreal",
                 hourly_usd=1.35, created_at_utc=sf.utc_now().isoformat(), launcher_pid=launcher.pid,
             ))
+            launcher.kill()
+            launcher.wait(timeout=5)
             env = {**os.environ, "EP_SHADEFORM_API_BASE_FOR_TESTS": f"http://127.0.0.1:{server.server_port}"}
             result = subprocess.run([
                 os.sys.executable, "scripts/shadeform_watchdog.py", "--phase-id", phase,
                 "--instance-id", "instance-loopback-1", "--launcher-pid", str(launcher.pid),
                 "--max-seconds", "0.15", "--poll-seconds", "0.03", "--env-file", str(env_file),
             ], env=env, timeout=10)
-            launcher.wait(timeout=5)
             self.assertEqual(result.returncode, 0)
             self.assertFalse(runtime.exists())
             self.assertIn("/instances/instance-loopback-1/delete", calls)

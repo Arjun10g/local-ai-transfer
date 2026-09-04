@@ -14,6 +14,7 @@ import os
 import signal
 import subprocess
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -46,11 +47,14 @@ def _salvage(info: dict[str, Any], identity: Path, known_hosts: Path, destinatio
     destination.mkdir(parents=True, exist_ok=True)
     results = []
     for name in names:
-        sf._preflight(info["phase_id"])
-        command = sf.scp_base(info["instance_info"], identity, known_hosts) + [
-            f"{info['instance_info']['ssh_user']}@{info['instance_info']['ip']}:/scratch/j1m/artifacts/{name}", str(destination / name),
-        ]
-        receipt = _remote(command, timeout=120)
+        try:
+            sf._preflight(info["phase_id"])
+            command = sf.scp_base(info["instance_info"], identity, known_hosts) + [
+                f"{info['instance_info']['ssh_user']}@{info['instance_info']['ip']}:/scratch/j1m/artifacts/{name}", str(destination / name),
+            ]
+            receipt = _remote(command, timeout=120)
+        except Exception as exc:
+            receipt = {"status": "salvage_failed", "error_type": type(exc).__name__}
         receipt["name"] = name
         results.append(receipt)
     return results
@@ -76,6 +80,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
         identity, public_key = sf.create_ephemeral_ssh_key(env, temp_root / "ssh")
         key_id: str | None = None
         instance_id: str | None = None
+        ambiguous_create = False
         recorded = False
         record: sf.OwnedResource | None = None
         known_hosts = temp_root / "known_hosts"
@@ -89,9 +94,20 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
         token_remote = False
         try:
             key_id = sf.add_ssh_key(api_key, phase_id, f"j1m-{nonce}", public_key)
-            instance_id = sf.create_instance(api_key, env, phase_id=phase_id, run_id=run_id, candidate=candidate, ssh_key_id=key_id, nonce=nonce, max_runtime_hours=runtime)
+            try:
+                instance_id = sf.create_instance(api_key, env, phase_id=phase_id, run_id=run_id, candidate=candidate, ssh_key_id=key_id, nonce=nonce, max_runtime_hours=runtime)
+                created_monotonic = time.monotonic()
+                provider_deadline = created_monotonic + float(config["modes"][mode]["provider_backstop_hours"]) * 3600
+            except Exception:
+                # A transport timeout after POST leaves the provider outcome
+                # unknown. Do not pretend it was absent: reserve a pending
+                # budget event, record the nonce for operator reconciliation,
+                # and refuse subsequent launches until settled.
+                sf.append_cost_event({"instance_id": f"ambiguous-{nonce}", "phase_id": phase_id, "status": "pending", "estimated_cost_usd": round(candidate.hourly_usd * max(0.25, runtime * 1.25), 6), "incident": "create-response-ambiguous"})
+                ambiguous_create = True
+                raise
             lifecycle["instance_id"] = instance_id
-            record = sf.OwnedResource(phase_id=phase_id, run_id=run_id, instance_id=instance_id, ownership_nonce=nonce, ssh_key_id=key_id, ssh_key_name=f"j1m-{nonce}", gpu=candidate.gpu, cloud=candidate.cloud, region=candidate.region, hourly_usd=candidate.hourly_usd, created_at_utc=sf.utc_now().isoformat(), active_deadline_utc=(sf.utc_now() + sf.timedelta(minutes=30)).isoformat())
+            record = sf.OwnedResource(phase_id=phase_id, run_id=run_id, instance_id=instance_id, ownership_nonce=nonce, ssh_key_id=key_id, ssh_key_name=f"j1m-{nonce}", gpu=candidate.gpu, cloud=candidate.cloud, region=candidate.region, hourly_usd=candidate.hourly_usd, created_at_utc=sf.utc_now().isoformat(), active_deadline_utc=(sf.utc_now() + sf.timedelta(minutes=30)).isoformat(), run_deadline_utc=(sf.utc_now() + sf.timedelta(hours=runtime)).isoformat())
             # Ownership record is written before any poll/upload. If this
             # fails, the fallback below still deletes the exact returned ID.
             sf.write_owned_resource(record)
@@ -105,7 +121,8 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             ])
             lifecycle["watchdog_pid"] = watchdog.pid
             j1m_runner.write_progress(progress_path, "wait-active-starting", phase_id=phase_id)
-            info = sf.wait_active(api_key, phase_id, instance_id)
+            wait_budget = max(30, int(min(1800, provider_deadline - time.monotonic() - 120)))
+            info = sf.wait_active(api_key, phase_id, instance_id, timeout_seconds=wait_budget)
             lifecycle["instance_info"] = info
             lifecycle["status"] = "active"
             remote_root = "/scratch/j1m"
@@ -125,14 +142,14 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 if upload_receipt["status"] != "completed":
                     raise sf.ShadeformError("required J1M upload failed")
             if mode == "prove":
-                lifecycle["job"] = _remote(sf.ssh_base(info, identity, known_hosts) + ["python3", f"{remote_root}/j1m_runner.py", "--prove", "--output", f"{remote_root}/artifacts/proving-receipt.json"], timeout=120)
+                lifecycle["job"] = _remote(sf.ssh_base(info, identity, known_hosts) + ["python3", f"{remote_root}/j1m_runner.py", "--prove", "--scratch", "/scratch", "--min-scratch-gib", str(config["resources"]["required_scratch_gib"]), "--output", f"{remote_root}/artifacts/proving-receipt.json"], timeout=120)
             else:
                 with j1m_runner.hf_token_file(sf.require_env(env, "HF_TOKEN")) as token_file:
                     token_upload = sf.scp_base(info, identity, known_hosts) + [str(token_file), f"{info['ssh_user']}@{info['ip']}:{remote_root}/hf-token.env"]
+                    token_remote = True
                     lifecycle["token_upload"] = _remote(token_upload, timeout=120)
                     if lifecycle["token_upload"]["status"] != "completed":
                         raise sf.ShadeformError("HF token upload failed")
-                    token_remote = True
                     chmod = _remote(sf.ssh_base(info, identity, known_hosts) + ["chmod", "600", f"{remote_root}/hf-token.env"], timeout=30)
                     lifecycle["token_chmod"] = chmod
                     if chmod["status"] != "completed":
@@ -140,10 +157,10 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     remote_job = sf.ssh_base(info, identity, known_hosts) + ["python3", f"{remote_root}/j1m_runner.py", "--run", "--config", f"{remote_root}/j1m-config.json", "--token-file", f"{remote_root}/hf-token.env"]
                     j1m_runner.write_progress(progress_path, "remote-build-starting", phase_id=phase_id)
                     try:
-                        lifecycle["job"] = _remote(remote_job, timeout=runtime * 3600)
+                        lifecycle["job"] = _remote(remote_job, timeout=max(30, provider_deadline - time.monotonic() - 120))
                     finally:
                         lifecycle["token_delete"] = _remote(sf.ssh_base(info, identity, known_hosts) + ["rm", "-f", f"{remote_root}/hf-token.env"], timeout=30)
-                        token_remote = False
+                        token_remote = lifecycle["token_delete"]["status"] != "completed"
             if lifecycle["job"]["status"] != "completed":
                 lifecycle["status"] = lifecycle["job"]["status"]
                 raise sf.ShadeformError("J1M remote job did not complete")
@@ -155,12 +172,25 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             if token_remote and lifecycle.get("instance_info"):
                 lifecycle["token_delete_backstop"] = _remote(sf.ssh_base(lifecycle["instance_info"], identity, known_hosts) + ["rm", "-f", "/scratch/j1m/hf-token.env"], timeout=30)
             if watchdog is not None and watchdog.poll() is None:
-                watchdog.terminate()
-                watchdog.wait(timeout=10)
+                try:
+                    watchdog.terminate()
+                except OSError:
+                    pass
+                try:
+                    watchdog.wait(timeout=10)
+                except (OSError, subprocess.TimeoutExpired):
+                    try:
+                        watchdog.kill()
+                    except OSError:
+                        pass
+                    try:
+                        watchdog.wait(timeout=10)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
             fetch_allowlist = config["artifacts"]["local_fetch_allowlist"] if mode == "build" else config["artifacts"]["prove_fetch_allowlist"]
             lifecycle["salvage"] = _salvage({"phase_id": phase_id, "instance_info": lifecycle.get("instance_info", {})}, identity, known_hosts, artifact_destination, fetch_allowlist) if lifecycle.get("instance_info") else []
             if mode == "prove" and lifecycle.get("job", {}).get("status") == "completed" and not any(item.get("name") == "proving-receipt.json" and item.get("status") == "completed" for item in lifecycle["salvage"]):
-                raise sf.ShadeformError("proving receipt was not salvaged before teardown")
+                lifecycle["receipt_error"] = "proving receipt was not salvaged before teardown"
             # The shared teardown performs exact deletion before cost/key
             # bookkeeping and emits a receipt, while remote salvage above is
             # best-effort and independent for each allowlisted artifact.
@@ -170,10 +200,10 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 else:
                     # Ledger write failed: exact ID is still known, so delete
                     # it before attempting any key/bookkeeping cleanup.
-                    lifecycle["deletion"] = sf.delete_instance(api_key, phase_id, instance_id)
+                    lifecycle["deletion"] = sf._delete_instance(api_key, phase_id, instance_id)
                     if lifecycle["deletion"].get("success") is True and key_id is not None:
                         sf.delete_ssh_key(api_key, phase_id, key_id)
-            elif key_id is not None:
+            elif key_id is not None and not ambiguous_create:
                 # Key creation succeeded but instance creation did not.
                 sf.delete_ssh_key(api_key, phase_id, key_id)
             for number, handler in previous_handlers.items():

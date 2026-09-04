@@ -51,7 +51,7 @@
     }
   },
   "resources": {
-    "scratch_gib": 70,
+    "required_scratch_gib": 70,
     "expected_peak_gib": 58,
     "progress_path": "experiments/runtime/J1M.progress.json"
   },
@@ -67,6 +67,8 @@
       "conversion-receipt.json",
       "model-receipt.json",
       "toolchain.json"
+      ,"command-receipt.json",
+      "scan-receipt.json"
     ],
     "local_fetch_allowlist": [
       "Qwen3.5-9B-Q4_K_M.gguf",
@@ -77,6 +79,8 @@
       "conversion-receipt.json",
       "model-receipt.json",
       "toolchain.json"
+      ,"command-receipt.json",
+      "scan-receipt.json"
     ],
     "prove_fetch_allowlist": ["proving-receipt.json"],
     "vision_projection": "excluded"

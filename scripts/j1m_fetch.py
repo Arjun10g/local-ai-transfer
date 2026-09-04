@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import hashlib
 import sys
 from pathlib import Path
 
@@ -27,6 +28,9 @@ LOCAL_ALLOWLIST = frozenset({
     "source-model-receipt.json",
     "conversion-receipt.json",
     "model-receipt.json",
+    "toolchain.json",
+    "command-receipt.json",
+    "scan-receipt.json",
 })
 
 
@@ -56,6 +60,15 @@ def copy_selected(remote_dir: Path, local_dir: Path, names: list[str]) -> list[d
     return receipt
 
 
+def verify_local_bundle(local_dir: Path) -> None:
+    manifest = json.loads((local_dir / "manifest.json").read_text(encoding="utf-8"))
+    expected = {item["name"]: item["sha256"] for item in manifest["artifacts"]}
+    for name, digest in expected.items():
+        path = local_dir / name
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise ValueError(f"local bundle checksum mismatch: {name}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -64,7 +77,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     config = load_config(args.config)
     names = list(config["artifacts"]["local_fetch_allowlist"])
-    print(json.dumps({"selected": copy_selected(args.remote_dir, args.local_dir, names)}, sort_keys=True))
+    receipt = copy_selected(args.remote_dir, args.local_dir, names)
+    verify_local_bundle(args.local_dir)
+    print(json.dumps({"selected": receipt, "checksums": "verified"}, sort_keys=True))
     return 0
 
 
