@@ -33,13 +33,14 @@ FIXTURE_MAX_BYTES = 256 * 1024
 MAX_MESSAGE_CHARS = 4096
 MAX_MESSAGES_PER_CASE = 8
 MAX_TOOLS = 16
+MAX_EVAL_CASES = 40
 MAX_TOOL_SCHEMA_BYTES = 16384
 MAX_JSON_DEPTH = 8
 ID = re.compile(r"^[A-Za-z0-9_.-]{1,96}$")
 NAME = re.compile(r"^[a-z][a-z0-9_.-]{1,95}$")
 SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{8,96}$")
 ROLE = {"user", "system"}
-CATEGORIES = {"tool_selection", "argument_fidelity", "no_tool", "malformed_prompt", "prompt_injection"}
+CATEGORIES = {"tool_selection", "argument_fidelity", "no_tool", "malformed_prompt", "prompt_injection", "schema_edge", "confirmation_sensitive", "abstention"}
 FIXTURE_KEYS = {"schema", "model", "protocol", "limits", "tools", "cases"}
 LIMIT_KEYS = {"context_tokens", "max_output_tokens", "temperature", "max_cases"}
 TOOL_CALL = re.compile(
@@ -113,7 +114,7 @@ def _bounded_json(value: Any, depth: int = 0) -> None:
         if len(value) > MAX_MESSAGE_CHARS:
             raise ValueError("fixture_string_unbounded")
     elif isinstance(value, list):
-        if len(value) > 32:
+        if len(value) > MAX_EVAL_CASES:
             raise ValueError("fixture_array_unbounded")
         for item in value:
             _bounded_json(item, depth + 1)
@@ -202,7 +203,7 @@ def validate_fixture(fixture: Any) -> dict[str, Any]:
         raise ValueError("fixture_limits_shape")
     _bounded_int(limits["context_tokens"], 1, 2048)
     _bounded_int(limits["max_output_tokens"], 1, 64)
-    _bounded_int(limits["max_cases"], 1, 8)
+    _bounded_int(limits["max_cases"], 1, MAX_EVAL_CASES)
     if isinstance(limits["temperature"], bool) or not isinstance(limits["temperature"], (int, float)) or not math.isfinite(limits["temperature"]) or not 0 <= limits["temperature"] <= 2:
         raise ValueError("fixture_temperature_invalid")
     tools = fixture["tools"]
@@ -442,7 +443,7 @@ def run_local(
     try:
         validate_endpoint(endpoint)
         validate_fixture(fixture)
-        if isinstance(max_cases, bool) or not isinstance(max_cases, int) or not 1 <= max_cases <= 8:
+        if isinstance(max_cases, bool) or not isinstance(max_cases, int) or not 1 <= max_cases <= MAX_EVAL_CASES:
             raise ValueError("max_cases_invalid")
         if not math.isfinite(timeout) or not 0 < timeout <= 600:
             raise ValueError("timeout_invalid")
@@ -474,11 +475,17 @@ def run_local(
             if rss is not None:
                 peak_rss = max(peak_rss or 0, rss)
         records.append({"id": case["id"], "category": case["category"], "status": status, "reason": reason, "latency_ms": elapsed_ms})
+    category_summary: dict[str, dict[str, int]] = {}
+    for item in records:
+        summary = category_summary.setdefault(item["category"], {"case_count": 0, "passed": 0, "failed": 0, "errors": 0})
+        summary["case_count"] += 1
+        result_key = {"pass": "passed", "fail": "failed", "error": "errors"}[item["status"]]
+        summary[result_key] += 1
     return {
         "schema": "local_bmo.tool-call-eval-result.v1", "model": fixture["model"],
         "case_count": len(records), "passed": sum(item["status"] == "pass" for item in records),
         "failed": sum(item["status"] == "fail" for item in records), "errors": sum(item["status"] == "error" for item in records),
-        "peak_rss_kib": peak_rss, "cases": records,
+        "peak_rss_kib": peak_rss, "cases": records, "category_summary": category_summary,
     }
 
 
@@ -533,12 +540,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--token-file", type=Path, help="protected regular file containing the native bearer token")
     parser.add_argument("--token-env", default=TOKEN_ENV, help="inherited environment variable name (presence only)")
     parser.add_argument("--timeout", type=float, default=90.0)
-    parser.add_argument("--max-cases", type=int, default=8)
+    parser.add_argument("--max-cases", type=int, default=MAX_EVAL_CASES)
     parser.add_argument("--engine-pid", type=int, help="optional local engine PID for bounded RSS sampling")
     parser.add_argument("--dry-run", action="store_true", help="validate fixture and print case IDs only")
     args = parser.parse_args(argv)
-    if not 1 <= args.max_cases <= 8:
-        parser.error("--max-cases must be between 1 and 8")
+    if not 1 <= args.max_cases <= MAX_EVAL_CASES:
+        parser.error(f"--max-cases must be between 1 and {MAX_EVAL_CASES}")
     if not math.isfinite(args.timeout) or not 0 < args.timeout <= 600:
         parser.error("--timeout must be finite and between 0 and 600 seconds")
     if args.engine_pid is not None and args.engine_pid <= 0:

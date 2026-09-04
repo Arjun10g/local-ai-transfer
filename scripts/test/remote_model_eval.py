@@ -31,6 +31,8 @@ PIN_RE = set("0123456789abcdef")
 TAIL_LIMIT = 1200
 MAX_ENGINE_LINE = 8192
 MAX_EVAL_OUTPUT = 256 * 1024
+FIXTURE_MAX_BYTES = 256 * 1024
+MAX_EVAL_CASES = 40
 
 
 def sha256(path: Path) -> str:
@@ -147,18 +149,61 @@ def _engine_build_info(engine: Path, expected_llama: str, expected_backend: str)
     return {key: payload[key] for key in ("engine_version", "api_version", "compiled_backend", "llama_cpp_revision", "model") if key in payload}
 
 
-def _validate_metrics(metrics: Any) -> dict[str, Any]:
+def _fixture_contract(path: Path) -> tuple[int, set[str]]:
+    """Read only the bounded fixture contract; never echo its prompts."""
+
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ValueError("evaluator_fixture_unreadable") from exc
+    if len(raw) > FIXTURE_MAX_BYTES:
+        raise ValueError("evaluator_fixture_too_large")
+    try:
+        fixture = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise ValueError("evaluator_fixture_invalid") from exc
+    if not isinstance(fixture, dict) or not isinstance(fixture.get("limits"), dict) or not isinstance(fixture.get("cases"), list):
+        raise ValueError("evaluator_fixture_invalid")
+    count = fixture["limits"].get("max_cases")
+    cases = fixture["cases"]
+    if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= MAX_EVAL_CASES or len(cases) != count:
+        raise ValueError("evaluator_fixture_count_invalid")
+    categories = {case.get("category") for case in cases if isinstance(case, dict)}
+    if len(categories) == 0 or not all(isinstance(category, str) for category in categories):
+        raise ValueError("evaluator_fixture_categories_invalid")
+    return count, categories
+
+
+def _validate_metrics(metrics: Any, *, expected_case_count: int = 8, expected_categories: set[str] | None = None) -> dict[str, Any]:
     if not isinstance(metrics, dict):
         raise ValueError("evaluator_metrics_invalid")
     counts = ("case_count", "passed", "failed", "errors")
     if any(isinstance(metrics.get(key), bool) or not isinstance(metrics.get(key), int) or metrics[key] < 0 for key in counts):
         raise ValueError("evaluator_metrics_invalid")
-    if metrics["case_count"] != 8 or sum(metrics[key] for key in counts[1:]) != 8:
+    if isinstance(expected_case_count, bool) or not isinstance(expected_case_count, int) or not 1 <= expected_case_count <= MAX_EVAL_CASES:
+        raise ValueError("evaluator_expected_count_invalid")
+    if metrics["case_count"] != expected_case_count or sum(metrics[key] for key in counts[1:]) != expected_case_count:
         raise ValueError("evaluator_metrics_total_invalid")
     peak = metrics.get("peak_rss_kib")
     if peak is not None and (isinstance(peak, bool) or not isinstance(peak, int) or peak < 0):
         raise ValueError("evaluator_rss_invalid")
-    return {key: metrics.get(key) for key in (*counts, "peak_rss_kib")}
+    summary = metrics.get("category_summary")
+    if expected_categories is not None:
+        if not isinstance(summary, dict) or set(summary) != expected_categories:
+            raise ValueError("evaluator_category_summary_invalid")
+        category_total = 0
+        for category in expected_categories:
+            item = summary[category]
+            if not isinstance(item, dict) or set(item) != {"case_count", "passed", "failed", "errors"}:
+                raise ValueError("evaluator_category_summary_invalid")
+            if any(isinstance(item.get(key), bool) or not isinstance(item.get(key), int) or item[key] < 0 for key in ("case_count", "passed", "failed", "errors")):
+                raise ValueError("evaluator_category_summary_invalid")
+            if item["passed"] + item["failed"] + item["errors"] != item["case_count"]:
+                raise ValueError("evaluator_category_summary_invalid")
+            category_total += item["case_count"]
+        if category_total != expected_case_count:
+            raise ValueError("evaluator_category_summary_total_invalid")
+    return {key: metrics.get(key) for key in (*counts, "peak_rss_kib")} | ({"category_summary": summary} if summary is not None else {})
 
 
 def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any]) -> dict[str, Any]:
@@ -172,6 +217,7 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any]) -> 
     backend = getattr(args, "backend", "cpu")
     if backend not in {"cpu", "cuda"}:
         raise ValueError("evaluation_backend_invalid")
+    expected_case_count, expected_categories = _fixture_contract(Path(args.fixture))
     cuda_receipt = None
     if backend == "cuda":
         receipt_path = Path(getattr(args, "cuda_device_receipt", ""))
@@ -242,7 +288,7 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any]) -> 
             sys.executable, args.evaluator, "--fixture", args.fixture,
             "--endpoint", f"http://127.0.0.1:{port}/v1/chat/completions",
             "--token-file", os.fspath(token_file), "--timeout", "120",
-            "--max-cases", "8", "--engine-pid", str(process.pid),
+            "--max-cases", str(expected_case_count), "--engine-pid", str(process.pid),
         ]
         result = _run_bounded(evaluate, timeout=float(args.timeout), output_limit=MAX_EVAL_OUTPUT)
         if result.get("status") != "completed":
@@ -251,8 +297,8 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any]) -> 
             metrics = json.loads(result.get("stdout", ""))
         except (TypeError, json.JSONDecodeError) as exc:
             raise ValueError("evaluator_receipt_invalid") from exc
-        metrics = _validate_metrics(metrics)
-        all_passed = metrics["passed"] == 8 and metrics["failed"] == 0 and metrics["errors"] == 0
+        metrics = _validate_metrics(metrics, expected_case_count=expected_case_count, expected_categories=expected_categories)
+        all_passed = metrics["passed"] == expected_case_count and metrics["failed"] == 0 and metrics["errors"] == 0
         has_failure = metrics["failed"] > 0 or metrics["errors"] > 0
         status = "verified" if all_passed else "completed_with_failures" if has_failure else "failed"
         return {
@@ -262,7 +308,7 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any]) -> 
             "engine": build_info,
             **({"cuda_device": cuda_receipt} if cuda_receipt is not None else {}),
             "toolchain": toolchain,
-            "metrics": {key: metrics[key] for key in ("case_count", "passed", "failed", "errors", "peak_rss_kib")},
+            "metrics": {key: metrics[key] for key in ("case_count", "passed", "failed", "errors", "peak_rss_kib", "category_summary")},
             "duration_ms": round((time.monotonic() - started) * 1000, 1),
             "prompt_response_logging": False,
             "token_logging": False,

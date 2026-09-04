@@ -30,6 +30,8 @@ from scripts.shadeform_teardown import teardown_exact
 
 ROOT = Path(__file__).resolve().parents[1]
 _STDERR_TAIL_LIMIT = 1200
+_EVAL_FIXTURE_MAX_BYTES = 256 * 1024
+_LEGACY_EVAL_CASES = 8
 
 
 class OperatorCancelled(Exception):
@@ -61,6 +63,25 @@ def _progress(path: Path, event: str, **details: Any) -> None:
         j1m_runner.write_progress(path, event, **details)
     except Exception:
         pass
+
+
+def _tool_eval_contract() -> tuple[int, set[str]]:
+    """Return the bounded case/category contract shipped with the evaluator."""
+
+    fixture_path = ROOT / "tests" / "model" / "tool_call_eval.json"
+    raw = fixture_path.read_bytes()
+    if len(raw) > _EVAL_FIXTURE_MAX_BYTES:
+        raise ValueError("eval fixture too large")
+    fixture = json.loads(raw.decode("utf-8"))
+    limits = fixture.get("limits") if isinstance(fixture, dict) else None
+    cases = fixture.get("cases") if isinstance(fixture, dict) else None
+    count = limits.get("max_cases") if isinstance(limits, dict) else None
+    if isinstance(count, bool) or not isinstance(count, int) or not isinstance(cases, list) or len(cases) != count or not 1 <= count <= 40:
+        raise ValueError("eval fixture count invalid")
+    categories = {case.get("category") for case in cases if isinstance(case, dict)}
+    if not categories or not all(isinstance(category, str) for category in categories):
+        raise ValueError("eval fixture categories invalid")
+    return count, categories
 
 
 def _remote(command: list[str], *, timeout: float) -> dict[str, Any]:
@@ -319,12 +340,33 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     if not isinstance(recorded, dict) or recorded.get("name") != artifact["name"] or recorded.get("size_bytes") != artifact["size_bytes"] or recorded.get("sha256") != artifact["sha256"]:
         raise ValueError("eval receipt artifact mismatch")
     metrics = payload.get("metrics")
-    if not isinstance(metrics, dict) or payload.get("status") not in {"verified", "completed_with_failures"} or metrics.get("case_count") != 8 or any(isinstance(metrics.get(key), bool) or not isinstance(metrics.get(key), int) or metrics[key] < 0 for key in ("passed", "failed", "errors")):
+    if not isinstance(metrics, dict) or payload.get("status") not in {"verified", "completed_with_failures"} or any(isinstance(metrics.get(key), bool) or not isinstance(metrics.get(key), int) or metrics[key] < 0 for key in ("case_count", "passed", "failed", "errors")):
         raise ValueError("eval receipt metrics invalid")
-    if sum(metrics[key] for key in ("passed", "failed", "errors")) != 8:
+    summary = metrics.get("category_summary")
+    if summary is not None:
+        expected_count, expected_categories = _tool_eval_contract()
+        if metrics["case_count"] != expected_count or not isinstance(summary, dict) or set(summary) != expected_categories:
+            raise ValueError("eval receipt metrics invalid")
+        category_total = 0
+        for category in expected_categories:
+            item = summary[category]
+            if not isinstance(item, dict) or set(item) != {"case_count", "passed", "failed", "errors"}:
+                raise ValueError("eval receipt category summary invalid")
+            if any(isinstance(item.get(key), bool) or not isinstance(item.get(key), int) or item[key] < 0 for key in ("case_count", "passed", "failed", "errors")):
+                raise ValueError("eval receipt category summary invalid")
+            if item["passed"] + item["failed"] + item["errors"] != item["case_count"]:
+                raise ValueError("eval receipt category summary invalid")
+            category_total += item["case_count"]
+        if category_total != expected_count:
+            raise ValueError("eval receipt category summary total invalid")
+    else:
+        # Receipts from the original eight-case smoke lane remain readable for
+        # audit history; all expanded receipts carry the category contract.
+        expected_count = _LEGACY_EVAL_CASES
+    if metrics["case_count"] != expected_count or sum(metrics[key] for key in ("passed", "failed", "errors")) != expected_count:
         raise ValueError("eval receipt metric totals invalid")
     status = payload["status"]
-    all_passed = metrics["passed"] == 8 and metrics["failed"] == 0 and metrics["errors"] == 0
+    all_passed = metrics["passed"] == expected_count and metrics["failed"] == 0 and metrics["errors"] == 0
     has_failure = metrics["failed"] > 0 or metrics["errors"] > 0
     if (status == "verified") != all_passed or (status == "completed_with_failures") != has_failure:
         raise ValueError("eval receipt status does not match metrics")
@@ -355,7 +397,10 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
         raise ValueError("eval receipt RSS metric invalid")
     if payload.get("prompt_response_logging") is not False or payload.get("token_logging") is not False:
         raise ValueError("eval receipt logging policy missing")
-    return {"status": status, "metrics": {key: metrics[key] for key in ("case_count", "passed", "failed", "errors", "peak_rss_kib")}, "toolchain": toolchain}
+    selected_metrics = {key: metrics[key] for key in ("case_count", "passed", "failed", "errors", "peak_rss_kib")}
+    if summary is not None:
+        selected_metrics["category_summary"] = summary
+    return {"status": status, "metrics": selected_metrics, "toolchain": toolchain}
 
 
 def _salvage(
