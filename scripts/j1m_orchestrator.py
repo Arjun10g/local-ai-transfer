@@ -136,6 +136,9 @@ def _eval_uploads(config: dict[str, Any], remote_root: str, artifact_path: Path,
         (manifest_path.with_name("model-manifest.sha256"), f"{remote_root}/model-manifest.sha256", False),
         (ROOT / "scripts" / "test" / "remote_model_eval.py", f"{remote_root}/remote_model_eval.py", False),
         (ROOT / "scripts" / "test" / "evaluate_tool_calls.py", f"{remote_root}/evaluate_tool_calls.py", False),
+        (ROOT / "scripts" / "test" / "cuda_device_probe.py", f"{remote_root}/cuda_device_probe.py", False),
+        (ROOT / "scripts" / "cuda_source_closure.py", f"{remote_root}/engine/scripts/cuda_source_closure.py", False),
+        (ROOT / "vendor" / "llama.cpp" / "ggml-cuda-source-lock.json", f"{remote_root}/engine/vendor/llama.cpp/ggml-cuda-source-lock.json", False),
         (ROOT / "tests" / "model" / "tool_call_eval.json", f"{remote_root}/tool_call_eval.json", False),
         (ROOT / "CMakeLists.txt", f"{remote_root}/engine/CMakeLists.txt", False),
         # Recursive scp copies the source directory beneath its destination;
@@ -145,21 +148,24 @@ def _eval_uploads(config: dict[str, Any], remote_root: str, artifact_path: Path,
 
 
 def _eval_remote_commands(config: dict[str, Any], remote_root: str) -> list[list[str]]:
-    """Build the reviewed, non-shell argv stages for native CPU eval."""
+    """Build reviewed non-shell argv stages for the authenticated CUDA eval."""
 
     llama = config["llama_cpp"]
+    eval_mode = config["modes"]["eval"]
+    device_name = eval_mode["cuda_device_name"]
     checkout = f"{remote_root}/llama.cpp"
     engine_root = f"{remote_root}/engine"
     build_root = f"{remote_root}/engine-build"
     return [
-        ["mkdir", "-p", f"{remote_root}/model", f"{engine_root}/native", f"{engine_root}/vendor", f"{remote_root}/artifacts"],
+        ["mkdir", "-p", f"{remote_root}/model", f"{engine_root}/native", f"{engine_root}/vendor", f"{engine_root}/scripts", f"{remote_root}/artifacts"],
         ["git", "clone", "--filter=blob:none", llama["repository"], checkout],
         ["git", "-C", checkout, "checkout", "--detach", llama["revision"]],
         ["git", "-C", checkout, "rev-parse", "HEAD"],
         ["cp", "-a", checkout, f"{engine_root}/vendor/llama.cpp"],
-        ["cmake", "-S", engine_root, "-B", build_root, "-DCMAKE_BUILD_TYPE=Release", "-DLAE_ENABLE_LLAMA_CPP=ON"],
+        ["python3", f"{remote_root}/cuda_device_probe.py", "--output", f"{remote_root}/artifacts/cuda-device-receipt.json"],
+        ["cmake", "-S", engine_root, "-B", build_root, "-DCMAKE_BUILD_TYPE=Release", "-DLAE_ENABLE_LLAMA_CPP=ON", "-DLAE_ENABLE_LLAMA_CUDA=ON", f"-DCMAKE_CUDA_ARCHITECTURES={eval_mode['cuda_architecture']}"],
         ["cmake", "--build", build_root, "--target", "lae-engine", "--parallel", "2"],
-        ["python3", f"{remote_root}/remote_model_eval.py", "--model", f"{remote_root}/model/Qwen3.5-9B-Q4_K_M.gguf", "--model-manifest", f"{remote_root}/model-manifest.json", "--model-manifest-lock", f"{remote_root}/model-manifest.sha256", "--source-revision", config["source"]["revision"], "--llama-revision", llama["revision"], "--llama-checkout", checkout, "--engine", f"{build_root}/native/lae-engine", "--evaluator", f"{remote_root}/evaluate_tool_calls.py", "--fixture", f"{remote_root}/tool_call_eval.json", "--token-file", f"{remote_root}/engine-token", "--receipt", f"{remote_root}/artifacts/eval-receipt.json", "--timeout", "600"],
+        ["python3", f"{remote_root}/remote_model_eval.py", "--model", f"{remote_root}/model/Qwen3.5-9B-Q4_K_M.gguf", "--model-manifest", f"{remote_root}/model-manifest.json", "--model-manifest-lock", f"{remote_root}/model-manifest.sha256", "--source-revision", config["source"]["revision"], "--llama-revision", llama["revision"], "--llama-checkout", checkout, "--engine", f"{build_root}/native/lae-engine", "--evaluator", f"{remote_root}/evaluate_tool_calls.py", "--fixture", f"{remote_root}/tool_call_eval.json", "--token-file", f"{remote_root}/engine-token", "--backend", eval_mode["backend"], "--cuda-device-name", device_name, "--cuda-device-receipt", f"{remote_root}/artifacts/cuda-device-receipt.json", "--receipt", f"{remote_root}/artifacts/eval-receipt.json", "--timeout", "600"],
     ]
 
 
@@ -192,8 +198,12 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     if (status == "verified") != all_passed or (status == "completed_with_failures") != has_failure:
         raise ValueError("eval receipt status does not match metrics")
     engine = payload.get("engine")
-    if not isinstance(engine, dict) or engine.get("llama_cpp_revision") != artifact.get("llama_cpp_revision") or engine.get("compiled_backend") != f"llama.cpp/{artifact.get('llama_cpp_revision', '')[:8]}/cpu":
+    if not isinstance(engine, dict) or engine.get("llama_cpp_revision") != artifact.get("llama_cpp_revision") or engine.get("compiled_backend") != f"llama.cpp/{artifact.get('llama_cpp_revision', '')[:8]}/cuda":
         raise ValueError("eval receipt engine identity mismatch")
+    cuda_device = payload.get("cuda_device")
+    device = cuda_device.get("device") if isinstance(cuda_device, dict) else None
+    if (not isinstance(cuda_device, dict) or cuda_device.get("schema") != "local_bmo.j1m.cuda-device-receipt.v1" or cuda_device.get("status") != "verified" or cuda_device.get("selector") != "CUDA0" or cuda_device.get("device_count") != 1 or not isinstance(device, dict) or "a100" not in str(device.get("name", "")).lower() or not isinstance(device.get("memory_total_mib"), int) or device["memory_total_mib"] < 70000):
+        raise ValueError("eval receipt CUDA placement attestation invalid")
     peak_rss = metrics.get("peak_rss_kib")
     if peak_rss is not None and (isinstance(peak_rss, bool) or not isinstance(peak_rss, int) or peak_rss < 0):
         raise ValueError("eval receipt RSS metric invalid")
@@ -243,10 +253,8 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             raise ValueError("eval requires --model-artifact; no implicit or alternate model is accepted")
         model_manifest = model_manifest or model_artifact.parent / "model-manifest.json"
         eval_artifact = _verify_eval_artifact(model_artifact, model_manifest, config)
-        # The approved catalogue target is an A100, but this composed path
-        # deliberately builds the CPU backend.  Do not spend on an A100 while
-        # presenting a CPU-only job as cost-efficient evaluation.
-        raise sf.ShadeformError("eval execution is blocked: CPU-only evaluation does not justify the approved A100; accelerated backend review is required")
+        # Eval is explicitly CUDA-only on the approved A100. A CPU binary or
+        # missing CUDA placement receipt is rejected by the remote verifier.
     else:
         eval_artifact = None
     env = sf.load_env(env_file)
@@ -400,7 +408,10 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 eval_commands = _eval_remote_commands(config, remote_root)
                 # The clone and immutable revision check precede uploads; the
                 # remaining stages consume the uploaded source/evaluator.
-                for command in eval_commands[:4]:
+                # Copy the exact pinned checkout before uploading the lock
+                # into its final vendor directory; otherwise SCP would target
+                # a path that does not yet exist (or create a nested tree).
+                for command in eval_commands[:5]:
                     stage = _remote(sf.ssh_base(info, identity, known_hosts) + command, timeout=_eval_timeout(provider_deadline, 300))
                     lifecycle.setdefault("eval_stages", []).append(stage)
                     if stage["status"] != "completed":
@@ -416,7 +427,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     lifecycle.setdefault("eval_uploads", []).append({"name": local.name, **upload_receipt})
                     if upload_receipt["status"] != "completed":
                         raise sf.ShadeformError("required eval upload failed")
-                for command in eval_commands[4:]:
+                for command in eval_commands[5:]:
                     stage = _remote(sf.ssh_base(info, identity, known_hosts) + command, timeout=_eval_timeout(provider_deadline, 600))
                     lifecycle.setdefault("eval_stages", []).append(stage)
                     if stage["status"] != "completed":
@@ -569,7 +580,9 @@ def main(argv: list[str] | None = None) -> int:
         plan["commands"] = _eval_remote_commands(config, "/scratch/j1m")
         plan["artifact"] = "--model-artifact is required at execution; no model is copied during planning"
         plan["quality_only"] = True
-        plan["execution_blocked"] = "CPU-only eval on approved A100 pending accelerated backend review"
+        plan["execution_backend"] = "cuda"
+        plan["cuda_architecture"] = 80
+        plan["gpu_layers"] = 99
     if not args.execute:
         plan["orchestrator"] = "dry-run; no provider API mutation"
         print(json.dumps(plan, indent=2, sort_keys=True))

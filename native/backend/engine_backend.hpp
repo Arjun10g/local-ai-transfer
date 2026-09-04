@@ -17,6 +17,7 @@ struct BackendConfig {
   // an explicit positive value and never silently falls back.
   unsigned gpu_layers = 20;
   std::string vulkan_device_name;
+  std::string cuda_device_name;
 };
 
 struct GenerationRequest {
