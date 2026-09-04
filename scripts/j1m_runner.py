@@ -28,6 +28,10 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "model" / "conversion" / "j1m-config.json"
 SOURCE_LOCK = ROOT / "model" / "source-lock" / "qwen35-9b.source-lock.json"
 TOKEN_ENV = "HF_TOKEN"
+CHILD_ENV_ALLOWLIST = frozenset({
+    "PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "PYTHONUNBUFFERED",
+    "HF_HOME", "HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE",
+})
 
 
 def utc_now() -> str:
@@ -190,6 +194,36 @@ def artifact_manifest(output_dir: Path, names: list[str], *, tensor_metadata: di
     }
 
 
+def write_wheelhouse_lock(wheelhouse: Path, lock_path: Path, *, llama_revision: str) -> dict[str, Any]:
+    if len(llama_revision) != 40 or any(character not in "0123456789abcdef" for character in llama_revision):
+        raise ValueError("wheelhouse lock requires the full pinned llama.cpp revision")
+    files = sorted(path for path in wheelhouse.iterdir() if path.is_file()) if wheelhouse.is_dir() else []
+    if not files:
+        raise ValueError("dependency wheelhouse is empty")
+    entries = [{"name": path.name, "size_bytes": path.stat().st_size, "sha256": _sha256(path)} for path in files]
+    payload = {"schema": "local_bmo.j1m.wheelhouse-lock.v1", "llama_cpp_revision": llama_revision, "artifacts": entries, "created_at_utc": utc_now()}
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return payload
+
+
+def verify_wheelhouse(wheelhouse: Path, lock_path: Path) -> dict[str, Any]:
+    payload = json.loads(lock_path.read_text(encoding="utf-8"))
+    entries = payload.get("artifacts")
+    if payload.get("schema") != "local_bmo.j1m.wheelhouse-lock.v1" or not isinstance(entries, list) or not entries:
+        raise ValueError("invalid dependency wheelhouse lock")
+    expected = {str(item.get("name")): item for item in entries if isinstance(item, dict)}
+    if len(expected) != len(entries):
+        raise ValueError("dependency wheelhouse lock has duplicate or malformed entries")
+    actual_files = {path.name: path for path in wheelhouse.iterdir() if path.is_file()}
+    if set(actual_files) != set(expected):
+        raise ValueError("dependency wheelhouse changed after hash lock")
+    for name, item in expected.items():
+        if item.get("size_bytes") != actual_files[name].stat().st_size or item.get("sha256") != _sha256(actual_files[name]):
+            raise ValueError(f"dependency wheel hash mismatch: {name}")
+    return {"status": "verified", "artifact_count": len(expected), "llama_cpp_revision": payload.get("llama_cpp_revision")}
+
+
 def write_artifacts(output_dir: Path, names: list[str], *, source_lock: Path = SOURCE_LOCK, commands: list[list[str]] | None = None, llama_revision: str | None = None) -> dict[str, Any]:
     """Write receipts in dependency order, avoiding a self-referential manifest."""
 
@@ -248,13 +282,19 @@ def command_plan(config: dict[str, Any], source: str = "/scratch/hf/Qwen3.5-9B",
     converter = f"{llama['checkout']}/convert_hf_to_gguf.py"
     python_exec = "/scratch/j1m/venv/bin/python"
     hf_exec = "/scratch/j1m/venv/bin/hf"
+    wheelhouse = "/scratch/j1m/wheelhouse"
+    wheelhouse_lock = f"{output}/wheelhouse-lock.json"
     return [
         ["git", "clone", "--filter=blob:none", config["llama_cpp"]["repository"], llama["checkout"]],
         ["git", "-C", llama["checkout"], "checkout", "--detach", llama["revision"]],
         ["python3", "-m", "venv", "/scratch/j1m/venv"],
-        ["/scratch/j1m/venv/bin/pip", "install", "--disable-pip-version-check", "--no-input", "-r", f"{llama['checkout']}/{config['python_dependencies']['requirements_file']}", "-e", f"{llama['checkout']}/{config['python_dependencies']['local_gguf_package']}"],
+        ["mkdir", "-p", wheelhouse],
+        ["/scratch/j1m/venv/bin/pip", "wheel", "--disable-pip-version-check", "--no-input", "--wheel-dir", wheelhouse, "-r", f"{llama['checkout']}/{config['python_dependencies']['requirements_file']}", f"{llama['checkout']}/{config['python_dependencies']['local_gguf_package']}"],
+        [python_exec, runner, "--wheelhouse-lock", wheelhouse_lock, "--wheelhouse", wheelhouse, "--llama-revision", llama["revision"]],
+        ["/scratch/j1m/venv/bin/pip", "install", "--disable-pip-version-check", "--no-input", "--no-index", "--find-links", wheelhouse, "-r", f"{llama['checkout']}/{config['python_dependencies']['requirements_file']}", "gguf"],
+        [python_exec, runner, "--wheelhouse-lock", wheelhouse_lock, "--verify-wheelhouse", "--wheelhouse", wheelhouse],
         [python_exec, runner, "--pip-freeze", f"{output}/pip-freeze.txt"],
-        [python_exec, runner, "--toolchain", f"{output}/toolchain.json", "--llama-checkout", llama["checkout"]],
+        [python_exec, runner, "--toolchain", f"{output}/toolchain.json", "--llama-checkout", llama["checkout"], "--wheelhouse-lock", wheelhouse_lock],
         ["git", "--version"],
         ["cmake", "--version"],
         ["python3", "--version"],
@@ -304,15 +344,11 @@ def run_commands(commands: list[list[str]], progress_path: Path, *, cwd: Path | 
         write_progress(progress_path, f"stage-{index + 1}-starting", argv=command)
         started_at = utc_now()
         try:
-            environment = None
-            if token_file is not None:
-                # The token is needed only by the HF download.  Every other
-                # subprocess receives a sanitized environment, preventing
-                # accidental leakage to git/build/conversion tooling.
-                environment = dict(os.environ)
-                environment.pop(TOKEN_ENV, None)
-                if any(part == "download" for part in command):
-                    environment[TOKEN_ENV] = read_token_file(token_file)
+            # Never inherit dotenv/API credentials into child tools. The token
+            # is added only to the one exact HF download subprocess.
+            environment = {key: os.environ[key] for key in CHILD_ENV_ALLOWLIST if key in os.environ}
+            if token_file is not None and any(part == "download" for part in command):
+                environment[TOKEN_ENV] = read_token_file(token_file)
             completed = subprocess.run(command, cwd=cwd, check=False, timeout=6 * 60 * 60, env=environment)
             stage_receipt = {"stage": index + 1, "argv": command, "started_at_utc": started_at, "ended_at_utc": utc_now(), "exit_code": completed.returncode, "status": "completed" if completed.returncode == 0 else "failed"}
         except subprocess.TimeoutExpired:
@@ -379,6 +415,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--token-file", type=Path, help="private remote token file; path only, never token material")
     parser.add_argument("--pip-freeze", type=Path)
     parser.add_argument("--toolchain", type=Path)
+    parser.add_argument("--wheelhouse-lock", type=Path)
+    parser.add_argument("--wheelhouse", type=Path)
+    parser.add_argument("--verify-wheelhouse", action="store_true")
+    parser.add_argument("--llama-revision")
     parser.add_argument("--llama-checkout", type=Path)
     parser.add_argument("--inspect-tensors", nargs=2, metavar=("GGUF", "OUTPUT"))
     parser.add_argument("--source-receipt", type=Path)
@@ -397,6 +437,14 @@ def main(argv: list[str] | None = None) -> int:
         freeze = subprocess.run([sys.executable, "-m", "pip", "freeze"], check=True, capture_output=True, text=True, timeout=120).stdout
         args.pip_freeze.write_text(freeze, encoding="utf-8")
         return 0
+    if args.wheelhouse_lock and (args.wheelhouse is not None or args.verify_wheelhouse):
+        if args.wheelhouse is None or not args.llama_revision and not args.verify_wheelhouse:
+            raise ValueError("wheelhouse lock requires a wheelhouse; writing also requires the pinned llama revision")
+        if args.verify_wheelhouse:
+            verify_wheelhouse(args.wheelhouse, args.wheelhouse_lock)
+        else:
+            write_wheelhouse_lock(args.wheelhouse, args.wheelhouse_lock, llama_revision=args.llama_revision)
+        return 0
     if args.toolchain:
         checkout = args.llama_checkout or Path(".")
         def version(command: list[str]) -> str:
@@ -406,8 +454,13 @@ def main(argv: list[str] | None = None) -> int:
                 return "unavailable"
         freeze_path = args.toolchain.parent / "pip-freeze.txt"
         freeze = freeze_path.read_text(encoding="utf-8") if freeze_path.is_file() else ""
+        dependency_lock = {}
+        if args.wheelhouse_lock is not None:
+            dependency_lock = json.loads(args.wheelhouse_lock.read_text(encoding="utf-8"))
+            if dependency_lock.get("schema") != "local_bmo.j1m.wheelhouse-lock.v1" or not dependency_lock.get("artifacts"):
+                raise ValueError("toolchain receipt requires a nonempty dependency wheelhouse lock")
         head = subprocess.run(["git", "-C", str(checkout), "rev-parse", "HEAD"], check=True, capture_output=True, text=True, timeout=30).stdout.strip()
-        payload = {"schema": "local_bmo.j1m.toolchain.v1", "llama_cpp_head": head, "python": version([sys.executable, "--version"]), "cmake": version(["cmake", "--version"]), "compiler": version(["cc", "--version"]), "pip_freeze": freeze}
+        payload = {"schema": "local_bmo.j1m.toolchain.v1", "llama_cpp_head": head, "python": version([sys.executable, "--version"]), "cmake": version(["cmake", "--version"]), "compiler": version(["cc", "--version"]), "pip_freeze": freeze, "dependency_wheelhouse_lock": dependency_lock}
         args.toolchain.parent.mkdir(parents=True, exist_ok=True)
         args.toolchain.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return 0

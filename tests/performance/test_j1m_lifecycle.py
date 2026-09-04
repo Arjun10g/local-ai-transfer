@@ -30,6 +30,7 @@ class J1MConfigTests(unittest.TestCase):
 
     def test_pins_source_converter_and_target_cost(self):
         config = self.j1m.load_config()
+        self.assertEqual(config["source"]["authentication"], "public-unauthenticated")
         self.assertEqual(config["source"]["revision"], "c202236235762e1c871ad0ccb60c8ee5ba337b9a")
         self.assertEqual(config["llama_cpp"]["revision"], "3581ba0cf591b3f772fbb002de0f70e294bc0396")
         plan = self.j1m.build_plan(config, "build")
@@ -41,11 +42,16 @@ class J1MConfigTests(unittest.TestCase):
         self.assertEqual(prove["commands"], [["python3", "scripts/j1m_runner.py", "--prove"]])
         self.assertEqual(config["artifacts"]["prove_fetch_allowlist"], ["proving-receipt.json"])
         self.assertNotIn("Qwen3.5-9B-Q4_K_M.gguf", config["artifacts"]["prove_fetch_allowlist"])
-        self.assertIn("requirements-convert_hf_to_gguf.txt", " ".join(plan["commands"][3]))
+        dependency_commands = [command for command in plan["commands"] if "requirements-convert_hf_to_gguf.txt" in " ".join(command)]
+        self.assertGreaterEqual(len(dependency_commands), 2)
+        self.assertTrue(any("--no-index" in command and "--find-links" in command for command in dependency_commands))
+        self.assertTrue(any(any("wheelhouse-lock" in part for part in command) for command in plan["commands"]))
         converters = [command for command in plan["commands"] if any("convert_hf_to_gguf.py" in part for part in command)]
         self.assertEqual(len(converters), 2)
         self.assertTrue(all("--no-mtp" in command for command in converters))
-        self.assertTrue(any("gguf-py" in command for command in plan["commands"][3]))
+        self.assertTrue(any(any("gguf-py" in part for part in command) for command in plan["commands"]))
+        self.assertTrue(any("--no-index" in command and "gguf" in command and "-e" not in command for command in plan["commands"]))
+        self.assertNotIn("--token-file", [part for command in plan["commands"] for part in command])
         self.assertTrue(any("--verify-llama" in command for command in plan["commands"]))
         self.assertTrue(any("--inspect-tensors" in command for command in plan["commands"]))
         hf_commands = [command for command in plan["commands"] if any(part == "download" for part in command)]
@@ -57,6 +63,20 @@ class J1MConfigTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
             self.assertIn("HF_TOKEN=", path.read_text())
         self.assertFalse(path.exists())
+
+    def test_dependency_wheelhouse_lock_is_hash_verified(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wheelhouse = root / "wheelhouse"
+            wheelhouse.mkdir()
+            (wheelhouse / "gguf-1.0-py3-none-any.whl").write_bytes(b"wheel")
+            lock = root / "wheelhouse-lock.json"
+            self.j1m.write_wheelhouse_lock(wheelhouse, lock, llama_revision="a" * 40)
+            self.assertEqual(self.j1m.verify_wheelhouse(wheelhouse, lock)["status"], "verified")
+            self.j1m.main(["--wheelhouse-lock", str(lock), "--verify-wheelhouse", "--wheelhouse", str(wheelhouse)])
+            (wheelhouse / "gguf-1.0-py3-none-any.whl").write_bytes(b"tampered")
+            with self.assertRaises(ValueError):
+                self.j1m.verify_wheelhouse(wheelhouse, lock)
 
     def test_artifact_allowlist_rejects_traversal(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -191,10 +211,13 @@ class J1MConfigTests(unittest.TestCase):
                 captured.append(kwargs.get("env", {}))
                 return types.SimpleNamespace(returncode=0)
 
-            with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            with mock.patch.dict(os.environ, {"HF_TOKEN": "ambient-never-used", "SHADEFORM_API_KEY": "api-never-used", "SHADEFORM_SSH": "ssh-never-used"}, clear=False), mock.patch.object(subprocess, "run", side_effect=fake_run):
                 self.j1m.run_commands([["cmake", "--version"], ["hf", "download", "Qwen/model"]], root / "progress.json", token_file=token_file)
             self.assertNotIn("HF_TOKEN", captured[0])
+            self.assertNotIn("SHADEFORM_API_KEY", captured[0])
+            self.assertNotIn("SHADEFORM_SSH", captured[0])
             self.assertEqual(captured[1]["HF_TOKEN"], "token-not-logged")
+            self.assertNotIn("SHADEFORM_API_KEY", captured[1])
 
     def test_ephemeral_key_generation_does_not_interpret_provider_identifier(self):
         from scripts import shadeform_lifecycle as sf
@@ -218,6 +241,57 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertNotIn("IdentifyingNumber", text)
         self.assertNotIn("product_identifier", text)
         self.assertNotIn('Write-Output "Receipt written: $([IO.Path]::GetFullPath', text)
+
+    def test_host_key_requires_stable_bounded_scans_and_strict_checking(self):
+        from scripts import shadeform_lifecycle as sf
+        self.assertNotIn("accept-new", " ".join(sf._transport_options(Path("/tmp/known_hosts"))))
+        keyscan = "[127.0.0.1]:2222 ssh-ed25519 AAAATESTKEY comment\n"
+        responses = iter([
+            types.SimpleNamespace(returncode=0, stdout=keyscan),
+            types.SimpleNamespace(returncode=0, stdout=keyscan),
+            types.SimpleNamespace(returncode=0, stdout="256 SHA256:stable-fingerprint host (ED25519)\n"),
+        ])
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(sf.subprocess, "run", side_effect=lambda *args, **kwargs: next(responses)):
+            receipt = sf.acquire_pinned_host_key({"ip": "127.0.0.1", "ssh_port": 2222, "ssh_user": "u"}, Path(directory) / "known_hosts")
+            self.assertEqual(receipt["proof"], "two-stable-bounded-scans-residual-tofu")
+            self.assertEqual(receipt["fingerprint"], "SHA256:stable-fingerprint")
+
+    def test_instance_info_must_match_nonce_tags_and_key(self):
+        from scripts import shadeform_lifecycle as sf
+        nonce = "0123456789abcdef0123456789abcdef"
+        info = {"id": "instance-owned-1", "name": f"ep-j1m-{nonce}", "tags": ["local-bmo-j1m", "ep-phase-phase-a", f"ep-run-{nonce}"], "ssh_key_id": "key-owned-1"}
+        sf.verify_instance_ownership(info, instance_id="instance-owned-1", phase_id="phase-a", nonce=nonce, ssh_key_id="key-owned-1")
+        info["tags"] = ["local-bmo-j1m"]
+        with self.assertRaises(sf.ShadeformError):
+            sf.verify_instance_ownership(info, instance_id="instance-owned-1", phase_id="phase-a", nonce=nonce, ssh_key_id="key-owned-1")
+
+    def test_teardown_deletes_after_salvage_failure_and_revokes_key_on_delete_failure(self):
+        from scripts import shadeform_lifecycle as sf
+        from scripts import shadeform_teardown as teardown
+        originals = (sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER)
+        phase = "phase-teardown-failure"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sf.RUNTIME_ROOT = root / "runtime"
+            sf.MARKDOWN_LEDGER = root / "ledger.md"
+            sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
+            sf.COST_LEDGER = root / "cost.jsonl"
+            env = root / "env"
+            env.write_text("SHADEFORM_API_KEY=stub-api\n", encoding="utf-8")
+            bad_destination = root / "destination-file"
+            bad_destination.write_text("not a directory", encoding="utf-8")
+            salvage_source = root / "receipt.json"
+            salvage_source.write_text("receipt", encoding="utf-8")
+            sf.write_owned_resource(sf.OwnedResource(
+                phase_id=phase, run_id="test", instance_id="instance-fail-1", ownership_nonce="0123456789abcdef0123456789abcdef", ssh_key_id="key-fail-1", ssh_key_name="key", gpu="A100", cloud="hyperstack", region="r", hourly_usd=1.0, created_at_utc=sf.utc_now().isoformat(), launcher_pid=None,
+            ))
+            with mock.patch.object(teardown.shadeform, "_delete_instance", side_effect=RuntimeError("delete transport")) as delete, mock.patch.object(teardown.shadeform, "delete_ssh_key", return_value={"success": True}) as key_delete:
+                with self.assertRaises(RuntimeError):
+                    teardown.teardown_exact(phase, "instance-fail-1", env_file=env, salvage=salvage_source, salvage_destination=bad_destination)
+            delete.assert_called_once()
+            key_delete.assert_called_once_with("stub-api", phase, "key-fail-1")
+            self.assertTrue(sf.runtime_ledger_path(phase).exists())
+        sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = originals
 
     def test_lifecycle_has_no_account_wide_delete_path(self):
         text = (ROOT / "scripts/shadeform_lifecycle.py").read_text(encoding="utf-8")

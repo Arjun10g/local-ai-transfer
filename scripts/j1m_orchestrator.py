@@ -106,9 +106,9 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
         signal.signal(signal.SIGINT, cancel)
         signal.signal(signal.SIGTERM, cancel)
         watchdog: subprocess.Popen[bytes] | None = None
-        token_remote = False
         try:
             key_id = sf.add_ssh_key(api_key, phase_id, f"j1m-{nonce}", public_key)
+            sf.verify_ssh_key_ownership(api_key, phase_id, key_id, expected_name=f"j1m-{nonce}", expected_public_key=public_key)
             try:
                 instance_id = sf.create_instance(api_key, env, phase_id=phase_id, run_id=run_id, candidate=candidate, ssh_key_id=key_id, nonce=nonce, max_runtime_hours=runtime)
                 created_monotonic = time.monotonic()
@@ -122,23 +122,28 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 ambiguous_create = True
                 raise
             lifecycle["instance_id"] = instance_id
-            record = sf.OwnedResource(phase_id=phase_id, run_id=run_id, instance_id=instance_id, ownership_nonce=nonce, ssh_key_id=key_id, ssh_key_name=f"j1m-{nonce}", gpu=candidate.gpu, cloud=candidate.cloud, region=candidate.region, hourly_usd=candidate.hourly_usd, created_at_utc=sf.utc_now().isoformat(), active_deadline_utc=(sf.utc_now() + sf.timedelta(minutes=30)).isoformat(), run_deadline_utc=(sf.utc_now() + sf.timedelta(hours=runtime)).isoformat())
+            record = sf.OwnedResource(phase_id=phase_id, run_id=run_id, instance_id=instance_id, ownership_nonce=nonce, ssh_key_id=key_id, ssh_key_name=f"j1m-{nonce}", gpu=candidate.gpu, cloud=candidate.cloud, region=candidate.region, hourly_usd=candidate.hourly_usd, created_at_utc=sf.utc_now().isoformat(), active_deadline_utc=(sf.utc_now() + sf.timedelta(minutes=30)).isoformat(), run_deadline_utc=(sf.utc_now() + sf.timedelta(hours=runtime)).isoformat(), instance_type=candidate.instance_type)
             # Ownership record is written before any poll/upload. If this
             # fails, the fallback below still deletes the exact returned ID.
             sf.write_owned_resource(record)
             recorded = True
             sf.append_cost_event({"instance_id": instance_id, "phase_id": phase_id, "status": "pending", "estimated_cost_usd": round(candidate.hourly_usd * float(config["modes"][mode]["provider_backstop_hours"]), 6)})
+            # Start the external watchdog immediately after ownership and
+            # pending-cost reservation. It protects the long pending_provider
+            # interval as well as the later SSH/build stages.
             watchdog = subprocess.Popen([
                 os.sys.executable, str(ROOT / "scripts" / "shadeform_watchdog.py"),
                 "--phase-id", phase_id, "--instance-id", instance_id,
                 "--launcher-pid", str(os.getpid()), "--max-seconds", str(config["modes"][mode]["external_watchdog_seconds"]),
-                "--env-file", str(env_file),
+                "--env-file", str(env_file), "--identity", str(identity), "--known-hosts", str(known_hosts),
             ])
             lifecycle["watchdog_pid"] = watchdog.pid
             j1m_runner.write_progress(progress_path, "wait-active-starting", phase_id=phase_id)
             wait_budget = max(30, int(min(1800, provider_deadline - time.monotonic() - 120)))
             info = sf.wait_active(api_key, phase_id, instance_id, timeout_seconds=wait_budget)
             lifecycle["instance_info"] = info
+            sf.verify_instance_ownership(info, instance_id=instance_id, phase_id=phase_id, nonce=nonce, expected_name=sf.owned_instance_name(run_id, nonce), ssh_key_id=key_id, expected_cloud=candidate.cloud, expected_region=candidate.region, expected_instance_type=candidate.instance_type, expected_hourly_usd=candidate.hourly_usd)
+            lifecycle["host_key"] = sf.acquire_pinned_host_key(info, known_hosts)
             lifecycle["status"] = "active"
             remote_root = "/scratch/j1m"
             lifecycle["remote_workspace"] = _remote(sf.ssh_base(info, identity, known_hosts) + ["mkdir", "-p", remote_root], timeout=30)
@@ -159,24 +164,13 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             if mode == "prove":
                 lifecycle["job"] = _remote(sf.ssh_base(info, identity, known_hosts) + ["python3", f"{remote_root}/j1m_runner.py", "--prove", "--scratch", "/scratch", "--min-scratch-gib", str(config["resources"]["required_scratch_gib"]), "--output", f"{remote_root}/artifacts/proving-receipt.json"], timeout=120)
             else:
-                with j1m_runner.hf_token_file(sf.require_env(env, "HF_TOKEN")) as token_file:
-                    token_upload = sf.scp_base(info, identity, known_hosts) + [str(token_file), f"{info['ssh_user']}@{info['ip']}:{remote_root}/hf-token.env"]
-                    token_remote = True
-                    lifecycle["token_upload"] = _remote(token_upload, timeout=120)
-                    if lifecycle["token_upload"]["status"] != "completed":
-                        raise sf.ShadeformError("HF token upload failed")
-                    chmod = _remote(sf.ssh_base(info, identity, known_hosts) + ["chmod", "600", f"{remote_root}/hf-token.env"], timeout=30)
-                    lifecycle["token_chmod"] = chmod
-                    if chmod["status"] != "completed":
-                        raise sf.ShadeformError("remote HF token permission hardening failed")
-                    remote_job = sf.ssh_base(info, identity, known_hosts) + ["python3", f"{remote_root}/j1m_runner.py", "--run", "--config", f"{remote_root}/j1m-config.json", "--token-file", f"{remote_root}/hf-token.env"]
-                    j1m_runner.write_progress(progress_path, "remote-build-starting", phase_id=phase_id)
-                    try:
-                        transfer_reserve = float(config["modes"][mode].get("transfer_reserve_seconds", 0))
-                        lifecycle["job"] = _remote(remote_job, timeout=max(30, provider_deadline - time.monotonic() - transfer_reserve - 120))
-                    finally:
-                        lifecycle["token_delete"] = _remote(sf.ssh_base(info, identity, known_hosts) + ["rm", "-f", f"{remote_root}/hf-token.env"], timeout=30)
-                        token_remote = lifecycle["token_delete"]["status"] != "completed"
+                # Qwen3.5-9B is public at the pinned revision. Do not place
+                # HF_TOKEN on the ephemeral host; the runner downloads it
+                # unauthenticated and child environments remain sanitized.
+                remote_job = sf.ssh_base(info, identity, known_hosts) + ["python3", f"{remote_root}/j1m_runner.py", "--run", "--config", f"{remote_root}/j1m-config.json"]
+                j1m_runner.write_progress(progress_path, "remote-build-starting", phase_id=phase_id)
+                transfer_reserve = float(config["modes"][mode].get("transfer_reserve_seconds", 0))
+                lifecycle["job"] = _remote(remote_job, timeout=max(30, provider_deadline - time.monotonic() - transfer_reserve - 120))
             if lifecycle["job"]["status"] != "completed":
                 lifecycle["status"] = lifecycle["job"]["status"]
                 raise sf.ShadeformError("J1M remote job did not complete")
@@ -185,8 +179,6 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             lifecycle["status"] = "cancelled_by_operator"
             raise
         finally:
-            if token_remote and lifecycle.get("instance_info"):
-                lifecycle["token_delete_backstop"] = _remote(sf.ssh_base(lifecycle["instance_info"], identity, known_hosts) + ["rm", "-f", "/scratch/j1m/hf-token.env"], timeout=30)
             if watchdog is not None and watchdog.poll() is None:
                 try:
                     watchdog.terminate()

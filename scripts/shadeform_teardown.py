@@ -20,9 +20,9 @@ ROOT = Path(__file__).resolve().parents[1]
 def salvage_local(source: Path | None, destination: Path) -> dict[str, object]:
     if source is None or not source.exists():
         return {"status": "nothing_available"}
-    destination.mkdir(parents=True, exist_ok=True)
-    target = destination / source.name
     try:
+        destination.mkdir(parents=True, exist_ok=True)
+        target = destination / source.name
         target.write_bytes(source.read_bytes())
     except OSError as exc:
         return {"status": "salvage_failed", "error_type": type(exc).__name__}
@@ -40,10 +40,23 @@ def teardown_exact(phase_id: str, instance_id: str, *, env_file: Path = ROOT / "
     api_key = shadeform.require_env(env, "SHADEFORM_API_KEY")
     # Once ownership is validated, exact deletion is attempted first. A
     # bookkeeping write must never become a precondition for cleanup.
-    deletion = shadeform._delete_instance(api_key, phase_id, exact)
+    try:
+        deletion = shadeform._delete_instance(api_key, phase_id, exact)
+    except Exception as exc:
+        deletion = {"success": False, "error_type": type(exc).__name__}
     if deletion.get("success") is not True:
         record.status = "delete-failed"
-        shadeform.write_owned_resource(record)
+        try:
+            shadeform.write_owned_resource(record)
+        except Exception:
+            pass
+        # Key cleanup is deliberately independent. The ownership ledger is
+        # retained because deletion was not confirmed, but the ephemeral key
+        # must still be revoked when the provider accepts that exact request.
+        try:
+            shadeform.delete_ssh_key(api_key, phase_id, record.ssh_key_id)
+        except Exception:
+            pass
         raise RuntimeError("provider did not confirm exact-resource deletion")
     receipt = {"schema": "local_bmo.shadeform.deletion-receipt.v1", "phase_id": phase_id, "instance_id": exact, "deletion": deletion, "salvage": salvage_receipt}
     record.status = "deleted"

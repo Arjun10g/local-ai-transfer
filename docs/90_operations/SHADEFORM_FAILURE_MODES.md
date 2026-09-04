@@ -13,12 +13,39 @@ teardown. All provider calls validate the phase and exact resource ID.
 ## Teardown order
 
 1. On cancellation, timeout, transport failure, host shutdown, or launcher
-   death, attempt progressive/best-effort artifact salvage and write a receipt.
+   death, remove any remote HF token using the phase ledger and pinned host-key
+   file, then attempt progressive/best-effort artifact salvage and write a
+   receipt.
 2. Delete the exact recorded instance and wait for provider confirmation.
 3. Only after deletion, record cost/deletion bookkeeping and remove the exact
-   SSH key. A bookkeeping failure must not prevent deletion.
-4. The external watchdog is independent of the launcher and performs the same
-   exact deletion before stopping a wedged launcher.
+   SSH key. A bookkeeping failure must not prevent deletion; key revocation is
+   also attempted independently when deletion fails, while the ownership
+   ledger remains pending until deletion is confirmed.
+4. The external watchdog is independent of the launcher and performs remote
+   token removal followed by the same exact deletion before stopping a wedged
+   launcher.
+
+## Create-response ambiguity
+
+The official [create API](https://docs.shadeform.ai/api-reference/instances/instances-create)
+returns only an instance ID and documents no idempotency key/header. The
+official [exact instance info API](https://docs.shadeform.ai/api-reference/instances/instances-info)
+and [SSH-key info API](https://docs.shadeform.ai/api-reference/sshkeys/sshkeys-info)
+are therefore used after a successful response to verify the nonce-bound name,
+tags, attached key ID, key name, and public key before SSH or model work. If a
+create POST times out before returning an ID, there is no safe exact-ID
+reconciliation endpoint: the lifecycle records an `ambiguous-create` pending
+incident, preserves the key/nonce, refuses subsequent launches, and relies on
+the provider auto-delete backstop. This residual risk is intentionally not
+resolved by an account-wide list or delete operation.
+
+## Host-key proof
+
+Instance info currently exposes no host-key fingerprint. The first connection
+therefore requires two bounded `ssh-keyscan` calls returning an identical key
+set, records the resulting fingerprint and residual-TOFU proof, and uses
+`StrictHostKeyChecking=yes` thereafter. A provider fingerprint, when exposed in
+future, supersedes the two-scan proof; unstable or empty scans fail closed.
 
 ## Backstops
 

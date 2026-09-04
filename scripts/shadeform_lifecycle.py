@@ -131,6 +131,7 @@ class OwnedResource:
     provider_status: str | None = None
     active_deadline_utc: str | None = None
     run_deadline_utc: str | None = None
+    instance_type: str | None = None
 
 
 def utc_now() -> datetime:
@@ -724,6 +725,8 @@ def add_ssh_key(api_key: str, phase_id: str, name: str, public_key: str) -> str:
         {"name": name, "public_key": public_key},
         phase_id=phase_id,
     )
+    # The create response is documented to carry only the ID. Name and public
+    # key are verified immediately afterward through /sshkeys/{id}/info.
     return validate_resource_id(response.get("id"), field="created SSH key id")
 
 
@@ -735,6 +738,18 @@ def delete_ssh_key(api_key: str, phase_id: str, key_id: str) -> dict[str, Any]:
         if exc.status == 404:
             return {"already_absent": True}
         raise
+
+
+def verify_ssh_key_ownership(api_key: str, phase_id: str, key_id: str, *, expected_name: str, expected_public_key: str) -> dict[str, Any]:
+    """Verify the exact newly-created key through its provider info endpoint."""
+
+    exact = validate_resource_id(key_id, field="SSH key id")
+    info = request(api_key, "GET", f"/sshkeys/{exact}/info", phase_id=phase_id)
+    if validate_resource_id(info.get("id"), field="SSH key info id") != exact:
+        raise ShadeformError("provider returned a different SSH key ID")
+    if info.get("name") != expected_name or info.get("public_key") != expected_public_key:
+        raise ShadeformError("provider SSH key info does not match this ephemeral ownership record")
+    return info
 
 
 def _auto_delete(env: dict[str, str], runtime_hours: float) -> dict[str, str]:
@@ -801,8 +816,7 @@ def create_instance(
     if read_owned_resource(phase_id) is not None:
         raise ShadeformError("phase already owns a recorded instance; reuse or clean it first")
     validate_nonce(nonce)
-    safe_run = re.sub(r"[^a-z0-9-]", "-", run_id.lower()).strip("-")[:15] or "run"
-    name = f"ep-{safe_run}-{nonce}"[:50]
+    name = owned_instance_name(run_id, nonce)
     payload = {
         "cloud": candidate.cloud,
         "region": candidate.region,
@@ -824,11 +838,64 @@ def create_instance(
     return validate_resource_id(response.get("id"), field="created instance id")
 
 
+def owned_instance_name(run_id: str, nonce: str) -> str:
+    validate_nonce(nonce)
+    safe_run = re.sub(r"[^a-z0-9-]", "-", run_id.lower()).strip("-")[:14] or "run"
+    return f"ep-{safe_run}-{nonce}"
+
+
 def instance_info(api_key: str, phase_id: str, instance_id: str) -> dict[str, Any]:
     exact = validate_resource_id(instance_id, field="instance id")
     info = request(api_key, "GET", f"/instances/{exact}/info", phase_id=phase_id)
     if validate_resource_id(info.get("id"), field="instance info id") != exact:
         raise ShadeformError("provider returned information for a different instance")
+    return info
+
+
+def verify_instance_ownership(
+    info: dict[str, Any],
+    *,
+    instance_id: str,
+    phase_id: str,
+    nonce: str,
+    expected_name: str | None = None,
+    ssh_key_id: str | None = None,
+    expected_cloud: str | None = None,
+    expected_region: str | None = None,
+    expected_instance_type: str | None = None,
+    expected_hourly_usd: float | None = None,
+) -> dict[str, Any]:
+    """Require provider-returned identity/tags before opening SSH or HF custody."""
+
+    exact = validate_resource_id(instance_id, field="instance id")
+    validate_phase_id(phase_id)
+    validate_nonce(nonce)
+    if validate_resource_id(info.get("id"), field="instance info id") != exact:
+        raise ShadeformError("provider ownership response has a different instance ID")
+    name = info.get("name")
+    if not isinstance(name, str) or nonce not in name or (expected_name is not None and name != expected_name):
+        raise ShadeformError("provider ownership response has no exact nonce-bound instance name")
+    tags = info.get("tags")
+    if not isinstance(tags, list):
+        raise ShadeformError("provider ownership response has no verifiable tags")
+    tag_set = {str(tag) for tag in tags}
+    required = {"local-bmo-j1m", f"ep-phase-{phase_id}", f"ep-run-{nonce}"}
+    if not required.issubset(tag_set):
+        raise ShadeformError("provider ownership tags do not match this phase and nonce")
+    if ssh_key_id is not None and validate_resource_id(info.get("ssh_key_id"), field="instance SSH key id") != validate_resource_id(ssh_key_id, field="expected SSH key id"):
+        raise ShadeformError("provider instance is attached to a different SSH key")
+    if expected_cloud is not None and str(info.get("cloud", "")).lower() != expected_cloud.lower():
+        raise ShadeformError("provider instance cloud does not match the approved candidate")
+    if expected_region is not None and str(info.get("region", "")).lower() != expected_region.lower():
+        raise ShadeformError("provider instance region does not match the approved candidate")
+    if expected_instance_type is not None and info.get("shade_instance_type") != expected_instance_type:
+        raise ShadeformError("provider instance type does not match the approved candidate")
+    if expected_hourly_usd is not None and info.get("hourly_price") is not None:
+        try:
+            if abs(float(info["hourly_price"]) / 100.0 - expected_hourly_usd) > 1e-6:
+                raise ShadeformError("provider hourly cents price does not match the approved candidate")
+        except (TypeError, ValueError):
+            raise ShadeformError("provider hourly price is not a valid cents value") from None
     return info
 
 
@@ -907,12 +974,55 @@ def _ssh_config_path(path: Path) -> str:
     return f'"{escaped}"'
 
 
+def acquire_pinned_host_key(info: dict[str, Any], known_hosts: Path, *, provider_fingerprint: str | None = None) -> dict[str, Any]:
+    """Acquire a bounded host key with provider proof or stable two-scan proof.
+
+    Shadeform currently exposes no host-key fingerprint in instance info. When
+    a provider fingerprint is present it is authoritative; otherwise two
+    independent bounded scans must return the exact same key set. This is a
+    deliberately recorded residual TOFU risk, and ``StrictHostKeyChecking``
+    remains enabled for all subsequent connections.
+    """
+
+    ip, _user, port = _endpoint(info)
+    fingerprint = provider_fingerprint or next(
+        (str(info.get(key, "")).strip() for key in ("ssh_host_key_fingerprint", "host_key_fingerprint", "ssh_fingerprint") if info.get(key)),
+        "",
+    )
+    def scan_once() -> list[str]:
+        scan = subprocess.run(["ssh-keyscan", "-T", "15", "-p", str(port), ip], check=False, capture_output=True, text=True, timeout=30)
+        if scan.returncode != 0 or not scan.stdout.strip():
+            raise ShadeformError("bounded host-key acquisition failed")
+        return [line.strip() for line in scan.stdout.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+
+    first_lines = scan_once()
+    second_lines = first_lines if fingerprint else scan_once()
+    first_keys = {" ".join(line.split()[:3]) for line in first_lines if len(line.split()) >= 3}
+    second_keys = {" ".join(line.split()[:3]) for line in second_lines if len(line.split()) >= 3}
+    if not first_keys or first_keys != second_keys:
+        raise ShadeformError("independent host-key scans were empty or unstable")
+    fingerprints: list[str] = []
+    for line in sorted(first_keys):
+        fields = line.split()
+        calculated = subprocess.run(["ssh-keygen", "-lf", "-", "-E", "sha256"], input=f"{fields[1]} {fields[2]}\n", check=False, capture_output=True, text=True, timeout=15)
+        if calculated.returncode != 0 or len(calculated.stdout.split()) < 2:
+            raise ShadeformError("host-key fingerprint calculation failed")
+        fingerprints.append(calculated.stdout.split()[1])
+    if fingerprint and fingerprint not in fingerprints:
+        raise ShadeformError("ssh-keyscan key did not match the provider fingerprint")
+    verified_lines = sorted(first_keys)
+    known_hosts.parent.mkdir(parents=True, exist_ok=True)
+    known_hosts.write_text("\n".join(verified_lines) + "\n", encoding="utf-8")
+    known_hosts.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    return {"status": "verified", "fingerprint": fingerprint or fingerprints[0], "key_count": len(verified_lines), "proof": "provider-fingerprint" if fingerprint else "two-stable-bounded-scans-residual-tofu"}
+
+
 def _transport_options(known_hosts: Path) -> list[str]:
     return [
         "-o",
         "BatchMode=yes",
         "-o",
-        "StrictHostKeyChecking=accept-new",
+        "StrictHostKeyChecking=yes",
         "-o",
         f"UserKnownHostsFile={_ssh_config_path(known_hosts)}",
         "-o",
