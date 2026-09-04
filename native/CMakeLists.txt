@@ -16,7 +16,7 @@ option(LAE_ENABLE_LLAMA_VULKAN "Build the authenticated product engine with Vulk
 if(LAE_ENABLE_LLAMA_VULKAN AND NOT LAE_ENABLE_LLAMA_CPP)
   message(FATAL_ERROR "LAE_ENABLE_LLAMA_VULKAN requires LAE_ENABLE_LLAMA_CPP=ON")
 endif()
-if(LAE_ENABLE_LLAMA_VULKAN AND NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/llama.cpp/ggml/src/ggml-vulkan)
+if(LAE_ENABLE_LLAMA_VULKAN AND NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/llama.cpp/ggml/src/ggml-vulkan")
   message(FATAL_ERROR "LAE_ENABLE_LLAMA_VULKAN requires the complete pinned ggml-vulkan source/shader closure")
 endif()
 if(LAE_ENABLE_LLAMA_CPP)
