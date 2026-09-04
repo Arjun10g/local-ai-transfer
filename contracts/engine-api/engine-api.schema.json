@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local-assistant.invalid/contracts/engine-api/v0.1.0",
+  "title": "Local Assistant Engine API v0.1.0",
+  "type": "object",
+  "required": ["api_version", "lifecycle_states", "limits", "routes", "stream"],
+  "properties": {
+    "api_version": {"const": "0.1.0"},
+    "lifecycle_states": {"type": "array", "items": {"type": "string"}},
+    "limits": {"type": "object", "required": ["max_body_bytes", "max_tokens", "max_active_generations"]},
+    "routes": {"type": "array", "items": {"type": "object", "required": ["method", "path", "auth"]}},
+    "stream": {"type": "object", "required": ["media_type", "terminator", "finish_reasons"]}
+  }
+}

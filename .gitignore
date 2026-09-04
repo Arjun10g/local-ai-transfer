@@ -24,4 +24,7 @@ artifacts/raw/
 *.log
 *.dmp
 *.core
-
+build/
+out/build/
+*.user
+*.suo
