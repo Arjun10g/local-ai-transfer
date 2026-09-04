@@ -75,6 +75,9 @@ const argument = (name, input) => {
 
 const address = value => ({ emailAddress: { address: value } });
 const projectionAddress = value => ({ name: typeof value?.name === 'string' ? value.name.slice(0, 256) : '', address: typeof value?.address === 'string' ? value.address.slice(0, 320) : '' });
+const previewText = (value, maxBytes) => {
+  const bytes = Buffer.from(value, 'utf8'); const truncated = bytes.byteLength > maxBytes; let text = new TextDecoder().decode(bytes.subarray(0, maxBytes)); while (text.endsWith('\uFFFD')) text = text.slice(0, -1); return { text, truncated };
+};
 const safeTeamsUrl = value => {
   if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > 2048) return null;
   try { const url = new URL(value); if (url.protocol !== 'https:' || url.username || url.password || url.hash) return null; if (!(url.hostname === 'teams.microsoft.com' || url.hostname.endsWith('.teams.microsoft.com') || url.hostname === 'teams.live.com' || url.hostname.endsWith('.teams.live.com'))) return null; return url.toString(); } catch { return null; }
@@ -86,10 +89,24 @@ const projectionMessage = (value, maxPreview = 1024) => {
 };
 const projectionDraft = value => {
   if (!value || typeof value !== 'object' || typeof value.id !== 'string' || value.id.length < 1) return null;
-  // Keep the complete bounded normalized body only in the host-side proposal
-  // digest. The public preview remains a short disclosure projection.
-  const body = normalizeText(value.body?.content, 65536); const recipients = [...safeArray(value.toRecipients, 20), ...safeArray(value.ccRecipients, 20)].map(item => item?.emailAddress?.address).filter(address => typeof address === 'string' && EMAIL.test(address)).slice(0, 40);
-  return { id: value.id.slice(0, 512), subject: typeof value.subject === 'string' ? value.subject.slice(0, 998) : '', body: body.text, body_preview: body.text.slice(0, 512), body_truncated: body.truncated, recipients, etag: typeof value['@odata.etag'] === 'string' ? value['@odata.etag'].slice(0, 512) : null, change_key: typeof value.changeKey === 'string' ? value.changeKey.slice(0, 512) : null };
+  const boundedField = (field, max, required = false) => { if (field === undefined && !required) return ''; if (typeof field !== 'string' || field.length < (required ? 1 : 0) || field.length > max || /[\u0000-\u001f\u007f]/u.test(field)) return null; return field; };
+  const id = boundedField(value.id, 512, true); const subject = boundedField(value.subject, 998) ?? (value.subject === undefined ? '' : null); const rawBody = boundedField(value.body?.content, 65536, true); const contentType = boundedField(value.body?.contentType, 32) ?? (value.body?.contentType === undefined ? '' : null);
+  if (!id || subject === null || !rawBody || contentType === null || Buffer.byteLength(rawBody, 'utf8') > 65536) return null;
+  const body = normalizeText(rawBody, 65536); if (body.truncated) return null;
+  const recipients = [];
+  for (const [field, list] of [['to', value.toRecipients], ['cc', value.ccRecipients]]) {
+    if (list === undefined) continue;
+    if (!Array.isArray(list) || list.length > 20) return null;
+    for (const item of list) {
+      if (!item || typeof item !== 'object' || Array.isArray(item) || !item.emailAddress || typeof item.emailAddress !== 'object' || Array.isArray(item.emailAddress)) return null;
+      const email = item.emailAddress; if (Object.keys(email).some(key => !['name', 'address'].includes(key))) return null;
+      const address = boundedField(email.address, 320, true); const name = boundedField(email.name, 256) ?? (email.name === undefined ? '' : null); if (!address || name === null || !EMAIL.test(address)) return null;
+      recipients.push({ field, address, name });
+    }
+  }
+  const etag = value['@odata.etag'] === undefined ? null : boundedField(value['@odata.etag'], 512); const changeKey = value.changeKey === undefined ? null : boundedField(value.changeKey, 512); if (etag === null && value['@odata.etag'] !== undefined || changeKey === null && value.changeKey !== undefined) return null;
+  const bodyPreview = previewText(body.text, 512);
+  return { id, subject, raw_body: rawBody, content_type: contentType, body: body.text, body_preview: bodyPreview.text, body_truncated: bodyPreview.truncated, recipients, etag, change_key: changeKey };
 };
 const putBounded = (map, key, value, max) => { if (map.size >= max && !map.has(key)) map.delete(map.keys().next().value); map.set(key, value); };
 const validGraphPath = path => typeof path === 'string' && path.length <= 2048 && /^\/v1\.0\/(?:me(?:\/mailFolders\/[^/]+\/messages|\/messages(?:\/[^/]+(?:\/send)?)?|\/chats)?|chats\/[^/]+\/messages)$/u.test(path) && !path.includes('..') && !/[\u0000-\u001f\u007f]/u.test(path);
@@ -175,17 +192,17 @@ export class MicrosoftGraphProvider {
   async preview(call) {
     const args = this.validate(call.name, call.arguments); const proposalRevision = this.remember(call, args);
     if (call.name === 'mail.create_draft') {
-      return { provider: 'microsoft_graph', action: 'create_draft', destination: '/me', recipients: [...args.to, ...(args.cc ?? [])], subject: args.subject, body_preview: args.body.slice(0, 512), proposal_revision: proposalRevision, data_categories: ['recipient', 'subject', 'message_body'], permission_profile: this.permissionProfile };
+      const bodyPreview = previewText(args.body, 512); return { provider: 'microsoft_graph', action: 'create_draft', destination: '/me', recipients: [...args.to, ...(args.cc ?? [])], subject: args.subject, body_preview: bodyPreview.text, body_truncated: bodyPreview.truncated, proposal_revision: proposalRevision, data_categories: ['recipient', 'subject', 'message_body'], permission_profile: this.permissionProfile };
     }
     if (call.name === 'mail.send_draft') {
       if (this.permissionProfile === 'always_ask' && call.preview_authorized !== true) return { provider: 'microsoft_graph', action: 'send_draft_preview_access', destination: '/me', draft_id: args.draft_id, preview_authorization_required: true, data_categories: ['existing_draft_content'], permission_profile: this.permissionProfile };
-      const draftResponse = await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(args.draft_id)}`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$select': 'id,subject,body,toRecipients,ccRecipients,changeKey' }, signal: call.signal }); const draft = projectionDraft(draftResponse.body); if (!draft) throw new ProviderToolError('provider_invalid_response', 'draft projection unavailable'); const saved = this.proposals.get(call.id); saved.draftBinding = digest(draft); return { provider: 'microsoft_graph', action: 'send_draft', destination: '/me', draft_id: draft.id, subject: draft.subject, body_preview: draft.body_preview, body_truncated: draft.body_truncated, recipients: draft.recipients, etag: draft.etag, change_key: draft.change_key, proposal_revision: proposalRevision, data_categories: ['recipient', 'subject', 'existing_draft_content'], permission_profile: this.permissionProfile };
+      const draftResponse = await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(args.draft_id)}`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$select': 'id,subject,body,toRecipients,ccRecipients,changeKey' }, signal: call.signal }); const draft = projectionDraft(draftResponse.body); if (!draft) throw new ProviderToolError('provider_invalid_response', 'draft projection unavailable'); const saved = this.proposals.get(call.id); saved.draftBinding = digest(draft); return { provider: 'microsoft_graph', action: 'send_draft', destination: '/me', draft_id: draft.id, subject: draft.subject, body_preview: draft.body_preview, body_truncated: draft.body_truncated, recipients: draft.recipients.map(recipient => recipient.address), etag: draft.etag, change_key: draft.change_key, proposal_revision: proposalRevision, data_categories: ['recipient', 'subject', 'existing_draft_content'], permission_profile: this.permissionProfile };
     }
     if (call.name === 'mail.mark_read') {
       return { provider: 'microsoft_graph', action: 'mark_read', destination: '/me', message_id: args.message_id, is_read: args.is_read, proposal_revision: proposalRevision, permission_profile: this.permissionProfile };
     }
     if (call.name === 'teams.send_message') {
-      return { provider: 'microsoft_graph', action: 'send_message', destination: '/chats', chat_id: args.chat_id, body_preview: args.body.slice(0, 512), data_categories: ['chat_message'], proposal_revision: proposalRevision, permission_profile: this.permissionProfile };
+      const bodyPreview = previewText(args.body, 512); return { provider: 'microsoft_graph', action: 'send_message', destination: '/chats', chat_id: args.chat_id, body_preview: bodyPreview.text, body_truncated: bodyPreview.truncated, data_categories: ['chat_message'], proposal_revision: proposalRevision, permission_profile: this.permissionProfile };
     }
     return { provider: 'microsoft_graph', action: call.name, destination: '/me', permission_profile: this.permissionProfile };
   }

@@ -135,6 +135,16 @@ test('Graph detects changed draft tails, preserves 202 status, and uses text Tea
   const team = call('teams.send_message', { chat_id: 'chat-1', body: 'hello' }, 'call_team_status'); await tools['teams.send_message'].preview(team); const teamResult = value(await tools['teams.send_message'].execute({ ...team, authorization: { kind: 'user_confirmation' } })); assert.equal(teamResult.http_status, 202); assert.equal(teamResult.accepted, true); assert.equal(teamResult.completed, false); assert.equal(teamRequest.body.body.contentType, 'text');
 });
 
+test('Graph refuses draft recipient changes and discloses create-body truncation', async () => {
+  let reads = 0; let sends = 0;
+  const transport = { request: async request => {
+    if (request.method === 'GET') { reads += 1; return { status: 200, body: { id: 'draft-recipient', subject: 'Subject', body: { content: 'Stable body' }, toRecipients: [{ emailAddress: { address: reads === 1 ? 'alice@example.com' : 'bob@example.com', name: 'Recipient' } }] } }; }
+    sends += 1; return { status: 201, body: { id: 'draft-recipient' } };
+  } };
+  const tools = createMicrosoftGraphTools({ enabled: true, credentialSource: { getAccessToken: async () => 'synthetic-token' }, transport }); const send = call('mail.send_draft', { draft_id: 'draft-recipient' }, 'call_recipient_change'); await tools['mail.send_draft'].preview(send); await tools['mail.send_draft'].preview({ ...send, preview_authorized: true, authorization: { kind: 'user_confirmation' } }); const refused = value(await tools['mail.send_draft'].execute({ ...send, authorization: { kind: 'user_confirmation' } })); assert.equal(refused.code, 'provider_permission_insufficient'); assert.equal(sends, 0);
+  const create = call('mail.create_draft', { to: ['alice@example.com'], subject: 'x', body: '😀'.repeat(300) }, 'call_create_truncation'); const createPreview = await tools['mail.create_draft'].preview(create); assert.equal(createPreview.body_truncated, true); assert.ok(Buffer.byteLength(createPreview.body_preview, 'utf8') <= 512);
+});
+
 test('Microsoft HTTPS transport uses redirect errors, JSON framing, and safe retry policy', async () => {
   let calls = 0; const transport = new MicrosoftGraphHttpsTransport({ requestTimeoutMs: 1000, sleep: async () => {}, fetchImpl: async (_url, options) => { calls += 1; assert.equal(options.redirect, 'error'); return new Response('{"error":"busy"}', { status: 503, headers: { 'content-type': 'application/json' } }); } }); const response = await transport.request({ origin: 'https://graph.microsoft.com', method: 'POST', path: '/v1.0/me/messages', body: { subject: 'x' } }); assert.equal(response.status, 503); assert.equal(calls, 1); await assert.rejects(() => transport.request({ origin: 'https://graph.microsoft.com', method: 'GET', path: '/v1.0/me', headers: { 'x-forwarded-for': 'evil' } }), error => error.code === 'provider_destination_rejected');
 });
@@ -238,6 +248,11 @@ test('external Graph credentials cannot opt into full_access outside test-only f
 test('registry maps protected config keys explicitly and exposes provider state separately', async () => {
   assert.deepEqual(createExternalToolRegistry().providerStatus(), { microsoft_graph: 'disabled', copilot: 'disabled', browser_actions: 'disabled' }); const unconfigured = createExternalToolRegistry({ config: { microsoft_graph: { enabled: true, permission_profile: 'full_access', account_fingerprint: 'acct-config', scope: 'mailbox-1' }, browser_actions: { enabled: true } } }); assert.deepEqual(unconfigured.providerStatus(), { microsoft_graph: 'unconfigured', copilot: 'disabled', browser_actions: 'unconfigured' }); assert.throws(() => createExternalToolRegistry({ graph: { token: 'not-an-option' } }), /unknown option/);
   const grants = new OperatorGrantStore(); grants.grant({ capability: 'microsoft.graph.mail', provider: 'microsoft_graph', accountFingerprint: 'acct-config', scope: 'mailbox-1', profile: 'full_access' }); let tokenReads = 0; const registry = createExternalToolRegistry({ config: { microsoft_graph: { enabled: true, permission_profile: 'full_access', account_fingerprint: 'acct-config', scope: 'mailbox-1' } }, graph: { credentialSource: { getAccessToken: async () => { tokenReads += 1; return 'synthetic-token'; } }, transport: { request: async () => ({ status: 201, body: { id: 'draft-config' } }) }, grantStore: grants, testOnly: true } }); assert.deepEqual(registry.providerStatus(), { microsoft_graph: 'ready', copilot: 'disabled', browser_actions: 'disabled' }); assert.equal(tokenReads, 0); const configured = createExternalToolRegistry({ config: { browser_actions: { enabled: true, executable: '/approved/chrome', allowlist: ['/approved/chrome'] } } }); assert.equal(configured.providerStatus().browser_actions, 'unverified'); const draft = call('mail.create_draft', { to: ['alice@example.com'], subject: 'x', body: 'x' }, 'call_config'); await registry['mail.create_draft'].preview(draft); assert.equal((await registry['mail.create_draft'].authorize(draft)).kind, 'operator_grant');
+});
+
+test('registry shutdown is idempotent so signal and API paths cannot double-clean providers', async () => {
+  let browserShutdowns = 0; const browser = new BrowserActionProvider(); browser.shutdown = async () => { browserShutdowns += 1; }; const registry = createExternalToolRegistry({ browser });
+  await Promise.all([registry.shutdown(), registry.shutdown()]); assert.equal(browserShutdowns, 1);
 });
 
 test('browser action provider uses isolated CDP sessions and binds inspected links', async () => {
