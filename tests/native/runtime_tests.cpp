@@ -21,6 +21,12 @@ int main() {
   assert(!context_budget_fits(8, 9, 16));
   assert(!context_budget_fits(17, 1, 16));
   assert(!context_budget_fits(0, 0, 0));
+  const auto default_batches = context_batch_config(0);
+  assert(default_batches.n_ctx == 8192 && default_batches.n_batch == 8192 && default_batches.n_ubatch == 512);
+  const auto boundary_batches = context_batch_config(513);
+  assert(boundary_batches.n_ctx == 513 && boundary_batches.n_batch == 513 && boundary_batches.n_ubatch == 512);
+  const auto large_batches = context_batch_config(1200);
+  assert(large_batches.n_ctx == 1200 && large_batches.n_batch == 1200 && large_batches.n_ubatch == 512);
   ChatRequest parsed;
   std::string parse_error;
   assert(parse_chat_request(R"({"model":"fixture","session_id":"s","messages":[{"role":"system","content":"policy"},{"role":"user","content":"say \"hi\""},{"role":"tool","name":"time.now","tool_call_id":"call-1","content":"noon"}],"stream":true,"max_tokens":4,"mode":"normal"})", parsed, parse_error));

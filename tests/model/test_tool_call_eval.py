@@ -117,6 +117,9 @@ class ToolCallEvaluatorTests(unittest.TestCase):
         self.assertEqual(payload["messages"], fixture["cases"][0]["messages"])
         self.assertNotIn("system", {message["role"] for message in payload["messages"]})
         self.assertEqual(result["category_summary"]["tool_selection"]["passed"], 1)
+        self.assertEqual(result["canary"]["passed"], True)
+        self.assertEqual(result["canary"]["tool_count"], 11)
+        self.assertEqual(result["error_diagnostics"]["total_errors"], 0)
 
     def test_endpoint_is_explicit_loopback_http_only(self):
         self.assertEqual(validate_endpoint("http://127.0.0.1:49912/v1/chat/completions"), "http://127.0.0.1:49912/v1/chat/completions")

@@ -141,7 +141,7 @@ std::string Engine::metrics_json() const {
   std::ostringstream out;
   out << "{\"lifecycle\":\"" << lifecycle_name(state_) << "\",\"backend\":\"" << backend_id()
       << "\",\"active_sessions\":" << sessions_.size() << ",\"active_generations\":" << active_.size()
-      << ",\"cancellations\":" << cancellation_count_ << "}";
+      << ",\"cancellations\":" << cancellation_count_ << ",\"runtime\":" << backend_->runtime_info_json() << "}";
   return out.str();
 }
 

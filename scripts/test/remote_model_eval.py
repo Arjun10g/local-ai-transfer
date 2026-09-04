@@ -51,11 +51,20 @@ SAFE_ERROR_CODES = frozenset({
     "evaluator_fixture_invalid", "evaluator_fixture_too_large", "evaluator_fixture_unreadable",
     "evaluator_metrics_invalid", "evaluator_metrics_total_invalid", "evaluator_process_failed",
     "evaluator_exit_status_mismatch", "evaluator_receipt_invalid", "evaluator_rss_invalid",
+    "evaluator_diagnostics_invalid", "evaluator_diagnostics_total_invalid", "evaluator_diagnostics_code_invalid",
+    "evaluator_canary_invalid", "engine_exited_during_evaluation",
     "llama_checkout_revision_mismatch",
     "llama_pin_invalid", "llama_revision_mismatch", "model_manifest_invalid",
     "model_manifest_lock_invalid", "model_manifest_lock_mismatch", "q4_artifact_hash_mismatch",
     "q4_artifact_missing_or_wrong_name", "source_pin_invalid", "source_revision_mismatch",
     "toolchain_receipt_invalid",
+})
+EVAL_DIAGNOSTIC_CODES = frozenset({
+    "http_400", "http_401", "http_404", "http_408", "http_409", "http_413",
+    "http_415", "http_429", "http_500", "http_503", "http_other",
+    "transport_url", "transport_timeout", "transport_os", "parse_json",
+    "parse_session_shape", "parse_response_shape", "context_overflow",
+    "endpoint", "token", "unknown",
 })
 TAIL_LIMIT = 1200
 MAX_ENGINE_LINE = 8192
@@ -649,10 +658,54 @@ def _fixture_contract(path: Path, *, deadline: float | None = None) -> tuple[int
     return count, categories
 
 
-def _validate_metrics(metrics: Any, *, expected_case_count: int = 8, expected_categories: set[str] | None = None) -> dict[str, Any]:
+def _validate_diagnostics(value: Any, *, expected_errors: int, expected_categories: set[str]) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"schema", "total_errors", "overall", "by_category"} or value.get("schema") != "local_bmo.tool-call-eval-diagnostics.v1":
+        raise ValueError("evaluator_diagnostics_invalid")
+    total = value.get("total_errors")
+    if isinstance(total, bool) or not isinstance(total, int) or total < 0 or total != expected_errors:
+        raise ValueError("evaluator_diagnostics_total_invalid")
+    overall = value.get("overall")
+    by_category = value.get("by_category")
+    if not isinstance(overall, dict) or not isinstance(by_category, dict) or set(by_category) != expected_categories:
+        raise ValueError("evaluator_diagnostics_invalid")
+    def check_histogram(histogram: Any) -> int:
+        if not isinstance(histogram, dict):
+            raise ValueError("evaluator_diagnostics_invalid")
+        count = 0
+        for code, amount in histogram.items():
+            if code not in EVAL_DIAGNOSTIC_CODES or isinstance(amount, bool) or not isinstance(amount, int) or amount < 1 or amount > MAX_EVAL_CASES:
+                raise ValueError("evaluator_diagnostics_code_invalid")
+            count += amount
+        return count
+    if check_histogram(overall) != expected_errors:
+        raise ValueError("evaluator_diagnostics_total_invalid")
+    category_total = 0
+    for category in expected_categories:
+        category_total += check_histogram(by_category[category])
+    if category_total != expected_errors:
+        raise ValueError("evaluator_diagnostics_total_invalid")
+    return {"schema": value["schema"], "total_errors": total, "overall": dict(overall), "by_category": {category: dict(by_category[category]) for category in sorted(expected_categories)}}
+
+
+def _validate_canary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"attempted", "passed", "error_code", "tool_count", "message_chars"} or value.get("attempted") is not True:
+        raise ValueError("evaluator_canary_invalid")
+    if not isinstance(value.get("passed"), bool) or isinstance(value.get("tool_count"), bool) or value.get("tool_count") != 11 or isinstance(value.get("message_chars"), bool) or value.get("message_chars") != 2400:
+        raise ValueError("evaluator_canary_invalid")
+    code = value.get("error_code")
+    if value["passed"] and code is not None:
+        raise ValueError("evaluator_canary_invalid")
+    if not value["passed"] and code not in EVAL_DIAGNOSTIC_CODES:
+        raise ValueError("evaluator_canary_invalid")
+    return dict(value)
+
+
+def _validate_metrics(metrics: Any, *, expected_case_count: int = 8, expected_categories: set[str] | None = None, require_diagnostics: bool = False) -> dict[str, Any]:
     if not isinstance(metrics, dict):
         raise ValueError("evaluator_metrics_invalid")
     counts = ("case_count", "passed", "failed", "errors")
+    if require_diagnostics and set(metrics) != set(counts) | {"peak_rss_kib", "category_summary", "canary", "error_diagnostics"}:
+        raise ValueError("evaluator_metrics_invalid")
     if any(isinstance(metrics.get(key), bool) or not isinstance(metrics.get(key), int) or metrics[key] < 0 for key in counts):
         raise ValueError("evaluator_metrics_invalid")
     if isinstance(expected_case_count, bool) or not isinstance(expected_case_count, int) or not 1 <= expected_case_count <= MAX_EVAL_CASES:
@@ -678,10 +731,21 @@ def _validate_metrics(metrics: Any, *, expected_case_count: int = 8, expected_ca
             category_total += item["case_count"]
         if category_total != expected_case_count:
             raise ValueError("evaluator_category_summary_total_invalid")
-    return {key: metrics.get(key) for key in (*counts, "peak_rss_kib")} | ({"category_summary": summary} if summary is not None else {})
+    result = {key: metrics.get(key) for key in (*counts, "peak_rss_kib")} | ({"category_summary": summary} if summary is not None else {})
+    if require_diagnostics:
+        if "error_diagnostics" not in metrics or "canary" not in metrics:
+            raise ValueError("evaluator_diagnostics_invalid")
+        result["error_diagnostics"] = _validate_diagnostics(metrics["error_diagnostics"], expected_errors=metrics["errors"], expected_categories=expected_categories or set())
+        result["canary"] = _validate_canary(metrics["canary"])
+    elif "error_diagnostics" in metrics or "canary" in metrics:
+        if "error_diagnostics" in metrics:
+            result["error_diagnostics"] = _validate_diagnostics(metrics["error_diagnostics"], expected_errors=metrics["errors"], expected_categories=expected_categories or set())
+        if "canary" in metrics:
+            result["canary"] = _validate_canary(metrics["canary"])
+    return result
 
 
-def _parse_evaluator_result(result: dict[str, Any], *, expected_case_count: int, expected_categories: set[str]) -> tuple[dict[str, Any], bool, bool]:
+def _parse_evaluator_result(result: dict[str, Any], *, expected_case_count: int, expected_categories: set[str], require_diagnostics: bool = False) -> tuple[dict[str, Any], bool, bool]:
     exit_code = result.get("exit_code")
     if result.get("status") not in {"completed", "failed"} or isinstance(exit_code, bool) or exit_code not in {0, 1}:
         raise ValueError("evaluator_process_failed")
@@ -689,7 +753,7 @@ def _parse_evaluator_result(result: dict[str, Any], *, expected_case_count: int,
         metrics = _strict_json_object(result.get("stdout", ""))
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("evaluator_receipt_invalid") from exc
-    metrics = _validate_metrics(metrics, expected_case_count=expected_case_count, expected_categories=expected_categories)
+    metrics = _validate_metrics(metrics, expected_case_count=expected_case_count, expected_categories=expected_categories, require_diagnostics=require_diagnostics)
     all_passed = metrics["passed"] == expected_case_count and metrics["failed"] == 0 and metrics["errors"] == 0
     has_failure = metrics["failed"] > 0 or metrics["errors"] > 0
     if (exit_code == 0) != all_passed or (exit_code == 1) != has_failure:
@@ -801,7 +865,14 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any], dea
             result,
             expected_case_count=expected_case_count,
             expected_categories=expected_categories,
+            require_diagnostics=True,
         )
+        child_status = _bounded_child_status(process)
+        if child_status is not None:
+            # A child that has exited/signalled cannot support a completed or
+            # completed_with_failures quality claim, even if the evaluator
+            # managed to print a syntactically valid aggregate first.
+            raise EngineStartupFailure("engine_exited_during_evaluation", child_status)
         status = "verified" if all_passed else "completed_with_failures" if has_failure else "failed"
         return {
             "schema": "local_bmo.j1m.real-tool-eval-receipt.v1",
@@ -813,7 +884,7 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any], dea
             "model_preflight": {**model_preflight, **preflight_summary},
             **({"cuda_device": cuda_receipt} if cuda_receipt is not None else {}),
             "toolchain": toolchain,
-            "metrics": {key: metrics[key] for key in ("case_count", "passed", "failed", "errors", "peak_rss_kib", "category_summary")},
+            "metrics": {key: metrics[key] for key in ("case_count", "passed", "failed", "errors", "peak_rss_kib", "category_summary", "canary", "error_diagnostics")},
             "duration_ms": round((time.monotonic() - started) * 1000, 1),
             "prompt_response_logging": False,
             "token_logging": False,

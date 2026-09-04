@@ -422,6 +422,22 @@ class J1MConfigTests(unittest.TestCase):
 
 
 class StaticSafetyTests(unittest.TestCase):
+    def test_native_context_batch_policy_keeps_logical_window_and_bounded_microbatch(self):
+        header = (ROOT / "native/backend/llama_backend.hpp").read_text(encoding="utf-8")
+        source = (ROOT / "native/backend/llama_backend.cpp").read_text(encoding="utf-8")
+        self.assertIn("ContextBatchConfig context_batch_config(unsigned context_tokens);", header)
+        self.assertIn("ContextBatchConfig{n_ctx, n_ctx, std::min(n_ctx, 512u)}", source)
+        self.assertIn("context_params.n_batch = batch_config.n_batch", source)
+        self.assertIn("context_params.n_ubatch = batch_config.n_ubatch", source)
+        self.assertIn("batch_config.n_ctx", source)
+        self.assertIn("llama_n_batch(impl_->context)", source)
+        self.assertIn("llama_n_ubatch(impl_->context)", source)
+
+    def test_remote_eval_rejects_engine_exit_after_valid_evaluator_output(self):
+        source = (ROOT / "scripts/test/remote_model_eval.py").read_text(encoding="utf-8")
+        self.assertIn('raise EngineStartupFailure("engine_exited_during_evaluation", child_status)', source)
+        self.assertIn('require_diagnostics=True', source)
+
     def test_no_donor_capture_executable_remains(self):
         for path in (ROOT / "scripts").rglob("*.py"):
             text = path.read_text(encoding="utf-8").lower()
@@ -1391,6 +1407,30 @@ class StaticSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "exit_status_mismatch"):
                 remote._parse_evaluator_result(mismatched, expected_case_count=2, expected_categories=categories)
 
+    def test_remote_eval_diagnostics_are_finite_and_totals_bound(self):
+        remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_diagnostics")
+        categories = {"tool_selection"}
+        metrics = {
+            "case_count": 2, "passed": 1, "failed": 0, "errors": 1, "peak_rss_kib": 10,
+            "category_summary": {"tool_selection": {"case_count": 2, "passed": 1, "failed": 0, "errors": 1}},
+            "canary": {"attempted": True, "passed": True, "error_code": None, "tool_count": 11, "message_chars": 2400},
+            "error_diagnostics": {"schema": "local_bmo.tool-call-eval-diagnostics.v1", "total_errors": 1, "overall": {"http_503": 1}, "by_category": {"tool_selection": {"http_503": 1}}},
+        }
+        parsed, all_passed, has_failure = remote._parse_evaluator_result(
+            {"status": "failed", "exit_code": 1, "stdout": json.dumps(metrics)},
+            expected_case_count=2, expected_categories=categories, require_diagnostics=True,
+        )
+        self.assertEqual(parsed["error_diagnostics"]["overall"], {"http_503": 1})
+        self.assertFalse(all_passed)
+        self.assertTrue(has_failure)
+        for bad in (
+            {**metrics, "error_diagnostics": {**metrics["error_diagnostics"], "overall": {"bogus": 1}}},
+            {**metrics, "error_diagnostics": {**metrics["error_diagnostics"], "total_errors": 0}},
+            {**metrics, "error_diagnostics": {**metrics["error_diagnostics"], "extra": False}},
+        ):
+            with self.assertRaises(ValueError):
+                remote._validate_metrics(bad, expected_case_count=2, expected_categories=categories, require_diagnostics=True)
+
     def test_remote_eval_verifies_same_model_manifest_identity(self):
         remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_identity")
         config = load(ROOT / "scripts/j1m_runner.py", "remote_model_eval_identity_config").load_config()
@@ -1449,7 +1489,7 @@ class StaticSafetyTests(unittest.TestCase):
                 "model_preflight": {"valid": True, "code": "ok", "status": "verified", "size_bytes": 4, "sha256": "a" * 64, "gguf_version": 3},
                 "cuda_device": {"schema": "local_bmo.j1m.cuda-device-receipt.v1", "status": "verified", "selector": "CUDA0", "device_count": 1, "device": {"index": 0, "name": "NVIDIA A100 80GB", "memory_total_mib": 81920, "driver_version": "550.1"}, "source": "nvidia-smi bounded query"},
                 "toolchain": {"schema": "local_bmo.j1m.remote-toolchain-receipt.v1", "status": "verified", "required": {"python3": ">=3.8", "git": ">=2.30", "cmake": ">=3.18", "g++": ">=9.0", "nvcc": ">=12.0"}, "versions": {"python3": {"major": 3, "minor": 10, "reported": "Python 3.10", "executable": "/usr/bin/python3"}, "git": {"major": 2, "minor": 39, "reported": "git version 2.39", "executable": "/usr/bin/git"}, "cmake": {"major": 3, "minor": 22, "reported": "cmake version 3.22", "executable": "/usr/bin/cmake"}, "g++": {"major": 11, "minor": 4, "reported": "g++ (Ubuntu 11.4)", "executable": "/usr/bin/g++"}, "nvcc": {"major": 12, "minor": 2, "reported": "Cuda compilation tools, release 12.2", "executable": "/usr/local/cuda/bin/nvcc"}}, "packages": {"ca-certificates": "20240101", "cmake": "3.22.1", "build-essential": "12.9", "git": "1:2.39.2", "python3": "3.10.12", "python3-venv": "3.10.12"}, "package_install": "ubuntu apt repositories; exact resolved package versions captured by dpkg-query"},
-                "metrics": {"case_count": case_count, "passed": case_count, "failed": 0, "errors": 0, "peak_rss_kib": 123, "category_summary": category_summary},
+                "metrics": {"case_count": case_count, "passed": case_count, "failed": 0, "errors": 0, "peak_rss_kib": 123, "category_summary": category_summary, "canary": {"attempted": True, "passed": True, "error_code": None, "tool_count": 11, "message_chars": 2400}, "error_diagnostics": {"schema": "local_bmo.tool-call-eval-diagnostics.v1", "total_errors": 0, "overall": {}, "by_category": {category: {} for category in category_summary}}},
                 "prompt_response_logging": False, "token_logging": False,
             }), encoding="utf-8")
             selected = orchestrator._verify_eval_receipt(receipt, artifact)

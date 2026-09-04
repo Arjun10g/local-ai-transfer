@@ -42,6 +42,13 @@ _DELETION_RESERVE_SECONDS = 480.0
 # an accepted eval artifact by changing JSON configuration.
 _APPROVED_EVAL_MANIFEST_RELATIVE = Path("artifacts/qwen35-9b/model-manifest.json")
 _APPROVED_EVAL_MANIFEST_SHA256 = "3bcfe1796e2ec24c556c2455d583bb3763039aeaf9b5119ddc1c498459fbeb99"
+_EVAL_DIAGNOSTIC_CODES = frozenset({
+    "http_400", "http_401", "http_404", "http_408", "http_409", "http_413",
+    "http_415", "http_429", "http_500", "http_503", "http_other",
+    "transport_url", "transport_timeout", "transport_os", "parse_json",
+    "parse_session_shape", "parse_response_shape", "context_overflow",
+    "endpoint", "token", "unknown",
+})
 
 
 class OperatorCancelled(Exception):
@@ -409,6 +416,40 @@ def _eval_deadline_ceiling(config: dict[str, Any]) -> dict[str, float]:
     }
 
 
+def _verify_eval_diagnostics(value: Any, *, errors: int, categories: set[str]) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"schema", "total_errors", "overall", "by_category"} or value.get("schema") != "local_bmo.tool-call-eval-diagnostics.v1":
+        raise ValueError("eval receipt diagnostics invalid")
+    if isinstance(value.get("total_errors"), bool) or not isinstance(value.get("total_errors"), int) or value["total_errors"] != errors:
+        raise ValueError("eval receipt diagnostics total invalid")
+    overall = value.get("overall")
+    by_category = value.get("by_category")
+    if not isinstance(overall, dict) or not isinstance(by_category, dict) or set(by_category) != categories:
+        raise ValueError("eval receipt diagnostics invalid")
+    def histogram(item: Any) -> int:
+        if not isinstance(item, dict):
+            raise ValueError("eval receipt diagnostics invalid")
+        total = 0
+        for code, amount in item.items():
+            if code not in _EVAL_DIAGNOSTIC_CODES or isinstance(amount, bool) or not isinstance(amount, int) or amount < 1 or amount > 40:
+                raise ValueError("eval receipt diagnostics code invalid")
+            total += amount
+        return total
+    if histogram(overall) != errors or sum(histogram(by_category[category]) for category in categories) != errors:
+        raise ValueError("eval receipt diagnostics total invalid")
+    return {"schema": value["schema"], "total_errors": value["total_errors"], "overall": dict(overall), "by_category": {category: dict(by_category[category]) for category in sorted(categories)}}
+
+
+def _verify_eval_canary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"attempted", "passed", "error_code", "tool_count", "message_chars"} or value.get("attempted") is not True:
+        raise ValueError("eval receipt canary invalid")
+    if not isinstance(value.get("passed"), bool) or isinstance(value.get("tool_count"), bool) or value.get("tool_count") != 11 or isinstance(value.get("message_chars"), bool) or value.get("message_chars") != 2400:
+        raise ValueError("eval receipt canary invalid")
+    code = value.get("error_code")
+    if (value["passed"] and code is not None) or (not value["passed"] and code not in _EVAL_DIAGNOSTIC_CODES):
+        raise ValueError("eval receipt canary invalid")
+    return dict(value)
+
+
 def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]:
     """Accept only the bounded aggregate receipt produced by remote eval."""
 
@@ -440,7 +481,9 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
             model_preflight.get("sha256") != artifact["sha256"] or model_preflight.get("gguf_version") != 3):
         raise ValueError("eval receipt model preflight invalid")
     metrics = payload.get("metrics")
-    if (not isinstance(metrics, dict) or set(metrics) != {"case_count", "passed", "failed", "errors", "peak_rss_kib", "category_summary"} or
+    metric_keys = {"case_count", "passed", "failed", "errors", "peak_rss_kib", "category_summary"}
+    optional_metric_keys = {"canary", "error_diagnostics"}
+    if (not isinstance(metrics, dict) or not metric_keys <= set(metrics) or set(metrics) - metric_keys - optional_metric_keys or
             payload.get("status") not in {"verified", "completed_with_failures"} or
             any(isinstance(metrics.get(key), bool) or not isinstance(metrics.get(key), int) or metrics[key] < 0 for key in ("case_count", "passed", "failed", "errors"))):
         raise ValueError("eval receipt metrics invalid")
@@ -462,6 +505,10 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
         raise ValueError("eval receipt category summary total invalid")
     if metrics["case_count"] != expected_count or sum(metrics[key] for key in ("passed", "failed", "errors")) != expected_count:
         raise ValueError("eval receipt metric totals invalid")
+    if "error_diagnostics" not in metrics or "canary" not in metrics:
+        raise ValueError("eval receipt diagnostics missing")
+    diagnostics = _verify_eval_diagnostics(metrics["error_diagnostics"], errors=metrics["errors"], categories=expected_categories)
+    canary = _verify_eval_canary(metrics["canary"])
     status = payload["status"]
     all_passed = metrics["passed"] == expected_count and metrics["failed"] == 0 and metrics["errors"] == 0
     has_failure = metrics["failed"] > 0 or metrics["errors"] > 0
@@ -521,6 +568,8 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     selected_metrics = {key: metrics[key] for key in ("case_count", "passed", "failed", "errors", "peak_rss_kib")}
     if summary is not None:
         selected_metrics["category_summary"] = summary
+    selected_metrics["error_diagnostics"] = diagnostics
+    selected_metrics["canary"] = canary
     selected_versions = {name: dict(versions[name]) for name in minimums}
     selected_packages = {name: packages[name] for name in expected_packages}
     return {

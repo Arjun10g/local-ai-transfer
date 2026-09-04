@@ -58,6 +58,9 @@ class EngineBackend {
  public:
   virtual ~EngineBackend() = default;
   virtual std::string id() const = 0;
+  // Bounded runtime identity for diagnostics/metrics; must never contain
+  // paths, prompts, model output, or device secrets.
+  virtual std::string runtime_info_json() const { return "{}"; }
   virtual void initialize(const BackendConfig& config) = 0;
   virtual GenerationResult generate(const GenerationRequest& request,
                                     const Cancellation& cancellation,

@@ -2,11 +2,17 @@
 #include "llama_chat_template.hpp"
 #include "model_validation/model_validator.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 
 namespace lae {
 bool context_budget_fits(size_t prompt_tokens, unsigned max_tokens, unsigned context_tokens) {
   return context_tokens != 0 && prompt_tokens <= context_tokens && max_tokens <= context_tokens - prompt_tokens;
+}
+
+ContextBatchConfig context_batch_config(unsigned context_tokens) {
+  const unsigned n_ctx = context_tokens == 0 ? 8192u : context_tokens;
+  return ContextBatchConfig{n_ctx, n_ctx, std::min(n_ctx, 512u)};
 }
 }  // namespace lae
 
@@ -14,7 +20,6 @@ bool context_budget_fits(size_t prompt_tokens, unsigned max_tokens, unsigned con
 #include "llama.h"
 #include "ggml-backend.h"
 
-#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <thread>
@@ -46,6 +51,12 @@ LlamaBackend::LlamaBackend() : impl_(new Impl()) {}
 LlamaBackend::~LlamaBackend() { shutdown(); delete impl_; }
 std::string LlamaBackend::id() const {
   return std::string("llama.cpp/3581ba0c/") + impl_->active_backend;
+}
+std::string LlamaBackend::runtime_info_json() const {
+  if (!impl_->context) return "{}";
+  return std::string("{\"context_tokens\":") + std::to_string(llama_n_ctx(impl_->context)) +
+         ",\"n_batch\":" + std::to_string(llama_n_batch(impl_->context)) +
+         ",\"n_ubatch\":" + std::to_string(llama_n_ubatch(impl_->context)) + "}";
 }
 
 void LlamaBackend::initialize(const BackendConfig& config) {
@@ -134,9 +145,10 @@ void LlamaBackend::initialize(const BackendConfig& config) {
   if (!embedded_template || !*embedded_template) throw std::runtime_error("llama chat template unavailable; raw prompt mode is not accepted");
   impl_->chat_template.load(embedded_template);
   auto context_params = llama_context_default_params();
-  context_params.n_ctx = config.context_tokens == 0 ? 8192 : config.context_tokens;
-  context_params.n_batch = std::min<uint32_t>(context_params.n_ctx, 512);
-  context_params.n_ubatch = context_params.n_batch;
+  const auto batch_config = context_batch_config(config.context_tokens);
+  context_params.n_ctx = batch_config.n_ctx;
+  context_params.n_batch = batch_config.n_batch;
+  context_params.n_ubatch = batch_config.n_ubatch;
   context_params.n_seq_max = 1;
   context_params.n_threads = static_cast<int32_t>(std::max(1u, std::thread::hardware_concurrency()));
   context_params.n_threads_batch = context_params.n_threads;
@@ -210,6 +222,7 @@ struct LlamaBackend::Impl {};
 LlamaBackend::LlamaBackend() : impl_(new Impl()) {}
 LlamaBackend::~LlamaBackend() { delete impl_; }
 std::string LlamaBackend::id() const { return "llama.cpp/3581ba0c/cpu-disabled"; }
+std::string LlamaBackend::runtime_info_json() const { return "{}"; }
 void LlamaBackend::initialize(const BackendConfig&) { throw std::runtime_error("real backend disabled; configure LAE_ENABLE_LLAMA_CPP=ON"); }
 GenerationResult LlamaBackend::generate(const GenerationRequest&, const Cancellation&, const TokenSink&) { throw std::runtime_error("real backend disabled"); }
 void LlamaBackend::reset() {}

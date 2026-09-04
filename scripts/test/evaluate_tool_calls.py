@@ -29,6 +29,14 @@ TOKEN_ENV = "LAE_EVAL_TOKEN"
 TOKEN_MAX_BYTES = 4096
 RESPONSE_MAX_BYTES = 1024 * 1024
 MODEL_OUTPUT_MAX_CHARS = 65536
+CANARY_MESSAGE_CHARS = 2400
+DIAGNOSTIC_CODES = frozenset({
+    "http_400", "http_401", "http_404", "http_408", "http_409", "http_413",
+    "http_415", "http_429", "http_500", "http_503", "http_other",
+    "transport_url", "transport_timeout", "transport_os", "parse_json",
+    "parse_session_shape", "parse_response_shape", "context_overflow",
+    "endpoint", "token", "unknown",
+})
 FIXTURE_MAX_BYTES = 256 * 1024
 MAX_MESSAGE_CHARS = 4096
 MAX_MESSAGES_PER_CASE = 8
@@ -428,6 +436,60 @@ def _post(endpoint: str, token: str, payload: dict[str, Any], timeout: float) ->
     return content
 
 
+def _error_diagnostic(error: BaseException, *, http_status: int | None = None) -> str:
+    """Map a request failure to a finite, secret-free diagnostic code."""
+    if http_status is not None:
+        return f"http_{http_status}" if http_status in {400, 401, 404, 408, 409, 413, 415, 429, 500, 503} else "http_other"
+    if isinstance(error, json.JSONDecodeError):
+        return "parse_json"
+    if isinstance(error, TimeoutError):
+        return "transport_timeout"
+    if isinstance(error, urllib.error.URLError):
+        return "transport_url"
+    if isinstance(error, OSError):
+        return "transport_os"
+    if isinstance(error, ValueError):
+        exact = {
+            "native engine returned no session id": "parse_session_shape",
+            "native engine response_missing_content": "parse_response_shape",
+            "context limit exceeded": "context_overflow",
+            "endpoint_must_be_loopback_http": "endpoint",
+            "token_invalid": "token",
+        }.get(str(error))
+        if exact is not None:
+            return exact
+    return "unknown"
+
+
+def _diagnostics(records: list[dict[str, Any]], categories: set[str]) -> dict[str, Any]:
+    overall: dict[str, int] = {}
+    by_category: dict[str, dict[str, int]] = {category: {} for category in sorted(categories)}
+    for item in records:
+        if item["status"] != "error":
+            continue
+        code = item["reason"] if item["reason"] in DIAGNOSTIC_CODES else "unknown"
+        overall[code] = overall.get(code, 0) + 1
+        category_counts = by_category[item["category"]]
+        category_counts[code] = category_counts.get(code, 0) + 1
+    return {
+        "schema": "local_bmo.tool-call-eval-diagnostics.v1",
+        "total_errors": sum(overall.values()),
+        "overall": dict(sorted(overall.items())),
+        "by_category": by_category,
+    }
+
+
+def _canary_payload(fixture: dict[str, Any]) -> dict[str, Any]:
+    # Exercise the >512-token prefill path with every declared tool while
+    # remaining below the fixture's 2048-token context budget.
+    text = ("canary " + ("bounded-context ") * (CANARY_MESSAGE_CHARS // 16))[:CANARY_MESSAGE_CHARS]
+    return {
+        "model": fixture["model"], "messages": [{"role": "user", "content": text}],
+        "tools": fixture["tools"], "stream": False,
+        "max_tokens": int(fixture["limits"]["max_output_tokens"]), "mode": "normal",
+    }
+
+
 def _rss_kib(pid: int) -> int | None:
     try:
         result = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True, timeout=2, check=True)
@@ -452,9 +514,25 @@ def run_local(
     except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
         return {"schema": "local_bmo.tool-call-eval-result.v1", "model": "invalid", "case_count": 0, "passed": 0, "failed": 0, "errors": 1, "peak_rss_kib": None, "cases": []}
     cases = fixture["cases"][:max_cases]
-    records = []
+    records: list[dict[str, Any]] = []
     peak_rss = _rss_kib(engine_pid) if engine_pid is not None else None
+    canary = {"attempted": True, "passed": False, "error_code": None, "tool_count": len(fixture["tools"]), "message_chars": CANARY_MESSAGE_CHARS}
+    try:
+        _post(endpoint, token, _canary_payload(fixture), timeout)
+        canary["passed"] = True
+    except urllib.error.HTTPError as exc:
+        canary["error_code"] = _error_diagnostic(exc, http_status=exc.code)
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError) as exc:
+        canary["error_code"] = _error_diagnostic(exc)
+    canary_failed = not canary["passed"]
+    if canary_failed:
+        canary_code = str(canary["error_code"] or "unknown")
+        # Preserve the exact fixture totals while stopping before any scoring
+        # request. The synthetic canary itself is never represented as a case.
+        records = [{"id": case["id"], "category": case["category"], "status": "error", "reason": canary_code, "latency_ms": 0.0} for case in cases]
     for case in cases:
+        if canary_failed:
+            break
         payload = {
             "model": fixture["model"], "session_id": f"eval-{case['id']}",
             "messages": case["messages"], "tools": fixture["tools"],
@@ -466,9 +544,9 @@ def run_local(
             passed, reason = evaluate_case(case, output, fixture["tools"])
             status = "pass" if passed else "fail"
         except urllib.error.HTTPError as exc:
-            status, reason = "error", f"HTTP_{exc.code}"
+            status, reason = "error", _error_diagnostic(exc, http_status=exc.code)
         except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError) as exc:
-            status, reason = "error", type(exc).__name__
+            status, reason = "error", _error_diagnostic(exc)
         elapsed_ms = round((time.monotonic() - started) * 1000, 1)
         if engine_pid is not None:
             rss = _rss_kib(engine_pid)
@@ -486,6 +564,8 @@ def run_local(
         "case_count": len(records), "passed": sum(item["status"] == "pass" for item in records),
         "failed": sum(item["status"] == "fail" for item in records), "errors": sum(item["status"] == "error" for item in records),
         "peak_rss_kib": peak_rss, "cases": records, "category_summary": category_summary,
+        "canary": canary,
+        "error_diagnostics": _diagnostics(records, {case["category"] for case in cases}),
     }
 
 
