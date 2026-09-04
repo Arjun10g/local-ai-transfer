@@ -8,7 +8,7 @@ import test from 'node:test';
 
 import {
   LLAMA_CPP_REVISION, PRODUCT_MODEL_FILE, PRODUCT_MODEL_ID, PRODUCT_MODEL_SHA256,
-  PRODUCT_MODEL_SIZE, launchEngine, parseReadyEvent, parseSupervisorArguments,
+  PRODUCT_MODEL_SIZE, awaitLaunchGate, launchEngine, parseReadyEvent, parseSupervisorArguments,
   resolveSupervisorInputs, runPortableSupervisor, validateServingBuildInfo,
 } from '../../portable-supervisor.mjs';
 
@@ -17,13 +17,14 @@ async function inputs(t) {
   t.after(() => rm(directory, { recursive: true, force: true }));
   const enginePath = join(directory, 'lae-engine-cpu.exe'); const modelPath = join(directory, PRODUCT_MODEL_FILE);
   await writeFile(enginePath, 'MZ'); await writeFile(modelPath, 'GGUF');
-  return { enginePath, modelPath, bootstrapPipe: 'LocalBMO-12345678-1234-1234-1234-123456789abc' };
+  return { enginePath, modelPath, bootstrapPipe: 'LocalBMO-12345678-1234-1234-1234-123456789abc', launchGatePipe: 'LocalBMOGate-12345678-1234-1234-1234-123456789abc' };
 }
 
 test('portable supervisor rejects caller identity substitution and duplicate config keys', async t => {
-  assert.deepEqual(parseSupervisorArguments(['--engine', 'E', '--model', 'M', '--bootstrap-pipe', 'LocalBMO-12345678-1234-1234-1234-123456789abc']), { enginePath: 'E', modelPath: 'M', configPath: undefined, bootstrapPipe: 'LocalBMO-12345678-1234-1234-1234-123456789abc' });
-  assert.throws(() => parseSupervisorArguments(['--engine', 'E', '--engine', 'X', '--model', 'M', '--bootstrap-pipe', 'LocalBMO-12345678-1234-1234-1234-123456789abc']), /duplicate/);
-  assert.throws(() => parseSupervisorArguments(['--engine', 'E', '--model', 'M', '--bootstrap-pipe', 'LocalBMO-12345678-1234-1234-1234-123456789abc', '--token', 'secret']), /invalid/);
+  const argv = ['--engine', 'E', '--model', 'M', '--bootstrap-pipe', 'LocalBMO-12345678-1234-1234-1234-123456789abc', '--launch-gate-pipe', 'LocalBMOGate-12345678-1234-1234-1234-123456789abc'];
+  assert.deepEqual(parseSupervisorArguments(argv), { enginePath: 'E', modelPath: 'M', configPath: undefined, bootstrapPipe: 'LocalBMO-12345678-1234-1234-1234-123456789abc', launchGatePipe: 'LocalBMOGate-12345678-1234-1234-1234-123456789abc' });
+  assert.throws(() => parseSupervisorArguments([...argv, '--engine', 'X']), /duplicate/);
+  assert.throws(() => parseSupervisorArguments([...argv, '--token', 'secret']), /invalid/);
   const value = await inputs(t); const configPath = join(value.enginePath, '..', 'host.json');
   await writeFile(configPath, '{"version":"0.1.0","version":"0.1.0"}');
   await assert.rejects(resolveSupervisorInputs({ ...value, configPath }, { platform: 'win32', architecture: 'x64' }), /duplicate key/);
@@ -37,6 +38,18 @@ test('portable supervisor pins build and ready identities', () => {
   assert.throws(() => validateServingBuildInfo({ ...serving, backend: 'llama.cpp/3581ba0c/vulkan' }), /identity/);
   assert.deepEqual(parseReadyEvent('{"event":"ready","port":3210,"bind":"127.0.0.1","token_required":true}\n'), { event: 'ready', port: 3210, bind: '127.0.0.1', token_required: true });
   assert.throws(() => parseReadyEvent('{"event":"ready","event":"ready","port":3210,"bind":"127.0.0.1","token_required":true}'), /duplicate key/);
+});
+
+test('launch gate accepts only the bounded post-job-assignment signal', async () => {
+  const pipe = 'LocalBMOGate-12345678-1234-1234-1234-123456789abc';
+  const connection = payload => {
+    const socket = new PassThrough();
+    queueMicrotask(() => socket.end(payload));
+    return socket;
+  };
+  await awaitLaunchGate(pipe, { connectImpl: () => connection('GO\n') });
+  await assert.rejects(awaitLaunchGate(pipe, { connectImpl: () => connection('GO\nextra') }), /handoff failed/);
+  await assert.rejects(awaitLaunchGate('LocalBMO-12345678-1234-1234-1234-123456789abc', { connectImpl: () => connection('GO\n') }), /invalid/);
 });
 
 test('engine token travels only over stdin and exact CPU launch has no fallback', async () => {
@@ -54,9 +67,11 @@ test('engine token travels only over stdin and exact CPU launch has no fallback'
 test('foreground supervisor keeps bootstrap and bearers out of console and tears down both runtimes', async t => {
   const value = await inputs(t); const child = new EventEmitter(); child.exitCode = null; child.killed = false; child.kill = () => { child.killed = true; queueMicrotask(() => child.emit('exit', 0)); return true; };
   const server = new EventEmitter(); let hostClosed = false; let toolsClosed = false; const bearer = 'B'.repeat(43); const bootstrap = 'N'.repeat(43); const consoleOutput = []; const handoff = [];
+  let gateOpened = false; let engineLaunchedAfterGate = false;
   const run = runPortableSupervisor(value, {
     platform: 'win32', architecture: 'x64', queryBuildInfoImpl: async () => {},
-    launchEngineImpl: () => ({ child, token: bearer, ready: Promise.resolve({ port: 4321 }) }),
+    awaitLaunchGateImpl: async pipe => { assert.equal(pipe, value.launchGatePipe); gateOpened = true; },
+    launchEngineImpl: () => { engineLaunchedAfterGate = gateOpened; return { child, token: bearer, ready: Promise.resolve({ port: 4321 }) }; },
     createHostRuntimeImpl: async ({ engineToken }) => { assert.equal(engineToken, bearer); setImmediate(() => server.emit('close')); return { address: { token: 'H'.repeat(43), bootstrap_url: `http://127.0.0.1:9000/#bootstrap=${bootstrap}` }, host: { server, close: async () => { hostClosed = true; } }, externalTools: { shutdown: async () => { toolsClosed = true; } } }; },
     publishBootstrapImpl: async (pipe, url) => handoff.push({ pipe, url }), print: item => consoleOutput.push(item),
   });
@@ -64,4 +79,5 @@ test('foreground supervisor keeps bootstrap and bearers out of console and tears
   assert.deepEqual(handoff, [{ pipe: value.bootstrapPipe, url: `http://127.0.0.1:9000/#bootstrap=${bootstrap}` }]);
   assert.deepEqual(consoleOutput, []); assert.equal(JSON.stringify(consoleOutput).includes(bootstrap), false); assert.equal(JSON.stringify(consoleOutput).includes(bearer), false); assert.equal(JSON.stringify(consoleOutput).includes('H'.repeat(43)), false);
   assert.equal(hostClosed, true); assert.equal(toolsClosed, true); assert.equal(child.killed, true);
+  assert.equal(engineLaunchedAfterGate, true);
 });

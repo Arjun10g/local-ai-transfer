@@ -31,14 +31,14 @@ function exactKeys(value, allowed, name) {
 
 export function parseSupervisorArguments(argv) {
   if (!Array.isArray(argv)) fail('arguments must be an array');
-  const output = Object.create(null); const allowed = new Set(['--engine', '--model', '--config', '--bootstrap-pipe']);
+  const output = Object.create(null); const allowed = new Set(['--engine', '--model', '--config', '--bootstrap-pipe', '--launch-gate-pipe']);
   for (let index = 0; index < argv.length; index += 2) {
     const key = argv[index]; const value = argv[index + 1];
     if (!allowed.has(key) || typeof value !== 'string' || !value || Object.hasOwn(output, key)) fail('invalid or duplicate supervisor argument');
     output[key] = value;
   }
-  if (!output['--engine'] || !output['--model'] || !output['--bootstrap-pipe']) fail('--engine, --model, and --bootstrap-pipe are required');
-  return { enginePath: output['--engine'], modelPath: output['--model'], configPath: output['--config'], bootstrapPipe: output['--bootstrap-pipe'] };
+  if (!output['--engine'] || !output['--model'] || !output['--bootstrap-pipe'] || !output['--launch-gate-pipe']) fail('--engine, --model, --bootstrap-pipe, and --launch-gate-pipe are required');
+  return { enginePath: output['--engine'], modelPath: output['--model'], configPath: output['--config'], bootstrapPipe: output['--bootstrap-pipe'], launchGatePipe: output['--launch-gate-pipe'] };
 }
 
 async function regularCanonicalFile(input, label, { expectedName } = {}) {
@@ -53,10 +53,12 @@ async function regularCanonicalFile(input, label, { expectedName } = {}) {
 }
 
 export async function resolveSupervisorInputs(options, { platform = process.platform, architecture = process.arch } = {}) {
-  exactKeys(options, ['enginePath', 'modelPath', 'configPath', 'bootstrapPipe'], 'supervisor options');
+  exactKeys(options, ['enginePath', 'modelPath', 'configPath', 'bootstrapPipe', 'launchGatePipe'], 'supervisor options');
   if (platform !== 'win32') fail('portable supervisor requires Windows x64');
   if (architecture !== 'x64') fail('portable supervisor requires Windows x64');
   if (typeof options.bootstrapPipe !== 'string' || !/^LocalBMO-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(options.bootstrapPipe)) fail('bootstrap pipe identity is invalid');
+  if (typeof options.launchGatePipe !== 'string' || !/^LocalBMOGate-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(options.launchGatePipe)) fail('launch gate pipe identity is invalid');
+  if (options.launchGatePipe === options.bootstrapPipe) fail('launcher pipes must be distinct');
   const enginePath = await regularCanonicalFile(options.enginePath, 'engine', { expectedName: 'lae-engine-cpu.exe' });
   const modelPath = await regularCanonicalFile(options.modelPath, 'model', { expectedName: PRODUCT_MODEL_FILE });
   let fileConfig = {};
@@ -67,7 +69,24 @@ export async function resolveSupervisorInputs(options, { platform = process.plat
     exactKeys(fileConfig, ['version', 'host', 'workspace_roots', 'applications', 'process_actions', 'network', 'providers'], 'host config');
   }
   const config = mergeConfig({ ...fileConfig, engine: { mode: 'native', model: PRODUCT_MODEL_ID, backend: 'cpu', request_timeout_ms: 120000 } });
-  return { enginePath, modelPath, bootstrapPipe: options.bootstrapPipe, config };
+  return { enginePath, modelPath, bootstrapPipe: options.bootstrapPipe, launchGatePipe: options.launchGatePipe, config };
+}
+
+export async function awaitLaunchGate(pipeName, { connectImpl = createConnection } = {}) {
+  if (typeof pipeName !== 'string' || !/^LocalBMOGate-[0-9a-f-]{36}$/iu.test(pipeName)) fail('launch gate handoff is invalid');
+  const pipePath = `\\\\.\\pipe\\${pipeName}`;
+  await new Promise((resolveGate, rejectGate) => {
+    const socket = connectImpl(pipePath); let settled = false; let bytes = '';
+    const finish = error => { if (settled) return; settled = true; clearTimeout(timer); socket.removeAllListeners(); socket.destroy(); error ? rejectGate(new Error('launch gate handoff failed')) : resolveGate(); };
+    const timer = setTimeout(() => finish(new Error('timeout')), 10_000);
+    socket.once('error', finish);
+    socket.on('data', chunk => {
+      bytes += chunk.toString('utf8');
+      if (bytes.length > 3) return finish(new Error('invalid gate'));
+      if (bytes === 'GO\n') finish();
+    });
+    socket.once('end', () => { if (!settled) finish(new Error('incomplete gate')); });
+  });
 }
 
 export async function publishBootstrapUrl(pipeName, bootstrapUrl, { connectImpl = createConnection } = {}) {
@@ -146,6 +165,9 @@ export async function createHostRuntime({ config, engineEndpoint, engineToken })
 
 export async function runPortableSupervisor(options, dependencies = {}) {
   const resolved = await resolveSupervisorInputs(options, { platform: dependencies.platform ?? process.platform, architecture: dependencies.architecture ?? process.arch });
+  // The launcher signals only after AssignProcessToJobObject succeeds. No child
+  // can therefore escape the kill-on-close job during the assignment window.
+  await (dependencies.awaitLaunchGateImpl ?? awaitLaunchGate)(resolved.launchGatePipe, dependencies);
   const launched = (dependencies.launchEngineImpl ?? launchEngine)(resolved, dependencies);
   let runtime;
   try {

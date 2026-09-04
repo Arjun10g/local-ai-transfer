@@ -21,8 +21,13 @@ class PackageScannerTests(unittest.TestCase):
         self.assertIn("ShellExecute($bootstrapUrl)", start)
         self.assertNotIn("Start-Process $bootstrapUrl", start)
         self.assertIn("NamedPipeServerStream", start)
+        self.assertIn("PipeOptions]::CurrentUserOnly", start)
+        self.assertIn("--launch-gate-pipe", start)
+        self.assertLess(start.index("[LocalAssistantJob]::Assign"), start.index('$gateWriter.Write("GO`n")'))
         self.assertIn("RevealBootstrapUrl", start)
         self.assertIn("if ($RevealBootstrapUrl) { Write-Output $bootstrapUrl }", start)
+        self.assertEqual(1, start.count("Write-Output $bootstrapUrl"))
+        self.assertNotIn("Write-Host $bootstrapUrl", start)
 
     def test_builder_closes_host_dependencies_without_target_python(self):
         with tempfile.TemporaryDirectory() as directory:

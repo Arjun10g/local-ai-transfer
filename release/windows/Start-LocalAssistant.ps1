@@ -35,8 +35,11 @@ if ($LASTEXITCODE -ne 0 -or $nodeVersion -ne 'v24.20.0') { throw "portable super
 
 if ($NoBrowser -and -not $RevealBootstrapUrl) { throw '-NoBrowser requires the explicit -RevealBootstrapUrl diagnostic switch' }
 $bootstrapPipeName = "LocalBMO-$([Guid]::NewGuid().ToString())"
-$bootstrapPipe = [System.IO.Pipes.NamedPipeServerStream]::new($bootstrapPipeName, [System.IO.Pipes.PipeDirection]::In, 1, [System.IO.Pipes.PipeTransmissionMode]::Byte, [System.IO.Pipes.PipeOptions]::None)
-$arguments = @($supervisor, '--engine', $enginePath, '--model', $model, '--bootstrap-pipe', $bootstrapPipeName)
+$launchGatePipeName = "LocalBMOGate-$([Guid]::NewGuid().ToString())"
+$pipeOptions = [System.IO.Pipes.PipeOptions]::CurrentUserOnly
+$bootstrapPipe = [System.IO.Pipes.NamedPipeServerStream]::new($bootstrapPipeName, [System.IO.Pipes.PipeDirection]::In, 1, [System.IO.Pipes.PipeTransmissionMode]::Byte, $pipeOptions)
+$launchGatePipe = [System.IO.Pipes.NamedPipeServerStream]::new($launchGatePipeName, [System.IO.Pipes.PipeDirection]::Out, 1, [System.IO.Pipes.PipeTransmissionMode]::Byte, $pipeOptions)
+$arguments = @($supervisor, '--engine', $enginePath, '--model', $model, '--bootstrap-pipe', $bootstrapPipeName, '--launch-gate-pipe', $launchGatePipeName)
 if (-not [string]::IsNullOrWhiteSpace($HostConfig)) {
     $config = Get-RegularNonLinkFile $HostConfig 'host config'
     $arguments += @('--config', $config)
@@ -89,6 +92,13 @@ try {
     $process.StartInfo = $start
     if (-not $process.Start()) { throw 'portable supervisor process could not start' }
     [LocalAssistantJob]::Assign($job, $process.Handle)
+    $launchGatePipe.WaitForConnection()
+    $gateWriter = [System.IO.StreamWriter]::new($launchGatePipe, [System.Text.UTF8Encoding]::new($false), 256, $true)
+    $gateWriter.Write("GO`n")
+    $gateWriter.Flush()
+    $gateWriter.Dispose()
+    $launchGatePipe.Dispose()
+    $launchGatePipe = $null
     $bootstrapPipe.WaitForConnection()
     $reader = [System.IO.StreamReader]::new($bootstrapPipe, [System.Text.UTF8Encoding]::new($false), $false, 256, $true)
     $bootstrapUrl = $reader.ReadLine()
@@ -114,6 +124,7 @@ try {
         $process.Dispose()
     }
     if ($bootstrapPipe) { $bootstrapPipe.Dispose() }
+    if ($launchGatePipe) { $launchGatePipe.Dispose() }
     [void][LocalAssistantJob]::CloseHandle($job)
 }
 exit $exitCode

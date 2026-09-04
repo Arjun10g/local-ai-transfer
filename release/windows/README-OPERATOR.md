@@ -35,8 +35,11 @@ the engine, generates the engine bearer in memory, sends it only through stdin,
 and supervises engine plus host as one foreground lifetime. No credential is
 placed in argv or the environment.
 
-The supervisor passes the 60-second, one-time bootstrap URL to the launcher
-through a private named pipe, and the launcher passes it to the Windows shell
+The launcher creates current-user-only named pipes before starting the
+supervisor. It assigns the supervisor to the kill-on-close Job and only then
+opens a launch gate, so the native engine cannot be created in the assignment
+window. The supervisor passes the 60-second, one-time bootstrap URL back
+through the second pipe, and the launcher passes it to the Windows shell
 through the COM API. Default stdout/stderr contain neither the nonce nor either
 bearer. The explicit diagnostic pair `-NoBrowser -RevealBootstrapUrl` prints
 the URL when shell launch is prohibited. The launcher never constructs a
