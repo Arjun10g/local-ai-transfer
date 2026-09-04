@@ -9,6 +9,7 @@ const MAX_FILE_BYTES = 32768;
 
 function hash(value) { return createHash('sha256').update(value).digest('hex'); }
 function utf8(value) { return Buffer.byteLength(value, 'utf8'); }
+function sameIdentity(left, right) { return (typeof left.dev === 'number' && typeof right.dev === 'number' && left.dev !== right.dev) || (typeof left.ino === 'number' && typeof right.ino === 'number' && left.ino !== right.ino); }
 
 /** Read only explicitly selected regular files through WorkspacePolicy.
  * The returned labels are host-authored and are included in the preview digest;
@@ -27,13 +28,13 @@ export async function readWorkspaceContext(policy, workspaceId, paths) {
       const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
       handle = await open(selected.canonical, flags);
       const before = await handle.stat();
-      if (!before.isFile() || before.size !== selected.stat.size || before.mtimeMs !== selected.stat.mtimeMs) throw new ProviderToolError('copilot_policy_denied', 'selected context changed while opening');
+      if (!before.isFile() || sameIdentity(before, selected.stat) || before.size !== selected.stat.size || before.mtimeMs !== selected.stat.mtimeMs) throw new ProviderToolError('copilot_policy_denied', 'selected context changed while opening');
       data = await handle.readFile();
       const after = await handle.stat();
-      if (!after.isFile() || after.size !== before.size || after.mtimeMs !== before.mtimeMs) throw new ProviderToolError('copilot_policy_denied', 'selected context changed while reading');
+      if (!after.isFile() || sameIdentity(after, before) || after.size !== before.size || after.mtimeMs !== before.mtimeMs) throw new ProviderToolError('copilot_policy_denied', 'selected context changed while reading');
     } catch (error) { if (error?.code === 'copilot_policy_denied') throw error; throw new ProviderToolError('copilot_policy_denied'); } finally { await handle?.close().catch(() => {}); }
     const checked = await policy.regularFile(workspaceId, path);
-    if (checked.canonical !== selected.canonical || checked.stat.size !== selected.stat.size || checked.stat.mtimeMs !== selected.stat.mtimeMs) throw new ProviderToolError('copilot_policy_denied', 'selected context changed after reading');
+    if (checked.canonical !== selected.canonical || sameIdentity(checked.stat, selected.stat) || checked.stat.size !== selected.stat.size || checked.stat.mtimeMs !== selected.stat.mtimeMs) throw new ProviderToolError('copilot_policy_denied', 'selected context changed after reading');
     if (data.length > MAX_FILE_BYTES) throw new ProviderToolError('provider_response_too_large');
     let text;
     try { text = new TextDecoder('utf-8', { fatal: true }).decode(data); } catch { throw new ProviderToolError('copilot_policy_denied', 'selected file is not UTF-8'); }
