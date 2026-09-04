@@ -35,3 +35,5 @@
 | QA-010 | S4 | `main` | IN_PROGRESS | TOOL-018, MODEL-006 | S0 | heavy autonomous tool tests pending |
 | SEC-006 | S4 | `main` | IN_PROGRESS | RUN-020, TOOL-019 | S0 | parser/schema adversarial evidence pending |
 | SOL-G4 | S0 | `main` | IN_PROGRESS | RUN-020, MODEL-007, QA-010 | S4 | release-hardening review in progress |
+| RUN-025 | S1 | `luna/native-release-hardening` | IN_PROGRESS | independent native/release audit findings | S0, S4 | immutable model identity, strict runtime config, exact Windows plan launch pending |
+| REL-004 | S1 | `luna/native-release-hardening` | IN_PROGRESS | RUN-025, QA-001 | S0, S4 | canonical QA mandatory-skip and portable-runtime dependency hardening pending |
