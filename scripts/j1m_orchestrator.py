@@ -97,6 +97,8 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
         key_id: str | None = None
         instance_id: str | None = None
         ambiguous_create = False
+        attempt_reserved = False
+        settle_attempt_after_cleanup = False
         recorded = False
         record: sf.OwnedResource | None = None
         known_hosts = temp_root / "known_hosts"
@@ -107,6 +109,11 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
         signal.signal(signal.SIGINT, cancel)
         signal.signal(signal.SIGTERM, cancel)
         watchdog: subprocess.Popen[bytes] | None = None
+        # Reserve the possible provider POST before uploading the key or
+        # creating an instance. A failed append is a hard stop: no mutation is
+        # allowed without a durable budget/ownership reservation.
+        attempt_id = sf.reserve_create_attempt(phase_id, nonce, candidate, backstop_hours=float(config["modes"][mode]["provider_backstop_hours"]), public_key_sha256=hashlib.sha256(public_key.encode("utf-8")).hexdigest())
+        attempt_reserved = True
         try:
             key_id = sf.add_ssh_key(api_key, phase_id, f"j1m-{nonce}", public_key)
             sf.verify_ssh_key_ownership(api_key, phase_id, key_id, expected_name=f"j1m-{nonce}", expected_public_key=public_key)
@@ -124,13 +131,18 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     "ssh_public_key_sha256": hashlib.sha256(public_key.encode("utf-8")).hexdigest(),
                     "error_type": type(exc).__name__,
                 }
-                sf.append_incident(incident)
                 if sf.is_ambiguous_transport(exc):
-                    # A transport timeout after POST leaves the provider
-                    # outcome unknown. Preserve exact cleanup metadata and
-                    # reserve budget; subsequent launches remain refused.
-                    sf.append_cost_event({"instance_id": f"ambiguous-{nonce}", "phase_id": phase_id, "status": "pending", "estimated_cost_usd": round(candidate.hourly_usd * max(0.25, runtime * 1.25), 6), "incident": "create-response-ambiguous", "ssh_key_id": key_id, "ssh_key_name": f"j1m-{nonce}", "ssh_public_key_sha256": incident["ssh_public_key_sha256"], "nonce": nonce})
                     ambiguous_create = True
+                else:
+                    # Definitive rejection/local failure is reconciled only
+                    # after the exact key cleanup in the outer finally.
+                    settle_attempt_after_cleanup = True
+                try:
+                    sf.append_incident(incident)
+                except Exception:
+                    # The pre-create reservation, not this optional incident,
+                    # is what blocks an unsafe subsequent launch.
+                    pass
                 raise
             lifecycle["instance_id"] = instance_id
             launcher_pid = os.getpid()
@@ -147,13 +159,18 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 os.sys.executable, str(ROOT / "scripts" / "shadeform_watchdog.py"),
                 "--phase-id", phase_id, "--instance-id", instance_id,
                 "--launcher-pid", str(launcher_pid), "--max-seconds", str(config["modes"][mode]["external_watchdog_seconds"]),
-                "--env-file", str(env_file), "--identity", str(identity), "--known-hosts", str(known_hosts),
+                "--env-file", str(env_file),
             ]
             if launcher_start_marker is not None:
                 watchdog_command.extend(["--launcher-start-marker", launcher_start_marker])
             watchdog = subprocess.Popen(watchdog_command)
             lifecycle["watchdog_pid"] = watchdog.pid
             sf.append_cost_event({"instance_id": instance_id, "phase_id": phase_id, "status": "pending", "estimated_cost_usd": round(candidate.hourly_usd * float(config["modes"][mode]["provider_backstop_hours"]), 6)})
+            # The instance reservation is now superseded by its exact
+            # ownership/billing row. Keep the pre-create reservation history
+            # but settle it to zero only after both durable writes and the
+            # watchdog are in place.
+            sf.append_cost_event({"instance_id": attempt_id, "phase_id": phase_id, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
             j1m_runner.write_progress(progress_path, "wait-active-starting", phase_id=phase_id)
             wait_budget = max(30, int(min(1800, provider_deadline - time.monotonic() - 120)))
             info = sf.wait_active(api_key, phase_id, instance_id, timeout_seconds=wait_budget)
@@ -193,6 +210,16 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             lifecycle["status"] = "completed"
         except (KeyboardInterrupt, OperatorCancelled):
             lifecycle["status"] = "cancelled_by_operator"
+            if instance_id is None and not ambiguous_create:
+                settle_attempt_after_cleanup = True
+            raise
+        except Exception:
+            # Key upload/ownership validation and other definitive local
+            # failures occur outside the create-specific handler. They still
+            # reconcile the pre-create reservation after finally cleanup when
+            # no instance POST could have succeeded.
+            if instance_id is None and not ambiguous_create:
+                settle_attempt_after_cleanup = True
             raise
         finally:
             if watchdog is not None and watchdog.poll() is None:
@@ -263,6 +290,14 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     lifecycle["key_cleanup"] = {"status": "failed", "error_type": type(exc).__name__}
                     try:
                         sf.append_incident({"phase_id": phase_id, "incident": "create-key-delete-failed", "ssh_key_id": key_id, "nonce": nonce, "error_type": type(exc).__name__})
+                    except Exception:
+                        pass
+            if attempt_reserved and settle_attempt_after_cleanup:
+                try:
+                    sf.append_cost_event({"instance_id": attempt_id, "phase_id": phase_id, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
+                except Exception as exc:
+                    try:
+                        sf.append_incident({"phase_id": phase_id, "incident": "attempt-reservation-settlement-failed", "nonce": nonce, "error_type": type(exc).__name__})
                     except Exception:
                         pass
             for number, handler in previous_handlers.items():

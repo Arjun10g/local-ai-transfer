@@ -101,6 +101,19 @@ class J1MConfigTests(unittest.TestCase):
             with self.assertRaises(sf.ShadeformHTTPError):
                 sf.create_instance("api", {}, phase_id="j1m-create-test", run_id="run", candidate=candidate, ssh_key_id="key-123456", nonce="b" * 32, max_runtime_hours=0.25)
 
+    def test_create_attempt_reservation_is_durable_gate(self):
+        from scripts import shadeform_lifecycle as sf
+        candidate = sf.Candidate("A100", "cloud", "region", "a100-80", 1.35, 80, "ubuntu", False)
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(sf, "COST_LEDGER", Path(directory) / "cost-ledger.jsonl"):
+            attempt_id = sf.reserve_create_attempt("j1m-reservation-test", "c" * 32, candidate, backstop_hours=0.3125, public_key_sha256="d" * 64)
+            event = json.loads(Path(directory, "cost-ledger.jsonl").read_text().strip())
+            self.assertEqual(attempt_id, "attempt-" + "c" * 32)
+            self.assertEqual(event["status"], "pending")
+            self.assertEqual(event["estimated_cost_usd"], 0.421875)
+            with mock.patch.object(sf, "append_cost_event", side_effect=OSError("ledger unavailable")):
+                with self.assertRaises(OSError):
+                    sf.reserve_create_attempt("j1m-reservation-test", "e" * 32, candidate, backstop_hours=0.3125, public_key_sha256="d" * 64)
+
     def test_ssh_key_ownership_normalizes_comment_but_rejects_malformed_key(self):
         from scripts import shadeform_lifecycle as sf
         with mock.patch.object(sf, "request", return_value={"id": "key-123456", "name": "j1m-key", "public_key": "  ssh-ed25519   AAAA   provider-comment\n"}):

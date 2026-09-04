@@ -13,19 +13,27 @@ teardown. All provider calls validate the phase and exact resource ID.
 ## Teardown order
 
 1. On cancellation, timeout, transport failure, host shutdown, or launcher
-   death, remove any remote HF token using the phase ledger and pinned host-key
-   file, then attempt progressive/best-effort artifact salvage and write a
-   receipt.
+   death, attempt progressive/best-effort artifact salvage and write a
+   receipt. The approved public Qwen source is unauthenticated, so no HF token
+   is uploaded to the ephemeral host.
 2. Delete the exact recorded instance and wait for provider confirmation.
 3. Only after deletion, record cost/deletion bookkeeping and remove the exact
    SSH key. A bookkeeping failure must not prevent deletion; key revocation is
    also attempted independently when deletion fails, while the ownership
    ledger remains pending until deletion is confirmed.
-4. The external watchdog is independent of the launcher and performs remote
-   token removal followed by the same exact deletion before stopping a wedged
-   launcher.
+4. The external watchdog is independent of the launcher and performs the same
+   exact deletion before stopping a wedged launcher; it has no SSH/token
+   custody path.
 
 ## Create-response ambiguity
+
+Before the create POST, the append-only cost ledger receives an
+`attempt-<nonce>` pending reservation containing the candidate, key name/public
+key hash, and provider-backstop estimate. A failed reservation is a hard stop.
+After durable exact ownership, watchdog start, and instance pending-cost entry,
+the attempt reservation is settled to zero. Definitive pre-create failures are
+settled to zero only after key cleanup; an ambiguous transport or unusable 2xx
+response leaves the attempt pending.
 
 The official [create API](https://docs.shadeform.ai/api-reference/instances/instances-create)
 returns only an instance ID and documents no idempotency key/header. The

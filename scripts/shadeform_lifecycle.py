@@ -368,6 +368,28 @@ def append_cost_event(event: dict[str, Any]) -> None:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
 
+def reserve_create_attempt(phase_id: str, nonce: str, candidate: Candidate, *, backstop_hours: float, public_key_sha256: str) -> str:
+    """Durably reserve one possible create POST before any provider mutation."""
+
+    validate_phase_id(phase_id)
+    validate_nonce(nonce)
+    if backstop_hours <= 0 or not re.fullmatch(r"[0-9a-f]{64}", public_key_sha256):
+        raise ValueError("invalid create-attempt reservation inputs")
+    attempt_id = f"attempt-{nonce}"
+    append_cost_event({
+        "instance_id": attempt_id,
+        "phase_id": phase_id,
+        "status": "pending",
+        "estimated_cost_usd": round(candidate.hourly_usd * backstop_hours, 6),
+        "reservation": "pre-create-attempt",
+        "ownership_nonce": nonce,
+        "ssh_key_name": f"j1m-{nonce}",
+        "ssh_public_key_sha256": public_key_sha256,
+        "candidate": {"cloud": candidate.cloud, "region": candidate.region, "gpu": candidate.gpu, "instance_type": candidate.instance_type, "vram_gb": candidate.vram_gb, "hourly_usd": candidate.hourly_usd},
+    })
+    return attempt_id
+
+
 def append_incident(event: dict[str, Any]) -> None:
     """Persist bounded incident metadata without recording secret material."""
 
