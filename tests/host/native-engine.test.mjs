@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import http from 'node:http';
 import { NativeEngineClient } from '../../host/engine/native-engine-client.mjs';
 import { ConversationController } from '../../host/agent/controller.mjs';
 
@@ -46,6 +47,20 @@ test('NativeEngineClient integrates authenticated native fixture streaming, sess
 
 test('NativeEngineClient requires explicit model/backend identity', () => {
   assert.throws(() => new NativeEngineClient({ endpoint: 'http://127.0.0.1:1234', token: 'native-client-test-token' }), /model identity is required/);
+});
+
+test('NativeEngineClient timeout covers a stalled SSE response body', async t => {
+  const server = http.createServer((request, response) => {
+    if (request.url === '/v1/sessions') { response.writeHead(201, { 'content-type': 'application/json' }); response.end('{"id":"sess-timeout"}'); return; }
+    if (request.url === '/v1/chat/completions') { response.writeHead(200, { 'content-type': 'text/event-stream', 'x-request-id': 'req-native-timeout' }); response.flushHeaders(); response.write(': waiting\n\n'); return; }
+    if (request.url === '/v1/cancel/req-native-timeout') { response.writeHead(200, { 'content-type': 'application/json' }); response.end('{"cancelled":true}'); return; }
+    response.writeHead(404); response.end();
+  });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const client = new NativeEngineClient({ endpoint: `http://127.0.0.1:${server.address().port}`, token: 'native-stream-timeout-token', model: 'qwen35-9b-q4-k-m', backend: 'cpu', timeoutMs: 1000, maxTokens: 2 });
+  t.after(() => client.shutdown());
+  await assert.rejects(async () => { for await (const _frame of client.generate({ requestId: 'req_timeout01', sessionId: 'ses_timeout01', messages: [{ role: 'user', content: 'hello' }] })) {} }, error => error?.code === 'engine_timeout');
 });
 
 test('launcher rejects invalid or conflicting engine selection without fixture fallback', () => {

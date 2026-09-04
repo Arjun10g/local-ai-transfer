@@ -87,6 +87,7 @@ GenerationResult LlamaBackend::generate(const GenerationRequest& request,
   prompt.resize(static_cast<size_t>(count));
   if (!context_budget_fits(prompt.size(), request.max_tokens, impl_->context_tokens)) throw std::invalid_argument("context limit exceeded");
   llama_batch batch = llama_batch_init(static_cast<int32_t>(prompt.size()), 0, 1);
+  batch.n_tokens = static_cast<int32_t>(prompt.size());
   for (size_t i = 0; i < prompt.size(); ++i) {
     batch.token[i] = prompt[i]; batch.pos[i] = static_cast<llama_pos>(i); batch.n_seq_id[i] = 1; batch.seq_id[i][0] = 0; batch.logits[i] = (i + 1 == prompt.size());
   }
@@ -101,6 +102,7 @@ GenerationResult LlamaBackend::generate(const GenerationRequest& request,
     if (piece_size < 0 || !sink(std::string(piece, static_cast<size_t>(piece_size)))) { result.finish_reason = "cancelled"; return result; }
     ++result.generated_tokens;
     llama_batch next = llama_batch_init(1, 0, 1);
+    next.n_tokens = 1;
     next.token[0] = token; next.pos[0] = static_cast<llama_pos>(prompt.size() + generated); next.n_seq_id[0] = 1; next.seq_id[0][0] = 0; next.logits[0] = true;
     if (llama_decode(impl_->context, next) != 0) { llama_batch_free(next); throw std::runtime_error("llama decode failed"); }
     llama_batch_free(next);

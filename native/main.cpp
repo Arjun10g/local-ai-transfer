@@ -112,6 +112,7 @@ int main(int argc, char** argv) {
   std::signal(SIGINT, on_signal); std::signal(SIGTERM, on_signal);
   std::cout << "{\"event\":\"ready\",\"port\":" << server.port() << ",\"bind\":\"127.0.0.1\",\"token_required\":true}\n" << std::flush;
   while (!stop_requested) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  engine.cancel_all();
   server.stop();
   engine.stop();
   active_server = nullptr; active_engine = nullptr;

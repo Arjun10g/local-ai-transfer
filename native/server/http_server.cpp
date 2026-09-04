@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cctype>
 #include <cstring>
+#include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -312,12 +313,13 @@ void HttpServer::handle(Socket client) {
         send_all(client, "data: {\"id\":\"" + json_escape(request_id) + "\",\"choices\":[{\"delta\":{},\"finish_reason\":\"" + json_escape(result.finish_reason) + "\"}]}\n\ndata: [DONE]\n\n");
       } catch (const std::invalid_argument& error) { const std::string code = std::string(error.what()) == "context limit exceeded" ? "invalid_request" : "not_found"; send_all(client, "data: {\"error\":{\"code\":\"" + code + "\"}}\n\ndata: [DONE]\n\n"); }
       catch (const std::logic_error&) { send_all(client, "data: {\"error\":{\"code\":\"busy\"}}\n\ndata: [DONE]\n\n"); }
-      catch (...) { send_all(client, "data: {\"error\":{\"code\":\"internal_error\"}}\n\ndata: [DONE]\n\n"); }
+      catch (const std::exception& error) { std::cerr << "generation " << request_id << " failed: " << error.what() << "\n"; send_all(client, "data: {\"error\":{\"code\":\"internal_error\"}}\n\ndata: [DONE]\n\n"); }
+      catch (...) { std::cerr << "generation " << request_id << " failed: unknown exception\n"; send_all(client, "data: {\"error\":{\"code\":\"internal_error\"}}\n\ndata: [DONE]\n\n"); }
     } else {
       try {
         const auto result = engine_.generate(request_id, session_id, chat_request.generation, cancellation, [&](const std::string& token) { combined += token; return true; });
         respond(client, 200, "application/json", "{\"id\":\"" + json_escape(request_id) + "\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"" + json_escape(combined) + "\"},\"finish_reason\":\"" + json_escape(result.finish_reason) + "\"}],\"usage\":{\"completion_tokens\":" + std::to_string(result.generated_tokens) + "}}", request_id);
-      } catch (const std::invalid_argument& error) { if (std::string(error.what()) == "context limit exceeded") fail(400, "invalid_request"); else fail(404, "not_found"); } catch (const std::logic_error&) { fail(409, "busy"); } catch (...) { fail(500, "internal_error"); }
+      } catch (const std::invalid_argument& error) { if (std::string(error.what()) == "context limit exceeded") fail(400, "invalid_request"); else fail(404, "not_found"); } catch (const std::logic_error&) { fail(409, "busy"); } catch (const std::exception& error) { std::cerr << "generation " << request_id << " failed: " << error.what() << "\n"; fail(500, "internal_error"); } catch (...) { std::cerr << "generation " << request_id << " failed: unknown exception\n"; fail(500, "internal_error"); }
     }
   } else {
     fail(404, "not_found");

@@ -34,6 +34,7 @@ class Engine final {
   bool delete_session(const std::string& id);
   bool has_session(const std::string& id) const;
   bool cancel(const std::string& request_id);
+  void cancel_all();
   GenerationResult generate(const std::string& request_id, const std::string& session_id,
                             const GenerationRequest& request, const Cancellation& cancellation,
                             const TokenSink& sink);

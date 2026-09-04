@@ -99,6 +99,13 @@ bool Engine::cancel(const std::string& request_id) {
   return true;
 }
 
+void Engine::cancel_all() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (auto& item : active_) {
+    if (!item.second->exchange(true)) ++cancellation_count_;
+  }
+}
+
 GenerationResult Engine::generate(const std::string& request_id, const std::string& session_id,
                                    const GenerationRequest& request, const Cancellation& cancellation,
                                    const TokenSink& sink) {

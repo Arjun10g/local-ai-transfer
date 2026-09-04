@@ -49,15 +49,16 @@ export class NativeEngineClient {
   headers(extra = {}) { return { authorization: `Bearer ${this.token}`, ...extra }; }
   async request(path, options = {}, { signal, timeoutMs = this.timeoutMs } = {}) {
     if (this.closed) throw new NativeEngineError('engine_client_closed', 'native engine client is closed');
-    const abort = new AbortController(); const timer = setTimeout(() => abort.abort(), timeoutMs); const relay = () => abort.abort(); signal?.addEventListener('abort', relay, { once: true });
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
+    const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
     try {
-      const response = await fetch(`${this.baseUrl}${path}`, { ...options, signal: abort.signal, headers: this.headers(options.headers) });
+      const response = await fetch(`${this.baseUrl}${path}`, { ...options, signal: requestSignal, headers: this.headers(options.headers) });
       if (!response.ok) { const payload = await readJson(response); throw new NativeEngineError(payload.error?.code ?? `http_${response.status}`, 'native engine request failed', response.status); }
       return response;
     } catch (error) {
-      if (error?.name === 'AbortError') throw Object.assign(new NativeEngineError(signal?.aborted ? 'cancelled' : 'engine_timeout', signal?.aborted ? 'native request cancelled' : 'native request timed out'), { code: signal?.aborted ? 'cancelled' : 'engine_timeout' });
+      if (error?.name === 'AbortError' || error?.name === 'TimeoutError') throw Object.assign(new NativeEngineError(signal?.aborted ? 'cancelled' : 'engine_timeout', signal?.aborted ? 'native request cancelled' : 'native request timed out'), { code: signal?.aborted ? 'cancelled' : 'engine_timeout' });
       throw error;
-    } finally { clearTimeout(timer); signal?.removeEventListener('abort', relay); }
+    }
   }
   async health() {
     const response = await this.request('/healthz', {}, { timeoutMs: 10000 }); const data = await readJson(response);
@@ -88,8 +89,9 @@ export class NativeEngineClient {
     if (!REQUEST_ID.test(requestId)) throw new NativeEngineError('invalid_request_id', 'host request id is invalid');
     if (!Array.isArray(messages) || messages.length < 1 || messages.length > 64) throw new NativeEngineError('invalid_messages', 'native message history is invalid');
     if (!['normal', 'deep'].includes(mode)) throw new NativeEngineError('invalid_mode', 'native mode is invalid');
-    const localAbort = new AbortController(); const relay = () => { localAbort.abort(); };
+    const localAbort = new AbortController(); const relay = () => { localAbort.abort(); }; let timedOut = false;
     signal?.addEventListener('abort', relay, { once: true }); const active = { abort: localAbort, nativeRequestId: null, cancelled: false }; this.active.set(requestId, active);
+    const generationTimer = setTimeout(() => { timedOut = true; localAbort.abort(); if (active.nativeRequestId) void this.postCancel(active.nativeRequestId); }, this.timeoutMs);
     try {
       const nativeSessionId = await this.ensureSession(sessionId ?? 'ses_native_default', localAbort.signal);
       const payload = { model: this.model, session_id: nativeSessionId, messages, stream: true, max_tokens: this.maxTokens, mode };
@@ -100,9 +102,10 @@ export class NativeEngineClient {
         const finish = choice?.finish_reason; if (finish) { if (finish === 'cancelled' || active.cancelled) throw Object.assign(new NativeEngineError('cancelled', 'native generation cancelled'), { code: 'cancelled' }); yield { kind: 'done', finish_reason: finish, usage: { completion_tokens: 0 } }; }
       }
     } catch (error) {
+      if (timedOut || error?.name === 'TimeoutError' || (error?.name === 'AbortError' && !active.cancelled && !signal?.aborted)) throw Object.assign(new NativeEngineError('engine_timeout', 'native generation timed out'), { code: 'engine_timeout' });
       if (active.cancelled || signal?.aborted || error?.code === 'cancelled') throw Object.assign(new NativeEngineError('cancelled', 'native generation cancelled'), { code: 'cancelled' });
       throw error;
-    } finally { signal?.removeEventListener('abort', relay); this.active.delete(requestId); }
+    } finally { clearTimeout(generationTimer); signal?.removeEventListener('abort', relay); this.active.delete(requestId); }
   }
   async shutdown() { for (const active of this.active.values()) active.abort.abort(); this.active.clear(); const sessions = [...this.sessions.keys()]; await Promise.allSettled(sessions.map(id => this.deleteSession(id))); this.closed = true; }
 }
