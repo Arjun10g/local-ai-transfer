@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -37,7 +37,7 @@ test('filesystem read/list/search are bounded and literal', async () => {
 
 test('write_new is create-only and apply_patch requires current base hash', async () => {
   const root = await fixture(); const tools = createFilesystemTools(new WorkspacePolicy([{ id: 'project', path: root, read: true, write: true }]));
-  const created = text(await tools['fs.write_new'].execute(call('fs.write_new', { workspace_id: 'project', path: 'new.txt', content: 'new content' }))); assert.equal(created.created, true); await assert.rejects(() => tools['fs.write_new'].execute(call('fs.write_new', { workspace_id: 'project', path: 'new.txt', content: 'overwrite' })), error => error.code === 'already_exists');
+  const created = text(await tools['fs.write_new'].execute(call('fs.write_new', { workspace_id: 'project', path: 'new.txt', content: 'new content' }))); assert.equal(created.created, true); assert.equal((await stat(join(root, 'new.txt'))).mode & 0o777, 0o600); await assert.rejects(() => tools['fs.write_new'].execute(call('fs.write_new', { workspace_id: 'project', path: 'new.txt', content: 'overwrite' })), error => error.code === 'already_exists');
   const original = Buffer.from(await readFile(join(root, 'notes.txt'))); const replacement = 'updated deadline\n'; const patchCall = call('fs.apply_patch', { workspace_id: 'project', path: 'notes.txt', base_sha256: hash(original), replacement }); const preview = await tools['fs.apply_patch'].preview(patchCall); assert.equal(preview.changed, true); const applied = text(await tools['fs.apply_patch'].execute(patchCall)); assert.equal(applied.applied, true); assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), replacement);
   await assert.rejects(() => tools['fs.apply_patch'].execute(call('fs.apply_patch', { workspace_id: 'project', path: 'notes.txt', base_sha256: hash(original), replacement: 'stale' })), error => error.code === 'base_hash_mismatch');
 });
@@ -62,4 +62,20 @@ test('every local tool rejects unknown fields and wrong argument types', async (
 test('filesystem patch rechecks canonical target before replacement', async () => {
   const root = await fixture(); const realPolicy = new WorkspacePolicy([{ id: 'project', path: root, read: true, write: true }]); const original = realPolicy.regularFile.bind(realPolicy); let calls = 0; realPolicy.regularFile = async (...args) => { const file = await original(...args); if (++calls === 4) throw Object.assign(new Error('reparse target changed'), { code: 'path_changed' }); return file; };
   const tools = createFilesystemTools(realPolicy); const old = Buffer.from(await readFile(join(root, 'notes.txt'))); const patch = call('fs.apply_patch', { workspace_id: 'project', path: 'notes.txt', base_sha256: hash(old), replacement: 'should not apply' }); await assert.rejects(() => tools['fs.apply_patch'].execute(patch), error => error.code === 'path_changed'); assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), 'deadline: Friday\nsecond line\n');
+});
+
+test('filesystem safe-open rejects a final-component symlink swap', async () => {
+  const root = await fixture(); const outside = await mkdtemp(join(tmpdir(), 'lae-race-')); const target = join(root, 'race.txt'); const escaped = join(outside, 'secret.txt'); await writeFile(target, 'inside only', 'utf8'); await writeFile(escaped, 'must not be read', 'utf8'); const originalStat = await stat(target); let first = true;
+  const racePolicy = { regularFile: async () => { if (first) { first = false; await unlink(target); await symlink(escaped, target); } return { canonical: target, path: 'race.txt', stat: originalStat }; } };
+  const tools = createFilesystemTools(racePolicy); await assert.rejects(() => tools['fs.read_text'].execute(call('fs.read_text', { workspace_id: 'project', path: 'race.txt' })), error => error.code === 'path_changed'); await unlink(target);
+});
+
+test('filesystem operations fail closed when Windows handle safety is unavailable', async () => {
+  const root = await fixture(); const policy = new WorkspacePolicy([{ id: 'project', path: root, read: true, write: true }]); const tools = createFilesystemTools(policy, { platform: 'win32' });
+  await assert.rejects(() => tools['fs.list'].execute(call('fs.list', { workspace_id: 'project', path: '' })), error => error.code === 'platform_path_safety_unavailable');
+  await assert.rejects(() => tools['fs.write_new'].execute(call('fs.write_new', { workspace_id: 'project', path: 'blocked.txt', content: 'blocked' })), error => error.code === 'platform_path_safety_unavailable');
+});
+
+test('confirmation UI discloses browser destination and carries both binding fields', async () => {
+  const source = await readFile(new URL('../../ui/app.js', import.meta.url), 'utf8'); assert.match(source, /External destination \(network egress\)/); assert.match(source, /previews\.set\(ev\.data\.call\.id,destination\)/); assert.match(source, /request_id:ev\.request_id,call_id:call\.id/);
 });
