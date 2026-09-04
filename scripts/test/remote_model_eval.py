@@ -28,7 +28,23 @@ from typing import Any
 
 MODEL_NAME = "Qwen3.5-9B-Q4_K_M.gguf"
 PIN_RE = set("0123456789abcdef")
-ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,95}$")
+SAFE_ERROR_CODES = frozenset({
+    "artifact_manifest_invalid", "cuda_device_receipt_invalid", "engine_binary_missing",
+    "engine_build_info_failed", "engine_build_info_invalid", "engine_llama_identity_mismatch",
+    "engine_not_ready", "engine_ready_identity_invalid", "engine_ready_receipt_invalid",
+    "engine_ready_timeout", "engine_stdout_unavailable", "engine_token_file_not_private",
+    "eval_timeout_invalid", "evaluation_backend_invalid", "evaluator_category_summary_invalid",
+    "evaluator_category_summary_total_invalid", "evaluator_expected_count_invalid",
+    "evaluator_fixture_categories_invalid", "evaluator_fixture_count_invalid",
+    "evaluator_fixture_invalid", "evaluator_fixture_too_large", "evaluator_fixture_unreadable",
+    "evaluator_metrics_invalid", "evaluator_metrics_total_invalid", "evaluator_process_failed",
+    "evaluator_exit_status_mismatch", "evaluator_receipt_invalid", "evaluator_rss_invalid",
+    "llama_checkout_revision_mismatch",
+    "llama_pin_invalid", "llama_revision_mismatch", "model_manifest_invalid",
+    "model_manifest_lock_invalid", "model_manifest_lock_mismatch", "q4_artifact_hash_mismatch",
+    "q4_artifact_missing_or_wrong_name", "source_pin_invalid", "source_revision_mismatch",
+    "toolchain_receipt_invalid",
+})
 TAIL_LIMIT = 1200
 MAX_ENGINE_LINE = 8192
 MAX_EVAL_OUTPUT = 256 * 1024
@@ -60,7 +76,7 @@ def _safe_error_code(error: BaseException) -> str:
     """Retain a stable reason without persisting dynamic exception detail."""
 
     candidate = str(error).partition(":")[0]
-    return candidate if ERROR_CODE_RE.fullmatch(candidate) else "evaluation_failed"
+    return candidate if candidate in SAFE_ERROR_CODES else "evaluation_failed"
 
 
 def verify_artifact(model: Path, manifest_path: Path, *, source_revision: str, llama_revision: str, manifest_lock_path: Path | None = None) -> dict[str, Any]:
@@ -225,6 +241,22 @@ def _validate_metrics(metrics: Any, *, expected_case_count: int = 8, expected_ca
     return {key: metrics.get(key) for key in (*counts, "peak_rss_kib")} | ({"category_summary": summary} if summary is not None else {})
 
 
+def _parse_evaluator_result(result: dict[str, Any], *, expected_case_count: int, expected_categories: set[str]) -> tuple[dict[str, Any], bool, bool]:
+    exit_code = result.get("exit_code")
+    if result.get("status") not in {"completed", "failed"} or isinstance(exit_code, bool) or exit_code not in {0, 1}:
+        raise ValueError("evaluator_process_failed")
+    try:
+        metrics = json.loads(result.get("stdout", ""))
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("evaluator_receipt_invalid") from exc
+    metrics = _validate_metrics(metrics, expected_case_count=expected_case_count, expected_categories=expected_categories)
+    all_passed = metrics["passed"] == expected_case_count and metrics["failed"] == 0 and metrics["errors"] == 0
+    has_failure = metrics["failed"] > 0 or metrics["errors"] > 0
+    if (exit_code == 0) != all_passed or (exit_code == 1) != has_failure:
+        raise ValueError("evaluator_exit_status_mismatch")
+    return metrics, all_passed, has_failure
+
+
 def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any]) -> dict[str, Any]:
     engine = Path(args.engine)
     if not engine.is_file():
@@ -303,15 +335,11 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any]) -> 
             "--max-cases", str(expected_case_count), "--engine-pid", str(process.pid),
         ]
         result = _run_bounded(evaluate, timeout=float(args.timeout), output_limit=MAX_EVAL_OUTPUT)
-        if result.get("status") != "completed":
-            raise ValueError("evaluator_process_failed")
-        try:
-            metrics = json.loads(result.get("stdout", ""))
-        except (TypeError, json.JSONDecodeError) as exc:
-            raise ValueError("evaluator_receipt_invalid") from exc
-        metrics = _validate_metrics(metrics, expected_case_count=expected_case_count, expected_categories=expected_categories)
-        all_passed = metrics["passed"] == expected_case_count and metrics["failed"] == 0 and metrics["errors"] == 0
-        has_failure = metrics["failed"] > 0 or metrics["errors"] > 0
+        metrics, all_passed, has_failure = _parse_evaluator_result(
+            result,
+            expected_case_count=expected_case_count,
+            expected_categories=expected_categories,
+        )
         status = "verified" if all_passed else "completed_with_failures" if has_failure else "failed"
         return {
             "schema": "local_bmo.j1m.real-tool-eval-receipt.v1",

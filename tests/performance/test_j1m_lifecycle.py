@@ -638,6 +638,9 @@ class StaticSafetyTests(unittest.TestCase):
         eval_command = next(command for command in commands if command and command[0] == "python3" and any("remote_model_eval.py" in part for part in command))
         self.assertEqual(eval_command[eval_command.index("--model") + 1], "/scratch/j1m/artifacts/Qwen3.5-9B-Q4_K_M.gguf")
         self.assertEqual(eval_command[eval_command.index("--llama-checkout") + 1], "/scratch/llama.cpp")
+        evaluator_timeout = float(eval_command[eval_command.index("--timeout") + 1])
+        self.assertEqual(evaluator_timeout, 420.0)
+        self.assertLessEqual(evaluator_timeout + 60.0, j1m.load_config()["modes"]["eval"]["stage_budgets_seconds"]["evaluation"])
         native_upload = next(remote for local, remote, recursive in uploads if local.name == "native" and recursive)
         self.assertEqual(native_upload, "/scratch/j1m/engine")
         self.assertNotIn("/engine/native/native", native_upload)
@@ -744,6 +747,30 @@ class StaticSafetyTests(unittest.TestCase):
         remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_error_code")
         self.assertEqual(remote._safe_error_code(ValueError("engine_not_ready:token=secret-value")), "engine_not_ready")
         self.assertEqual(remote._safe_error_code(OSError("/secret/path was unavailable")), "evaluation_failed")
+        for secret_like in ("secret_value", "hf_token", "password123"):
+            self.assertEqual(remote._safe_error_code(ValueError(secret_like)), "evaluation_failed")
+
+    def test_remote_eval_preserves_bounded_quality_failure_metrics(self):
+        remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_quality_result")
+        categories = {"tool_selection"}
+        failed_metrics = {
+            "case_count": 2, "passed": 1, "failed": 1, "errors": 0, "peak_rss_kib": 10,
+            "category_summary": {"tool_selection": {"case_count": 2, "passed": 1, "failed": 1, "errors": 0}},
+        }
+        parsed, all_passed, has_failure = remote._parse_evaluator_result(
+            {"status": "failed", "exit_code": 1, "stdout": json.dumps(failed_metrics)},
+            expected_case_count=2,
+            expected_categories=categories,
+        )
+        self.assertEqual(parsed["failed"], 1)
+        self.assertFalse(all_passed)
+        self.assertTrue(has_failure)
+        for mismatched in (
+            {"status": "completed", "exit_code": 0, "stdout": json.dumps(failed_metrics)},
+            {"status": "failed", "exit_code": 1, "stdout": json.dumps({**failed_metrics, "passed": 2, "failed": 0, "category_summary": {"tool_selection": {"case_count": 2, "passed": 2, "failed": 0, "errors": 0}}})},
+        ):
+            with self.assertRaisesRegex(ValueError, "exit_status_mismatch"):
+                remote._parse_evaluator_result(mismatched, expected_case_count=2, expected_categories=categories)
 
     def test_remote_eval_verifies_same_model_manifest_identity(self):
         remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_identity")
@@ -871,9 +898,13 @@ class StaticSafetyTests(unittest.TestCase):
     def test_eval_receipt_rejects_cpu_identity_for_cuda_lane(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_cuda_identity")
         artifact = {"name": "Qwen3.5-9B-Q4_K_M.gguf", "size_bytes": 4, "sha256": "a" * 64, "llama_cpp_revision": "b" * 40}
+        fixture = json.loads((ROOT / "tests/model/tool_call_eval.json").read_text(encoding="utf-8"))
+        category_counts = {category: sum(case["category"] == category for case in fixture["cases"]) for category in {case["category"] for case in fixture["cases"]}}
+        category_summary = {category: {"case_count": count, "passed": count, "failed": 0, "errors": 0} for category, count in category_counts.items()}
+        case_count = len(fixture["cases"])
         with tempfile.TemporaryDirectory() as directory:
             receipt = Path(directory) / "eval-receipt.json"
-            receipt.write_text(json.dumps({"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "verified", "artifact": artifact, "engine": {"llama_cpp_revision": "b" * 40, "compiled_backend": "llama.cpp/bbbbbbbb/cpu"}, "metrics": {"case_count": 8, "passed": 8, "failed": 0, "errors": 0, "peak_rss_kib": 1}, "prompt_response_logging": False, "token_logging": False}), encoding="utf-8")
+            receipt.write_text(json.dumps({"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "verified", "artifact": artifact, "engine": {"llama_cpp_revision": "b" * 40, "compiled_backend": "llama.cpp/bbbbbbbb/cpu"}, "metrics": {"case_count": case_count, "passed": case_count, "failed": 0, "errors": 0, "peak_rss_kib": 1, "category_summary": category_summary}, "prompt_response_logging": False, "token_logging": False}), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "engine identity"):
                 orchestrator._verify_eval_receipt(receipt, artifact)
 
