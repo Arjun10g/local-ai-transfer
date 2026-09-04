@@ -315,7 +315,8 @@ test('browser and app launches use argv boundaries rather than shell interpretat
   assert.equal(browser.opened, true);
   const app = resultText(await system['app.open'].execute(call('app.open', { app_id: 'probe' })));
   assert.equal(app.opened, true);
-  for (let i = 0; i < 50; i++) { try { await readFile(capture); break; } catch { await sleep(2); } }
+  const captureDeadline = Date.now() + 2000;
+  while (Date.now() < captureDeadline) { try { await readFile(capture); break; } catch { await sleep(10); } }
   const captured = await readFile(capture, 'utf8');
   assert.match(captured, /fixed-arg;not-shell/);
   assert.equal(captured.includes(marker), false);
