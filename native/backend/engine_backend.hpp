@@ -11,6 +11,7 @@ namespace lae {
 struct BackendConfig {
   std::string model_path;
   std::string backend_profile = "fixture-cpu";
+  unsigned context_tokens = 8192;
 };
 
 struct GenerationRequest {

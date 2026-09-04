@@ -1,11 +1,14 @@
 #include "backend/fixture_backend.hpp"
 #include "engine/engine.hpp"
+#include "backend/llama_backend.hpp"
+#include "model_validation/model_validator.hpp"
 #include "server/http_server.hpp"
 
 #include <csignal>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <cstdint>
 #include <chrono>
 #include <thread>
 
@@ -15,15 +18,15 @@ lae::HttpServer* active_server = nullptr;
 volatile std::sig_atomic_t stop_requested = 0;
 void on_signal(int) { stop_requested = 1; }
 void usage() {
-  std::cout << "lae-engine 0.1.0-fixture\ncommands: serve version print-build-info probe\n";
+  std::cout << "lae-engine 0.1.0\ncommands: serve verify-model version print-build-info probe\n";
 }
 }  // namespace
 
 int main(int argc, char** argv) {
   const std::string command = argc > 1 ? argv[1] : "help";
-  if (command == "version") { std::cout << "0.1.0-fixture\n"; return 0; }
+  if (command == "version") { std::cout << "0.1.0\n"; return 0; }
   if (command == "print-build-info") {
-    std::cout << "{\"engine_version\":\"0.1.0-fixture\",\"api_version\":\"0.1.0\",\"backend\":\"fixture-cpu/0.1.0\",\"source_revision\":\"fixture-no-upstream\",\"model\":\"none\"}\n";
+    std::cout << "{\"engine_version\":\"0.1.0\",\"api_version\":\"0.1.0\",\"backend\":\"fixture-cpu/0.1.0\",\"llama_cpp_revision\":\"3581ba0cf591b3f772fbb002de0f70e294bc0396\",\"model\":\"none\"}\n";
     return 0;
   }
   if (command == "probe") {
@@ -34,17 +37,45 @@ int main(int argc, char** argv) {
 #endif
     return 0;
   }
-  if (command != "serve") { usage(); return command == "help" ? 0 : 2; }
+  if (command != "serve" && command != "verify-model") { usage(); return command == "help" ? 0 : 2; }
 
-  unsigned port = 0; std::string token; bool token_seen = false;
+  unsigned port = 0; unsigned context_tokens = 8192; std::uint64_t model_size = 0;
+  std::string token; bool token_seen = false; std::string backend = "fixture-cpu";
+  std::string model_path; std::string model_sha256;
   for (int i = 2; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--port" && i + 1 < argc) port = static_cast<unsigned>(std::stoul(argv[++i]));
     else if (arg == "--token" && i + 1 < argc) { token = argv[++i]; token_seen = true; }
+    else if (arg == "--backend" && i + 1 < argc) backend = argv[++i];
+    else if (arg == "--model" && i + 1 < argc) model_path = argv[++i];
+    else if (arg == "--size" && i + 1 < argc) model_size = std::stoull(argv[++i]);
+    else if (arg == "--sha256" && i + 1 < argc) model_sha256 = argv[++i];
+    else if (arg == "--context" && i + 1 < argc) context_tokens = static_cast<unsigned>(std::stoul(argv[++i]));
     else { std::cerr << "unknown argument\n"; return 2; }
   }
+  if (command == "verify-model") {
+    if (model_path.empty()) { std::cerr << "verify-model requires --model\n"; return 2; }
+    lae::ModelProfile profile; profile.expected_size_bytes = model_size; profile.expected_sha256 = model_sha256;
+    const auto result = lae::validate_model_file(model_path, profile);
+    std::cout << "{\"valid\":" << (result.valid ? "true" : "false") << ",\"code\":\"" << result.code << "\",\"size_bytes\":" << result.size_bytes << ",\"sha256\":\"" << result.sha256 << "\",\"gguf_version\":" << result.gguf_version << "}\n";
+    return result.valid ? 0 : 2;
+  }
   if (!token_seen || token.empty()) { std::cerr << "serve requires a non-empty --token\n"; return 2; }
-  lae::Engine engine(std::make_unique<lae::FixtureBackend>());
+  if (context_tokens < 1 || context_tokens > 16384) { std::cerr << "context must be between 1 and 16384 tokens\n"; return 2; }
+  std::unique_ptr<lae::EngineBackend> backend_instance;
+  lae::BackendConfig backend_config; backend_config.backend_profile = backend; backend_config.context_tokens = context_tokens;
+  if (backend == "fixture-cpu") {
+    if (!model_path.empty()) { std::cerr << "fixture backend does not accept a model path\n"; return 2; }
+    backend_instance = std::make_unique<lae::FixtureBackend>();
+  } else if (backend == "cpu") {
+    if (model_path.empty()) { std::cerr << "cpu backend requires --model\n"; return 2; }
+    lae::ModelProfile profile; profile.expected_size_bytes = model_size; profile.expected_sha256 = model_sha256;
+    const auto result = lae::validate_model_file(model_path, profile);
+    if (!result.valid) { std::cerr << "model validation failed: " << result.code << "\n"; return 2; }
+    backend_config.model_path = result.canonical_path;
+    backend_instance = std::make_unique<lae::LlamaBackend>();
+  } else { std::cerr << "unsupported backend profile\n"; return 2; }
+  lae::Engine engine(std::move(backend_instance));
   try { engine.initialize(); } catch (const std::exception& error) { std::cerr << error.what() << "\n"; return 1; }
   lae::HttpServer server(engine, token);
   try { server.start(port); } catch (const std::exception& error) { std::cerr << error.what() << "\n"; return 1; }

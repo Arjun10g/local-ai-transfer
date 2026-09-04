@@ -1,10 +1,13 @@
 #include "../../native/backend/fixture_backend.hpp"
 #include "../../native/engine/engine.hpp"
+#include "../../native/model_validation/model_validator.hpp"
 
 #include <cassert>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <fstream>
+#include <filesystem>
 
 int main() {
   using namespace lae;
@@ -39,5 +42,21 @@ int main() {
   assert(!engine.has_session(session.id));
   engine.stop();
   assert(engine.state() == LifecycleState::STOPPED);
+
+  const auto model_path = std::filesystem::temp_directory_path() / "Qwen3.5-9B-Q4_K_M.gguf";
+  {
+    std::ofstream model(model_path, std::ios::binary | std::ios::trunc);
+    const unsigned char fixture[] = {'G','G','U','F',3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+    model.write(reinterpret_cast<const char*>(fixture), sizeof(fixture));
+  }
+  lae::ModelProfile profile; profile.expected_size_bytes = 24; profile.expected_sha256 = "a4e5e156ddec27e286f75328784d7106b60a4eb1d246e950a001a3f944fbda99";
+  const auto accepted = lae::validate_model_file(model_path, profile, true);
+  assert(accepted.valid && accepted.code == "ok" && accepted.gguf_version == 3);
+  const auto rejected_real = lae::validate_model_file(model_path, profile, false);
+  assert(!rejected_real.valid && rejected_real.code == "model_profile_missing_metadata");
+  profile.expected_sha256 = std::string(64, '0');
+  const auto rejected_hash = lae::validate_model_file(model_path, profile, true);
+  assert(!rejected_hash.valid && rejected_hash.code == "model_hash_mismatch");
+  std::error_code cleanup_error; std::filesystem::remove(model_path, cleanup_error);
   std::cout << "runtime contract/backend tests: PASS\\n";
 }
