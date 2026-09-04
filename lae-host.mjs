@@ -30,7 +30,7 @@ const grantStore = new OperatorGrantStore();
 const operatorGrants = new OperatorGrantControl({ store: grantStore, bindings: buildOperatorGrantBindings(config) });
 const externalTools = createExternalToolRegistry({ config: config.providers, graph: { grantStore } });
 const controller = new ConversationController({ engine, toolRegistry: { ...createLocalToolRegistry({ workspaces: config.workspace_roots, applications: config.applications, networkProvider: config.network.provider, grantControl: operatorGrants }), ...externalTools } });
-const host = new HostServer({ controller, engine, config, providers: externalTools.providerStatus, operatorGrants });
+const host = new HostServer({ controller, engine, config, providers: externalTools.providerStatus, providerAuth: externalTools.providerAuthControl, operatorGrants });
 const address = await host.listen(Number(process.env.LAE_PORT ?? 0));
 console.log(JSON.stringify({ ready: true, host: address.host, port: address.port, engine: mode, network: config.network.provider }));
 const shutdown = async () => { await externalTools.shutdown?.(); await host.close(); process.exit(0); };
