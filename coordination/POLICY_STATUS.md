@@ -16,5 +16,6 @@
 | Microsoft Graph mail/Teams read provider | REQUESTED | S0/S3/S4 | Delegated scope/admin consent, synthetic account, redaction and live package evidence |
 | Isolated browser action provider | REQUESTED | S0/S3/S4 | Approved existing browser, temporary-profile/CDP policy, synthetic Windows action evidence |
 | GitHub Copilot CLI bridge | REQUESTED | S0/S3/S4 | Existing approved CLI/license, explicit cloud-egress approval, synthetic prompt-only evidence |
+| Operator `full_access` capability grants | REQUESTED | S0/S3/S4 | Local grant/revoke UX, immutable safety floor, adversarial tests, corporate approval |
 | Release signing/attestation | UNASSESSED | S0/S4 | Corporate mechanism and credential handling |
 | Target transfer and acceptance | UNASSESSED | S0 | Operator approval, target receipt, approved transfer route |

@@ -17,6 +17,20 @@ The first provider set is:
 
 All adapters must support deterministic fake transports so unit and integration tests require no company credentials. A mock pass is not a live-provider pass.
 
+## Operator-granted full-access profile
+
+The product exposes a local `full_access` permission profile because the operator explicitly requested the ability to delegate complete tasks. This is an operator grant, not a model-selected mode.
+
+- The profile can be enabled only in protected local configuration or an authenticated local UI action with a conspicuous scope summary. It is off after a fresh install and is revocable immediately.
+- Grants are capability-scoped: Microsoft account, browser session, application allowlist, process allowlist, and filesystem roots are independent. Enabling one never enables the others.
+- Within a granted capability, read and ordinary write actions may run without a per-call prompt. Every action remains schema-bound, destination/root/account-bound, timed, size-limited, cancellable, and audited by metadata.
+- Irreversible or high-impact actions retain an execution-time confirmation even under `full_access`: sending externally visible content to a new recipient, deletion, payment/purchase, account/security changes, publishing, installing software, privilege elevation, persistence, and disabling protections.
+- The UI always exposes stop, revoke, and kill-child-process controls. Revocation cancels pending provider work and prevents queued calls from inheriting the former grant.
+- Model output, tool output, webpages, mail, and Teams content cannot create, widen, persist, or renew a grant.
+- `full_access` never authorizes T4 operations, administrator elevation, credential extraction, unrestricted shell strings, the user's normal browser credential profile, or hidden cloud inference.
+
+The name therefore means full access to the explicitly selected safe capabilities, roots, applications, accounts, and provider actions—not unbounded control of Windows or the organization tenant.
+
 ## Microsoft Graph provider
 
 - Fixed authority and API origins are configured by the operator and allowlisted; the model never supplies either.
@@ -24,7 +38,9 @@ All adapters must support deterministic fake transports so unit and integration 
 - Mail listing may use `Mail.ReadBasic`; reading message bodies requires separately approved `Mail.Read`.
 - Teams chat reading requires delegated `Chat.Read`.
 - Tokens are loaded by a credential source owned by the host and are never included in prompts, tool results, confirmation previews, command lines, or logs.
-- The initial provider is read-only. Sending mail, posting Teams messages, deleting, marking read, reacting, and downloading attachments are disabled.
+- The default provider profile is read-only. An approved write grant may additionally use delegated `Mail.ReadWrite`, `Mail.Send`, and `ChatMessage.Send` for draft/update/send and posting to an existing chat. It does not grant tenant-wide application permissions.
+- Sends use a proposal containing resolved recipients/chat, subject or bounded message preview, data categories, and idempotency key. The execution revalidates this proposal. New recipients and bulk sends always require per-call confirmation.
+- Deleting mail/chat content, creating chats, modifying members, impersonating another user/shared mailbox, reacting, and downloading attachments remain disabled in the first write-capable release.
 - Only `/me` resources are accepted. Arbitrary user IDs, tenant-wide reads, and Graph URLs returned by the model are rejected.
 - Pagination is bounded. Provider-generated next links are accepted only after scheme, origin, API-version, path-family, and query validation.
 - HTML bodies are converted to bounded plain text; active content, remote images, attachments, and embedded resources are ignored.
@@ -71,4 +87,3 @@ Until then, UI/status must report `disabled`, `mock`, or `unverified`; it must n
 - Unrestricted CDP JavaScript evaluation or coordinate clicking: too broad for the first action adapter.
 - Copilot `--allow-all*` flags or unrestricted shell/write tools: duplicates an autonomous agent behind a weaker confirmation boundary.
 - Reusing credentials found in `.env`: borrowed operational practices do not authorize borrowed secrets.
-
