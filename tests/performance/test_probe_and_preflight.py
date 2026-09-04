@@ -94,7 +94,8 @@ class ShadeformPreflightTests(unittest.TestCase):
         values = {"SHADEFORM_API_KEY": "secret", "SHADEFORM_MAX_HOURLY_COST_USD": "1", "SHADEFORM_MAX_TOTAL_COST_USD": "2"}
         self.assertTrue(self.module.mutation_readiness(values)["read_only_catalogue_ready"])
         self.assertFalse(self.module.mutation_readiness(values)["mutation_ready"])
-        self.assertIn("SHADEFORM_SSH_KEY_ID", self.module.mutation_readiness(values)["missing_or_invalid_inputs"])
+        self.assertIn("SHADEFORM_SSH", self.module.mutation_readiness(values)["missing_or_invalid_inputs"])
+        self.assertNotIn("SHADEFORM_SSH_KEY_ID", self.module.mutation_readiness(values)["missing_or_invalid_inputs"])
 
     def test_pending_ledger_refuses_selection(self):
         with tempfile.TemporaryDirectory() as directory:
