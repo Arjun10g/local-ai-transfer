@@ -125,7 +125,7 @@ $receipt = [ordered]@{
     generated_at_utc = (Get-Date).ToUniversalTime().ToString('o')
     collection = [ordered]@{ read_only = $true; admin_required = $false; network_changed = $false; secrets_collected = $false }
     os = [ordered]@{ caption = $os.Caption; version = $os.Version; build = $os.BuildNumber; architecture = $os.OSArchitecture; service_pack = $os.CSDVersion }
-    computer = [ordered]@{ manufacturer = $computer.Manufacturer; model = $computer.Model; system_family = $computer.SystemFamily; product_identifier = $computer.IdentifyingNumber; total_memory_bytes = $computer.TotalPhysicalMemory; available_memory_bytes = $os.FreePhysicalMemory * 1024 }
+    computer = [ordered]@{ manufacturer = $computer.Manufacturer; model = $computer.Model; system_family = $computer.SystemFamily; total_memory_bytes = $computer.TotalPhysicalMemory; available_memory_bytes = $os.FreePhysicalMemory * 1024 }
     cpu = @(
         foreach ($cpu in $cpus) {
             [ordered]@{ name = $cpu.Name; manufacturer = $cpu.Manufacturer; description = $cpu.Description; physical_cores = $cpu.NumberOfCores; logical_processors = $cpu.NumberOfLogicalProcessors; max_clock_mhz = $cpu.MaxClockSpeed; address_width = $cpu.AddressWidth; data_width = $cpu.DataWidth; family = $cpu.Family; stepping = $cpu.Stepping; revision = $cpu.Revision }
@@ -165,5 +165,5 @@ if (-not $NoSummary) {
     [IO.File]::WriteAllLines($summaryPath, $summary, $encoding)
 }
 
-Write-Output "Receipt written: $([IO.Path]::GetFullPath($OutputPath))"
+Write-Output "Receipt written: $([IO.Path]::GetFileName($resolvedOutputPath))"
 Write-Output "Receipt SHA-256: $hash"
