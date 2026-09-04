@@ -28,6 +28,7 @@ from typing import Any
 
 MODEL_NAME = "Qwen3.5-9B-Q4_K_M.gguf"
 PIN_RE = set("0123456789abcdef")
+ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,95}$")
 TAIL_LIMIT = 1200
 MAX_ENGINE_LINE = 8192
 MAX_EVAL_OUTPUT = 256 * 1024
@@ -53,6 +54,13 @@ def _pin(value: Any, label: str) -> str:
     if not isinstance(value, str) or len(value) != 40 or set(value) - PIN_RE:
         raise ValueError(f"{label}_pin_invalid")
     return value
+
+
+def _safe_error_code(error: BaseException) -> str:
+    """Retain a stable reason without persisting dynamic exception detail."""
+
+    candidate = str(error).partition(":")[0]
+    return candidate if ERROR_CODE_RE.fullmatch(candidate) else "evaluation_failed"
 
 
 def verify_artifact(model: Path, manifest_path: Path, *, source_revision: str, llama_revision: str, manifest_lock_path: Path | None = None) -> dict[str, Any]:
@@ -147,6 +155,17 @@ def _engine_build_info(engine: Path, expected_llama: str, expected_backend: str)
     if not isinstance(payload, dict) or payload.get("llama_cpp_revision") != expected_llama or payload.get("compiled_backend") != f"llama.cpp/{expected_llama[:8]}/{expected_backend}":
         raise ValueError("engine_llama_identity_mismatch")
     return {key: payload[key] for key in ("engine_version", "api_version", "compiled_backend", "llama_cpp_revision", "model") if key in payload}
+
+
+def _engine_launch_argv(args: argparse.Namespace, token_file: Path, backend: str) -> list[str]:
+    launch = [
+        os.fspath(args.engine), "serve", "--port", "0", "--backend", backend,
+        "--model", args.model, "--context", "2048",
+        "--token-file", os.fspath(token_file),
+    ]
+    if backend == "cuda":
+        launch.extend(["--gpu-layers", "99", "--cuda-device-name", args.cuda_device_name])
+    return launch
 
 
 def _fixture_contract(path: Path) -> tuple[int, set[str]]:
@@ -256,13 +275,7 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any]) -> 
         # The protected token-file option is deliberately explicit.  Passing
         # a bearer as a command-line argument would expose it through process
         # inspection and is forbidden by the evaluation contract.
-        launch = [
-            os.fspath(engine), "serve", "--port", "0", "--backend", backend,
-            "--model", args.model, "--context", "2048",
-            "--token-file", os.fspath(token_file),
-        ]
-        if backend == "cuda":
-            launch.extend(["--gpu-layers", "99", "--cuda-device-name", args.cuda_device_name])
+        launch = _engine_launch_argv(args, token_file, backend)
         engine_stderr = tempfile.TemporaryFile()
         process = subprocess.Popen(launch, stdout=subprocess.PIPE, stderr=engine_stderr, text=True)
         if process.stdout is None:
@@ -357,7 +370,7 @@ def main(argv: list[str] | None = None) -> int:
         receipt = _launch_and_evaluate(args, artifact)
         status = 0 if receipt["status"] in {"verified", "completed_with_failures"} else 1
     except (OSError, ValueError, TypeError, KeyError, IndexError, RecursionError, OverflowError, subprocess.SubprocessError) as exc:
-        receipt = {"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "failed", "error_type": type(exc).__name__, "prompt_response_logging": False, "token_logging": False}
+        receipt = {"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "failed", "error_type": type(exc).__name__, "error_code": _safe_error_code(exc), "prompt_response_logging": False, "token_logging": False}
         status = 1
     output = Path(args.receipt)
     output.parent.mkdir(parents=True, exist_ok=True)

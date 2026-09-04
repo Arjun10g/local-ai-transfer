@@ -723,6 +723,28 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertNotIn("secret-value", remote._tail("token=secret-value"))
         self.assertIn("<redacted>", remote._tail("token=secret-value"))
 
+    def test_remote_eval_engine_launch_matches_hardened_cuda_cli(self):
+        remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_argv")
+        args = types.SimpleNamespace(
+            engine="/approved/lae-engine",
+            model="/approved/Qwen3.5-9B-Q4_K_M.gguf",
+            cuda_device_name="CUDA0",
+        )
+        launch = remote._engine_launch_argv(args, Path("/approved/engine-token"), "cuda")
+        self.assertEqual(launch, [
+            "/approved/lae-engine", "serve", "--port", "0", "--backend", "cuda",
+            "--model", "/approved/Qwen3.5-9B-Q4_K_M.gguf", "--context", "2048",
+            "--token-file", "/approved/engine-token", "--gpu-layers", "99",
+            "--cuda-device-name", "CUDA0",
+        ])
+        self.assertNotIn("--size", launch)
+        self.assertNotIn("--sha256", launch)
+
+    def test_remote_eval_failure_code_is_bounded_and_secret_free(self):
+        remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_error_code")
+        self.assertEqual(remote._safe_error_code(ValueError("engine_not_ready:token=secret-value")), "engine_not_ready")
+        self.assertEqual(remote._safe_error_code(OSError("/secret/path was unavailable")), "evaluation_failed")
+
     def test_remote_eval_verifies_same_model_manifest_identity(self):
         remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_identity")
         config = load(ROOT / "scripts/j1m_runner.py", "remote_model_eval_identity_config").load_config()
