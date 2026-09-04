@@ -540,6 +540,8 @@ def request(
     phase_id: str | None = None,
     timeout: float = 90,
 ) -> dict[str, Any]:
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
+        raise ValueError("provider request timeout must be positive")
     _preflight(phase_id)
     url = f"{api_base()}{path}"
     body: bytes | None = None
@@ -825,16 +827,26 @@ def create_ephemeral_ssh_key(env: dict[str, str], directory: Path) -> tuple[Path
 
 
 def add_ssh_key(api_key: str, phase_id: str, name: str, public_key: str) -> str:
-    response = request(
-        api_key,
-        "POST",
-        "/sshkeys/add",
-        {"name": name, "public_key": public_key},
-        phase_id=phase_id,
-    )
-    # The create response is documented to carry only the ID. Name and public
-    # key are verified immediately afterward through /sshkeys/{id}/info.
-    return validate_resource_id(response.get("id"), field="created SSH key id")
+    try:
+        response = request(
+            api_key,
+            "POST",
+            "/sshkeys/add",
+            {"name": name, "public_key": public_key},
+            phase_id=phase_id,
+        )
+        # The create response is documented to carry only the ID. Name and
+        # public key are verified immediately afterward through
+        # /sshkeys/{id}/info.
+        return validate_resource_id(response.get("id"), field="created SSH key id")
+    except ShadeformHTTPError:
+        raise
+    except (ShadeformError, OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        # A timeout or malformed successful response may follow a provider-side
+        # key creation. The caller must reconcile by the unique nonce name and
+        # public-key fingerprint before it can revoke anything or create an
+        # instance; never treat this as a definitive no-op.
+        raise AmbiguousProviderOutcome("SSH key create outcome is unknown after transport/schema failure") from exc
 
 
 def _canonical_public_key(value: object) -> tuple[str, str]:
@@ -853,6 +865,48 @@ def _canonical_public_key(value: object) -> tuple[str, str]:
     except (ValueError, UnicodeEncodeError):
         raise ValueError("SSH public key material is not valid base64") from None
     return algorithm, material
+
+
+def ssh_public_key_fingerprint(value: object) -> str:
+    """Return the OpenSSH-style SHA-256 fingerprint input for one key."""
+    _algorithm, material = _canonical_public_key(value)
+    try:
+        decoded = base64.b64decode(material.encode("ascii"), validate=True)
+    except (ValueError, UnicodeEncodeError):
+        raise ValueError("SSH public key material is not valid base64") from None
+    return base64.b64encode(hashlib.sha256(decoded).digest()).decode("ascii").rstrip("=")
+
+
+def reconcile_ssh_key(api_key: str, phase_id: str, *, expected_name: str, expected_public_key: str) -> str:
+    """Reconcile one ambiguous key create, then return only an exact unique ID.
+
+    The list is bounded and used only to identify a key with both the nonce-bound
+    name and the expected public-key fingerprint. Any zero or multiple matches
+    remains unresolved; no broad delete or instance create is permitted.
+    """
+    expected_fingerprint = ssh_public_key_fingerprint(expected_public_key)
+    response = request(api_key, "GET", "/sshkeys", phase_id=phase_id)
+    entries = response.get("ssh_keys") if isinstance(response, dict) else None
+    if not isinstance(entries, list) or len(entries) > 256:
+        raise AmbiguousProviderOutcome("SSH key reconciliation response is unavailable or unbounded")
+    matches: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise MalformedProviderResponse("SSH key reconciliation entry is malformed")
+        if entry.get("name") != expected_name:
+            continue
+        provider_key = entry.get("public_key")
+        try:
+            fingerprint = ssh_public_key_fingerprint(provider_key)
+            key_id = validate_resource_id(entry.get("id"), field="reconciled SSH key id")
+        except (TypeError, ValueError) as exc:
+            raise AmbiguousProviderOutcome("matching SSH key identity is malformed") from exc
+        if fingerprint == expected_fingerprint:
+            matches.append(key_id)
+    if len(matches) != 1:
+        raise AmbiguousProviderOutcome("SSH key reconciliation did not identify exactly one nonce-bound key")
+    verify_ssh_key_ownership(api_key, phase_id, matches[0], expected_name=expected_name, expected_public_key=expected_public_key)
+    return matches[0]
 
 
 def delete_ssh_key(api_key: str, phase_id: str, key_id: str) -> dict[str, Any]:
@@ -993,9 +1047,9 @@ def owned_instance_name(run_id: str, nonce: str) -> str:
     return f"ep-{safe_run}-{nonce}"
 
 
-def instance_info(api_key: str, phase_id: str, instance_id: str) -> dict[str, Any]:
+def instance_info(api_key: str, phase_id: str, instance_id: str, *, timeout: float = 90) -> dict[str, Any]:
     exact = validate_resource_id(instance_id, field="instance id")
-    info = request(api_key, "GET", f"/instances/{exact}/info", phase_id=phase_id)
+    info = request(api_key, "GET", f"/instances/{exact}/info", phase_id=phase_id, timeout=timeout)
     if validate_resource_id(info.get("id"), field="instance info id") != exact:
         raise ShadeformError("provider returned information for a different instance")
     return info
@@ -1102,27 +1156,39 @@ def wait_active(
     raise TimeoutError(f"instance did not become active; last status={last}")
 
 
-def _delete_instance(api_key: str, phase_id: str, instance_id: str) -> dict[str, Any]:
+def _delete_instance(api_key: str, phase_id: str, instance_id: str, *, deadline: float | None = None) -> dict[str, Any]:
     """Delete one exact instance and confirm it is gone. 404 counts as gone."""
 
     exact = validate_resource_id(instance_id, field="instance id")
+    def remaining() -> float:
+        return deadline - time.monotonic() if deadline is not None else float("inf")
+
+    request_timeout = min(90.0, remaining())
+    if request_timeout < 1.0:
+        return {"success": False, "instance_id": exact, "error_type": "deletion_deadline_exhausted"}
     try:
-        response = request(api_key, "POST", f"/instances/{exact}/delete", phase_id=phase_id)
+        response = request(api_key, "POST", f"/instances/{exact}/delete", phase_id=phase_id, timeout=request_timeout)
     except ShadeformHTTPError as exc:
         if exc.status == 404:
             return {"success": True, "already_absent": True}
         raise
-    deadline = time.monotonic() + 240
-    while time.monotonic() < deadline:
+    poll_deadline = min(time.monotonic() + 240.0, deadline) if deadline is not None else time.monotonic() + 240.0
+    while time.monotonic() < poll_deadline:
+        request_timeout = min(90.0, poll_deadline - time.monotonic())
+        if request_timeout < 1.0:
+            break
         try:
-            info = instance_info(api_key, phase_id, exact)
+            info = instance_info(api_key, phase_id, exact, timeout=request_timeout)
         except ShadeformHTTPError as exc:
             if exc.status == 404:
                 return {"success": True, "response": response, "status": "absent"}
             raise
         if info.get("status") == "deleted":
             return {"success": True, "response": response, "status": "deleted"}
-        time.sleep(5)
+        sleep_for = min(5.0, poll_deadline - time.monotonic())
+        if sleep_for < 0.1:
+            break
+        time.sleep(sleep_for)
     return {"success": False, "response": response, "instance_id": exact}
 
 

@@ -37,7 +37,7 @@ def salvage_local(source: Path | None, destination: Path) -> dict[str, object]:
     return {"status": "salvaged", "name": target.name, "size_bytes": target.stat().st_size}
 
 
-def teardown_exact(phase_id: str, instance_id: str, *, env_file: Path = ROOT / ".env", salvage: Path | None = None, salvage_destination: Path = ROOT / "experiments" / "results") -> dict[str, object]:
+def teardown_exact(phase_id: str, instance_id: str, *, env_file: Path = ROOT / ".env", salvage: Path | None = None, salvage_destination: Path = ROOT / "experiments" / "results", deadline: float | None = None) -> dict[str, object]:
     phase_id = shadeform.validate_phase_id(phase_id)
     exact = shadeform.validate_resource_id(instance_id, field="requested instance id")
     with shadeform.phase_cleanup_lock(phase_id):
@@ -55,10 +55,10 @@ def teardown_exact(phase_id: str, instance_id: str, *, env_file: Path = ROOT / "
             raise RuntimeError("refusing teardown: no owned ledger or matching confirmed deletion receipt")
         if current.instance_id != exact:
             raise RuntimeError("refusing teardown: requested ID is not the exact phase-owned resource")
-        return _teardown_exact_locked(phase_id, exact, env_file=env_file, salvage=salvage, salvage_destination=salvage_destination)
+        return _teardown_exact_locked(phase_id, exact, env_file=env_file, salvage=salvage, salvage_destination=salvage_destination, deadline=deadline)
 
 
-def _teardown_exact_locked(phase_id: str, exact: str, *, env_file: Path, salvage: Path | None, salvage_destination: Path) -> dict[str, object]:
+def _teardown_exact_locked(phase_id: str, exact: str, *, env_file: Path, salvage: Path | None, salvage_destination: Path, deadline: float | None) -> dict[str, object]:
     record = shadeform.read_owned_resource(phase_id)
     if record is None or record.instance_id != exact:
         raise RuntimeError("refusing teardown: requested ID is not the exact phase-owned resource")
@@ -73,7 +73,7 @@ def _teardown_exact_locked(phase_id: str, exact: str, *, env_file: Path, salvage
     # Once ownership is validated, exact deletion is attempted first. A
     # bookkeeping write must never become a precondition for cleanup.
     try:
-        deletion = shadeform._delete_instance(api_key, phase_id, exact)
+        deletion = shadeform._delete_instance(api_key, phase_id, exact, deadline=deadline)
     except Exception as exc:
         deletion = {"success": False, "error_type": type(exc).__name__}
     if deletion.get("success") is not True:

@@ -1,4 +1,5 @@
 import importlib.util
+import contextlib
 import hashlib
 import io
 import json
@@ -145,6 +146,32 @@ class J1MConfigTests(unittest.TestCase):
         with mock.patch.object(sf, "request", return_value={"id": "key-123456", "name": "j1m-key", "public_key": "ssh-ed25519 not-base64!"}):
             with self.assertRaises(sf.ShadeformError):
                 sf.verify_ssh_key_ownership("api", "j1m-key-test", "key-123456", expected_name="j1m-key", expected_public_key="ssh-ed25519 AAAA")
+
+    def test_ambiguous_ssh_key_create_reconciles_only_unique_nonce_fingerprint(self):
+        from scripts import shadeform_lifecycle as sf
+        public_key = "ssh-ed25519 AAAA"
+        name = "j1m-0123456789abcdef0123456789abcdef"
+        responses = iter([
+            {"ssh_keys": [{"id": "key-123456", "name": name, "public_key": public_key}]},
+            {"id": "key-123456", "name": name, "public_key": public_key},
+        ])
+        with mock.patch.object(sf, "request", side_effect=lambda *args, **kwargs: next(responses)):
+            self.assertEqual(sf.reconcile_ssh_key("api", "j1m-key-test", expected_name=name, expected_public_key=public_key), "key-123456")
+        with mock.patch.object(sf, "request", return_value={"ssh_keys": []}):
+            with self.assertRaises(sf.AmbiguousProviderOutcome):
+                sf.reconcile_ssh_key("api", "j1m-key-test", expected_name=name, expected_public_key=public_key)
+        with mock.patch.object(sf, "request", return_value={"ssh_keys": [
+            {"id": "key-123456", "name": name, "public_key": public_key},
+            {"id": "key-654321", "name": name, "public_key": public_key},
+        ]}):
+            with self.assertRaises(sf.AmbiguousProviderOutcome):
+                sf.reconcile_ssh_key("api", "j1m-key-test", expected_name=name, expected_public_key=public_key)
+
+    def test_ssh_key_create_transport_or_schema_failure_is_ambiguous(self):
+        from scripts import shadeform_lifecycle as sf
+        with mock.patch.object(sf, "request", side_effect=TimeoutError("provider timeout")):
+            with self.assertRaises(sf.AmbiguousProviderOutcome):
+                sf.add_ssh_key("api", "j1m-key-test", "j1m-key", "ssh-ed25519 AAAA")
 
     def test_post_cleanup_requires_exact_gguf_set_and_no_vision_names(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -442,6 +469,21 @@ class StaticSafetyTests(unittest.TestCase):
             self.assertTrue(sf.runtime_ledger_path(phase).exists())
         sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = originals
 
+    def test_delete_instance_never_starts_final_poll_past_cleanup_deadline(self):
+        from scripts import shadeform_lifecycle as sf
+        clock = iter(i * 0.6 for i in range(30))
+        calls = []
+
+        def fake_request(*args, **kwargs):
+            calls.append(kwargs["timeout"])
+            return {"id": "instance-deadline", "status": "pending"} if args[1] == "GET" else {"accepted": True}
+
+        with mock.patch.object(sf.time, "monotonic", side_effect=lambda: next(clock)), mock.patch.object(sf.time, "sleep"), mock.patch.object(sf, "request", side_effect=fake_request):
+            result = sf._delete_instance("api", "j1m-key-test", "instance-deadline", deadline=5.0)
+        self.assertFalse(result["success"])
+        self.assertTrue(calls)
+        self.assertLessEqual(max(calls), 5.0)
+
     def test_lifecycle_has_no_account_wide_delete_path(self):
         text = (ROOT / "scripts/shadeform_lifecycle.py").read_text(encoding="utf-8")
         self.assertNotIn("/instances?", text)
@@ -493,9 +535,9 @@ class StaticSafetyTests(unittest.TestCase):
         watchdog_seconds = selected["external_watchdog_seconds"]
         host_shutdown_seconds = selected["activation_timeout_seconds"] + 120 + 3 * 15 + 5 * 30 + 30 + selected["host_shutdown_delay_minutes"] * 60
         provider_seconds = selected["provider_backstop_hours"] * 3600
-        self.assertLess(cumulative, watchdog_seconds)
-        self.assertLess(watchdog_seconds, run_seconds)
-        self.assertLess(host_shutdown_seconds, run_seconds)
+        self.assertLess(cumulative, run_seconds)
+        self.assertLess(run_seconds, host_shutdown_seconds)
+        self.assertLess(host_shutdown_seconds, watchdog_seconds)
         self.assertLess(run_seconds, provider_seconds)
         # Remote-only eval never transfers the model from this laptop; this
         # bucket is retained only for non-eval compatibility.
@@ -505,7 +547,8 @@ class StaticSafetyTests(unittest.TestCase):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_deadline_ceiling")
         envelope = orchestrator._eval_deadline_ceiling(config)
         self.assertEqual(envelope["upload_count"], 15)
-        self.assertLess(envelope["ceiling_seconds"], envelope["watchdog_seconds"])
+        self.assertLess(envelope["ceiling_seconds"], envelope["run_seconds"])
+        self.assertLess(envelope["run_seconds"], envelope["host_shutdown_from_create_seconds"])
         self.assertLess(envelope["host_shutdown_from_create_seconds"], envelope["watchdog_seconds"])
 
     def test_teardown_failure_keeps_watchdog_for_exact_retry(self):
@@ -515,6 +558,91 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertNotIn("finally:\n                        #", cleanup)
         self.assertIn("if deletion_confirmed():\n                stop_watchdog()", cleanup)
         self.assertIn('deletion.get("retry_required") is not True', source)
+
+    def test_execute_captures_teardown_failure_before_final_persistence(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_teardown_behavior")
+        from scripts import shadeform_lifecycle as sf
+        candidate = sf.Candidate("A100_80G", "hyperstack", "montreal-canada-2", "A100_80G", 1.35, 80, "ubuntu22.04_cuda12.2_shade_os", False)
+        progress = []
+        persisted = []
+
+        class Watchdog:
+            pid = 42
+            def poll(self): return None
+            def terminate(self): raise AssertionError("watchdog must remain alive after unconfirmed teardown")
+            def wait(self, timeout): raise AssertionError("watchdog must remain alive after unconfirmed teardown")
+
+        def remote(*args, **kwargs):
+            return {"status": "completed", "exit_code": 0}
+
+        with tempfile.TemporaryDirectory() as directory:
+            identity = Path(directory) / "id_ed25519"
+            identity.write_text("private", encoding="utf-8")
+            with contextlib.ExitStack() as stack:
+                patches = [
+                    mock.patch.object(orchestrator.sf, "load_env", return_value={"SHADEFORM_API_KEY": "api"}),
+                    mock.patch.object(orchestrator.sf, "require_env", return_value="api"),
+                    mock.patch.object(orchestrator.sf, "list_candidates", return_value=[candidate]),
+                    mock.patch.object(orchestrator.sf, "create_ephemeral_ssh_key", return_value=(identity, "ssh-ed25519 AAAA")),
+                    mock.patch.object(orchestrator.sf, "reserve_create_attempt", return_value="attempt-x"),
+                    mock.patch.object(orchestrator.sf, "add_ssh_key", return_value="key-123456"),
+                    mock.patch.object(orchestrator.sf, "verify_ssh_key_ownership", return_value={}),
+                    mock.patch.object(orchestrator.sf, "create_instance", return_value="instance-123456"),
+                    mock.patch.object(orchestrator.sf, "process_start_marker", return_value=None),
+                    mock.patch.object(orchestrator.sf, "write_owned_resource"),
+                    mock.patch.object(orchestrator.sf, "append_cost_event"),
+                    mock.patch.object(orchestrator.sf, "wait_active", return_value={"id": "instance-123456", "status": "active", "ip": "127.0.0.1", "ssh_user": "runner", "ssh_port": 22}),
+                    mock.patch.object(orchestrator.sf, "verify_instance_ownership"),
+                    mock.patch.object(orchestrator.sf, "validate_ssh_user", return_value="runner"),
+                    mock.patch.object(orchestrator.sf, "acquire_pinned_host_key", return_value={"status": "verified"}),
+                    mock.patch.object(orchestrator.sf, "ssh_base", return_value=["ssh"]),
+                    mock.patch.object(orchestrator.sf, "scp_base", return_value=["scp"]),
+                    mock.patch.object(orchestrator.subprocess, "Popen", return_value=Watchdog()),
+                    mock.patch.object(orchestrator, "_remote", side_effect=remote),
+                    mock.patch.object(orchestrator, "_salvage", return_value=[]),
+                    mock.patch.object(orchestrator, "teardown_exact", side_effect=RuntimeError("delete unavailable")),
+                    mock.patch.object(orchestrator, "_persist_lifecycle", side_effect=lambda phase, value: persisted.append(value)),
+                    mock.patch.object(orchestrator, "_progress", side_effect=lambda path, event, **details: progress.append(event)),
+                    mock.patch.object(orchestrator.j1m_runner, "write_progress"),
+                ]
+                for patcher in patches:
+                    stack.enter_context(patcher)
+                with self.assertRaisesRegex(RuntimeError, "teardown was not confirmed"):
+                    orchestrator.execute(
+                        Path(directory) / "env", config_path=ROOT / "model/conversion/j1m-config.json",
+                        phase_id="teardown-behavior", run_id="test", artifact_destination=Path(directory) / "artifacts", mode="prove",
+                    )
+        self.assertTrue(persisted)
+        self.assertEqual(progress[-1], "failed")
+
+    def test_execute_reservation_failure_restores_signal_and_terminalizes(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_reservation_behavior")
+        from scripts import shadeform_lifecycle as sf
+        candidate = sf.Candidate("A100_80G", "hyperstack", "montreal-canada-2", "A100_80G", 1.35, 80, "ubuntu22.04_cuda12.2_shade_os", False)
+        progress = []
+        persisted = []
+        with tempfile.TemporaryDirectory() as directory:
+            identity = Path(directory) / "id_ed25519"
+            identity.write_text("private", encoding="utf-8")
+            with contextlib.ExitStack() as stack:
+                for patcher in [
+                    mock.patch.object(orchestrator.sf, "load_env", return_value={"SHADEFORM_API_KEY": "api"}),
+                    mock.patch.object(orchestrator.sf, "require_env", return_value="api"),
+                    mock.patch.object(orchestrator.sf, "list_candidates", return_value=[candidate]),
+                    mock.patch.object(orchestrator.sf, "create_ephemeral_ssh_key", return_value=(identity, "ssh-ed25519 AAAA")),
+                    mock.patch.object(orchestrator.sf, "reserve_create_attempt", side_effect=OSError("ledger unavailable")),
+                    mock.patch.object(orchestrator, "_persist_lifecycle", side_effect=lambda phase, value: persisted.append(value)),
+                    mock.patch.object(orchestrator, "_progress", side_effect=lambda path, event, **details: progress.append(event)),
+                    mock.patch.object(orchestrator.j1m_runner, "write_progress"),
+                ]:
+                    stack.enter_context(patcher)
+                with self.assertRaises(OSError):
+                    orchestrator.execute(
+                        Path(directory) / "env", config_path=ROOT / "model/conversion/j1m-config.json",
+                        phase_id="reservation-behavior", run_id="test", artifact_destination=Path(directory) / "artifacts", mode="prove",
+                    )
+        self.assertTrue(persisted)
+        self.assertEqual(progress[-1], "failed")
 
     def test_eval_rejects_local_artifact_execution_path(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_reject_local_eval")
@@ -1024,6 +1152,27 @@ class StaticSafetyTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 remote.verify_artifact(model, manifest, source_revision=config["source"]["revision"], llama_revision=config["llama_cpp"]["revision"])
 
+    def test_manifest_duplicate_and_oversize_snapshots_are_rejected(self):
+        remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_manifest_snapshot")
+        prepare = load(ROOT / "scripts/test/remote_eval_prepare.py", "remote_eval_prepare_manifest_snapshot")
+        config = load(ROOT / "scripts/j1m_runner.py", "remote_model_eval_manifest_snapshot_config").load_config()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "Qwen3.5-9B-Q4_K_M.gguf"
+            model.write_bytes(b"q4 fixture")
+            manifest = root / "model-manifest.json"
+            duplicate = b'{"schema_version":"1.1.0","schema_version":"1.1.0"}'
+            manifest.write_bytes(duplicate)
+            (root / "model-manifest.sha256").write_text(f"{hashlib.sha256(duplicate).hexdigest()}  model-manifest.json\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "model_manifest_invalid"):
+                remote.verify_artifact(model, manifest, source_revision=config["source"]["revision"], llama_revision=config["llama_cpp"]["revision"])
+            with self.assertRaisesRegex(ValueError, "remote_q4_manifest_invalid"):
+                prepare.verify(model, manifest, root / "receipt.json")
+            oversized = b"{" + b"\"x\":\"" + b"a" * (256 * 1024) + b"\"}"
+            manifest.write_bytes(oversized)
+            with self.assertRaises(ValueError):
+                prepare.verify(model, manifest, root / "receipt-oversize.json")
+
     def test_eval_receipt_acceptance_is_hash_and_total_bound(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_eval_receipt")
         config = load(ROOT / "scripts/j1m_runner.py", "j1m_eval_receipt_config").load_config()
@@ -1038,12 +1187,17 @@ class StaticSafetyTests(unittest.TestCase):
                 "schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "verified", "artifact": artifact,
                 "engine": {"engine_version": "0.1.0", "api_version": "0.1.0", "compiled_backend": f"llama.cpp/{config['llama_cpp']['revision'][:8]}/cuda", "llama_cpp_revision": config["llama_cpp"]["revision"], "model": "qwen35-9b-q4-k-m"},
                 "model_preflight": {"valid": True, "code": "ok", "status": "verified", "size_bytes": 4, "sha256": "a" * 64, "gguf_version": 3},
-                "cuda_device": {"schema": "local_bmo.j1m.cuda-device-receipt.v1", "status": "verified", "selector": "CUDA0", "device_count": 1, "device": {"name": "NVIDIA A100 80GB", "memory_total_mib": 81920}, "source": "nvidia-smi bounded query"},
-                "toolchain": {"schema": "local_bmo.j1m.remote-toolchain-receipt.v1", "status": "verified", "required": {"python3": ">=3.8", "git": ">=2.30", "cmake": ">=3.18", "g++": ">=9.0", "nvcc": ">=12.0"}, "versions": {"python3": {"major": 3, "minor": 10}, "git": {"major": 2, "minor": 39}, "cmake": {"major": 3, "minor": 22}, "g++": {"major": 11, "minor": 4}, "nvcc": {"major": 12, "minor": 2, "executable": "/usr/local/cuda/bin/nvcc"}}, "packages": {"ca-certificates": "20240101", "cmake": "3.22.1", "build-essential": "12.9", "git": "1:2.39.2", "python3": "3.10.12", "python3-venv": "3.10.12"}, "package_install": "ubuntu apt repositories; exact resolved package versions captured by dpkg-query"},
+                "cuda_device": {"schema": "local_bmo.j1m.cuda-device-receipt.v1", "status": "verified", "selector": "CUDA0", "device_count": 1, "device": {"index": 0, "name": "NVIDIA A100 80GB", "memory_total_mib": 81920, "driver_version": "550.1"}, "source": "nvidia-smi bounded query"},
+                "toolchain": {"schema": "local_bmo.j1m.remote-toolchain-receipt.v1", "status": "verified", "required": {"python3": ">=3.8", "git": ">=2.30", "cmake": ">=3.18", "g++": ">=9.0", "nvcc": ">=12.0"}, "versions": {"python3": {"major": 3, "minor": 10, "reported": "Python 3.10", "executable": "/usr/bin/python3"}, "git": {"major": 2, "minor": 39, "reported": "git version 2.39", "executable": "/usr/bin/git"}, "cmake": {"major": 3, "minor": 22, "reported": "cmake version 3.22", "executable": "/usr/bin/cmake"}, "g++": {"major": 11, "minor": 4, "reported": "g++ (Ubuntu 11.4)", "executable": "/usr/bin/g++"}, "nvcc": {"major": 12, "minor": 2, "reported": "Cuda compilation tools, release 12.2", "executable": "/usr/local/cuda/bin/nvcc"}}, "packages": {"ca-certificates": "20240101", "cmake": "3.22.1", "build-essential": "12.9", "git": "1:2.39.2", "python3": "3.10.12", "python3-venv": "3.10.12"}, "package_install": "ubuntu apt repositories; exact resolved package versions captured by dpkg-query"},
                 "metrics": {"case_count": case_count, "passed": case_count, "failed": 0, "errors": 0, "peak_rss_kib": 123, "category_summary": category_summary},
                 "prompt_response_logging": False, "token_logging": False,
             }), encoding="utf-8")
-            self.assertEqual(orchestrator._verify_eval_receipt(receipt, artifact)["metrics"]["case_count"], case_count)
+            selected = orchestrator._verify_eval_receipt(receipt, artifact)
+            self.assertEqual(selected["metrics"]["case_count"], case_count)
+            self.assertEqual(set(selected), {"status", "artifact", "engine", "model_preflight", "cuda_device", "metrics", "toolchain"})
+            self.assertEqual(selected["artifact"]["modality"], "text_only_no_mmproj")
+            self.assertEqual(selected["artifact"]["quantization"], "Q4_K_M")
+            self.assertEqual(set(selected["toolchain"]["versions"]), {"python3", "git", "cmake", "g++", "nvcc"})
             failed = json.loads(receipt.read_text())
             failed["status"] = "completed_with_failures"
             failed["metrics"]["passed"] -= 1

@@ -116,18 +116,31 @@ def _read_bounded(path: Path, limit: int, *, deadline: float | None = None, erro
 
     _deadline_check(deadline, error_code)
     try:
-        if path.stat().st_size > limit:
-            raise ValueError(error_code)
+        # Open first, then bind the descriptor identity and size. A path
+        # replacement during validation must not cause us to hash one file and
+        # parse another; the post-read lstat catches replacement before close.
         with path.open("rb") as stream:
+            before = os.fstat(stream.fileno())
+            if before.st_size > limit:
+                raise ValueError(error_code)
             data = bytearray()
             while True:
                 _deadline_check(deadline, error_code)
                 chunk = stream.read(min(64 * 1024, limit + 1 - len(data)))
                 if not chunk:
-                    return bytes(data)
+                    break
                 data.extend(chunk)
                 if len(data) > limit:
                     raise ValueError(error_code)
+            after = os.fstat(stream.fileno())
+            current = path.stat()
+            identity_before = (before.st_dev, before.st_ino)
+            identity_after = (after.st_dev, after.st_ino)
+            identity_current = (current.st_dev, current.st_ino)
+            if (before.st_size != after.st_size or after.st_size != len(data) or
+                    identity_before != identity_after or identity_after != identity_current):
+                raise ValueError(error_code)
+            return bytes(data)
     except ValueError:
         raise
     except (OSError, UnicodeError) as exc:
@@ -345,10 +358,16 @@ def _write_preflight_receipt(
             summary["error_code"] = error_code
         if validator_code in MODEL_VALIDATOR_CODES and validator_code != "ok":
             summary["validator_code"] = validator_code
+        valid_child = False
         if isinstance(child_status, dict) and set(child_status) in ({"exit_code"}, {"signal"}):
             value = next(iter(child_status.values()))
             if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 255 and ("signal" not in child_status or value >= 1):
                 summary["child"] = {next(iter(child_status)): value}
+                valid_child = True
+        if status in {"rejected", "failed"} and not valid_child:
+            raise ValueError("engine_model_preflight_invalid")
+        if status == "terminated" and (not valid_child or "signal" not in summary.get("child", {})):
+            raise ValueError("engine_model_preflight_invalid")
     else:
         raise ValueError("engine_model_preflight_invalid")
     payload = {"schema": MODEL_PREFLIGHT_RECEIPT_SCHEMA, **summary}
@@ -397,11 +416,13 @@ def verify_artifact(model: Path, manifest_path: Path, *, source_revision: str, l
     lock_parts = _read_bounded(manifest_lock_path, 4096, deadline=deadline, error_code="model_manifest_lock_invalid").decode("utf-8").strip().split()
     if len(lock_parts) != 2 or lock_parts[1] != manifest_path.name or len(lock_parts[0]) != 64 or any(character not in PIN_RE for character in lock_parts[0]):
         raise ValueError("model_manifest_lock_invalid")
-    if sha256(manifest_path, deadline=deadline, error_code="model_manifest_lock_mismatch") != lock_parts[0]:
+    manifest_bytes = _read_bounded(manifest_path, MAX_METADATA_BYTES, deadline=deadline, error_code="model_manifest_invalid")
+    manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
+    if manifest_digest != lock_parts[0]:
         raise ValueError("model_manifest_lock_mismatch")
     try:
-        manifest = json.loads(_read_bounded(manifest_path, MAX_METADATA_BYTES, deadline=deadline, error_code="model_manifest_invalid").decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        manifest = _strict_json_object(manifest_bytes)
+    except (UnicodeDecodeError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("model_manifest_invalid") from exc
     if not isinstance(manifest, dict) or manifest.get("schema_version") != "1.1.0":
         raise ValueError("model_manifest_invalid")
@@ -496,6 +517,8 @@ def _preflight_child_status(result: object) -> dict[str, int] | None:
 
 
 def _preflight_outcome_status(error_code: str) -> str:
+    if error_code == "engine_model_preflight_not_started":
+        return "not_started"
     if error_code == "engine_model_preflight_timeout":
         return "timeout"
     if error_code == "engine_model_preflight_output_too_large":
@@ -565,6 +588,11 @@ def _engine_model_preflight(
         error_code = _safe_error_code(exc)
         if error_code not in SAFE_ERROR_CODES or not error_code.startswith("engine_model_preflight_"):
             error_code = "engine_model_preflight_failed"
+        # No result means the child was never successfully observed. Preserve
+        # the explicit typed no-subprocess outcome rather than fabricating a
+        # failed child receipt without exit/signal evidence.
+        if result is None:
+            error_code = "engine_model_preflight_not_started"
         validator_code = payload.get("code") if isinstance(payload, dict) and payload.get("code") in MODEL_VALIDATOR_CODES else None
         summary = _write_preflight_receipt(
             receipt_path,
@@ -691,7 +719,9 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any], dea
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ValueError("cuda_device_receipt_invalid") from exc
         device = cuda_receipt.get("device") if isinstance(cuda_receipt, dict) else None
-        if (not isinstance(cuda_receipt, dict) or cuda_receipt.get("schema") != "local_bmo.j1m.cuda-device-receipt.v1" or cuda_receipt.get("status") != "verified" or cuda_receipt.get("selector") != getattr(args, "cuda_device_name", "") or cuda_receipt.get("device_count") != 1 or not isinstance(device, dict) or "a100" not in str(device.get("name", "")).lower() or not isinstance(device.get("memory_total_mib"), int) or device["memory_total_mib"] < 70000):
+        if (not isinstance(cuda_receipt, dict) or set(cuda_receipt) != {"schema", "status", "selector", "device_count", "device", "source"} or
+                cuda_receipt.get("schema") != "local_bmo.j1m.cuda-device-receipt.v1" or cuda_receipt.get("status") != "verified" or cuda_receipt.get("selector") != getattr(args, "cuda_device_name", "") or cuda_receipt.get("device_count") != 1 or cuda_receipt.get("source") != "nvidia-smi bounded query" or
+                not isinstance(device, dict) or set(device) != {"index", "name", "memory_total_mib", "driver_version"} or "a100" not in str(device.get("name", "")).lower() or not isinstance(device.get("index"), int) or isinstance(device.get("index"), bool) or device["index"] < 0 or not isinstance(device.get("name"), str) or not 1 <= len(device["name"]) <= 160 or not isinstance(device.get("driver_version"), str) or not 1 <= len(device["driver_version"]) <= 80 or not isinstance(device.get("memory_total_mib"), int) or device["memory_total_mib"] < 70000):
             raise ValueError("cuda_device_receipt_invalid")
     try:
         toolchain = _strict_json_object(_read_bounded(Path(args.toolchain_receipt), MAX_METADATA_BYTES, deadline=deadline, error_code="toolchain_receipt_invalid"))
@@ -699,17 +729,22 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any], dea
         raise ValueError("toolchain_receipt_invalid") from exc
     versions = toolchain.get("versions") if isinstance(toolchain, dict) else None
     minimums = {"python3": (3, 8), "git": (2, 30), "cmake": (3, 18), "g++": (9, 0), "nvcc": (12, 0)}
-    if (not isinstance(toolchain, dict) or toolchain.get("schema") != "local_bmo.j1m.remote-toolchain-receipt.v1" or toolchain.get("status") != "verified" or not isinstance(versions, dict)):
+    if (not isinstance(toolchain, dict) or toolchain.get("schema") != "local_bmo.j1m.remote-toolchain-receipt.v1" or
+            toolchain.get("status") != "verified" or set(toolchain) != {"schema", "status", "required", "versions", "packages", "package_install"} or
+            not isinstance(versions, dict) or set(versions) != set(minimums) or
+            toolchain.get("required") != {name: f">={major}.{minor}" for name, (major, minor) in minimums.items()} or
+            toolchain.get("package_install") != "ubuntu apt repositories; exact resolved package versions captured by dpkg-query"):
         raise ValueError("toolchain_receipt_invalid")
     for name, minimum in minimums.items():
         version = versions.get(name)
-        if (not isinstance(version, dict) or isinstance(version.get("major"), bool) or not isinstance(version.get("major"), int) or isinstance(version.get("minor"), bool) or not isinstance(version.get("minor"), int) or (version["major"], version["minor"]) < minimum):
+        if (not isinstance(version, dict) or set(version) != {"major", "minor", "reported", "executable"} or
+                isinstance(version.get("major"), bool) or not isinstance(version.get("major"), int) or isinstance(version.get("minor"), bool) or not isinstance(version.get("minor"), int) or (version["major"], version["minor"]) < minimum):
             raise ValueError("toolchain_receipt_invalid")
     if versions["nvcc"].get("executable") != "/usr/local/cuda/bin/nvcc":
         raise ValueError("toolchain_receipt_invalid")
     packages = toolchain.get("packages")
     expected_packages = {"ca-certificates", "cmake", "build-essential", "git", "python3", "python3-venv"}
-    if not isinstance(packages, dict) or set(packages) != expected_packages or any(not isinstance(value, str) or not value or len(value) > 160 for value in packages.values()):
+    if not isinstance(packages, dict) or set(packages) != expected_packages or any(not isinstance(value, str) or not value or len(value) > 160 or any(ord(char) < 0x20 for char in value) for value in packages.values()):
         raise ValueError("toolchain_receipt_invalid")
     preflight_path = Path(getattr(args, "preflight_receipt", "") or Path(args.receipt).with_name("startup-preflight-receipt.json"))
     try:

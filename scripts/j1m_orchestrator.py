@@ -34,7 +34,7 @@ _STDERR_TAIL_LIMIT = 1200
 _EVAL_FIXTURE_MAX_BYTES = 256 * 1024
 _EVAL_RECEIPT_MAX_BYTES = 64 * 1024
 _PREFLIGHT_RECEIPT_MAX_BYTES = 1024
-_DELETION_RESERVE_SECONDS = 420.0
+_DELETION_RESERVE_SECONDS = 480.0
 
 
 class OperatorCancelled(Exception):
@@ -49,11 +49,24 @@ def _redacted_output_tail(value: object) -> str:
     return text[-_STDERR_TAIL_LIMIT:]
 
 
+def _bounded_bytes(path: Path, limit: int) -> bytes:
+    """Read one bounded descriptor snapshot, rejecting replacement."""
+    with path.open("rb") as stream:
+        before = os.fstat(stream.fileno())
+        if before.st_size > limit:
+            raise ValueError("receipt exceeds bound")
+        raw = stream.read(limit + 1)
+        after = os.fstat(stream.fileno())
+        current = path.stat()
+        if (len(raw) > limit or before.st_size != after.st_size or after.st_size != len(raw) or
+                (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino) or
+                (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino)):
+            raise ValueError("receipt changed during bounded read")
+        return raw
+
+
 def _bounded_json(path: Path, limit: int) -> Any:
     """Decode a small receipt without duplicate keys or unbounded reads."""
-
-    if path.stat().st_size > limit:
-        raise ValueError("receipt exceeds bound")
 
     def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -63,10 +76,7 @@ def _bounded_json(path: Path, limit: int) -> Any:
             result[key] = value
         return result
 
-    with path.open("rb") as stream:
-        raw = stream.read(limit + 1)
-    if len(raw) > limit:
-        raise ValueError("receipt exceeds bound")
+    raw = _bounded_bytes(path, limit)
     return json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicates)
 
 
@@ -152,7 +162,16 @@ def _verify_eval_artifact(path: Path | None, manifest_path: Path, config: dict[s
     expected_name = "Qwen3.5-9B-Q4_K_M.gguf"
     if path is not None and (path.name != expected_name or not path.is_file()):
         raise ValueError("eval artifact has the wrong name or is missing")
-    manifest = _bounded_json(manifest_path, _EVAL_FIXTURE_MAX_BYTES)
+    manifest_bytes = _bounded_bytes(manifest_path, _EVAL_FIXTURE_MAX_BYTES)
+    manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("eval model manifest contains duplicate key")
+            result[key] = value
+        return result
+    manifest = json.loads(manifest_bytes.decode("utf-8"), object_pairs_hook=reject_duplicates)
     if not isinstance(manifest, dict) or manifest.get("schema_version") != "1.1.0":
         raise ValueError("eval model manifest is invalid")
     source = manifest.get("source")
@@ -183,7 +202,7 @@ def _verify_eval_artifact(path: Path | None, manifest_path: Path, config: dict[s
         raise ValueError("eval model manifest checksum lock is invalid") from exc
     if len(lock_parts) != 2 or lock_parts[1] != manifest_path.name or len(lock_parts[0]) != 64 or any(character not in "0123456789abcdef" for character in lock_parts[0]):
         raise ValueError("eval model manifest checksum lock is invalid")
-    if j1m_runner._sha256(manifest_path) != lock_parts[0]:
+    if manifest_digest != lock_parts[0]:
         raise ValueError("eval model manifest checksum mismatch")
     size = artifact.get("expected_size_bytes")
     digest = artifact.get("sha256")
@@ -197,6 +216,8 @@ def _verify_eval_artifact(path: Path | None, manifest_path: Path, config: dict[s
         "sha256": digest,
         "source_revision": config["source"]["revision"],
         "llama_cpp_revision": config["llama_cpp"]["revision"],
+        "modality": artifact["modality_profile"],
+        "quantization": artifact["quantization_profile"],
     }
 
 
@@ -351,12 +372,12 @@ def _eval_deadline_ceiling(config: dict[str, Any]) -> dict[str, float]:
     provider_seconds = float(mode["provider_backstop_hours"]) * 3600.0
     host_shutdown_seconds = float(mode.get("activation_timeout_seconds", 600)) + host_key + 5 * 30.0 + 30.0 + float(mode["host_shutdown_delay_minutes"]) * 60.0
     ceiling = work + cleanup
-    if not (ceiling < watchdog_seconds < run_seconds < provider_seconds):
-        raise ValueError("eval sequential budget does not fit watchdog/run/provider clocks")
+    if not (ceiling < run_seconds < host_shutdown_seconds < watchdog_seconds < provider_seconds):
+        raise ValueError("eval sequential budget does not fit run/cleanup/host/watchdog/provider clocks")
+    if host_shutdown_seconds - run_seconds < 120.0:
+        raise ValueError("eval host shutdown backstop lacks cleanup margin")
     if watchdog_seconds - host_shutdown_seconds < 120.0:
-        raise ValueError("eval host shutdown backstop lacks watchdog jitter margin")
-    if host_shutdown_seconds - ceiling < 120.0:
-        raise ValueError("eval host shutdown backstop precedes cleanup reserve")
+        raise ValueError("eval watchdog backstop lacks host-shutdown jitter margin")
     return {
         "work_seconds": work,
         "cleanup_reserve_seconds": cleanup,
@@ -386,7 +407,8 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     if "duration_ms" in payload and (isinstance(payload["duration_ms"], bool) or not isinstance(payload["duration_ms"], (int, float)) or not math.isfinite(payload["duration_ms"]) or payload["duration_ms"] < 0):
         raise ValueError("eval receipt duration invalid")
     recorded = payload.get("artifact")
-    if (not isinstance(recorded, dict) or set(recorded) - {"name", "size_bytes", "sha256", "source_revision", "llama_cpp_revision", "modality", "quantization"} or
+    artifact_keys = {"name", "size_bytes", "sha256", "source_revision", "llama_cpp_revision", "modality", "quantization"}
+    if (not isinstance(recorded, dict) or set(recorded) != artifact_keys or
             recorded.get("name") != artifact["name"] or recorded.get("size_bytes") != artifact["size_bytes"] or recorded.get("sha256") != artifact["sha256"]):
         raise ValueError("eval receipt artifact mismatch")
     for key in ("source_revision", "llama_cpp_revision", "modality", "quantization"):
@@ -427,7 +449,7 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     if (status == "verified") != all_passed or (status == "completed_with_failures") != has_failure:
         raise ValueError("eval receipt status does not match metrics")
     engine = payload.get("engine")
-    if (not isinstance(engine, dict) or set(engine) - {"engine_version", "api_version", "compiled_backend", "llama_cpp_revision", "model"} or
+    if (not isinstance(engine, dict) or set(engine) != {"engine_version", "api_version", "compiled_backend", "llama_cpp_revision", "model"} or
             engine.get("llama_cpp_revision") != artifact.get("llama_cpp_revision") or engine.get("compiled_backend") != f"llama.cpp/{artifact.get('llama_cpp_revision', '')[:8]}/cuda"):
         raise ValueError("eval receipt engine identity mismatch")
     if engine.get("engine_version") != "0.1.0" or engine.get("api_version") != "0.1.0" or engine.get("model") != "qwen35-9b-q4-k-m":
@@ -437,9 +459,9 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
             raise ValueError("eval receipt engine identity mismatch")
     cuda_device = payload.get("cuda_device")
     device = cuda_device.get("device") if isinstance(cuda_device, dict) else None
-    if (not isinstance(cuda_device, dict) or set(cuda_device) - {"schema", "status", "selector", "device_count", "device", "source"} or
+    if (not isinstance(cuda_device, dict) or set(cuda_device) != {"schema", "status", "selector", "device_count", "device", "source"} or
             cuda_device.get("schema") != "local_bmo.j1m.cuda-device-receipt.v1" or cuda_device.get("status") != "verified" or cuda_device.get("selector") != "CUDA0" or cuda_device.get("device_count") != 1 or
-            not isinstance(device, dict) or set(device) - {"index", "name", "memory_total_mib", "driver_version"} or "a100" not in str(device.get("name", "")).lower() or not isinstance(device.get("memory_total_mib"), int) or device["memory_total_mib"] < 70000):
+            not isinstance(device, dict) or set(device) != {"index", "name", "memory_total_mib", "driver_version"} or "a100" not in str(device.get("name", "")).lower() or not isinstance(device.get("memory_total_mib"), int) or device["memory_total_mib"] < 70000):
         raise ValueError("eval receipt CUDA placement attestation invalid")
     if cuda_device.get("source") != "nvidia-smi bounded query":
         raise ValueError("eval receipt CUDA placement attestation invalid")
@@ -452,14 +474,15 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     versions = toolchain.get("versions") if isinstance(toolchain, dict) else None
     minimums = {"python3": (3, 8), "git": (2, 30), "cmake": (3, 18), "g++": (9, 0), "nvcc": (12, 0)}
     if (not isinstance(toolchain, dict) or set(toolchain) != {"schema", "status", "required", "versions", "packages", "package_install"} or
-            toolchain.get("schema") != "local_bmo.j1m.remote-toolchain-receipt.v1" or toolchain.get("status") != "verified" or not isinstance(versions, dict)):
+            toolchain.get("schema") != "local_bmo.j1m.remote-toolchain-receipt.v1" or toolchain.get("status") != "verified" or
+            not isinstance(versions, dict) or set(versions) != set(minimums)):
         raise ValueError("eval receipt toolchain evidence invalid")
     expected_required = {"python3": ">=3.8", "git": ">=2.30", "cmake": ">=3.18", "g++": ">=9.0", "nvcc": ">=12.0"}
     if toolchain.get("required") != expected_required or toolchain.get("package_install") != "ubuntu apt repositories; exact resolved package versions captured by dpkg-query":
         raise ValueError("eval receipt toolchain evidence invalid")
     for name, minimum in minimums.items():
         version = versions.get(name)
-        if (not isinstance(version, dict) or set(version) - {"major", "minor", "reported", "executable"} or
+        if (not isinstance(version, dict) or set(version) != {"major", "minor", "reported", "executable"} or
                 isinstance(version.get("major"), bool) or not isinstance(version.get("major"), int) or isinstance(version.get("minor"), bool) or not isinstance(version.get("minor"), int) or (version["major"], version["minor"]) < minimum):
                 raise ValueError("eval receipt toolchain version invalid")
         for key in ("reported", "executable"):
@@ -479,15 +502,16 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     selected_metrics = {key: metrics[key] for key in ("case_count", "passed", "failed", "errors", "peak_rss_kib")}
     if summary is not None:
         selected_metrics["category_summary"] = summary
-    selected_versions = {
-        name: {key: value for key, value in versions[name].items() if key in {"major", "minor", "reported", "executable"}}
-        for name in minimums
-    }
+    selected_versions = {name: dict(versions[name]) for name in minimums}
     selected_packages = {name: packages[name] for name in expected_packages}
     return {
         "status": status,
+        "artifact": dict(recorded),
+        "engine": dict(engine),
+        "model_preflight": dict(model_preflight),
+        "cuda_device": {**cuda_device, "device": dict(device)},
         "metrics": selected_metrics,
-        "toolchain": {"schema": toolchain["schema"], "status": toolchain["status"], "versions": selected_versions, "packages": selected_packages},
+        "toolchain": {"schema": toolchain["schema"], "status": toolchain["status"], "required": dict(toolchain["required"]), "versions": selected_versions, "packages": selected_packages, "package_install": toolchain["package_install"]},
     }
 
 
@@ -665,6 +689,8 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
         signal.signal(signal.SIGINT, cancel)
         signal.signal(signal.SIGTERM, cancel)
         watchdog: subprocess.Popen[bytes] | None = None
+        attempt_id: str | None = None
+        cleanup_failure: BaseException | None = None
         def stop_watchdog() -> None:
             nonlocal watchdog
             if watchdog is None or watchdog.poll() is not None:
@@ -696,13 +722,48 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             if isinstance(nested, dict):
                 return nested.get("success") is True and deletion.get("retry_required") is not True
             return deletion.get("success") is True and deletion.get("retry_required") is not True
-        # Reserve the possible provider POST before uploading the key or
-        # creating an instance. A failed append is a hard stop: no mutation is
-        # allowed without a durable budget/ownership reservation.
-        attempt_id = sf.reserve_create_attempt(phase_id, nonce, candidate, backstop_hours=float(config["modes"][mode]["provider_backstop_hours"]), public_key_sha256=hashlib.sha256(public_key.encode("utf-8")).hexdigest())
-        attempt_reserved = True
         try:
-            key_id = sf.add_ssh_key(api_key, phase_id, f"j1m-{nonce}", public_key)
+            # Reserve the possible provider POST before uploading the key or
+            # creating an instance. Keeping this in the protected region means
+            # a ledger/filesystem failure still restores signals and persists
+            # a terminal lifecycle marker without making a provider call.
+            attempt_id = sf.reserve_create_attempt(phase_id, nonce, candidate, backstop_hours=float(config["modes"][mode]["provider_backstop_hours"]), public_key_sha256=hashlib.sha256(public_key.encode("utf-8")).hexdigest())
+            attempt_reserved = True
+            try:
+                key_id = sf.add_ssh_key(api_key, phase_id, f"j1m-{nonce}", public_key)
+            except sf.AmbiguousProviderOutcome as exc:
+                # A timed-out or malformed key-create response may have
+                # succeeded remotely. Reconcile only the nonce-bound name and
+                # exact public-key fingerprint; unresolved ambiguity blocks
+                # instance creation and is retained as a finite incident.
+                lifecycle["ssh_key_create_ambiguous"] = True
+                try:
+                    key_id = sf.reconcile_ssh_key(
+                        api_key, phase_id, expected_name=f"j1m-{nonce}",
+                        expected_public_key=public_key,
+                    )
+                    lifecycle["ssh_key_reconciliation"] = {"status": "exact_match"}
+                except Exception as reconcile_exc:
+                    lifecycle["ssh_key_reconciliation"] = {
+                        "status": "unresolved",
+                        "retry_required": True,
+                        "error_type": type(reconcile_exc).__name__,
+                    }
+                    try:
+                        sf.append_incident({
+                            "phase_id": phase_id,
+                            "incident": "ssh-key-create-ambiguous-unresolved",
+                            "nonce": nonce,
+                            "ssh_key_name": f"j1m-{nonce}",
+                            "ssh_public_key_sha256": hashlib.sha256(public_key.encode("utf-8")).hexdigest(),
+                            "error_type": type(reconcile_exc).__name__,
+                        })
+                    except Exception:
+                        pass
+                    raise sf.AmbiguousProviderOutcome("SSH key create could not be safely reconciled") from exc
+                # Even an exact reconciliation is revoked by the normal exact
+                # key-cleanup branch; this attempt must never proceed to create.
+                raise sf.AmbiguousProviderOutcome("SSH key create was reconciled; instance creation refused") from exc
             sf.verify_ssh_key_ownership(api_key, phase_id, key_id, expected_name=f"j1m-{nonce}", expected_public_key=public_key)
             # Bind the exact provider key ID into the already-pending attempt
             # reservation before allowing the instance create POST.
@@ -942,12 +1003,40 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     # case retain the external watchdog so it can continue
                     # the exact cleanup retry; stopping it here would orphan
                     # the provider resource during the exception path.
-                    lifecycle["deletion"] = teardown_exact(phase_id, instance_id, env_file=env_file)
+                    try:
+                        lifecycle["deletion"] = teardown_exact(
+                            phase_id, instance_id, env_file=env_file,
+                            deadline=(execution_deadline + _DELETION_RESERVE_SECONDS)
+                            if "execution_deadline" in locals() else None,
+                        )
+                    except Exception as exc:
+                        cleanup_failure = RuntimeError("exact instance teardown was not confirmed")
+                        lifecycle["deletion"] = {
+                            "status": "delete-failed",
+                            "retry_required": True,
+                            "error_type": type(exc).__name__,
+                        }
+                        lifecycle["status"] = "failed"
+                        try:
+                            sf.append_incident({
+                                "phase_id": phase_id,
+                                "incident": "post-instance-teardown-unconfirmed",
+                                "instance_id": instance_id,
+                                "ssh_key_id": key_id,
+                                "nonce": nonce,
+                                "error_type": type(exc).__name__,
+                            })
+                        except Exception:
+                            pass
                 else:
                     # Ledger write failed: exact ID is still known, so delete
                     # it before attempting any key/bookkeeping cleanup.
                     try:
-                        lifecycle["deletion"] = sf._delete_instance(api_key, phase_id, instance_id)
+                        lifecycle["deletion"] = sf._delete_instance(
+                            api_key, phase_id, instance_id,
+                            deadline=(execution_deadline + _DELETION_RESERVE_SECONDS)
+                            if "execution_deadline" in locals() else None,
+                        )
                     except Exception as exc:
                         lifecycle["deletion"] = {"success": False, "error_type": type(exc).__name__}
                         try:
@@ -964,6 +1053,9 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                                     sf.append_incident({"phase_id": phase_id, "incident": "post-instance-key-delete-failed", "instance_id": instance_id, "ssh_key_id": key_id, "nonce": nonce, "error_type": type(exc).__name__})
                                 except Exception:
                                     pass
+                    if not deletion_confirmed():
+                        cleanup_failure = RuntimeError("exact instance deletion was not confirmed")
+                        lifecycle["status"] = "failed"
             elif key_id is not None and not ambiguous_create:
                 # Key creation succeeded but instance creation did not.
                 try:
@@ -995,6 +1087,8 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             _progress(progress_path, "completed" if lifecycle.get("status") == "completed" else "failed", phase_id=phase_id, failed_stage=lifecycle.get("failed_stage"), teardown="finished")
             for number, handler in previous_handlers.items():
                 signal.signal(number, handler)
+        if cleanup_failure is not None:
+            raise cleanup_failure
         return lifecycle
 
 
