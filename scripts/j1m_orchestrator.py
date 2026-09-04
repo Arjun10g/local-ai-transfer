@@ -49,6 +49,12 @@ _EVAL_DIAGNOSTIC_CODES = frozenset({
     "parse_session_shape", "parse_response_shape", "context_overflow",
     "endpoint", "token", "unknown",
 })
+_EVAL_QUALITY_CODES = frozenset({
+    "forbidden_tool_name", "malformed_call", "unknown_tool", "malformed_parameter",
+    "parameter_too_large", "invalid_json_argument", "invalid_tool_schema",
+    "invalid_arguments", "missing_call", "unexpected_call", "call_mismatch",
+    "quality_unknown",
+})
 
 
 class OperatorCancelled(Exception):
@@ -451,6 +457,42 @@ def _verify_eval_diagnostics(value: Any, *, errors: int, categories: set[str], c
     return {"schema": value["schema"], "total_errors": value["total_errors"], "overall": dict(overall), "by_category": {category: dict(by_category[category]) for category in sorted(categories)}}
 
 
+def _verify_eval_quality_diagnostics(value: Any, *, failed: int, categories: set[str], category_failed: dict[str, int]) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"schema", "total_failed", "overall", "by_category"} or value.get("schema") != "local_bmo.tool-call-quality-diagnostics.v1":
+        raise ValueError("eval receipt quality diagnostics invalid")
+    total = value.get("total_failed")
+    if isinstance(total, bool) or not isinstance(total, int) or total < 0 or total != failed:
+        raise ValueError("eval receipt quality diagnostics total invalid")
+    overall = value.get("overall")
+    by_category = value.get("by_category")
+    if not isinstance(overall, dict) or not isinstance(by_category, dict) or set(by_category) != categories:
+        raise ValueError("eval receipt quality diagnostics invalid")
+    def histogram(item: Any) -> int:
+        if not isinstance(item, dict):
+            raise ValueError("eval receipt quality diagnostics invalid")
+        count = 0
+        for code, amount in item.items():
+            if code not in _EVAL_QUALITY_CODES or isinstance(amount, bool) or not isinstance(amount, int) or amount < 1 or amount > 40:
+                raise ValueError("eval receipt quality diagnostics code invalid")
+            count += amount
+        return count
+    if histogram(overall) != failed:
+        raise ValueError("eval receipt quality diagnostics total invalid")
+    combined: dict[str, int] = {}
+    category_total = 0
+    for category in categories:
+        category_histogram = by_category[category]
+        count = histogram(category_histogram)
+        if count != category_failed[category]:
+            raise ValueError("eval receipt quality diagnostics total invalid")
+        category_total += count
+        for code, amount in category_histogram.items():
+            combined[code] = combined.get(code, 0) + amount
+    if category_total != failed or combined != overall:
+        raise ValueError("eval receipt quality diagnostics total invalid")
+    return {"schema": value["schema"], "total_failed": total, "overall": dict(overall), "by_category": {category: dict(by_category[category]) for category in sorted(categories)}}
+
+
 def _verify_eval_canary(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {"attempted", "passed", "error_code", "tool_count", "message_chars", "prompt_tokens", "context_tokens", "output_reserve_tokens"} or value.get("attempted") is not True:
         raise ValueError("eval receipt canary invalid")
@@ -519,7 +561,7 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
         raise ValueError("eval receipt model preflight invalid")
     metrics = payload.get("metrics")
     metric_keys = {"case_count", "passed", "failed", "errors", "peak_rss_kib", "category_summary"}
-    optional_metric_keys = {"canary", "error_diagnostics"}
+    optional_metric_keys = {"canary", "error_diagnostics", "quality_diagnostics"}
     if (not isinstance(metrics, dict) or not metric_keys <= set(metrics) or set(metrics) - metric_keys - optional_metric_keys or
             payload.get("status") not in {"verified", "completed_with_failures", "failed"} or
             any(isinstance(metrics.get(key), bool) or not isinstance(metrics.get(key), int) or metrics[key] < 0 for key in ("case_count", "passed", "failed", "errors"))):
@@ -546,11 +588,12 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
         raise ValueError("eval receipt metric totals invalid")
     if any(sum(summary[category][field] for category in expected_categories) != metrics[field] for field in ("case_count", "passed", "failed", "errors")):
         raise ValueError("eval receipt metric totals invalid")
-    if "error_diagnostics" not in metrics or "canary" not in metrics:
+    if "error_diagnostics" not in metrics or "canary" not in metrics or "quality_diagnostics" not in metrics:
         raise ValueError("eval receipt diagnostics missing")
     diagnostics = _verify_eval_diagnostics(metrics["error_diagnostics"], errors=metrics["errors"], categories=expected_categories, category_errors={category: summary[category]["errors"] for category in expected_categories})
     canary = _verify_eval_canary(metrics["canary"])
     _verify_eval_canary_coherence(canary, metrics=metrics, summary=summary, diagnostics=diagnostics, expected_count=expected_count, categories=expected_categories)
+    quality_diagnostics = _verify_eval_quality_diagnostics(metrics["quality_diagnostics"], failed=metrics["failed"], categories=expected_categories, category_failed={category: summary[category]["failed"] for category in expected_categories})
     child = _verify_eval_child(payload.get("child")) if payload.get("status") == "failed" else None
     if payload.get("status") != "failed" and "child" in payload:
         raise ValueError("eval receipt child status invalid")
@@ -618,6 +661,7 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
         selected_metrics["category_summary"] = summary
     selected_metrics["error_diagnostics"] = diagnostics
     selected_metrics["canary"] = canary
+    selected_metrics["quality_diagnostics"] = quality_diagnostics
     selected_versions = {name: dict(versions[name]) for name in minimums}
     selected_packages = {name: packages[name] for name in expected_packages}
     return {

@@ -52,6 +52,7 @@ SAFE_ERROR_CODES = frozenset({
     "evaluator_metrics_invalid", "evaluator_metrics_total_invalid", "evaluator_process_failed",
     "evaluator_exit_status_mismatch", "evaluator_receipt_invalid", "evaluator_rss_invalid",
     "evaluator_diagnostics_invalid", "evaluator_diagnostics_total_invalid", "evaluator_diagnostics_code_invalid",
+    "evaluator_quality_diagnostics_invalid", "evaluator_quality_diagnostics_total_invalid", "evaluator_quality_diagnostics_code_invalid",
     "evaluator_canary_invalid", "engine_exited_during_evaluation",
     "llama_checkout_revision_mismatch",
     "llama_pin_invalid", "llama_revision_mismatch", "model_manifest_invalid",
@@ -65,6 +66,12 @@ EVAL_DIAGNOSTIC_CODES = frozenset({
     "transport_url", "transport_timeout", "transport_os", "parse_json",
     "parse_session_shape", "parse_response_shape", "context_overflow",
     "endpoint", "token", "unknown",
+})
+EVAL_QUALITY_CODES = frozenset({
+    "forbidden_tool_name", "malformed_call", "unknown_tool", "malformed_parameter",
+    "parameter_too_large", "invalid_json_argument", "invalid_tool_schema",
+    "invalid_arguments", "missing_call", "unexpected_call", "call_mismatch",
+    "quality_unknown",
 })
 TAIL_LIMIT = 1200
 MAX_ENGINE_LINE = 8192
@@ -697,6 +704,42 @@ def _validate_diagnostics(value: Any, *, expected_errors: int, expected_categori
     return {"schema": value["schema"], "total_errors": total, "overall": dict(overall), "by_category": {category: dict(by_category[category]) for category in sorted(expected_categories)}}
 
 
+def _validate_quality_diagnostics(value: Any, *, expected_failed: int, expected_categories: set[str], category_failed: dict[str, int]) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"schema", "total_failed", "overall", "by_category"} or value.get("schema") != "local_bmo.tool-call-quality-diagnostics.v1":
+        raise ValueError("evaluator_quality_diagnostics_invalid")
+    total = value.get("total_failed")
+    if isinstance(total, bool) or not isinstance(total, int) or total < 0 or total != expected_failed:
+        raise ValueError("evaluator_quality_diagnostics_total_invalid")
+    overall = value.get("overall")
+    by_category = value.get("by_category")
+    if not isinstance(overall, dict) or not isinstance(by_category, dict) or set(by_category) != expected_categories:
+        raise ValueError("evaluator_quality_diagnostics_invalid")
+    def histogram(item: Any) -> int:
+        if not isinstance(item, dict):
+            raise ValueError("evaluator_quality_diagnostics_invalid")
+        count = 0
+        for code, amount in item.items():
+            if code not in EVAL_QUALITY_CODES or isinstance(amount, bool) or not isinstance(amount, int) or amount < 1 or amount > MAX_EVAL_CASES:
+                raise ValueError("evaluator_quality_diagnostics_code_invalid")
+            count += amount
+        return count
+    if histogram(overall) != expected_failed:
+        raise ValueError("evaluator_quality_diagnostics_total_invalid")
+    combined: dict[str, int] = {}
+    category_total = 0
+    for category in expected_categories:
+        category_histogram = by_category[category]
+        count = histogram(category_histogram)
+        if count != category_failed[category]:
+            raise ValueError("evaluator_quality_diagnostics_total_invalid")
+        category_total += count
+        for code, amount in category_histogram.items():
+            combined[code] = combined.get(code, 0) + amount
+    if category_total != expected_failed or combined != overall:
+        raise ValueError("evaluator_quality_diagnostics_total_invalid")
+    return {"schema": value["schema"], "total_failed": total, "overall": dict(overall), "by_category": {category: dict(by_category[category]) for category in sorted(expected_categories)}}
+
+
 def _validate_canary(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {"attempted", "passed", "error_code", "tool_count", "message_chars", "prompt_tokens", "context_tokens", "output_reserve_tokens"} or value.get("attempted") is not True:
         raise ValueError("evaluator_canary_invalid")
@@ -729,7 +772,7 @@ def _validate_metrics(metrics: Any, *, expected_case_count: int = 8, expected_ca
     if not isinstance(metrics, dict):
         raise ValueError("evaluator_metrics_invalid")
     counts = ("case_count", "passed", "failed", "errors")
-    if require_diagnostics and set(metrics) != set(counts) | {"peak_rss_kib", "category_summary", "canary", "error_diagnostics"}:
+    if require_diagnostics and set(metrics) != set(counts) | {"peak_rss_kib", "category_summary", "canary", "error_diagnostics", "quality_diagnostics"}:
         raise ValueError("evaluator_metrics_invalid")
     if any(isinstance(metrics.get(key), bool) or not isinstance(metrics.get(key), int) or metrics[key] < 0 for key in counts):
         raise ValueError("evaluator_metrics_invalid")
@@ -762,16 +805,19 @@ def _validate_metrics(metrics: Any, *, expected_case_count: int = 8, expected_ca
             raise ValueError("evaluator_metrics_total_invalid")
     result = {key: metrics.get(key) for key in (*counts, "peak_rss_kib")} | ({"category_summary": summary} if summary is not None else {})
     if require_diagnostics:
-        if "error_diagnostics" not in metrics or "canary" not in metrics:
+        if "error_diagnostics" not in metrics or "canary" not in metrics or "quality_diagnostics" not in metrics:
             raise ValueError("evaluator_diagnostics_invalid")
         result["error_diagnostics"] = _validate_diagnostics(metrics["error_diagnostics"], expected_errors=metrics["errors"], expected_categories=expected_categories or set(), category_errors={category: summary[category]["errors"] for category in (expected_categories or set())})
         result["canary"] = _validate_canary(metrics["canary"])
         _validate_canary_coherence(result["canary"], metrics=metrics, summary=summary, diagnostics=result["error_diagnostics"], expected_case_count=expected_case_count, expected_categories=expected_categories or set())
-    elif "error_diagnostics" in metrics or "canary" in metrics:
+        result["quality_diagnostics"] = _validate_quality_diagnostics(metrics["quality_diagnostics"], expected_failed=metrics["failed"], expected_categories=expected_categories or set(), category_failed={category: summary[category]["failed"] for category in (expected_categories or set())})
+    elif "error_diagnostics" in metrics or "canary" in metrics or "quality_diagnostics" in metrics:
         if "error_diagnostics" in metrics:
             result["error_diagnostics"] = _validate_diagnostics(metrics["error_diagnostics"], expected_errors=metrics["errors"], expected_categories=expected_categories or set(), category_errors={category: summary[category]["errors"] for category in (expected_categories or set())})
         if "canary" in metrics:
             result["canary"] = _validate_canary(metrics["canary"])
+        if "quality_diagnostics" in metrics:
+            result["quality_diagnostics"] = _validate_quality_diagnostics(metrics["quality_diagnostics"], expected_failed=metrics["failed"], expected_categories=expected_categories or set(), category_failed={category: summary[category]["failed"] for category in (expected_categories or set())})
     return result
 
 
@@ -913,7 +959,7 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any], dea
             "model_preflight": {**model_preflight, **preflight_summary},
             **({"cuda_device": cuda_receipt} if cuda_receipt is not None else {}),
             "toolchain": toolchain,
-            "metrics": {key: metrics[key] for key in ("case_count", "passed", "failed", "errors", "peak_rss_kib", "category_summary", "canary", "error_diagnostics")},
+            "metrics": {key: metrics[key] for key in ("case_count", "passed", "failed", "errors", "peak_rss_kib", "category_summary", "canary", "error_diagnostics", "quality_diagnostics")},
             **({"child": child_status} if child_status is not None else {}),
             "duration_ms": round((time.monotonic() - started) * 1000, 1),
             "prompt_response_logging": False,

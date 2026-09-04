@@ -148,7 +148,7 @@ class ToolCallEvaluatorTests(unittest.TestCase):
         with patch("scripts.test.evaluate_tool_calls._post", side_effect=fake_post):
             produced = run_local(fixture, "http://127.0.0.1:1/v1/chat/completions", "test-token-20260904", timeout=0.1, max_cases=1)
         aggregate = __import__("scripts.test.evaluate_tool_calls", fromlist=["aggregate_result"]).aggregate_result(produced)
-        self.assertEqual(set(aggregate), {"case_count", "passed", "failed", "errors", "peak_rss_kib", "category_summary", "canary", "error_diagnostics"})
+        self.assertEqual(set(aggregate), {"case_count", "passed", "failed", "errors", "peak_rss_kib", "category_summary", "canary", "error_diagnostics", "quality_diagnostics"})
         parsed, all_passed, has_failure = remote_model_eval._parse_evaluator_result(
             {"status": "completed", "exit_code": 0, "stdout": json.dumps(aggregate)},
             expected_case_count=1, expected_categories={"tool_selection"}, require_diagnostics=True,
@@ -156,6 +156,28 @@ class ToolCallEvaluatorTests(unittest.TestCase):
         self.assertTrue(all_passed)
         self.assertFalse(has_failure)
         self.assertEqual(parsed["case_count"], 1)
+
+    def test_quality_failure_histogram_round_trips_without_case_data(self):
+        fixture = load_fixture()
+        with patch("scripts.test.evaluate_tool_calls._post", side_effect=lambda *args, include_usage=False, **kwargs: ("4", 700) if include_usage else "4"):
+            produced = run_local(fixture, "http://127.0.0.1:1/v1/chat/completions", "test-token-20260904", timeout=0.1, max_cases=1)
+        aggregate = __import__("scripts.test.evaluate_tool_calls", fromlist=["aggregate_result"]).aggregate_result(produced)
+        self.assertEqual(aggregate["quality_diagnostics"]["overall"], {"missing_call": 1})
+        parsed, all_passed, has_failure = remote_model_eval._parse_evaluator_result(
+            {"status": "failed", "exit_code": 1, "stdout": json.dumps(aggregate)},
+            expected_case_count=1, expected_categories={"tool_selection"}, expected_category_counts={"tool_selection": 1}, require_diagnostics=True,
+        )
+        self.assertFalse(all_passed)
+        self.assertTrue(has_failure)
+        self.assertEqual(parsed["quality_diagnostics"]["total_failed"], 1)
+        bad = json.loads(json.dumps(aggregate))
+        bad["quality_diagnostics"]["overall"] = {"raw_model_text": 1}
+        bad["quality_diagnostics"]["by_category"] = {"tool_selection": {"raw_model_text": 1}}
+        with self.assertRaises(ValueError):
+            remote_model_eval._parse_evaluator_result(
+                {"status": "failed", "exit_code": 1, "stdout": json.dumps(bad)},
+                expected_case_count=1, expected_categories={"tool_selection"}, expected_category_counts={"tool_selection": 1}, require_diagnostics=True,
+            )
 
     def test_endpoint_is_explicit_loopback_http_only(self):
         self.assertEqual(validate_endpoint("http://127.0.0.1:49912/v1/chat/completions"), "http://127.0.0.1:49912/v1/chat/completions")

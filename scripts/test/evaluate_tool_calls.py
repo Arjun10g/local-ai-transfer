@@ -37,6 +37,12 @@ DIAGNOSTIC_CODES = frozenset({
     "parse_session_shape", "parse_response_shape", "context_overflow",
     "endpoint", "token", "unknown",
 })
+QUALITY_CODES = frozenset({
+    "forbidden_tool_name", "malformed_call", "unknown_tool", "malformed_parameter",
+    "parameter_too_large", "invalid_json_argument", "invalid_tool_schema",
+    "invalid_arguments", "missing_call", "unexpected_call", "call_mismatch",
+    "quality_unknown",
+})
 FIXTURE_MAX_BYTES = 256 * 1024
 MAX_MESSAGE_CHARS = 4096
 MAX_MESSAGES_PER_CASE = 8
@@ -400,6 +406,10 @@ def evaluate_case(case: dict[str, Any], output: str, tools: list[dict[str, Any]]
     return call == wanted, "exact_call" if call == wanted else "call_mismatch"
 
 
+def _quality_code(reason: str) -> str:
+    return reason if reason in QUALITY_CODES else "quality_unknown"
+
+
 def _post(endpoint: str, token: str, payload: dict[str, Any], timeout: float, *, include_usage: bool = False) -> str | tuple[str, int]:
     validate_endpoint(endpoint)
     session_endpoint = endpoint.removesuffix("/v1/chat/completions") + "/v1/sessions"
@@ -498,6 +508,33 @@ def _diagnostics(records: list[dict[str, Any]], categories: set[str], category_s
     }
 
 
+def _quality_diagnostics(records: list[dict[str, Any]], categories: set[str], category_summary: dict[str, dict[str, int]]) -> dict[str, Any]:
+    overall: dict[str, int] = {}
+    by_category: dict[str, dict[str, int]] = {category: {} for category in sorted(categories)}
+    for item in records:
+        if item["status"] != "fail":
+            continue
+        code = _quality_code(item["reason"])
+        overall[code] = overall.get(code, 0) + 1
+        category_counts = by_category[item["category"]]
+        category_counts[code] = category_counts.get(code, 0) + 1
+    for category in categories:
+        if sum(by_category[category].values()) != category_summary[category]["failed"]:
+            raise ValueError("quality category total mismatch")
+    combined: dict[str, int] = {}
+    for histogram in by_category.values():
+        for code, amount in histogram.items():
+            combined[code] = combined.get(code, 0) + amount
+    if combined != overall:
+        raise ValueError("quality overall total mismatch")
+    return {
+        "schema": "local_bmo.tool-call-quality-diagnostics.v1",
+        "total_failed": sum(overall.values()),
+        "overall": dict(sorted(overall.items())),
+        "by_category": by_category,
+    }
+
+
 def _canary_payload(fixture: dict[str, Any]) -> dict[str, Any]:
     # Exercise the >512-token prefill path with every declared tool while
     # remaining below the fixture's 2048-token context budget.
@@ -569,6 +606,8 @@ def run_local(
             output = _post(endpoint, token, payload, timeout)
             passed, reason = evaluate_case(case, output, fixture["tools"])
             status = "pass" if passed else "fail"
+            if status == "fail":
+                reason = _quality_code(reason)
         except urllib.error.HTTPError as exc:
             status, reason = "error", _error_diagnostic(exc, http_status=exc.code)
         except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError) as exc:
@@ -605,6 +644,7 @@ def run_local(
         "peak_rss_kib": peak_rss, "cases": records, "category_summary": category_summary,
         "canary": canary,
         "error_diagnostics": _diagnostics(records, {case["category"] for case in cases}, category_summary),
+        "quality_diagnostics": _quality_diagnostics(records, {case["category"] for case in cases}, category_summary),
     }
 
 
@@ -613,6 +653,7 @@ def aggregate_result(result: dict[str, Any]) -> dict[str, Any]:
     return {key: result[key] for key in (
         "case_count", "passed", "failed", "errors", "peak_rss_kib",
         "category_summary", "canary", "error_diagnostics",
+        "quality_diagnostics",
     )}
 
 
