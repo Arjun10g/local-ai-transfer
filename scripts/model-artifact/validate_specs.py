@@ -57,6 +57,10 @@ def check_lock(path: Path) -> list[str]:
         errors.append("text-only policy must be true")
     if lock.get("policy", {}).get("weights_downloaded_during_phase_0") is not False:
         errors.append("Phase 0 must not download weights")
+    receipts = lock.get("source_receipts", {})
+    for key in ("model_card_sha256", "license_sha256", "tokenizer_sha256", "chat_template_sha256"):
+        if not isinstance(receipts.get(key), str) or not SHA256_RE.fullmatch(receipts[key]):
+            errors.append(f"source_receipts.{key} must be a SHA-256")
     return errors
 
 

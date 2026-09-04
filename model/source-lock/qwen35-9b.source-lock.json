@@ -29,6 +29,16 @@
     {"path": "video_preprocessor_config.json", "size_bytes": 385, "blob_id": "3ba6735ad7d4d13f54155ecd38b2a94a6dac8fe", "excluded_from_text_only": true},
     {"path": "vocab.json", "size_bytes": 6722759, "blob_id": "0aa0ce0658d60ac4a5d609f4eadb0e8e43514176", "sha256": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003"}
   ],
+  "source_receipts": {
+    "model_card_path": "README.md",
+    "model_card_sha256": "c5f5a8c2dddab69cfbf05279235aa5fddb137939a06539c4c7637aa900fef6d0",
+    "license_path": "LICENSE",
+    "license_sha256": "bbedc3fda3305820b977265f01b8619d87570a6739de3a5582c3464840f1e57a",
+    "tokenizer_path": "tokenizer.json",
+    "tokenizer_sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+    "chat_template_path": "chat_template.jinja",
+    "chat_template_sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
+  },
   "policy": {
     "official_source_only": true,
     "target_side_download": false,
