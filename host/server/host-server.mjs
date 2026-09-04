@@ -38,9 +38,9 @@ async function body(req, maxBytes, timeoutMs) {
 }
 
 export class HostServer {
-  constructor({ controller, engine, config = {} } = {}) {
+  constructor({ controller, engine, config = {}, providers } = {}) {
     if (!controller) throw new TypeError('controller is required');
-    this.controller = controller; this.engine = engine; this.config = mergeConfig(config); this.token = randomBytes(32).toString('base64url'); this.server = null; this.port = null; this.authFailures = new Map();
+    this.controller = controller; this.engine = engine; this.config = mergeConfig(config); this.providers = providers; this.token = randomBytes(32).toString('base64url'); this.server = null; this.port = null; this.authFailures = new Map();
   }
   async listen(port = 0) {
     if (this.server) return this.address();
@@ -89,7 +89,7 @@ export class HostServer {
     if (!isWithinDirectory(UI_ROOT, candidate)) return json(res, 404, { error: 'not_found' });
     try { let content = await readFile(candidate, 'utf8'); if (file === 'index.html') content = content.replaceAll('__LAE_BOOTSTRAP__', this.token); res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', ...securityHeaders() }); res.end(content); } catch { json(res, 404, { error: 'not_found' }); }
   }
-  async status(res) { let engine = { ready: false, backend: 'unknown' }; try { engine = await this.engine?.health?.() ?? engine; } catch { /* generic status only */ } json(res, 200, { host: { bind: '127.0.0.1', port: this.port }, engine, network: { provider: this.config.network.provider, enabled: this.config.network.provider !== 'disabled' }, limits: { max_body_bytes: this.config.host.max_body_bytes, max_connections: this.config.host.max_connections } }); }
+  async status(res) { let engine = { ready: false, backend: 'unknown' }; try { engine = await this.engine?.health?.() ?? engine; } catch { /* generic status only */ } const providers = typeof this.providers === 'function' ? this.providers() : this.providers ?? {}; json(res, 200, { host: { bind: '127.0.0.1', port: this.port }, engine, network: { provider: this.config.network.provider, enabled: this.config.network.provider !== 'disabled' }, providers, limits: { max_body_bytes: this.config.host.max_body_bytes, max_connections: this.config.host.max_connections } }); }
   async chat(req, res) {
     if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' });
     const input = exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), ['session_id', 'message', 'mode', 'request_id'], ['session_id', 'message', 'request_id']);

@@ -6,6 +6,7 @@ import { ConversationController } from './host/agent/controller.mjs';
 import { HostServer } from './host/server/host-server.mjs';
 import { mergeConfig } from './host/agent/config.mjs';
 import { createLocalToolRegistry } from './host/tools/local/index.mjs';
+import { createExternalToolRegistry } from './host/providers/index.mjs';
 
 const configPath = process.env.LAE_CONFIG_PATH;
 let fileConfig = {};
@@ -25,8 +26,9 @@ const config = mergeConfig({ ...fileConfig, engine: { ...(fileConfig.engine ?? {
 if (mode === 'native' && (!model || !backend)) throw new Error('native engine model and backend must be explicit in config or environment');
 const engine = mode === 'native' ? new NativeEngineClient({ endpoint, token, model, backend, timeoutMs: requestTimeoutMs }) : new FixtureEngineClient();
 if (mode === 'native') await engine.waitReady();
-const controller = new ConversationController({ engine, toolRegistry: createLocalToolRegistry({ workspaces: config.workspace_roots, networkProvider: config.network.provider }) });
-const host = new HostServer({ controller, engine, config });
+const externalTools = createExternalToolRegistry({ config: config.providers });
+const controller = new ConversationController({ engine, toolRegistry: { ...createLocalToolRegistry({ workspaces: config.workspace_roots, networkProvider: config.network.provider }), ...externalTools } });
+const host = new HostServer({ controller, engine, config, providers: externalTools.providerStatus });
 const address = await host.listen(Number(process.env.LAE_PORT ?? 0));
 console.log(JSON.stringify({ ready: true, host: address.host, port: address.port, engine: mode, network: config.network.provider }));
 const shutdown = async () => { await host.close(); process.exit(0); };

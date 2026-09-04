@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "lae://contracts/external-tools/0.1.0",
+  "title": "Local Assistant External Tools",
+  "version": "0.1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "tools"],
+  "properties": {
+    "version": {"const": "0.1.0"},
+    "tools": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/tool"}
+    }
+  },
+  "$defs": {
+    "boundedString": {"type": "string", "minLength": 1, "maxLength": 65536},
+    "identifier": {"type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[^\\u0000-\\u001f\\u007f]+$"},
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "risk_tier", "side_effect", "network", "data_egress", "requires_confirmation", "timeout_ms", "output_limit", "input_schema"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{1,95}$"},
+        "version": {"const": "0.1.0"},
+        "risk_tier": {"enum": ["T0", "T1", "T2", "T3"]},
+        "side_effect": {"type": "string", "minLength": 1, "maxLength": 64},
+        "network": {"type": "boolean"},
+        "data_egress": {"type": "string", "minLength": 1, "maxLength": 64},
+        "requires_confirmation": {"type": "boolean"},
+        "timeout_ms": {"type": "integer", "minimum": 100, "maximum": 120000},
+        "output_limit": {"type": "integer", "minimum": 1, "maximum": 1048576},
+        "input_schema": {"$ref": "#/$defs/inputSchema"}
+      }
+    },
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "properties"],
+      "properties": {
+        "type": {"const": "object"},
+        "additionalProperties": {"const": false},
+        "required": {"type": "array", "items": {"type": "string"}},
+        "properties": {"type": "object", "additionalProperties": {"type": "object"}}
+      }
+    }
+  },
+  "tools": [
+    {"name": "mail.list_messages", "version": "0.1.0", "risk_tier": "T1", "side_effect": "read_mail", "network": true, "data_egress": "none", "requires_confirmation": false, "timeout_ms": 10000, "output_limit": 65536, "input_schema": {"type": "object", "additionalProperties": false, "required": [], "properties": {"folder": {"type": "string", "enum": ["inbox", "sentitems", "drafts", "archive"]}, "unread_only": {"type": "boolean"}, "limit": {"type": "integer", "minimum": 1, "maximum": 25}}}},
+    {"name": "mail.read_message", "version": "0.1.0", "risk_tier": "T1", "side_effect": "read_mail", "network": true, "data_egress": "none", "requires_confirmation": false, "timeout_ms": 10000, "output_limit": 65536, "input_schema": {"type": "object", "additionalProperties": false, "required": ["message_id"], "properties": {"message_id": {"$ref": "#/$defs/identifier"}, "max_bytes": {"type": "integer", "minimum": 1, "maximum": 65536}}}},
+    {"name": "mail.create_draft", "version": "0.1.0", "risk_tier": "T2", "side_effect": "create_draft", "network": true, "data_egress": "message_content", "requires_confirmation": true, "timeout_ms": 10000, "output_limit": 8192, "input_schema": {"type": "object", "additionalProperties": false, "required": ["to", "subject", "body"], "properties": {"to": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "string", "maxLength": 320}}, "cc": {"type": "array", "maxItems": 20, "items": {"type": "string", "maxLength": 320}}, "subject": {"type": "string", "maxLength": 998}, "body": {"type": "string", "maxLength": 65536}}}},
+    {"name": "mail.send_draft", "version": "0.1.0", "risk_tier": "T3", "side_effect": "send_mail", "network": true, "data_egress": "message_content", "requires_confirmation": true, "timeout_ms": 10000, "output_limit": 8192, "input_schema": {"type": "object", "additionalProperties": false, "required": ["draft_id"], "properties": {"draft_id": {"$ref": "#/$defs/identifier"}}}},
+    {"name": "mail.mark_read", "version": "0.1.0", "risk_tier": "T2", "side_effect": "modify_mail", "network": true, "data_egress": "none", "requires_confirmation": true, "timeout_ms": 10000, "output_limit": 8192, "input_schema": {"type": "object", "additionalProperties": false, "required": ["message_id", "is_read"], "properties": {"message_id": {"$ref": "#/$defs/identifier"}, "is_read": {"type": "boolean"}}}},
+    {"name": "teams.list_chats", "version": "0.1.0", "risk_tier": "T1", "side_effect": "read_teams", "network": true, "data_egress": "none", "requires_confirmation": false, "timeout_ms": 10000, "output_limit": 65536, "input_schema": {"type": "object", "additionalProperties": false, "required": [], "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 25}}}},
+    {"name": "teams.list_messages", "version": "0.1.0", "risk_tier": "T1", "side_effect": "read_teams", "network": true, "data_egress": "none", "requires_confirmation": false, "timeout_ms": 10000, "output_limit": 65536, "input_schema": {"type": "object", "additionalProperties": false, "required": ["chat_id"], "properties": {"chat_id": {"$ref": "#/$defs/identifier"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}}}},
+    {"name": "teams.send_message", "version": "0.1.0", "risk_tier": "T3", "side_effect": "send_teams", "network": true, "data_egress": "message_content", "requires_confirmation": true, "timeout_ms": 10000, "output_limit": 8192, "input_schema": {"type": "object", "additionalProperties": false, "required": ["chat_id", "body"], "properties": {"chat_id": {"$ref": "#/$defs/identifier"}, "body": {"type": "string", "maxLength": 16384}}}},
+    {"name": "browser.session_start", "version": "0.1.0", "risk_tier": "T1", "side_effect": "browser_navigation", "network": true, "data_egress": "external_destination", "requires_confirmation": true, "timeout_ms": 15000, "output_limit": 8192, "input_schema": {"type": "object", "additionalProperties": false, "required": ["url"], "properties": {"url": {"type": "string", "maxLength": 2048}}}},
+    {"name": "browser.inspect_links", "version": "0.1.0", "risk_tier": "T1", "side_effect": "browser_read", "network": true, "data_egress": "none", "requires_confirmation": false, "timeout_ms": 10000, "output_limit": 65536, "input_schema": {"type": "object", "additionalProperties": false, "required": ["browser_session_id"], "properties": {"browser_session_id": {"$ref": "#/$defs/identifier"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}}}},
+    {"name": "browser.follow_link", "version": "0.1.0", "risk_tier": "T2", "side_effect": "browser_navigation", "network": true, "data_egress": "external_destination", "requires_confirmation": true, "timeout_ms": 15000, "output_limit": 8192, "input_schema": {"type": "object", "additionalProperties": false, "required": ["browser_session_id", "page_revision", "link_id"], "properties": {"browser_session_id": {"$ref": "#/$defs/identifier"}, "page_revision": {"type": "string", "maxLength": 128}, "link_id": {"$ref": "#/$defs/identifier"}}}},
+    {"name": "browser.session_close", "version": "0.1.0", "risk_tier": "T0", "side_effect": "browser_close", "network": false, "data_egress": "none", "requires_confirmation": false, "timeout_ms": 5000, "output_limit": 4096, "input_schema": {"type": "object", "additionalProperties": false, "required": ["browser_session_id"], "properties": {"browser_session_id": {"$ref": "#/$defs/identifier"}}}},
+    {"name": "coding.copilot_ask", "version": "0.1.0", "risk_tier": "T3", "side_effect": "cloud_inference", "network": true, "data_egress": "prompt_and_selected_files", "requires_confirmation": true, "timeout_ms": 30000, "output_limit": 65536, "input_schema": {"type": "object", "additionalProperties": false, "required": ["prompt", "workspace_id", "context_paths"], "properties": {"prompt": {"type": "string", "minLength": 1, "maxLength": 8192}, "workspace_id": {"type": "string", "minLength": 1, "maxLength": 64}, "context_paths": {"type": "array", "maxItems": 8, "items": {"type": "string", "minLength": 1, "maxLength": 1024}}}}}
+  ]
+}
