@@ -70,10 +70,15 @@ export function providerError(status) {
 
 export function normalizeText(value, maxBytes) {
   if (typeof value !== 'string') return { text: '', truncated: false };
-  const normalized = value.replace(/<[^>]*>/gu, ' ').replace(/[ \t\r\f]+/gu, ' ').replace(/\n{3,}/gu, '\n\n').trim();
+  const decode = text => text.replace(/&(?:amp|lt|gt|quot|apos|nbsp);|&#(?:x[0-9a-f]+|[0-9]+);/giu, entity => {
+    const named = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'", '&nbsp;': ' ' };
+    if (named[entity.toLowerCase()]) return named[entity.toLowerCase()]; const hex = entity.match(/^&#x([0-9a-f]+);$/iu); const decimal = entity.match(/^&#([0-9]+);$/u); const code = hex ? Number.parseInt(hex[1], 16) : decimal ? Number.parseInt(decimal[1], 10) : NaN; return Number.isSafeInteger(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : ' ';
+  });
+  const decoded = decode(value);
+  const normalized = decoded.replace(/<!--[\s\S]*?-->/gu, ' ').replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/giu, ' ').replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/giu, ' ').replace(/<[^>]*>/gu, ' ').replace(/[ \t\r\f]+/gu, ' ').replace(/\n{3,}/gu, '\n\n').trim();
   const bytes = Buffer.from(normalized, 'utf8');
   if (bytes.length <= maxBytes) return { text: normalized, truncated: false };
-  return { text: bytes.subarray(0, maxBytes).toString('utf8'), truncated: true };
+  let text = new TextDecoder().decode(bytes.subarray(0, maxBytes)); while (text && text.endsWith('\uFFFD')) text = text.slice(0, -1); return { text, truncated: true };
 }
 
 export function safeArray(value) { return Array.isArray(value) ? value : []; }

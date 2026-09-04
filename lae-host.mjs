@@ -26,7 +26,7 @@ const config = mergeConfig({ ...fileConfig, engine: { ...(fileConfig.engine ?? {
 if (mode === 'native' && (!model || !backend)) throw new Error('native engine model and backend must be explicit in config or environment');
 const engine = mode === 'native' ? new NativeEngineClient({ endpoint, token, model, backend, timeoutMs: requestTimeoutMs }) : new FixtureEngineClient();
 if (mode === 'native') await engine.waitReady();
-const controller = new ConversationController({ engine, toolRegistry: { ...createLocalToolRegistry({ workspaces: config.workspace_roots, networkProvider: config.network.provider }), ...createExternalToolRegistry() } });
+const controller = new ConversationController({ engine, toolRegistry: { ...createLocalToolRegistry({ workspaces: config.workspace_roots, networkProvider: config.network.provider }), ...createExternalToolRegistry({ config: config.providers }) } });
 const host = new HostServer({ controller, engine, config });
 const address = await host.listen(Number(process.env.LAE_PORT ?? 0));
 console.log(JSON.stringify({ ready: true, host: address.host, port: address.port, engine: mode, network: config.network.provider }));
