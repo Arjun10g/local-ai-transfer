@@ -1016,7 +1016,7 @@ def verify_instance_ownership(
         raise ShadeformError("provider GPU count does not match the approved candidate")
     if expected_vram_gb is not None and configuration.get("vram_per_gpu_in_gb") != expected_vram_gb:
         raise ShadeformError("provider VRAM does not match the approved candidate")
-    if expected_os_image is not None and info.get("os") != expected_os_image:
+    if expected_os_image is not None and configuration.get("os") != expected_os_image:
         raise ShadeformError("provider OS image does not match the approved candidate")
     if expected_hourly_usd is not None and info.get("hourly_price") is not None:
         try:
@@ -1140,22 +1140,30 @@ def acquire_pinned_host_key(info: dict[str, Any], known_hosts: Path, *, provider
     second_lines = first_lines if fingerprint else acquire_scan()
     first_keys = {" ".join(line.split()[:3]) for line in first_lines if len(line.split()) >= 3}
     second_keys = {" ".join(line.split()[:3]) for line in second_lines if len(line.split()) >= 3}
-    if len(first_keys) != 1 or not first_keys or first_keys != second_keys:
+    if not first_keys or first_keys != second_keys:
         raise ShadeformError("independent host-key scans were empty or unstable")
-    fingerprints: list[str] = []
+    fingerprint_lines: dict[str, list[str]] = {}
     for line in sorted(first_keys):
         fields = line.split()
         calculated = subprocess.run(["ssh-keygen", "-lf", "-", "-E", "sha256"], input=f"{fields[1]} {fields[2]}\n", check=False, capture_output=True, text=True, timeout=15)
         if calculated.returncode != 0 or len(calculated.stdout.split()) < 2:
             raise ShadeformError("host-key fingerprint calculation failed")
-        fingerprints.append(calculated.stdout.split()[1])
-    if fingerprint and fingerprint not in fingerprints:
-        raise ShadeformError("ssh-keyscan key did not match the provider fingerprint")
-    verified_lines = sorted(first_keys)
+        fingerprint_lines.setdefault(calculated.stdout.split()[1], []).append(line)
+    if fingerprint:
+        matching_lines = fingerprint_lines.get(fingerprint, [])
+        if len(matching_lines) != 1:
+            raise ShadeformError("provider fingerprint did not identify exactly one scanned host key")
+        verified_lines = matching_lines
+    else:
+        # OpenSSH commonly publishes RSA, ECDSA, and Ed25519 host keys. A
+        # stable set across both scans is the proof; rejecting that normal set
+        # would make a fresh ephemeral host unusable.
+        verified_lines = sorted(first_keys)
     known_hosts.parent.mkdir(parents=True, exist_ok=True)
     known_hosts.write_text("\n".join(verified_lines) + "\n", encoding="utf-8")
     known_hosts.chmod(stat.S_IRUSR | stat.S_IWUSR)
-    return {"status": "verified", "fingerprint": fingerprint or fingerprints[0], "key_count": len(verified_lines), "proof": "provider-fingerprint" if fingerprint else "two-stable-bounded-scans-residual-tofu"}
+    selected_fingerprint = fingerprint if fingerprint else next(iter(fingerprint_lines))
+    return {"status": "verified", "fingerprint": selected_fingerprint, "key_count": len(verified_lines), "proof": "provider-fingerprint" if fingerprint else "two-stable-bounded-scans-residual-tofu"}
 
 
 def _transport_options(known_hosts: Path) -> list[str]:

@@ -310,12 +310,37 @@ class StaticSafetyTests(unittest.TestCase):
             self.assertEqual(receipt["proof"], "two-stable-bounded-scans-residual-tofu")
             self.assertEqual(receipt["fingerprint"], "SHA256:stable-fingerprint")
 
+    def test_host_key_multi_algorithm_set_is_stable_and_provider_fingerprint_selects_one(self):
+        from scripts import shadeform_lifecycle as sf
+        keys = "[127.0.0.1]:2222 ssh-ed25519 AAAAED\n[127.0.0.1]:2222 ecdsa-sha2-nistp256 AAAAEC\n"
+        with tempfile.TemporaryDirectory() as directory:
+            responses = iter([
+                types.SimpleNamespace(returncode=0, stdout=keys),
+                types.SimpleNamespace(returncode=0, stdout=keys),
+                types.SimpleNamespace(returncode=0, stdout="256 SHA256:ec host (ECDSA)\n"),
+                types.SimpleNamespace(returncode=0, stdout="256 SHA256:ed host (ED25519)\n"),
+            ])
+            with mock.patch.object(sf.subprocess, "run", side_effect=lambda *args, **kwargs: next(responses)):
+                receipt = sf.acquire_pinned_host_key({"ip": "127.0.0.1", "ssh_port": 2222, "ssh_user": "u"}, Path(directory) / "known_hosts")
+            self.assertEqual(receipt["key_count"], 2)
+            self.assertEqual(len(Path(directory, "known_hosts").read_text().splitlines()), 2)
+        with tempfile.TemporaryDirectory() as directory:
+            responses = iter([
+                types.SimpleNamespace(returncode=0, stdout=keys),
+                types.SimpleNamespace(returncode=0, stdout="256 SHA256:ec host (ECDSA)\n"),
+                types.SimpleNamespace(returncode=0, stdout="256 SHA256:ed host (ED25519)\n"),
+            ])
+            with mock.patch.object(sf.subprocess, "run", side_effect=lambda *args, **kwargs: next(responses)):
+                receipt = sf.acquire_pinned_host_key({"ip": "127.0.0.1", "ssh_port": 2222, "ssh_user": "u"}, Path(directory) / "known_hosts", provider_fingerprint="SHA256:ec")
+            self.assertEqual(receipt["key_count"], 1)
+            self.assertIn("ecdsa-sha2-nistp256", Path(directory, "known_hosts").read_text())
+
     def test_instance_info_must_match_nonce_tags_and_key(self):
         from scripts import shadeform_lifecycle as sf
         nonce = "0123456789abcdef0123456789abcdef"
         info = {"id": "instance-owned-1", "name": f"ep-j1m-{nonce}", "tags": ["local-bmo-j1m", "ep-phase-phase-a", f"ep-run-{nonce}"], "ssh_key_id": "key-owned-1"}
         sf.verify_instance_ownership(info, instance_id="instance-owned-1", phase_id="phase-a", nonce=nonce, ssh_key_id="key-owned-1")
-        exact_profile = {**info, "cloud": "hyperstack", "region": "montreal-canada-2", "shade_instance_type": "A100_80G", "hourly_price": 135, "os": "ubuntu22.04_cuda12.2_shade_os", "configuration": {"gpu_type": "A100_80G", "num_gpus": 1, "vram_per_gpu_in_gb": 80}}
+        exact_profile = {**info, "cloud": "hyperstack", "region": "montreal-canada-2", "shade_instance_type": "A100_80G", "hourly_price": 135, "configuration": {"gpu_type": "A100_80G", "num_gpus": 1, "vram_per_gpu_in_gb": 80, "os": "ubuntu22.04_cuda12.2_shade_os"}}
         sf.verify_instance_ownership(exact_profile, instance_id="instance-owned-1", phase_id="phase-a", nonce=nonce, ssh_key_id="key-owned-1", expected_cloud="hyperstack", expected_region="montreal-canada-2", expected_instance_type="A100_80G", expected_hourly_usd=1.35, expected_gpu="A100_80G", expected_gpu_count=1, expected_vram_gb=80, expected_os_image="ubuntu22.04_cuda12.2_shade_os")
         exact_profile["hourly_price"] = 136
         with self.assertRaises(sf.ShadeformError):
