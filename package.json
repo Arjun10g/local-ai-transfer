@@ -1,0 +1,8 @@
+{
+  "name": "local-bmo-mvp-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24 <26" },
+  "scripts": { "test": "node --test tests/host/*.test.mjs", "start": "node lae-host.mjs" }
+}

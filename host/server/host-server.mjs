@@ -33,7 +33,7 @@ export class HostServer {
   address() { return { host: '127.0.0.1', port: this.port, token: this.token, url: `http://127.0.0.1:${this.port}` }; }
   async close() { if (!this.server) return; await new Promise(resolve => this.server.close(() => resolve())); this.server = null; await this.engine?.shutdown?.(); }
   allowedRequest(req) {
-    if (req.socket.remoteAddress && !['127.0.0.1', '::ffff:127.0.0.1', '::1'].includes(req.socket.remoteAddress)) return false;
+    if (req.socket.remoteAddress && !['127.0.0.1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) return false;
     if (!LOCAL_HOST.test(req.headers.host ?? '')) return false;
     const origin = req.headers.origin;
     if (origin && !/^https?:\/\/(?:127\.0\.0\.1|localhost):\d{1,5}$/i.test(origin)) return false;
@@ -53,7 +53,7 @@ export class HostServer {
       if (req.method === 'POST' && path === '/api/chat') return this.chat(req, res);
       if (req.method === 'POST' && path === '/api/cancel') { const input = await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms); const cancelled = this.controller.cancel(input.request_id); return json(res, cancelled ? 200 : 404, { cancelled }); }
       const confirmation = path.match(/^\/api\/tool-confirmations\/([A-Za-z0-9_-]{8,96})$/);
-      if (req.method === 'POST' && confirmation) { const input = await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms); const accepted = this.controller.confirm(confirmation[1], input.approved); return json(res, accepted ? 200 : 404, { accepted }); }
+      if (req.method === 'POST' && confirmation) { const input = await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms); const accepted = this.controller.confirm(confirmation[1], input.approved, { requestId: input.request_id, callId: input.call_id }); return json(res, accepted ? 200 : 404, { accepted }); }
       if (req.method === 'POST' && path === '/api/shutdown') { json(res, 200, { shutting_down: true }); setImmediate(() => this.close()); return; }
       return json(res, 404, { error: 'not_found' });
     } catch (error) { return json(res, error.code === 'body_too_large' ? 413 : 400, { error: error.code ?? 'bad_request' }); }

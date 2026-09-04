@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 export const ASSISTANT_EVENTS_VERSION = '0.1.0';
 export const EVENT_NAMES = Object.freeze([
   'message.started', 'message.delta', 'message.completed', 'reasoning.started', 'reasoning.completed',
@@ -10,7 +12,7 @@ export class EventError extends Error {
   constructor(code, message) { super(message); this.name = 'EventError'; this.code = code; }
 }
 
-export function makeEvent({ event, requestId, sessionId, sequence, data = {}, eventId = crypto.randomUUID().replaceAll('-', '') }) {
+export function makeEvent({ event, requestId, sessionId, sequence, data = {}, eventId = randomUUID().replaceAll('-', '') }) {
   if (!EVENT_NAMES.includes(event)) throw new EventError('unknown_event', `unknown event: ${event}`);
   if (!ID.test(requestId) || !ID.test(sessionId) || !ID.test(eventId)) throw new EventError('invalid_event_id', 'invalid event identifier');
   if (!Number.isInteger(sequence) || sequence < 0 || sequence > 10000) throw new EventError('invalid_sequence', 'invalid event sequence');

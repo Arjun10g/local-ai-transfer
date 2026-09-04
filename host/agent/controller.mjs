@@ -18,10 +18,11 @@ export class ConversationController {
   resetSession(sessionId) { const session = this.sessions.get(sessionId); if (!session) return false; if (session.state !== 'IDLE' && session.state !== 'COMPLETED' && session.state !== 'FAILED' && session.state !== 'CANCELLED') throw new Error('session_busy'); session.history = []; session.state = 'IDLE'; return true; }
   state(sessionId) { return this.getSession(sessionId).state; }
   cancel(requestId) { if (this.active?.requestId !== requestId) return false; this.active.controller.abort(); this.engine.cancel?.(requestId); return true; }
-  confirm(confirmationId, approved) { const item = this.pending.get(confirmationId); if (!item) return false; if (typeof approved !== 'boolean') return false; this.pending.delete(confirmationId); item.resolve(approved); return true; }
+  confirm(confirmationId, approved, { requestId, callId } = {}) { const item = this.pending.get(confirmationId); if (!item || typeof approved !== 'boolean') return false; if ((requestId && requestId !== item.requestId) || (callId && callId !== item.callId)) return false; this.pending.delete(confirmationId); item.resolve(approved); return true; }
   emitFactory(requestId, sessionId, onEvent) { let sequence = 0; return (event, data) => { const output = makeEvent({ event, requestId, sessionId, sequence: sequence++, data }); onEvent?.(output); return output; }; }
   async runTurn({ sessionId, message, mode = 'normal', requestId = opaque('req'), signal, onEvent } = {}) {
     if (typeof message !== 'string' || !message.trim() || message.length > 32768) throw new Error('invalid_message');
+    if (!/^[A-Za-z0-9_-]{8,96}$/.test(requestId)) throw Object.assign(new Error('invalid_request_id'), { code: 'invalid_request_id' });
     const session = this.getSession(sessionId); if (this.active) throw Object.assign(new Error('another_generation_active'), { code: 'busy' });
     if (!['normal', 'deep'].includes(mode)) throw new Error('invalid_mode');
     const controller = new AbortController();

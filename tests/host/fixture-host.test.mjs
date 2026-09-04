@@ -5,6 +5,7 @@ import { validateEvent } from '../../host/agent/assistant-events.mjs';
 import { ConversationController } from '../../host/agent/controller.mjs';
 import { FixtureEngineClient } from '../../host/engine/fixture-engine.mjs';
 import { HostServer } from '../../host/server/host-server.mjs';
+import { mergeConfig } from '../../host/agent/config.mjs';
 
 const auth = token => ({ authorization: `Bearer ${token}` });
 
@@ -46,10 +47,25 @@ test('host enforces loopback auth/origin, static allowlist, and streams fixture 
   const health = await fetch(`${address.url}/healthz`); assert.equal(health.status, 200);
   const unauthorized = await fetch(`${address.url}/api/status`); assert.equal(unauthorized.status, 401);
   const forbidden = await fetch(`${address.url}/api/status`, { headers: { ...auth(address.token), origin: 'https://attacker.invalid' } }); assert.equal(forbidden.status, 403);
-  const page = await fetch(`${address.url}/`, { headers: auth(address.token) }); assert.equal(page.status, 200); assert.match(await page.text(), /window\.__LAE_TOKEN__ = '[^']+'/);
+  const page = await fetch(`${address.url}/`, { headers: auth(address.token) }); assert.equal(page.status, 200); assert.match(await page.text(), /meta name="lae-token" content="[A-Za-z0-9_-]+"/);
   const sessionResponse = await fetch(`${address.url}/api/sessions`, { method: 'POST', headers: { ...auth(address.token), 'content-type': 'application/json' }, body: '{}' }); assert.equal(sessionResponse.status, 201); const session = await sessionResponse.json();
   const response = await fetch(`${address.url}/api/chat`, { method: 'POST', headers: { ...auth(address.token), 'content-type': 'application/json' }, body: JSON.stringify({ session_id: session.session_id, request_id: 'req_http01', message: 'What time is it?' }) });
   assert.equal(response.status, 200); const stream = await response.text(); assert.match(stream, /event: tool\.completed/); assert.match(stream, /event: message\.completed/);
   const traversal = await fetch(`${address.url}/../package.json`, { headers: auth(address.token) }); assert.equal(traversal.status, 404);
 });
 
+test('config rejects unknown/non-loopback settings and host enforces body bound', async t => {
+  assert.throws(() => mergeConfig({ unknown: true }), /unknown key/);
+  assert.throws(() => mergeConfig({ host: { bind: '0.0.0.0' } }), /127\.0\.0\.1/);
+  const engine = new FixtureEngineClient(); const controller = new ConversationController({ engine }); const host = new HostServer({ controller, engine, config: { host: { max_body_bytes: 1024 } } }); const address = await host.listen(0); t.after(() => host.close());
+  const response = await fetch(`${address.url}/api/sessions`, { method: 'POST', headers: { ...auth(address.token), 'content-type': 'application/json' }, body: JSON.stringify({ padding: 'x'.repeat(2000) }) }); assert.equal(response.status, 413);
+});
+
+test('confirmation is request/call bound and denial continues as a safe tool result', async () => {
+  const engine = { async *generate({ messages }) { if (!messages.some(m => m.role === 'tool')) { yield { kind: 'tool_call_chunk', text: '{"id":"call_safe1","name":"test.confirm","arguments":{}}' }; return; } yield { kind: 'text_delta', text: 'Denied safely.' }; yield { kind: 'done', finish_reason: 'stop' }; } };
+  const controller = new ConversationController({ engine, confirmationTimeoutMs: 1000, toolRegistry: { 'test.confirm': { name: 'test.confirm', risk_tier: 'T2', requires_confirmation: true, execute: async () => { throw new Error('must not execute'); } } } });
+  const events = []; const promise = controller.runTurn({ sessionId: 'ses_confirm', requestId: 'req_confirm', message: 'do it', onEvent: event => events.push(event) });
+  while (!events.some(e => e.event === 'tool.confirmation_required')) await new Promise(resolve => setTimeout(resolve, 1));
+  const required = events.find(e => e.event === 'tool.confirmation_required'); assert.equal(controller.confirm(required.data.confirmation_id, true, { requestId: 'req_other' }), false); assert.equal(controller.confirm(required.data.confirmation_id, false, { requestId: 'req_confirm', callId: 'call_safe1' }), true);
+  const result = await promise; assert.equal(result.state, 'COMPLETED'); assert.match(result.text, /Denied safely/); assert.equal(events.find(e => e.event === 'tool.completed').data.result.status, 'denied');
+});
