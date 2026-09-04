@@ -1,0 +1,430 @@
+[
+  {
+    "argv": [
+      "git",
+      "clone",
+      "--filter=blob:none",
+      "https://github.com/ggml-org/llama.cpp",
+      "/scratch/llama.cpp"
+    ],
+    "ended_at_utc": "2026-09-04T05:58:24.374245+00:00",
+    "exit_code": 0,
+    "stage": 1,
+    "started_at_utc": "2026-09-04T05:58:17.793065+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "git",
+      "-C",
+      "/scratch/llama.cpp",
+      "checkout",
+      "--detach",
+      "3581ba0cf591b3f772fbb002de0f70e294bc0396"
+    ],
+    "ended_at_utc": "2026-09-04T05:58:26.244149+00:00",
+    "exit_code": 0,
+    "stage": 2,
+    "started_at_utc": "2026-09-04T05:58:24.375225+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "sudo",
+      "apt-get",
+      "update"
+    ],
+    "ended_at_utc": "2026-09-04T05:58:28.414759+00:00",
+    "exit_code": 0,
+    "stage": 3,
+    "started_at_utc": "2026-09-04T05:58:26.245054+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "sudo",
+      "env",
+      "DEBIAN_FRONTEND=noninteractive",
+      "apt-get",
+      "install",
+      "-y",
+      "python3-venv",
+      "cmake",
+      "build-essential"
+    ],
+    "ended_at_utc": "2026-09-04T05:58:38.305947+00:00",
+    "exit_code": 0,
+    "stage": 4,
+    "started_at_utc": "2026-09-04T05:58:28.415748+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "python3",
+      "-m",
+      "venv",
+      "/scratch/j1m/venv"
+    ],
+    "ended_at_utc": "2026-09-04T05:58:41.078653+00:00",
+    "exit_code": 0,
+    "stage": 5,
+    "started_at_utc": "2026-09-04T05:58:38.306853+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "mkdir",
+      "-p",
+      "/scratch/j1m/wheelhouse"
+    ],
+    "ended_at_utc": "2026-09-04T05:58:41.083453+00:00",
+    "exit_code": 0,
+    "stage": 6,
+    "started_at_utc": "2026-09-04T05:58:41.079544+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "/scratch/j1m/venv/bin/pip",
+      "wheel",
+      "--disable-pip-version-check",
+      "--no-input",
+      "--wheel-dir",
+      "/scratch/j1m/wheelhouse",
+      "-r",
+      "/scratch/llama.cpp/requirements/requirements-convert_hf_to_gguf.txt",
+      "/scratch/llama.cpp/gguf-py"
+    ],
+    "ended_at_utc": "2026-09-04T05:58:59.593770+00:00",
+    "exit_code": 0,
+    "stage": 7,
+    "started_at_utc": "2026-09-04T05:58:41.084063+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "/scratch/j1m/venv/bin/python",
+      "/scratch/j1m/j1m_runner.py",
+      "--config",
+      "/scratch/j1m/j1m-config.json",
+      "--wheelhouse-lock",
+      "/scratch/j1m/artifacts/wheelhouse-lock.json",
+      "--wheelhouse",
+      "/scratch/j1m/wheelhouse",
+      "--llama-revision",
+      "3581ba0cf591b3f772fbb002de0f70e294bc0396"
+    ],
+    "ended_at_utc": "2026-09-04T05:58:59.859521+00:00",
+    "exit_code": 0,
+    "stage": 8,
+    "started_at_utc": "2026-09-04T05:58:59.594728+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "/scratch/j1m/venv/bin/pip",
+      "install",
+      "--disable-pip-version-check",
+      "--no-input",
+      "--no-index",
+      "--find-links",
+      "/scratch/j1m/wheelhouse",
+      "-r",
+      "/scratch/llama.cpp/requirements/requirements-convert_hf_to_gguf.txt",
+      "gguf"
+    ],
+    "ended_at_utc": "2026-09-04T05:59:32.308103+00:00",
+    "exit_code": 0,
+    "stage": 9,
+    "started_at_utc": "2026-09-04T05:58:59.860393+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "/scratch/j1m/venv/bin/python",
+      "/scratch/j1m/j1m_runner.py",
+      "--config",
+      "/scratch/j1m/j1m-config.json",
+      "--wheelhouse-lock",
+      "/scratch/j1m/artifacts/wheelhouse-lock.json",
+      "--verify-wheelhouse",
+      "--wheelhouse",
+      "/scratch/j1m/wheelhouse"
+    ],
+    "ended_at_utc": "2026-09-04T05:59:32.624395+00:00",
+    "exit_code": 0,
+    "stage": 10,
+    "started_at_utc": "2026-09-04T05:59:32.309097+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "/scratch/j1m/venv/bin/python",
+      "/scratch/j1m/j1m_runner.py",
+      "--config",
+      "/scratch/j1m/j1m-config.json",
+      "--pip-freeze",
+      "/scratch/j1m/artifacts/pip-freeze.txt"
+    ],
+    "ended_at_utc": "2026-09-04T05:59:33.090709+00:00",
+    "exit_code": 0,
+    "stage": 11,
+    "started_at_utc": "2026-09-04T05:59:32.625200+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "/scratch/j1m/venv/bin/python",
+      "/scratch/j1m/j1m_runner.py",
+      "--config",
+      "/scratch/j1m/j1m-config.json",
+      "--toolchain",
+      "/scratch/j1m/artifacts/toolchain.json",
+      "--llama-checkout",
+      "/scratch/llama.cpp",
+      "--wheelhouse-lock",
+      "/scratch/j1m/artifacts/wheelhouse-lock.json"
+    ],
+    "ended_at_utc": "2026-09-04T05:59:33.206398+00:00",
+    "exit_code": 0,
+    "stage": 12,
+    "started_at_utc": "2026-09-04T05:59:33.091787+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "git",
+      "--version"
+    ],
+    "ended_at_utc": "2026-09-04T05:59:33.211313+00:00",
+    "exit_code": 0,
+    "stage": 13,
+    "started_at_utc": "2026-09-04T05:59:33.207355+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "cmake",
+      "--version"
+    ],
+    "ended_at_utc": "2026-09-04T05:59:33.227872+00:00",
+    "exit_code": 0,
+    "stage": 14,
+    "started_at_utc": "2026-09-04T05:59:33.212005+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "python3",
+      "--version"
+    ],
+    "ended_at_utc": "2026-09-04T05:59:33.232282+00:00",
+    "exit_code": 0,
+    "stage": 15,
+    "started_at_utc": "2026-09-04T05:59:33.228578+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "mkdir",
+      "-p",
+      "/scratch/hf/Qwen3.5-9B",
+      "/scratch/j1m/artifacts"
+    ],
+    "ended_at_utc": "2026-09-04T05:59:33.236637+00:00",
+    "exit_code": 0,
+    "stage": 16,
+    "started_at_utc": "2026-09-04T05:59:33.232960+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "python3",
+      "/scratch/j1m/j1m_runner.py",
+      "--config",
+      "/scratch/j1m/j1m-config.json",
+      "--verify-llama",
+      "/scratch/llama.cpp",
+      "3581ba0cf591b3f772fbb002de0f70e294bc0396"
+    ],
+    "ended_at_utc": "2026-09-04T05:59:33.301359+00:00",
+    "exit_code": 0,
+    "stage": 17,
+    "started_at_utc": "2026-09-04T05:59:33.237345+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "cmake",
+      "-S",
+      "/scratch/llama.cpp",
+      "-B",
+      "/scratch/llama.cpp/build",
+      "-DGGML_CUDA=OFF",
+      "-DLLAMA_BUILD_TOOLS=ON",
+      "-DLLAMA_BUILD_TESTS=OFF",
+      "-DLLAMA_BUILD_EXAMPLES=OFF",
+      "-DLLAMA_BUILD_SERVER=OFF",
+      "-DLLAMA_BUILD_APP=OFF",
+      "-DLLAMA_BUILD_UI=OFF",
+      "-DLLAMA_OPENSSL=OFF"
+    ],
+    "ended_at_utc": "2026-09-04T05:59:34.770141+00:00",
+    "exit_code": 0,
+    "stage": 18,
+    "started_at_utc": "2026-09-04T05:59:33.302125+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "cmake",
+      "--build",
+      "/scratch/llama.cpp/build",
+      "--target",
+      "llama-quantize",
+      "-j2"
+    ],
+    "ended_at_utc": "2026-09-04T06:03:08.745397+00:00",
+    "exit_code": 0,
+    "stage": 19,
+    "started_at_utc": "2026-09-04T05:59:34.771416+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "/scratch/j1m/venv/bin/python",
+      "/scratch/j1m/j1m_runner.py",
+      "--config",
+      "/scratch/j1m/j1m-config.json",
+      "--scratch",
+      "/scratch",
+      "--min-scratch-gib",
+      "70"
+    ],
+    "ended_at_utc": "2026-09-04T06:03:08.810646+00:00",
+    "exit_code": 0,
+    "stage": 20,
+    "started_at_utc": "2026-09-04T06:03:08.746457+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "/scratch/j1m/venv/bin/hf",
+      "download",
+      "Qwen/Qwen3.5-9B",
+      "--revision",
+      "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+      "--local-dir",
+      "/scratch/hf/Qwen3.5-9B"
+    ],
+    "ended_at_utc": "2026-09-04T06:03:50.980792+00:00",
+    "exit_code": 0,
+    "stage": 21,
+    "started_at_utc": "2026-09-04T06:03:08.811564+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "/scratch/j1m/venv/bin/python",
+      "/scratch/j1m/j1m_runner.py",
+      "--config",
+      "/scratch/j1m/j1m-config.json",
+      "--mark-source",
+      "/scratch/hf/Qwen3.5-9B",
+      "--revision",
+      "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
+    ],
+    "ended_at_utc": "2026-09-04T06:03:51.046084+00:00",
+    "exit_code": 0,
+    "stage": 22,
+    "started_at_utc": "2026-09-04T06:03:50.981875+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "/scratch/j1m/venv/bin/python",
+      "-u",
+      "/scratch/j1m/j1m_runner.py",
+      "--config",
+      "/scratch/j1m/j1m-config.json",
+      "--verify-source",
+      "/scratch/hf/Qwen3.5-9B",
+      "--lock",
+      "/scratch/j1m/qwen35-9b.source-lock.json",
+      "--receipt",
+      "/scratch/j1m/artifacts/source-model-receipt.json"
+    ],
+    "ended_at_utc": "2026-09-04T06:04:06.054136+00:00",
+    "exit_code": 0,
+    "stage": 23,
+    "started_at_utc": "2026-09-04T06:03:51.046956+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "/scratch/j1m/venv/bin/python",
+      "/scratch/llama.cpp/convert_hf_to_gguf.py",
+      "/scratch/hf/Qwen3.5-9B",
+      "--outfile",
+      "/scratch/j1m/artifacts/Qwen3.5-9B-bf16.gguf",
+      "--outtype",
+      "bf16",
+      "--no-mtp"
+    ],
+    "ended_at_utc": "2026-09-04T06:05:13.535647+00:00",
+    "exit_code": 0,
+    "stage": 24,
+    "started_at_utc": "2026-09-04T06:04:06.055404+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "/scratch/j1m/venv/bin/python",
+      "/scratch/llama.cpp/convert_hf_to_gguf.py",
+      "/scratch/hf/Qwen3.5-9B",
+      "--outfile",
+      "/scratch/j1m/artifacts/Qwen3.5-9B-Q8_0.gguf",
+      "--outtype",
+      "q8_0",
+      "--no-mtp"
+    ],
+    "ended_at_utc": "2026-09-04T06:06:31.305987+00:00",
+    "exit_code": 0,
+    "stage": 25,
+    "started_at_utc": "2026-09-04T06:05:13.536844+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "/scratch/llama.cpp/build/bin/llama-quantize",
+      "/scratch/j1m/artifacts/Qwen3.5-9B-bf16.gguf",
+      "/scratch/j1m/artifacts/Qwen3.5-9B-Q4_K_M.gguf",
+      "Q4_K_M"
+    ],
+    "ended_at_utc": "2026-09-04T06:07:32.448802+00:00",
+    "exit_code": 0,
+    "stage": 26,
+    "started_at_utc": "2026-09-04T06:06:31.307029+00:00",
+    "status": "completed"
+  },
+  {
+    "argv": [
+      "/scratch/j1m/venv/bin/python",
+      "/scratch/j1m/j1m_runner.py",
+      "--config",
+      "/scratch/j1m/j1m-config.json",
+      "--inspect-tensors",
+      "/scratch/j1m/artifacts/Qwen3.5-9B-Q4_K_M.gguf",
+      "/scratch/j1m/artifacts/tensor-metadata.json",
+      "--source-receipt",
+      "/scratch/j1m/artifacts/source-model-receipt.json"
+    ],
+    "ended_at_utc": "2026-09-04T06:07:45.145063+00:00",
+    "exit_code": 1,
+    "stage": 27,
+    "started_at_utc": "2026-09-04T06:07:32.449934+00:00",
+    "status": "failed",
+    "stderr_tail": "m_runner.py\", line 637, in <module>\n    raise SystemExit(main())\n  File \"/scratch/j1m/j1m_runner.py\", line 582, in main\n    metadata_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + \"\\n\", encoding=\"utf-8\")\n  File \"/usr/lib/python3.10/json/__init__.py\", line 238, in dumps\n    **kw).encode(obj)\n  File \"/usr/lib/python3.10/json/encoder.py\", line 201, in encode\n    chunks = list(chunks)\n  File \"/usr/lib/python3.10/json/encoder.py\", line 431, in _iterencode\n    yield from _iterencode_dict(o, _current_indent_level)\n  File \"/usr/lib/python3.10/json/encoder.py\", line 405, in _iterencode_dict\n    yield from chunks\n  File \"/usr/lib/python3.10/json/encoder.py\", line 325, in _iterencode_list\n    yield from chunks\n  File \"/usr/lib/python3.10/json/encoder.py\", line 405, in _iterencode_dict\n    yield from chunks\n  File \"/usr/lib/python3.10/json/encoder.py\", line 325, in _iterencode_list\n    yield from chunks\n  File \"/usr/lib/python3.10/json/encoder.py\", line 438, in _iterencode\n    o = _default(o)\n  File \"/usr/lib/python3.10/json/encoder.py\", line 179, in default\n    raise TypeError(f'Object of type {o.__class__.__name__} '\nTypeError: Object of type uint64 is not JSON serializable\n",
+    "stdout_tail": ""
+  }
+]

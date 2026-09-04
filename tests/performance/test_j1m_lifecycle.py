@@ -228,6 +228,12 @@ class J1MConfigTests(unittest.TestCase):
     def test_readerfield_contents_and_source_chat_template_hash_are_verified(self):
         chat_template = "{{ messages[0]['content'] }}"
 
+        class NumpyLikeUInt64:
+            def __init__(self, value):
+                self.value = value
+            def item(self):
+                return self.value
+
         class ReaderField:
             def __init__(self, value):
                 self.value = value
@@ -236,7 +242,7 @@ class J1MConfigTests(unittest.TestCase):
 
         class Tensor:
             name = "blk.0.attn.weight"
-            shape = [2, 2]
+            shape = [NumpyLikeUInt64(2), NumpyLikeUInt64(2)]
             tensor_type = "Q4_K_M"
 
         class Reader:
@@ -265,6 +271,7 @@ class J1MConfigTests(unittest.TestCase):
             receipt = json.loads(metadata.read_text(encoding="utf-8"))
             self.assertEqual(receipt["gguf_metadata"]["general.architecture"], "qwen35")
             self.assertEqual(receipt["gguf_metadata"]["general.file_type"], 15)
+            self.assertEqual(receipt["tensors"][0]["shape"], [2, 2])
             self.assertEqual(receipt["vision_projection_present"], False)
             self.assertEqual(receipt["chat_template_sha256"], hashlib.sha256(chat_template.encode()).hexdigest())
 

@@ -1,0 +1,13 @@
+{
+  "schema": "local_bmo.j1m.unaccepted-artifact.v1",
+  "phase_id": "j1m-build-20260904-d",
+  "accepted": false,
+  "artifact": {
+    "name": "Qwen3.5-9B-Q4_K_M.gguf",
+    "size_bytes": 5629109088,
+    "sha256": "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b"
+  },
+  "source_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+  "llama_cpp_revision": "3581ba0cf591b3f772fbb002de0f70e294bc0396",
+  "rejection_reason": "tensor metadata serialization failed at stage 27; scan, cleanup, and final manifest stages did not run"
+}

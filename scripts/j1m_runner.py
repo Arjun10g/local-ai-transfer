@@ -70,13 +70,16 @@ def _normalize_gguf_value(value: Any) -> Any:
 
     if hasattr(value, "tolist"):
         value = value.tolist()
-    if isinstance(value, list) and len(value) == 1:
-        value = value[0]
+    if isinstance(value, dict):
+        return {str(key): _normalize_gguf_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        normalized = [_normalize_gguf_value(item) for item in value]
+        return normalized[0] if len(normalized) == 1 else normalized
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="strict")
     if hasattr(value, "item"):
         try:
-            return value.item()
+            return _normalize_gguf_value(value.item())
         except ValueError:
             pass
     return value
@@ -553,7 +556,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             from gguf import GGUFReader
             reader = GGUFReader(str(gguf_path))
-            tensors = [{"name": tensor.name, "shape": list(tensor.shape), "type": str(tensor.tensor_type)} for tensor in reader.tensors]
+            tensors = [{"name": tensor.name, "shape": [_normalize_gguf_value(dimension) for dimension in tensor.shape], "type": str(tensor.tensor_type)} for tensor in reader.tensors]
             wanted_fields = {"general.architecture", "general.file_type", "general.version", "tokenizer.chat_template"}
             fields = {str(key): _reader_field_value(value) for key, value in reader.fields.items() if str(key) in wanted_fields}
             architecture = str(fields.get("general.architecture", "")).lower().replace(".", "").replace("_", "")

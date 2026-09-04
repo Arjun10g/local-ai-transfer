@@ -1,0 +1,160 @@
+{
+  "cmake": "cmake version 3.22.1",
+  "compiler": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.2) 11.4.0",
+  "dependency_wheelhouse_lock": {
+    "artifacts": [
+      {
+        "name": "certifi-2026.7.22-py3-none-any.whl",
+        "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
+        "size_bytes": 136983
+      },
+      {
+        "name": "charset_normalizer-3.5.1-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+        "sha256": "96eefc178f8636b9c760c5829345307fd81cfae9ab1e80997dbddeb0f54ee9a3",
+        "size_bytes": 261644
+      },
+      {
+        "name": "filelock-3.32.5-py3-none-any.whl",
+        "sha256": "142cd9fa77a872c5e78c62329a0d15278fadc686eb89e760017968961a4fd6b2",
+        "size_bytes": 100003
+      },
+      {
+        "name": "fsspec-2026.7.0-py3-none-any.whl",
+        "sha256": "b57ddbafedfaef7018c1ecab32aa200a9d7ca26b77965f64e48b70061249d279",
+        "size_bytes": 206583
+      },
+      {
+        "name": "gguf-0.19.0-py3-none-any.whl",
+        "sha256": "b24041a1cb29061aaccfdc14b1f95e097a0f7c11ac10244f9e91fc6d9448e561",
+        "size_bytes": 125528
+      },
+      {
+        "name": "hf_xet-1.6.0-cp38-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+        "sha256": "d62671bb130879cef0ee4c9ebe47a14af6c66ec53e6d84dc15936e5ffdfac82f",
+        "size_bytes": 4464663
+      },
+      {
+        "name": "huggingface_hub-0.36.2-py3-none-any.whl",
+        "sha256": "48f0c8eac16145dfce371e9d2d7772854a4f591bcb56c9cf548accf531d54270",
+        "size_bytes": 566395
+      },
+      {
+        "name": "idna-3.19-py3-none-any.whl",
+        "sha256": "815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4",
+        "size_bytes": 68550
+      },
+      {
+        "name": "jinja2-3.1.6-py3-none-any.whl",
+        "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67",
+        "size_bytes": 134899
+      },
+      {
+        "name": "markupsafe-3.0.3-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+        "sha256": "f42d0984e947b8adf7dd6dde396e720934d12c506ce84eea8476409563607591",
+        "size_bytes": 20681
+      },
+      {
+        "name": "mpmath-1.3.0-py3-none-any.whl",
+        "sha256": "a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c",
+        "size_bytes": 536198
+      },
+      {
+        "name": "networkx-3.4.2-py3-none-any.whl",
+        "sha256": "df5d4365b724cf81b8c6a7312509d0c22386097011ad1abe274afd5e9d3bbc5f",
+        "size_bytes": 1723263
+      },
+      {
+        "name": "numpy-1.26.4-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+        "sha256": "ffa75af20b44f8dba823498024771d5ac50620e6915abac414251bd971b4529f",
+        "size_bytes": 18240889
+      },
+      {
+        "name": "packaging-26.3-py3-none-any.whl",
+        "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c",
+        "size_bytes": 129956
+      },
+      {
+        "name": "protobuf-4.25.9-cp37-abi3-manylinux2014_x86_64.whl",
+        "sha256": "438c636de8fb706a0de94a12a268ef1ae8f5ba5ae655a7671fcda5968ba3c9be",
+        "size_bytes": 295178
+      },
+      {
+        "name": "pyyaml-6.0.3-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+        "sha256": "9c7708761fccb9397fe64bbc0395abcae8c4bf7b0eac081e12b809bf47700d0b",
+        "size_bytes": 770293
+      },
+      {
+        "name": "regex-2026.9.3-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+        "sha256": "7ab7ad8b557d1f21e8b4a97a2c1a2ac82cf10c92d6a875c90f038ca9ed85dc5b",
+        "size_bytes": 793625
+      },
+      {
+        "name": "requests-2.34.2-py3-none-any.whl",
+        "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0",
+        "size_bytes": 73075
+      },
+      {
+        "name": "safetensors-0.8.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+        "sha256": "fd6f3f93c9a0a7cc2788ee63fb763353d4bd2e89b0751bc78fcf7dda00bea774",
+        "size_bytes": 516040
+      },
+      {
+        "name": "sentencepiece-0.2.2-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "sha256": "44284adc6fbe9d5bdd480541431a3d93f674fa44736714d3ad4bcee8283ace7d",
+        "size_bytes": 1392757
+      },
+      {
+        "name": "setuptools-81.0.0-py3-none-any.whl",
+        "sha256": "fdd925d5c5d9f62e4b74b30d6dd7828ce236fd6ed998a08d81de62ce5a6310d6",
+        "size_bytes": 1062021
+      },
+      {
+        "name": "sympy-1.14.0-py3-none-any.whl",
+        "sha256": "e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5",
+        "size_bytes": 6299353
+      },
+      {
+        "name": "tokenizers-0.22.2-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+        "sha256": "369cc9fc8cc10cb24143873a0d95438bb8ee257bb80c71989e3ee290e8d72c67",
+        "size_bytes": 3274982
+      },
+      {
+        "name": "torch-2.11.0+cpu-cp310-cp310-manylinux_2_28_x86_64.whl",
+        "sha256": "f378df648bf7fb94bbc820dfec37d3d346bd1703c692a2215edebf6edcef8b75",
+        "size_bytes": 190202114
+      },
+      {
+        "name": "tqdm-4.70.0-py3-none-any.whl",
+        "sha256": "7f585706bfddbdebf89daac705b2dfcc16890130727d3197ca62c732b4310953",
+        "size_bytes": 80184
+      },
+      {
+        "name": "transformers-4.57.6-py3-none-any.whl",
+        "sha256": "4c9e9de11333ddfe5114bc872c9f370509198acf0b87a832a0ab9458e2bd0550",
+        "size_bytes": 11993498
+      },
+      {
+        "name": "typing_extensions-4.16.0-py3-none-any.whl",
+        "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
+        "size_bytes": 45571
+      },
+      {
+        "name": "urllib3-2.7.0-py3-none-any.whl",
+        "sha256": "9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897",
+        "size_bytes": 131087
+      }
+    ],
+    "created_at_utc": "2026-09-04T05:58:59.842166+00:00",
+    "llama_cpp_revision": "3581ba0cf591b3f772fbb002de0f70e294bc0396",
+    "schema": "local_bmo.j1m.wheelhouse-lock.v1"
+  },
+  "llama_cpp_head": "3581ba0cf591b3f772fbb002de0f70e294bc0396",
+  "os_packages": [
+    "build-essential=12.9ubuntu3",
+    "cmake=3.22.1-1ubuntu1.22.04.2",
+    "python3-venv=3.10.6-1~22.04.1"
+  ],
+  "pip_freeze": "certifi==2026.7.22\ncharset-normalizer==3.5.1\nfilelock==3.32.5\nfsspec==2026.7.0\ngguf==0.19.0\nhf-xet==1.6.0\nhuggingface_hub==0.36.2\nidna==3.19\nJinja2==3.1.6\nMarkupSafe==3.0.3\nmpmath==1.3.0\nnetworkx==3.4.2\nnumpy==1.26.4\npackaging==26.3\nprotobuf==4.25.9\nPyYAML==6.0.3\nregex==2026.9.3\nrequests==2.34.2\nsafetensors==0.8.0\nsentencepiece==0.2.2\nsympy==1.14.0\ntokenizers==0.22.2\ntorch==2.11.0+cpu\ntqdm==4.70.0\ntransformers==4.57.6\ntyping_extensions==4.16.0\nurllib3==2.7.0\n",
+  "python": "Python 3.10.12",
+  "schema": "local_bmo.j1m.toolchain.v1"
+}
