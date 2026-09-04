@@ -45,7 +45,14 @@ unknown sessions return the typed error envelope in `../error-codes`.
 ```
 
 `stream` defaults to false. `max_tokens` is an integer from 1 through 64.
-The fixture ignores prompt text but retains the session boundary. A streaming
+`messages` is required, ordered, and contains 1–64 objects. Each object has a
+bounded string `role` (`system`, `user`, `assistant`, or `tool`) and bounded
+string `content`; optional bounded `name` and `tool_call_id` are accepted only
+as message fields, and `tool` messages require `name`. Unknown fields,
+duplicate fields, malformed JSON, unsupported roles, non-integer numbers, and
+oversized strings/history are rejected before generation. The fixture ignores
+message text but retains the complete ordered history and session boundary. A streaming
+response is `text/event-stream`, one JSON chunk per line (`data: ...\n\n`), and
 response is `text/event-stream`, one JSON chunk per line (`data: ...\n\n`), and
 terminates with `data: [DONE]\n\n`. Every response includes `X-Request-Id`.
 

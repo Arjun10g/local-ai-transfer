@@ -2,7 +2,11 @@
 
 #include "engine_backend.hpp"
 
+#include <cstddef>
+
 namespace lae {
+
+bool context_budget_fits(size_t prompt_tokens, unsigned max_tokens, unsigned context_tokens);
 
 // Adapter for the pinned llama.cpp C API. Upstream types stay private to the
 // implementation; fixture builds retain a deterministic backend when disabled.

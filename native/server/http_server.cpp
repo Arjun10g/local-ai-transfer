@@ -1,4 +1,5 @@
 #include "http_server.hpp"
+#include "chat_request.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -86,39 +87,6 @@ bool valid_loopback_origin(const std::string& origin) {
   if (origin.rfind(scheme, 0) != 0) return false;
   const std::string authority = origin.substr(std::strlen(scheme));
   return valid_loopback_authority(authority);
-}
-
-std::string json_string(const std::string& body, const std::string& key) {
-  const std::string marker = "\"" + key + "\"";
-  const size_t start = body.find(marker);
-  if (start == std::string::npos) return {};
-  size_t colon = body.find(':', start + marker.size());
-  if (colon == std::string::npos) return {};
-  size_t quote = body.find('"', colon + 1);
-  if (quote == std::string::npos) return {};
-  size_t end = quote + 1;
-  while (end < body.size()) {
-    if (body[end] == '"' && body[end - 1] != '\\') break;
-    ++end;
-  }
-  return end < body.size() ? body.substr(quote + 1, end - quote - 1) : std::string{};
-}
-
-unsigned json_unsigned(const std::string& body, const std::string& key, unsigned fallback) {
-  const std::string marker = "\"" + key + "\"";
-  size_t pos = body.find(marker);
-  if (pos == std::string::npos) return fallback;
-  pos = body.find(':', pos + marker.size());
-  if (pos == std::string::npos) return fallback;
-  ++pos;
-  while (pos < body.size() && std::isspace(static_cast<unsigned char>(body[pos]))) ++pos;
-  if (pos >= body.size() || !std::isdigit(static_cast<unsigned char>(body[pos]))) return fallback;
-  unsigned value = 0;
-  while (pos < body.size() && std::isdigit(static_cast<unsigned char>(body[pos]))) {
-    if (value > 1000000) return fallback + 1;
-    value = value * 10 + static_cast<unsigned>(body[pos++] - '0');
-  }
-  return value;
 }
 
 std::string next_request_id() {
@@ -326,36 +294,30 @@ void HttpServer::handle(Socket client) {
     respond(client, 200, "application/json", std::string("{\"cancelled\":") + (cancelled ? "true" : "false") + "}", request_id);
   } else if (method == "POST" && path == "/v1/chat/completions") {
     if (engine_.state() != LifecycleState::READY) { fail(engine_.state() == LifecycleState::BUSY ? 409 : 503, engine_.state() == LifecycleState::BUSY ? "busy" : "not_ready"); close_socket(client); return; }
-    if (body.size() < 2 || body.front() != '{' || body.back() != '}') { fail(400, "invalid_json"); close_socket(client); return; }
-    const unsigned max_tokens = json_unsigned(body, "max_tokens", 8);
-    if (max_tokens < 1 || max_tokens > 64) { fail(400, "invalid_request"); close_socket(client); return; }
-    const std::string session_id = json_string(body, "session_id");
-    const std::string prompt = json_string(body, "content");
-    if (prompt.empty()) { fail(400, "invalid_request"); close_socket(client); return; }
-    const size_t stream_key = body.find("\"stream\"");
-    const size_t stream_colon = stream_key == std::string::npos ? std::string::npos : body.find(':', stream_key + 8);
-    size_t stream_value = stream_colon == std::string::npos ? std::string::npos : stream_colon + 1;
-    while (stream_value < body.size() && std::isspace(static_cast<unsigned char>(body[stream_value]))) ++stream_value;
-    const bool stream = stream_value != std::string::npos && body.compare(stream_value, 4, "true") == 0;
+    ChatRequest chat_request;
+    std::string parse_error;
+    if (!parse_chat_request(body, chat_request, parse_error)) { fail(400, parse_error); close_socket(client); return; }
+    const std::string& session_id = chat_request.session_id;
+    const bool stream = chat_request.stream;
     const Cancellation cancellation = std::make_shared<std::atomic<bool>>(false);
     std::string combined;
     if (stream) {
       std::ostringstream head; head << "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nX-Request-Id: " << request_id << "\r\n\r\n";
       if (!send_all(client, head.str())) { cancellation->store(true); close_socket(client); return; }
       try {
-        const auto result = engine_.generate(request_id, session_id, {prompt, max_tokens}, cancellation, [&](const std::string& token) {
+        const auto result = engine_.generate(request_id, session_id, chat_request.generation, cancellation, [&](const std::string& token) {
           combined += token;
           return send_all(client, "data: {\"id\":\"" + json_escape(request_id) + "\",\"choices\":[{\"delta\":{\"content\":\"" + json_escape(token) + "\"}}]}\n\n");
         });
         send_all(client, "data: {\"id\":\"" + json_escape(request_id) + "\",\"choices\":[{\"delta\":{},\"finish_reason\":\"" + json_escape(result.finish_reason) + "\"}]}\n\ndata: [DONE]\n\n");
-      } catch (const std::invalid_argument&) { send_all(client, "data: {\"error\":{\"code\":\"not_found\"}}\n\ndata: [DONE]\n\n"); }
+      } catch (const std::invalid_argument& error) { const std::string code = std::string(error.what()) == "context limit exceeded" ? "invalid_request" : "not_found"; send_all(client, "data: {\"error\":{\"code\":\"" + code + "\"}}\n\ndata: [DONE]\n\n"); }
       catch (const std::logic_error&) { send_all(client, "data: {\"error\":{\"code\":\"busy\"}}\n\ndata: [DONE]\n\n"); }
       catch (...) { send_all(client, "data: {\"error\":{\"code\":\"internal_error\"}}\n\ndata: [DONE]\n\n"); }
     } else {
       try {
-        const auto result = engine_.generate(request_id, session_id, {prompt, max_tokens}, cancellation, [&](const std::string& token) { combined += token; return true; });
+        const auto result = engine_.generate(request_id, session_id, chat_request.generation, cancellation, [&](const std::string& token) { combined += token; return true; });
         respond(client, 200, "application/json", "{\"id\":\"" + json_escape(request_id) + "\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"" + json_escape(combined) + "\"},\"finish_reason\":\"" + json_escape(result.finish_reason) + "\"}],\"usage\":{\"completion_tokens\":" + std::to_string(result.generated_tokens) + "}}", request_id);
-      } catch (const std::invalid_argument&) { fail(404, "not_found"); } catch (const std::logic_error&) { fail(409, "busy"); } catch (...) { fail(500, "internal_error"); }
+      } catch (const std::invalid_argument& error) { if (std::string(error.what()) == "context limit exceeded") fail(400, "invalid_request"); else fail(404, "not_found"); } catch (const std::logic_error&) { fail(409, "busy"); } catch (...) { fail(500, "internal_error"); }
     }
   } else {
     fail(404, "not_found");
