@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import signal
@@ -31,6 +32,8 @@ from scripts.shadeform_teardown import teardown_exact
 ROOT = Path(__file__).resolve().parents[1]
 _STDERR_TAIL_LIMIT = 1200
 _EVAL_FIXTURE_MAX_BYTES = 256 * 1024
+_EVAL_RECEIPT_MAX_BYTES = 64 * 1024
+_PREFLIGHT_RECEIPT_MAX_BYTES = 1024
 
 
 class OperatorCancelled(Exception):
@@ -43,6 +46,27 @@ def _redacted_output_tail(value: object) -> str:
     text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value or "")
     text = re.sub(r"(?i)(api[_-]?key|token|password|secret)(\s*[=:]\s*)\S+", r"\1\2<redacted>", text)
     return text[-_STDERR_TAIL_LIMIT:]
+
+
+def _bounded_json(path: Path, limit: int) -> Any:
+    """Decode a small receipt without duplicate keys or unbounded reads."""
+
+    if path.stat().st_size > limit:
+        raise ValueError("receipt exceeds bound")
+
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("receipt contains duplicate key")
+            result[key] = value
+        return result
+
+    with path.open("rb") as stream:
+        raw = stream.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError("receipt exceeds bound")
+    return json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicates)
 
 
 def _persist_lifecycle(phase_id: str, lifecycle: dict[str, Any]) -> None:
@@ -68,17 +92,22 @@ def _tool_eval_contract() -> tuple[int, set[str]]:
     """Return the bounded case/category contract shipped with the evaluator."""
 
     fixture_path = ROOT / "tests" / "model" / "tool_call_eval.json"
-    raw = fixture_path.read_bytes()
-    if len(raw) > _EVAL_FIXTURE_MAX_BYTES:
-        raise ValueError("eval fixture too large")
-    fixture = json.loads(raw.decode("utf-8"))
+    fixture = _bounded_json(fixture_path, _EVAL_FIXTURE_MAX_BYTES)
     limits = fixture.get("limits") if isinstance(fixture, dict) else None
     cases = fixture.get("cases") if isinstance(fixture, dict) else None
     count = limits.get("max_cases") if isinstance(limits, dict) else None
-    if isinstance(count, bool) or not isinstance(count, int) or not isinstance(cases, list) or len(cases) != count or not 1 <= count <= 40:
+    if (not isinstance(fixture, dict) or set(fixture) != {"schema", "model", "protocol", "limits", "tools", "cases"} or
+            fixture.get("schema") != "local_bmo.tool-call-eval.v1" or isinstance(count, bool) or not isinstance(count, int) or
+            not isinstance(cases, list) or len(cases) != count or not 1 <= count <= 40):
         raise ValueError("eval fixture count invalid")
-    categories = {case.get("category") for case in cases if isinstance(case, dict)}
-    if not categories or not all(isinstance(category, str) for category in categories):
+    if any(not isinstance(case, dict) or set(case) != {"id", "category", "messages", "expected"} or
+           not isinstance(case.get("id"), str) or not 1 <= len(case["id"]) <= 128 or
+           not isinstance(case.get("category"), str) or not 1 <= len(case["category"]) <= 64 or
+           not isinstance(case.get("messages"), list) or not isinstance(case.get("expected"), dict)
+           for case in cases):
+        raise ValueError("eval fixture case invalid")
+    categories = {case["category"] for case in cases}
+    if not categories or not all(isinstance(category, str) and category.isascii() for category in categories):
         raise ValueError("eval fixture categories invalid")
     return count, categories
 
@@ -240,7 +269,7 @@ def _eval_timeout(provider_deadline: float, requested: float, *, reserve: float 
     """Return a stage timeout that cannot extend beyond the provider clock."""
 
     remaining = provider_deadline - time.monotonic() - reserve
-    if remaining < 30.0:
+    if remaining < 1.0:
         raise sf.ShadeformError("eval provider deadline has no cleanup-safe stage budget remaining")
     return min(float(requested), remaining)
 
@@ -332,9 +361,19 @@ def _eval_deadline_ceiling(config: dict[str, Any]) -> dict[str, float]:
 def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]:
     """Accept only the bounded aggregate receipt produced by remote eval."""
 
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = _bounded_json(path, _EVAL_RECEIPT_MAX_BYTES)
+    allowed_top_level = {"schema", "status", "artifact", "engine", "model_preflight", "cuda_device", "toolchain", "metrics", "duration_ms", "prompt_response_logging", "token_logging"}
+    required_top_level = {"schema", "status", "artifact", "engine", "model_preflight", "toolchain", "metrics", "prompt_response_logging", "token_logging"}
     if not isinstance(payload, dict) or payload.get("schema") != "local_bmo.j1m.real-tool-eval-receipt.v1":
         raise ValueError("eval receipt schema mismatch")
+    # Keep the diagnostic specific for a missing mandatory evidence section;
+    # other missing/unknown top-level fields remain a schema failure.
+    if "toolchain" not in payload:
+        raise ValueError("eval receipt toolchain evidence invalid")
+    if not required_top_level <= set(payload) or set(payload) - allowed_top_level:
+        raise ValueError("eval receipt schema mismatch")
+    if "duration_ms" in payload and (isinstance(payload["duration_ms"], bool) or not isinstance(payload["duration_ms"], (int, float)) or not math.isfinite(payload["duration_ms"]) or payload["duration_ms"] < 0):
+        raise ValueError("eval receipt duration invalid")
     recorded = payload.get("artifact")
     if not isinstance(recorded, dict) or recorded.get("name") != artifact["name"] or recorded.get("size_bytes") != artifact["size_bytes"] or recorded.get("sha256") != artifact["sha256"]:
         raise ValueError("eval receipt artifact mismatch")
@@ -345,7 +384,9 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
             model_preflight.get("sha256") != artifact["sha256"] or model_preflight.get("gguf_version") != 3):
         raise ValueError("eval receipt model preflight invalid")
     metrics = payload.get("metrics")
-    if not isinstance(metrics, dict) or payload.get("status") not in {"verified", "completed_with_failures"} or any(isinstance(metrics.get(key), bool) or not isinstance(metrics.get(key), int) or metrics[key] < 0 for key in ("case_count", "passed", "failed", "errors")):
+    if (not isinstance(metrics, dict) or set(metrics) - {"case_count", "passed", "failed", "errors", "peak_rss_kib", "category_summary"} or
+            payload.get("status") not in {"verified", "completed_with_failures"} or
+            any(isinstance(metrics.get(key), bool) or not isinstance(metrics.get(key), int) or metrics[key] < 0 for key in ("case_count", "passed", "failed", "errors"))):
         raise ValueError("eval receipt metrics invalid")
     summary = metrics.get("category_summary")
     expected_count, expected_categories = _tool_eval_contract()
@@ -428,7 +469,7 @@ def _verify_startup_preflight_receipt(path: Path, artifact: dict[str, Any]) -> d
             result[key] = value
         return result
 
-    payload = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicates)
+    payload = _bounded_json(path, _PREFLIGHT_RECEIPT_MAX_BYTES)
     if not isinstance(payload, dict) or payload.get("schema") != "local_bmo.j1m.startup-preflight-receipt.v1":
         raise ValueError("startup preflight receipt schema invalid")
     status = payload.get("status")
@@ -440,18 +481,35 @@ def _verify_startup_preflight_receipt(path: Path, artifact: dict[str, Any]) -> d
     elif status in {"rejected", "timeout", "oversize", "terminated", "failed"}:
         if not set(payload) <= {"schema", "status", "error_code", "validator_code", "child"}:
             raise ValueError("startup preflight receipt outcome invalid")
-        if "error_code" in payload and (not isinstance(payload["error_code"], str) or payload["error_code"] not in {
+        error_code = payload.get("error_code")
+        allowed_errors = {
             "engine_model_preflight_failed", "engine_model_preflight_invalid", "engine_model_preflight_exit",
             "engine_model_preflight_output_too_large", "engine_model_preflight_timeout", "engine_model_preflight_terminated_by_signal",
-        }):
+        }
+        if not isinstance(error_code, str) or error_code not in allowed_errors:
             raise ValueError("startup preflight receipt outcome invalid")
-        if "validator_code" in payload and payload["validator_code"] not in _STARTUP_PREFLIGHT_VALIDATOR_CODES:
+        if status == "timeout" and error_code != "engine_model_preflight_timeout":
+            raise ValueError("startup preflight receipt outcome invalid")
+        if status == "oversize" and error_code != "engine_model_preflight_output_too_large":
+            raise ValueError("startup preflight receipt outcome invalid")
+        if status == "terminated" and error_code != "engine_model_preflight_terminated_by_signal":
+            raise ValueError("startup preflight receipt outcome invalid")
+        if "validator_code" in payload and (not isinstance(payload["validator_code"], str) or payload["validator_code"] not in _STARTUP_PREFLIGHT_VALIDATOR_CODES or status != "rejected"):
             raise ValueError("startup preflight receipt outcome invalid")
         child = payload.get("child")
         if child is not None and (not isinstance(child, dict) or set(child) not in ({"exit_code"}, {"signal"}) or
                                   not isinstance(next(iter(child.values())), int) or isinstance(next(iter(child.values())), bool) or
-                                  not 0 <= next(iter(child.values())) <= 255):
+                                  not 0 <= next(iter(child.values())) <= 255 or
+                                  ("signal" in child and child["signal"] < 1)):
             raise ValueError("startup preflight receipt child invalid")
+        if status == "terminated" and (not isinstance(child, dict) or "signal" not in child):
+            raise ValueError("startup preflight receipt child invalid")
+        if isinstance(child, dict) and "signal" in child and status != "terminated":
+            raise ValueError("startup preflight receipt child invalid")
+        if status == "failed" and error_code != "engine_model_preflight_failed":
+            raise ValueError("startup preflight receipt outcome invalid")
+        if status == "rejected" and error_code == "engine_model_preflight_failed":
+            raise ValueError("startup preflight receipt outcome invalid")
     else:
         raise ValueError("startup preflight receipt outcome invalid")
     return {"status": status}
@@ -608,7 +666,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             # watchdog are in place.
             sf.append_cost_event({"instance_id": attempt_id, "phase_id": phase_id, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
             j1m_runner.write_progress(progress_path, "wait-active-starting", phase_id=phase_id)
-            wait_budget = max(30, int(min(float(config["modes"][mode].get("activation_timeout_seconds", 1800)), provider_deadline - time.monotonic() - 120)))
+            wait_budget = int(_eval_timeout(provider_deadline, float(config["modes"][mode].get("activation_timeout_seconds", 1800))))
             info = sf.wait_active(api_key, phase_id, instance_id, timeout_seconds=wait_budget)
             lifecycle["instance_info"] = info
             sf.verify_instance_ownership(info, instance_id=instance_id, phase_id=phase_id, nonce=nonce, expected_name=sf.owned_instance_name(run_id, nonce), ssh_key_id=key_id, expected_cloud=candidate.cloud, expected_region=candidate.region, expected_instance_type=candidate.instance_type, expected_hourly_usd=candidate.hourly_usd, expected_gpu=candidate.gpu, expected_gpu_count=1, expected_vram_gb=candidate.vram_gb, expected_os_image=candidate.os_image)
@@ -656,7 +714,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 )
                 j1m_runner.write_progress(progress_path, "remote-build-starting", phase_id=phase_id)
                 transfer_reserve = float(config["modes"][mode].get("transfer_reserve_seconds", 0))
-                lifecycle["job"] = _remote(remote_job, timeout=max(30, provider_deadline - time.monotonic() - transfer_reserve - 120))
+                lifecycle["job"] = _remote(remote_job, timeout=_eval_timeout(provider_deadline, float("inf"), reserve=transfer_reserve + 120.0))
             else:
                 eval_commands = _eval_remote_commands(config, remote_root)
                 _progress(progress_path, "eval-bootstrap-starting", phase_id=phase_id)

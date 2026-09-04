@@ -24,11 +24,11 @@ void PinnedChatTemplate::load(const std::string& source) {
   jinja::lexer lexer;
   auto tokens = [&] {
     try { return lexer.tokenize(source); }
-    catch (...) { throw std::runtime_error("llama chat template parse failed"); }
+    catch (const std::exception&) { throw std::runtime_error("llama chat template parse failed"); }
   }();
   auto program = [&] {
     try { return jinja::parse_from_tokens(tokens); }
-    catch (...) { throw std::runtime_error("llama chat template parse failed"); }
+    catch (const std::exception&) { throw std::runtime_error("llama chat template parse failed"); }
   }();
   impl_->source = tokens.source;
   impl_->program = std::make_unique<jinja::program>(std::move(program));

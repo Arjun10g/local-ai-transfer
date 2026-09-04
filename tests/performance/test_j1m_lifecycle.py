@@ -826,6 +826,18 @@ class StaticSafetyTests(unittest.TestCase):
             reader.close()
             os.close(write_fd)
 
+    def test_remote_eval_ready_reader_rejects_bytes_after_identity_line(self):
+        remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_ready_trailing")
+        read_fd, write_fd = os.pipe()
+        reader = os.fdopen(read_fd, "rb", buffering=0)
+        try:
+            os.write(write_fd, b'{"event":"ready"}\nextra\n')
+            with self.assertRaisesRegex(ValueError, "engine_ready_receipt_invalid"):
+                remote._read_ready_line(reader, time.monotonic() + 1.0)
+        finally:
+            reader.close()
+            os.close(write_fd)
+
     def test_remote_eval_stages_share_outer_deadline_and_cleanup_reserve(self):
         remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_deadline")
         with mock.patch.object(remote.time, "monotonic", return_value=100.0):
@@ -835,6 +847,42 @@ class StaticSafetyTests(unittest.TestCase):
                 remote._stage_timeout(130.5, 30.0, "expired")
         self.assertEqual(remote.EVAL_TOTAL_TIMEOUT, 480.0)
         self.assertEqual(remote.CLEANUP_RESERVE_SECONDS, 30.0)
+
+    def test_remote_eval_hash_and_fixture_reads_honor_deadline_and_exact_case_shape(self):
+        remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_bounded_reads")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "small.bin"
+            path.write_bytes(b"fixture")
+            with mock.patch.object(remote.time, "monotonic", return_value=100.0):
+                with self.assertRaisesRegex(ValueError, "q4_artifact_hash_mismatch"):
+                    remote.sha256(path, deadline=120.0)
+            fixture = json.loads((ROOT / "tests/model/tool_call_eval.json").read_text(encoding="utf-8"))
+            fixture["cases"][0]["unexpected"] = True
+            bad = Path(directory) / "bad-fixture.json"
+            bad.write_text(json.dumps(fixture), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "evaluator_fixture_invalid"):
+                remote._fixture_contract(bad)
+
+    def test_remote_eval_preflight_receipt_rejects_zero_signal_and_requires_not_started_reason(self):
+        remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_receipt_coherence")
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_receipt_coherence")
+        artifact = {"size_bytes": 4, "sha256": "a" * 64}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "startup-preflight-receipt.json"
+            summary = remote._write_preflight_receipt(path, status="not_started", error_code="engine_model_preflight_not_started")
+            self.assertEqual(summary["status"], "not_started")
+            with self.assertRaisesRegex(ValueError, "engine_model_preflight_invalid"):
+                remote._write_preflight_receipt(path, status="not_started", error_code="engine_model_preflight_failed")
+            path.write_text(json.dumps({"schema": remote.MODEL_PREFLIGHT_RECEIPT_SCHEMA, "status": "terminated", "error_code": "engine_model_preflight_terminated_by_signal", "child": {"signal": 0}}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "child"):
+                orchestrator._verify_startup_preflight_receipt(path, artifact)
+
+    def test_remote_eval_startup_literals_map_to_finite_category_codes(self):
+        remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_stderr_categories")
+        self.assertEqual(remote._exact_serve_stderr_code("exact configured CUDA device is unavailable\n"), "engine_cuda_unavailable")
+        self.assertEqual(remote._exact_serve_stderr_code("llama model load failed\n"), "engine_model_load_failed")
+        self.assertEqual(remote._exact_serve_stderr_code("loopback bind/listen failed\n"), "engine_bind_failed")
+        self.assertIsNone(remote._exact_serve_stderr_code("prefix\nllama model load failed\ntrailing diagnostics"))
 
     def test_remote_eval_serve_eof_is_finite_and_secret_free(self):
         remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_eof")

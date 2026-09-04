@@ -145,11 +145,11 @@ int main(int argc, char** argv) {
     else if (arg == "--config" && i + 1 < argc) { config_path = argv[++i]; config_seen = true; }
     else { std::cerr << "unknown argument\n"; return 2; }
   }
-  } catch (const std::exception& error) { std::cerr << "invalid numeric argument: " << error.what() << "\n"; return 2; }
+  } catch (const std::exception&) { std::cerr << "invalid numeric argument\n"; return 2; }
   if (config_seen) {
     lae::RuntimeConfigFile file_config;
     std::string config_error;
-    if (!lae::load_runtime_config(config_path, file_config, config_error)) { std::cerr << "config load failed: " << config_error << "\n"; return 2; }
+    if (!lae::load_runtime_config(config_path, file_config, config_error)) { std::cerr << "config load failed\n"; return 2; }
     if (!backend_seen) backend = file_config.backend_profile;
     if (!model_seen) model_path = file_config.model_path;
     if (!context_seen) context_tokens = file_config.context_tokens;
@@ -192,9 +192,9 @@ int main(int argc, char** argv) {
     backend_instance = std::make_unique<lae::LlamaBackend>();
   } else { std::cerr << "unsupported backend profile\n"; return 2; }
   lae::Engine engine(std::move(backend_instance));
-  try { engine.initialize(backend_config); } catch (const std::exception& error) { std::cerr << error.what() << "\n"; return 1; }
+  try { engine.initialize(backend_config); } catch (const std::exception&) { std::cerr << "engine initialization failed\n"; return 1; }
   lae::HttpServer server(engine, token);
-  try { server.start(port); } catch (const std::exception& error) { std::cerr << error.what() << "\n"; return 1; }
+  try { server.start(port); } catch (const std::exception&) { std::cerr << "server start failed\n"; return 1; }
   active_engine = &engine; active_server = &server;
   std::signal(SIGINT, on_signal); std::signal(SIGTERM, on_signal);
   std::cout << "{\"event\":\"ready\",\"port\":" << server.port() << ",\"bind\":\"127.0.0.1\",\"token_required\":true}\n" << std::flush;
