@@ -43,6 +43,7 @@ export const graphDefinitions = Object.freeze({
 
 const argument = (name, input) => {
   let args;
+  const bodyArgument = (value, field, max, min = 0) => { if (typeof value !== 'string' || value.length < min || value.length > max || Buffer.byteLength(value, 'utf8') > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value)) throw new ProviderToolError('invalid_tool_arguments', `${field} must be a bounded body`); };
   if (name === 'mail.list_messages') {
     args = exactObject(input, ['folder', 'unread_only', 'limit']);
     if (own(args, 'folder')) boundedString(args.folder, 'folder', { min: 1, max: 32 });
@@ -57,8 +58,7 @@ const argument = (name, input) => {
     const recipient = (value, field) => { boundedString(value, field, { min: 3, max: 320, identifier: true }); if (!EMAIL.test(value)) throw new ProviderToolError('invalid_tool_arguments', `${field} must be an email address`); };
     boundedArray(args.to, 'to', { min: 1, max: 20, item: recipient });
     if (own(args, 'cc')) boundedArray(args.cc, 'cc', { max: 20, item: recipient });
-    boundedString(args.subject, 'subject', { max: 998 }); boundedString(args.body, 'body', { max: 65536 });
-    if (Buffer.byteLength(args.body, 'utf8') > 65536) throw new ProviderToolError('invalid_tool_arguments', 'body exceeds byte limit');
+    boundedString(args.subject, 'subject', { max: 998 }); bodyArgument(args.body, 'body', 65536);
   } else if (name === 'mail.send_draft') {
     args = exactObject(input, ['draft_id'], ['draft_id']); boundedString(args.draft_id, 'draft_id', { min: 1, max: 512, identifier: true });
   } else if (name === 'mail.mark_read') {
@@ -68,7 +68,7 @@ const argument = (name, input) => {
   } else if (name === 'teams.list_messages') {
     args = exactObject(input, ['chat_id', 'limit'], ['chat_id']); boundedString(args.chat_id, 'chat_id', { min: 1, max: 512, identifier: true }); if (own(args, 'limit')) boundedInteger(args.limit, 'limit', 1, 50);
   } else if (name === 'teams.send_message') {
-    args = exactObject(input, ['chat_id', 'body'], ['chat_id', 'body']); boundedString(args.chat_id, 'chat_id', { min: 1, max: 512, identifier: true }); boundedString(args.body, 'body', { min: 1, max: 16384 }); if (Buffer.byteLength(args.body, 'utf8') > 16384) throw new ProviderToolError('invalid_tool_arguments', 'body exceeds byte limit');
+    args = exactObject(input, ['chat_id', 'body'], ['chat_id', 'body']); boundedString(args.chat_id, 'chat_id', { min: 1, max: 512, identifier: true }); bodyArgument(args.body, 'body', 16384, 1);
   } else throw new ProviderToolError('invalid_tool_arguments', `unknown Graph tool: ${name}`);
   return structuredClone(args);
 };
@@ -90,8 +90,9 @@ const projectionMessage = (value, maxPreview = 1024) => {
 const projectionDraft = value => {
   if (!value || typeof value !== 'object' || typeof value.id !== 'string' || value.id.length < 1) return null;
   const boundedField = (field, max, required = false) => { if (field === undefined && !required) return ''; if (typeof field !== 'string' || field.length < (required ? 1 : 0) || field.length > max || /[\u0000-\u001f\u007f]/u.test(field)) return null; return field; };
-  const id = boundedField(value.id, 512, true); const subject = boundedField(value.subject, 998) ?? (value.subject === undefined ? '' : null); const rawBody = boundedField(value.body?.content, 65536, true); const contentType = boundedField(value.body?.contentType, 32) ?? (value.body?.contentType === undefined ? '' : null);
-  if (!id || subject === null || !rawBody || contentType === null || Buffer.byteLength(rawBody, 'utf8') > 65536) return null;
+  const boundedBody = field => typeof field === 'string' && field.length <= 65536 && Buffer.byteLength(field, 'utf8') <= 65536 && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(field) ? field : null;
+  const id = boundedField(value.id, 512, true); const subject = boundedField(value.subject, 998) ?? (value.subject === undefined ? '' : null); const rawBody = boundedBody(value.body?.content); const contentType = boundedField(value.body?.contentType, 32) ?? (value.body?.contentType === undefined ? '' : null);
+  if (!id || subject === null || rawBody === null || contentType === null) return null;
   const body = normalizeText(rawBody, 65536); if (body.truncated) return null;
   const recipients = [];
   for (const [field, list] of [['to', value.toRecipients], ['cc', value.ccRecipients]]) {

@@ -143,6 +143,8 @@ test('Graph refuses draft recipient changes and discloses create-body truncation
   } };
   const tools = createMicrosoftGraphTools({ enabled: true, credentialSource: { getAccessToken: async () => 'synthetic-token' }, transport }); const send = call('mail.send_draft', { draft_id: 'draft-recipient' }, 'call_recipient_change'); await tools['mail.send_draft'].preview(send); await tools['mail.send_draft'].preview({ ...send, preview_authorized: true, authorization: { kind: 'user_confirmation' } }); const refused = value(await tools['mail.send_draft'].execute({ ...send, authorization: { kind: 'user_confirmation' } })); assert.equal(refused.code, 'provider_permission_insufficient'); assert.equal(sends, 0);
   const create = call('mail.create_draft', { to: ['alice@example.com'], subject: 'x', body: '😀'.repeat(300) }, 'call_create_truncation'); const createPreview = await tools['mail.create_draft'].preview(create); assert.equal(createPreview.body_truncated, true); assert.ok(Buffer.byteLength(createPreview.body_preview, 'utf8') <= 512);
+  const multiline = call('mail.create_draft', { to: ['alice@example.com'], subject: 'x', body: 'line one\n\tline two\r\n' }, 'call_create_multiline'); assert.equal((await tools['mail.create_draft'].preview(multiline)).body_preview, 'line one\n\tline two\r\n');
+  const empty = call('mail.create_draft', { to: ['alice@example.com'], subject: 'x', body: '' }, 'call_create_empty'); assert.equal((await tools['mail.create_draft'].preview(empty)).body_preview, '');
 });
 
 test('Microsoft HTTPS transport uses redirect errors, JSON framing, and safe retry policy', async () => {
