@@ -23,6 +23,7 @@ from scripts.test.evaluate_tool_calls import (
     main,
     parse_tool_call,
     run_local,
+    validate_fixture,
     validate_endpoint,
 )
 
@@ -151,8 +152,8 @@ class ToolCallEvaluatorTests(unittest.TestCase):
             def read(self, limit):
                 return self.body
 
-        session = FixedResponse(b'{"id":"s"}')
-        body = json.dumps({"choices": [{"message": {"content": "x" * (MODEL_OUTPUT_MAX_CHARS + 1)}}]}).encode()
+        session = FixedResponse(b'{"id":"sess-00000001","object":"session","state_version":1}')
+        body = json.dumps({"choices": [{"message": {"role": "assistant", "content": "x" * (MODEL_OUTPUT_MAX_CHARS + 1)}}]}).encode()
         with patch("scripts.test.evaluate_tool_calls._open_url", side_effect=[session, FixedResponse(body)]):
             with self.assertRaisesRegex(ValueError, "model_output_too_large"):
                 _post("http://127.0.0.1:49912/v1/chat/completions", "test-token-20260904", {}, 0.1)
@@ -198,8 +199,50 @@ class ToolCallEvaluatorTests(unittest.TestCase):
             fixture = load_fixture()
             fixture["cases"][0]["messages"][0]["content"] = "x" * 4097
             path.write_text(json.dumps(fixture), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "message is unbounded"):
+            with self.assertRaisesRegex(ValueError, "message_unbounded"):
                 load_fixture(path)
+
+    def test_fixture_shapes_and_run_local_fail_closed_without_tracebacks(self):
+        valid = load_fixture()
+        mutations = (
+            ("limits", {**valid["limits"], "max_cases": "8"}),
+            ("tool", [None]),
+            ("case", [None]),
+            ("message", [{"role": "user"}]),
+            ("expected", [{**valid["cases"][0], "expected": {}}]),
+            ("model", 7),
+        )
+        for name, replacement in mutations:
+            with self.subTest(name=name):
+                fixture = json.loads(json.dumps(valid))
+                if name == "limits": fixture["limits"] = replacement
+                elif name == "tool": fixture["tools"] = replacement
+                elif name == "case": fixture["cases"] = replacement
+                elif name == "message": fixture["cases"][0]["messages"] = replacement
+                elif name == "expected": fixture["cases"] = replacement
+                else: fixture["model"] = replacement
+                with self.assertRaises(ValueError):
+                    validate_fixture(fixture)
+                result = run_local(fixture, "http://127.0.0.1:1/v1/chat/completions", "test-token-20260904", timeout=0.1, max_cases=1)
+                self.assertEqual((result["errors"], result["case_count"]), (1, 0))
+
+    def test_post_rejects_malformed_session_and_completion_shapes(self):
+        class Response:
+            def __init__(self, body): self.body = body
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self, limit): return self.body
+        for session_body in (b"[]", b'{"id":"bad"}', b'{"id":"sess-00000001","object":"session","state_version":2}'):
+            with self.subTest(session=session_body):
+                with patch("scripts.test.evaluate_tool_calls._open_url", return_value=Response(session_body)):
+                    with self.assertRaisesRegex(ValueError, "session id"):
+                        _post("http://127.0.0.1:49912/v1/chat/completions", "test-token-20260904", {}, 0.1)
+        session = Response(b'{"id":"sess-00000001","object":"session","state_version":1}')
+        for completion_body in (b"[]", b'{"choices":[]}', b'{"choices":[{"message":{"role":"user","content":"x"}}]}', b'{"choices":[{"message":{"role":"assistant","content":7}}]}'):
+            with self.subTest(completion=completion_body):
+                with patch("scripts.test.evaluate_tool_calls._open_url", side_effect=[session, Response(completion_body)]):
+                    with self.assertRaisesRegex(ValueError, "response_missing_content"):
+                        _post("http://127.0.0.1:49912/v1/chat/completions", "test-token-20260904", {}, 0.1)
 
     def test_cli_bounds_are_fail_closed(self):
         for argument in (("--max-cases", "0"), ("--max-cases", "9"), ("--timeout", "0"), ("--timeout", "601"), ("--timeout", "nan"), ("--engine-pid", "0")):

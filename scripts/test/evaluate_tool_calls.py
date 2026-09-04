@@ -9,6 +9,7 @@ to the result.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import math
 import os
@@ -33,6 +34,14 @@ MAX_MESSAGE_CHARS = 4096
 MAX_MESSAGES_PER_CASE = 8
 MAX_TOOLS = 16
 MAX_TOOL_SCHEMA_BYTES = 16384
+MAX_JSON_DEPTH = 8
+ID = re.compile(r"^[A-Za-z0-9_.-]{1,96}$")
+NAME = re.compile(r"^[a-z][a-z0-9_.-]{1,95}$")
+SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{8,96}$")
+ROLE = {"user", "system"}
+CATEGORIES = {"tool_selection", "argument_fidelity", "no_tool", "malformed_prompt", "prompt_injection"}
+FIXTURE_KEYS = {"schema", "model", "protocol", "limits", "tools", "cases"}
+LIMIT_KEYS = {"context_tokens", "max_output_tokens", "temperature", "max_cases"}
 TOOL_CALL = re.compile(
     r"\A\s*<tool_call>\s*<function=([a-z][a-z0-9_.-]{1,95})>"
     r"(.*?)</function>\s*</tool_call>\s*\Z",
@@ -85,16 +94,160 @@ def validate_endpoint(endpoint: str) -> str:
 
 def _read_response(response: Any, limit: int) -> bytes:
     data = response.read(limit + 1)
+    if not isinstance(data, (bytes, bytearray)):
+        raise ValueError("response_invalid")
     if len(data) > limit:
         raise ValueError("response_too_large")
     return data
+
+
+def _exact_keys(value: dict[str, Any], keys: set[str]) -> None:
+    if set(value) != keys:
+        raise ValueError("fixture_shape")
+
+
+def _bounded_json(value: Any, depth: int = 0) -> None:
+    if depth > MAX_JSON_DEPTH:
+        raise ValueError("fixture_json_too_deep")
+    if isinstance(value, str):
+        if len(value) > MAX_MESSAGE_CHARS:
+            raise ValueError("fixture_string_unbounded")
+    elif isinstance(value, list):
+        if len(value) > 32:
+            raise ValueError("fixture_array_unbounded")
+        for item in value:
+            _bounded_json(item, depth + 1)
+    elif isinstance(value, dict):
+        if len(value) > 32:
+            raise ValueError("fixture_object_unbounded")
+        for key, item in value.items():
+            if not isinstance(key, str) or len(key) > 96:
+                raise ValueError("fixture_key_unbounded")
+            _bounded_json(item, depth + 1)
+    elif isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("fixture_number_invalid")
+    elif value is not None and not isinstance(value, (bool, int, float)):
+        raise ValueError("fixture_value_invalid")
+
+
+def _bounded_int(value: Any, low: int, high: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+        raise ValueError("fixture_limit_invalid")
+
+
+def _validate_tool_schema(tool: Any) -> None:
+    if not isinstance(tool, dict):
+        raise ValueError("fixture_tool_invalid")
+    _exact_keys(tool, {"type", "function"})
+    if tool["type"] != "function" or not isinstance(tool["function"], dict):
+        raise ValueError("fixture_tool_invalid")
+    function = tool["function"]
+    _exact_keys(function, {"name", "description", "parameters"})
+    if not isinstance(function["name"], str) or not NAME.fullmatch(function["name"]):
+        raise ValueError("fixture_tool_name_invalid")
+    if not isinstance(function["description"], str) or not 1 <= len(function["description"]) <= MAX_MESSAGE_CHARS:
+        raise ValueError("fixture_tool_description_invalid")
+    parameters = function["parameters"]
+    if not isinstance(parameters, dict) or set(parameters) - {"type", "properties", "required", "additionalProperties"}:
+        raise ValueError("fixture_parameters_invalid")
+    if parameters.get("type") != "object" or not isinstance(parameters.get("properties"), dict) or len(parameters["properties"]) > 32:
+        raise ValueError("fixture_parameters_invalid")
+    if "additionalProperties" in parameters and not isinstance(parameters["additionalProperties"], bool):
+        raise ValueError("fixture_parameters_invalid")
+    required = parameters.get("required", [])
+    if not isinstance(required, list) or len(required) > 32 or any(not isinstance(item, str) for item in required) or len(set(required)) != len(required):
+        raise ValueError("fixture_required_invalid")
+    for key in required:
+        if not isinstance(key, str) or not ID.fullmatch(key) or key not in parameters["properties"]:
+            raise ValueError("fixture_required_invalid")
+    for key, schema in parameters["properties"].items():
+        if not isinstance(key, str) or not ID.fullmatch(key) or not isinstance(schema, dict):
+            raise ValueError("fixture_property_invalid")
+        if set(schema) - {"type", "enum", "description"} or schema.get("type") not in {"string", "number", "integer", "boolean", "object", "array"}:
+            raise ValueError("fixture_property_invalid")
+        if "description" in schema and (not isinstance(schema["description"], str) or len(schema["description"]) > MAX_MESSAGE_CHARS):
+            raise ValueError("fixture_property_invalid")
+        if "enum" in schema and (not isinstance(schema["enum"], list) or len(schema["enum"]) > 16):
+            raise ValueError("fixture_property_invalid")
+        _bounded_json(schema)
+
+
+def validate_fixture(fixture: Any) -> dict[str, Any]:
+    if not isinstance(fixture, dict) or set(fixture) != FIXTURE_KEYS or fixture["schema"] != "local_bmo.tool-call-eval.v1":
+        raise ValueError("invalid tool-call evaluation fixture")
+    if not isinstance(fixture["model"], str) or not ID.fullmatch(fixture["model"]):
+        raise ValueError("fixture_model_invalid")
+    if fixture["protocol"] != "qwen35-xml-tool-call-v1" or not isinstance(fixture["limits"], dict):
+        raise ValueError("fixture_protocol_invalid")
+    limits = fixture["limits"]
+    if set(limits) != LIMIT_KEYS:
+        raise ValueError("fixture_limits_shape")
+    _bounded_int(limits["context_tokens"], 1, 2048)
+    _bounded_int(limits["max_output_tokens"], 1, 64)
+    _bounded_int(limits["max_cases"], 1, 8)
+    if isinstance(limits["temperature"], bool) or not isinstance(limits["temperature"], (int, float)) or not math.isfinite(limits["temperature"]) or not 0 <= limits["temperature"] <= 2:
+        raise ValueError("fixture_temperature_invalid")
+    tools = fixture["tools"]
+    if not isinstance(tools, list) or not 1 <= len(tools) <= MAX_TOOLS:
+        raise ValueError("fixture_tools_invalid")
+    names = set()
+    functions: dict[str, dict[str, Any]] = {}
+    for tool in tools:
+        _validate_tool_schema(tool)
+        name = tool["function"]["name"]
+        if name in names:
+            raise ValueError("fixture_duplicate_tool")
+        names.add(name)
+        functions[name] = tool["function"]
+        if len(json.dumps(tool, separators=(",", ":")).encode("utf-8")) > MAX_TOOL_SCHEMA_BYTES:
+            raise ValueError("fixture_tool_schema_unbounded")
+    cases = fixture["cases"]
+    if not isinstance(cases, list) or not 1 <= len(cases) <= limits["max_cases"]:
+        raise ValueError("fixture_cases_invalid")
+    case_ids = set()
+    for case in cases:
+        if not isinstance(case, dict):
+            raise ValueError("fixture_case_invalid")
+        _exact_keys(case, {"id", "category", "messages", "expected"})
+        if not isinstance(case["id"], str) or not ID.fullmatch(case["id"]) or case["id"] in case_ids:
+            raise ValueError("fixture_case_id_invalid")
+        case_ids.add(case["id"])
+        if not isinstance(case["category"], str) or case["category"] not in CATEGORIES or not isinstance(case["messages"], list) or not 1 <= len(case["messages"]) <= MAX_MESSAGES_PER_CASE:
+            raise ValueError("fixture_case_invalid")
+        if not any(isinstance(message, dict) and message.get("role") == "user" for message in case["messages"]):
+            raise ValueError("fixture_user_message_required")
+        for message in case["messages"]:
+            if not isinstance(message, dict):
+                raise ValueError("fixture_message_invalid")
+            _exact_keys(message, {"role", "content"})
+            if not isinstance(message["role"], str) or message["role"] not in ROLE or not isinstance(message["content"], str) or not message["content"]:
+                raise ValueError("fixture_message_invalid")
+            if len(message["content"]) > MAX_MESSAGE_CHARS:
+                raise ValueError("fixture_message_unbounded")
+        expected = case["expected"]
+        if not isinstance(expected, dict) or not set(expected).issubset({"call", "no_call", "forbid_names"}) or ("call" in expected) == ("no_call" in expected):
+            raise ValueError("fixture_expected_invalid")
+        if "no_call" in expected:
+            if expected["no_call"] is not True:
+                raise ValueError("fixture_expected_invalid")
+        else:
+            call = expected["call"]
+            if not isinstance(call, dict) or set(call) != {"name", "arguments"} or not isinstance(call["name"], str) or not NAME.fullmatch(call["name"]) or call["name"] not in names or not isinstance(call["arguments"], dict):
+                raise ValueError("fixture_expected_invalid")
+            _validate_arguments(functions[call["name"]], call["arguments"])
+        if "forbid_names" in expected:
+            forbidden = expected["forbid_names"]
+            if not isinstance(forbidden, list) or len(forbidden) > 32 or any(not isinstance(name, str) or not NAME.fullmatch(name) for name in forbidden) or len(set(forbidden)) != len(forbidden):
+                raise ValueError("fixture_expected_invalid")
+    _bounded_json(fixture)
+    return fixture
 
 
 def load_fixture(path: Path = FIXTURE) -> dict[str, Any]:
     try:
         with path.open("rb") as stream:
             raw = stream.read(FIXTURE_MAX_BYTES + 1)
-    except OSError as exc:
+    except (OSError, TypeError) as exc:
         raise ValueError("fixture_unreadable") from exc
     if len(raw) > FIXTURE_MAX_BYTES:
         raise ValueError("fixture_too_large")
@@ -102,31 +255,14 @@ def load_fixture(path: Path = FIXTURE) -> dict[str, Any]:
         fixture = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("invalid_tool-call_fixture") from exc
-    if not isinstance(fixture, dict) or fixture.get("schema") != "local_bmo.tool-call-eval.v1" or not isinstance(fixture.get("cases"), list):
-        raise ValueError("invalid tool-call evaluation fixture")
-    limits = fixture.get("limits", {})
-    if not isinstance(limits, dict) or int(limits.get("max_cases", 8)) > 8:
-        raise ValueError("fixture exceeds bounded case limit")
-    if len(fixture["cases"]) > min(int(limits.get("max_cases", 8)), 8):
-        raise ValueError("fixture exceeds bounded case limit")
-    tools = fixture.get("tools")
-    if not isinstance(tools, list) or len(tools) > MAX_TOOLS:
-        raise ValueError("fixture tools are unbounded")
-    for tool in tools:
-        if not isinstance(tool, dict) or len(json.dumps(tool, separators=(",", ":")).encode("utf-8")) > MAX_TOOL_SCHEMA_BYTES:
-            raise ValueError("fixture tool schema is unbounded")
-    for case in fixture["cases"]:
-        if not isinstance(case, dict) or not isinstance(case.get("messages"), list) or len(case["messages"]) > MAX_MESSAGES_PER_CASE:
-            raise ValueError("fixture messages are unbounded")
-        for message in case["messages"]:
-            if not isinstance(message, dict) or not isinstance(message.get("content"), str) or len(message["content"]) > MAX_MESSAGE_CHARS:
-                raise ValueError("fixture message is unbounded")
-    return fixture
+    return validate_fixture(fixture)
 
 
 def _tool_map(tools: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for tool in tools:
+        if not isinstance(tool, dict):
+            raise ValueError("invalid_tool_schema")
         function = tool.get("function", {})
         if tool.get("type") != "function" or not isinstance(function, dict):
             raise ValueError("invalid_tool_schema")
@@ -167,6 +303,8 @@ def _validate_arguments(function: dict[str, Any], arguments: dict[str, Any]) -> 
 
 def parse_tool_call(text: str, tools: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
     """Parse one complete pinned Qwen XML call; malformed output never scores."""
+    if not isinstance(text, str):
+        raise ValueError("malformed_call")
     match = TOOL_CALL.fullmatch(text)
     if not match:
         if "<tool_call" in text or "</tool_call>" in text:
@@ -241,7 +379,7 @@ def _post(endpoint: str, token: str, payload: dict[str, Any], timeout: float) ->
     )
     with _open_url(session_request, timeout) as response:
         session = json.loads(_read_response(response, RESPONSE_MAX_BYTES).decode("utf-8"))
-    if not isinstance(session.get("id"), str):
+    if not isinstance(session, dict) or set(session) != {"id", "object", "state_version"} or session.get("object") != "session" or session.get("state_version") != 1 or not isinstance(session.get("id"), str) or not SESSION_ID.fullmatch(session["id"]):
         raise ValueError("native engine returned no session id")
     payload = {**payload, "session_id": session["id"]}
     request = urllib.request.Request(
@@ -253,10 +391,15 @@ def _post(endpoint: str, token: str, payload: dict[str, Any], timeout: float) ->
     with _open_url(request, timeout) as response:
         data = json.loads(_read_response(response, RESPONSE_MAX_BYTES).decode("utf-8"))
     try:
-        content = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
+        if not isinstance(data, dict) or not isinstance(data.get("choices"), list) or len(data["choices"]) != 1 or not isinstance(data["choices"][0], dict) or not isinstance(data["choices"][0].get("message"), dict):
+            raise ValueError("shape")
+        message = data["choices"][0]["message"]
+        if set(message) != {"role", "content"} or message.get("role") != "assistant" or not isinstance(message.get("content"), str):
+            raise ValueError("shape")
+        content = message["content"]
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
         raise ValueError("native engine response_missing_content") from exc
-    if not isinstance(content, str) or len(content) > MODEL_OUTPUT_MAX_CHARS:
+    if len(content) > MODEL_OUTPUT_MAX_CHARS:
         raise ValueError("model_output_too_large")
     return content
 
@@ -273,7 +416,17 @@ def run_local(
     fixture: dict[str, Any], endpoint: str, token: str, *, timeout: float,
     max_cases: int, engine_pid: int | None = None,
 ) -> dict[str, Any]:
-    validate_endpoint(endpoint)
+    try:
+        validate_endpoint(endpoint)
+        validate_fixture(fixture)
+        if isinstance(max_cases, bool) or not isinstance(max_cases, int) or not 1 <= max_cases <= 8:
+            raise ValueError("max_cases_invalid")
+        if not math.isfinite(timeout) or not 0 < timeout <= 600:
+            raise ValueError("timeout_invalid")
+        if engine_pid is not None and (isinstance(engine_pid, bool) or not isinstance(engine_pid, int) or engine_pid <= 0):
+            raise ValueError("engine_pid_invalid")
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        return {"schema": "local_bmo.tool-call-eval-result.v1", "model": "invalid", "case_count": 0, "passed": 0, "failed": 0, "errors": 1, "peak_rss_kib": None, "cases": []}
     cases = fixture["cases"][:max_cases]
     records = []
     peak_rss = _rss_kib(engine_pid) if engine_pid is not None else None
@@ -311,18 +464,23 @@ def load_bearer_token(token_file: Path | None, token_env: str) -> str:
     if token_file is not None and token_env in os.environ:
         raise ValueError("choose_token_file_or_env")
     if token_file is not None:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        descriptor = -1
         try:
-            info = token_file.lstat()
-        except OSError as exc:
-            raise ValueError("token_file_unreadable") from exc
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-            raise ValueError("token_file_must_be_regular")
-        if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
-            raise ValueError("token_file_permissions")
-        if info.st_size > TOKEN_MAX_BYTES:
-            raise ValueError("token_file_too_large")
-        try:
-            with token_file.open("rb") as stream:
+            descriptor = os.open(os.fspath(token_file), flags)
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError("token_file_must_be_regular")
+            if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
+                raise ValueError("token_file_permissions")
+            if info.st_size > TOKEN_MAX_BYTES:
+                raise ValueError("token_file_too_large")
+            with os.fdopen(descriptor, "rb") as stream:
+                descriptor = -1
                 raw = stream.read(TOKEN_MAX_BYTES + 1)
             if len(raw) > TOKEN_MAX_BYTES:
                 raise ValueError("token_file_too_large")
@@ -330,7 +488,12 @@ def load_bearer_token(token_file: Path | None, token_env: str) -> str:
         except UnicodeDecodeError as exc:
             raise ValueError("token_file_unreadable") from exc
         except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise ValueError("token_file_must_be_regular") from exc
             raise ValueError("token_file_unreadable") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
     else:
         token = os.environ.get(token_env, "").strip()
     if len(token.encode("utf-8")) > TOKEN_MAX_BYTES:
@@ -357,7 +520,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--timeout must be finite and between 0 and 600 seconds")
     if args.engine_pid is not None and args.engine_pid <= 0:
         parser.error("--engine-pid must be positive")
-    fixture = load_fixture(args.fixture)
+    try:
+        fixture = load_fixture(args.fixture)
+    except (ValueError, TypeError, OSError):
+        parser.error("invalid_fixture")
     if args.dry_run:
         print(json.dumps({"schema": "local_bmo.tool-call-eval-dry-run.v1", "model": fixture["model"], "case_ids": [case["id"] for case in fixture["cases"][:args.max_cases]], "limits": fixture["limits"]}, sort_keys=True))
         return 0

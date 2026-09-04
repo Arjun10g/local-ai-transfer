@@ -44,4 +44,5 @@ RSS only; prompts and generated text are intentionally excluded.
 
 The parser contract and value-framing vectors are shared with the host parser
 in `tests/model/qwen_xml_vectors.json`; quoted values remain text, while only
-exact JSON primitives/containers are normalized.
+exact JSON primitives/containers are normalized. Alternate fixtures are
+strictly schema-validated and bounded before any engine request.
