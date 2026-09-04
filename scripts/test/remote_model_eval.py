@@ -165,6 +165,19 @@ def _bounded_child_status(process: Any) -> dict[str, int] | None:
     return {"signal": -value} if value < 0 else {"exit_code": value}
 
 
+def _reap_child_status(process: Any, deadline: float | None = None) -> dict[str, int] | None:
+    """Give an exiting child one short, outer-clock-bounded chance to reap."""
+
+    timeout = 1.0
+    if deadline is not None:
+        timeout = max(0.0, min(timeout, deadline - time.monotonic() - CLEANUP_RESERVE_SECONDS))
+    try:
+        process.wait(timeout=timeout)
+    except (AttributeError, OSError, subprocess.TimeoutExpired):
+        pass
+    return _bounded_child_status(process)
+
+
 SERVE_STDERR_CODES = {
     "unknown argument": "engine_cli_invalid",
     "invalid numeric argument": "engine_cli_invalid",
@@ -230,14 +243,10 @@ def _exact_serve_stderr_code(value: object) -> str | None:
     return SERVE_STDERR_CODES.get(final)
 
 
-def _classify_serve_eof(process: Any, stderr_tail: object = None) -> EngineStartupFailure:
+def _classify_serve_eof(process: Any, stderr_tail: object = None, deadline: float | None = None) -> EngineStartupFailure:
     """Classify a finite ready-stream EOF without retaining child diagnostics."""
 
-    try:
-        process.wait(timeout=1)
-    except (AttributeError, OSError, subprocess.TimeoutExpired):
-        pass
-    child_status = _bounded_child_status(process)
+    child_status = _reap_child_status(process, deadline)
     stderr_code = _exact_serve_stderr_code(stderr_tail)
     if child_status and "signal" in child_status:
         code = "engine_terminated_by_signal"
@@ -470,7 +479,7 @@ def _engine_build_info(engine: Path, expected_llama: str, expected_backend: str,
         raise ValueError("engine_build_info_failed")
     try:
         payload = _strict_json_object(result.get("stdout", ""))
-    except (TypeError, json.JSONDecodeError) as exc:
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("engine_build_info_invalid") from exc
     if not isinstance(payload, dict) or payload.get("llama_cpp_revision") != expected_llama or payload.get("compiled_backend") != f"llama.cpp/{expected_llama[:8]}/{expected_backend}":
         raise ValueError("engine_llama_identity_mismatch")
@@ -590,7 +599,7 @@ def _fixture_contract(path: Path, *, deadline: float | None = None) -> tuple[int
         raise
     try:
         fixture = _strict_json_object(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError, RecursionError) as exc:
         raise ValueError("evaluator_fixture_invalid") from exc
     if (not isinstance(fixture, dict) or set(fixture) != {"schema", "model", "protocol", "limits", "tools", "cases"} or
             fixture.get("schema") != "local_bmo.tool-call-eval.v1" or not isinstance(fixture.get("limits"), dict) or
@@ -650,7 +659,7 @@ def _parse_evaluator_result(result: dict[str, Any], *, expected_case_count: int,
         raise ValueError("evaluator_process_failed")
     try:
         metrics = _strict_json_object(result.get("stdout", ""))
-    except (TypeError, json.JSONDecodeError) as exc:
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("evaluator_receipt_invalid") from exc
     metrics = _validate_metrics(metrics, expected_case_count=expected_case_count, expected_categories=expected_categories)
     all_passed = metrics["passed"] == expected_case_count and metrics["failed"] == 0 and metrics["errors"] == 0
@@ -732,18 +741,18 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any], dea
             code = str(exc)
             if code not in SAFE_ERROR_CODES or not code.startswith("engine_ready_"):
                 code = "engine_ready_receipt_invalid"
-            raise EngineStartupFailure(code, _bounded_child_status(process)) from exc
+            raise EngineStartupFailure(code, _reap_child_status(process, deadline)) from exc
         if ready_line is None:
-            raise _classify_serve_eof(process, _file_tail(engine_stderr))
+            raise _classify_serve_eof(process, _file_tail(engine_stderr), deadline)
         try:
             ready = _strict_json_object(ready_line)
         except (json.JSONDecodeError, ValueError) as exc:
-            raise EngineStartupFailure("engine_ready_receipt_invalid", _bounded_child_status(process)) from exc
+            raise EngineStartupFailure("engine_ready_receipt_invalid", _reap_child_status(process, deadline)) from exc
         port = ready.get("port") if isinstance(ready, dict) else None
         if (not isinstance(ready, dict) or set(ready) != {"event", "port", "bind", "token_required"} or
                 ready.get("event") != "ready" or ready.get("token_required") is not True or
                 isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535 or ready.get("bind") != "127.0.0.1"):
-            raise EngineStartupFailure("engine_ready_identity_invalid", _bounded_child_status(process))
+            raise EngineStartupFailure("engine_ready_identity_invalid", _reap_child_status(process, deadline))
         evaluate = [
             sys.executable, args.evaluator, "--fixture", args.fixture,
             "--endpoint", f"http://127.0.0.1:{port}/v1/chat/completions",

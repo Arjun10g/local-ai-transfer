@@ -116,14 +116,13 @@ def _remote(command: list[str], *, timeout: float) -> dict[str, Any]:
     try:
         result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        return {"status": "transport_timeout", "exit_code": None, "error_type": type(exc).__name__, "stderr_tail": _redacted_output_tail(exc.stderr), "stdout_tail": _redacted_output_tail(exc.stdout)}
+        return {"status": "transport_timeout", "exit_code": None, "error_type": type(exc).__name__, "stderr_tail": _redacted_output_tail(exc.stderr)}
     receipt = {"status": "completed" if result.returncode == 0 else "failed", "exit_code": result.returncode, "stderr_tail": _redacted_output_tail(result.stderr)}
     if result.returncode != 0:
         receipt["error_type"] = "remote_exit"
-        # Several bounded probes intentionally report a refusal on stdout.
-        # Retain only a redacted tail so a failed ephemeral host can be
-        # diagnosed after its mandatory teardown without logging credentials.
-        receipt["stdout_tail"] = _redacted_output_tail(result.stdout)
+        # Never retain provider/model prompt or response material from a
+        # failed command. The finite error type plus bounded stderr tail are
+        # sufficient for lifecycle diagnosis.
     return receipt
 
 
@@ -344,8 +343,8 @@ def _eval_deadline_ceiling(config: dict[str, Any]) -> dict[str, float]:
     ceiling = work + cleanup
     if not (ceiling < watchdog_seconds < run_seconds < provider_seconds):
         raise ValueError("eval sequential budget does not fit watchdog/run/provider clocks")
-    if host_shutdown_seconds >= watchdog_seconds:
-        raise ValueError("eval host shutdown backstop is later than watchdog cleanup")
+    if watchdog_seconds - host_shutdown_seconds < 120.0:
+        raise ValueError("eval host shutdown backstop lacks watchdog jitter margin")
     return {
         "work_seconds": work,
         "cleanup_reserve_seconds": cleanup,
@@ -375,7 +374,8 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     if "duration_ms" in payload and (isinstance(payload["duration_ms"], bool) or not isinstance(payload["duration_ms"], (int, float)) or not math.isfinite(payload["duration_ms"]) or payload["duration_ms"] < 0):
         raise ValueError("eval receipt duration invalid")
     recorded = payload.get("artifact")
-    if not isinstance(recorded, dict) or recorded.get("name") != artifact["name"] or recorded.get("size_bytes") != artifact["size_bytes"] or recorded.get("sha256") != artifact["sha256"]:
+    if (not isinstance(recorded, dict) or set(recorded) - {"name", "size_bytes", "sha256", "source_revision", "llama_cpp_revision", "modality", "quantization"} or
+            recorded.get("name") != artifact["name"] or recorded.get("size_bytes") != artifact["size_bytes"] or recorded.get("sha256") != artifact["sha256"]):
         raise ValueError("eval receipt artifact mismatch")
     model_preflight = payload.get("model_preflight")
     if (not isinstance(model_preflight, dict) or set(model_preflight) != {"valid", "code", "status", "size_bytes", "sha256", "gguf_version"} or
@@ -412,21 +412,37 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     if (status == "verified") != all_passed or (status == "completed_with_failures") != has_failure:
         raise ValueError("eval receipt status does not match metrics")
     engine = payload.get("engine")
-    if not isinstance(engine, dict) or engine.get("llama_cpp_revision") != artifact.get("llama_cpp_revision") or engine.get("compiled_backend") != f"llama.cpp/{artifact.get('llama_cpp_revision', '')[:8]}/cuda":
+    if (not isinstance(engine, dict) or set(engine) - {"engine_version", "api_version", "compiled_backend", "llama_cpp_revision", "model"} or
+            engine.get("llama_cpp_revision") != artifact.get("llama_cpp_revision") or engine.get("compiled_backend") != f"llama.cpp/{artifact.get('llama_cpp_revision', '')[:8]}/cuda"):
         raise ValueError("eval receipt engine identity mismatch")
+    for key in ("engine_version", "api_version", "model"):
+        if key in engine and (not isinstance(engine[key], str) or not 1 <= len(engine[key]) <= 256 or any(ord(char) < 0x20 for char in engine[key])):
+            raise ValueError("eval receipt engine identity mismatch")
     cuda_device = payload.get("cuda_device")
     device = cuda_device.get("device") if isinstance(cuda_device, dict) else None
-    if (not isinstance(cuda_device, dict) or cuda_device.get("schema") != "local_bmo.j1m.cuda-device-receipt.v1" or cuda_device.get("status") != "verified" or cuda_device.get("selector") != "CUDA0" or cuda_device.get("device_count") != 1 or not isinstance(device, dict) or "a100" not in str(device.get("name", "")).lower() or not isinstance(device.get("memory_total_mib"), int) or device["memory_total_mib"] < 70000):
+    if (not isinstance(cuda_device, dict) or set(cuda_device) - {"schema", "status", "selector", "device_count", "device", "source"} or
+            cuda_device.get("schema") != "local_bmo.j1m.cuda-device-receipt.v1" or cuda_device.get("status") != "verified" or cuda_device.get("selector") != "CUDA0" or cuda_device.get("device_count") != 1 or
+            not isinstance(device, dict) or set(device) - {"index", "name", "memory_total_mib", "driver_version"} or "a100" not in str(device.get("name", "")).lower() or not isinstance(device.get("memory_total_mib"), int) or device["memory_total_mib"] < 70000):
+        raise ValueError("eval receipt CUDA placement attestation invalid")
+    if (not isinstance(device.get("index", 0), int) or isinstance(device.get("index", 0), bool) or device.get("index", 0) < 0 or
+            not isinstance(device.get("name"), str) or not 1 <= len(device["name"]) <= 160 or
+            ("driver_version" in device and (not isinstance(device["driver_version"], str) or not 1 <= len(device["driver_version"]) <= 80)) or
+            ("source" in cuda_device and (not isinstance(cuda_device["source"], str) or len(cuda_device["source"]) > 160))):
         raise ValueError("eval receipt CUDA placement attestation invalid")
     toolchain = payload.get("toolchain")
     versions = toolchain.get("versions") if isinstance(toolchain, dict) else None
     minimums = {"python3": (3, 8), "git": (2, 30), "cmake": (3, 18), "g++": (9, 0), "nvcc": (12, 0)}
-    if not isinstance(toolchain, dict) or toolchain.get("schema") != "local_bmo.j1m.remote-toolchain-receipt.v1" or toolchain.get("status") != "verified" or not isinstance(versions, dict):
+    if (not isinstance(toolchain, dict) or set(toolchain) - {"schema", "status", "required", "versions", "packages", "package_install"} or
+            toolchain.get("schema") != "local_bmo.j1m.remote-toolchain-receipt.v1" or toolchain.get("status") != "verified" or not isinstance(versions, dict)):
         raise ValueError("eval receipt toolchain evidence invalid")
     for name, minimum in minimums.items():
         version = versions.get(name)
-        if not isinstance(version, dict) or isinstance(version.get("major"), bool) or not isinstance(version.get("major"), int) or isinstance(version.get("minor"), bool) or not isinstance(version.get("minor"), int) or (version["major"], version["minor"]) < minimum:
-            raise ValueError("eval receipt toolchain version invalid")
+        if (not isinstance(version, dict) or set(version) - {"major", "minor", "reported", "executable"} or
+                isinstance(version.get("major"), bool) or not isinstance(version.get("major"), int) or isinstance(version.get("minor"), bool) or not isinstance(version.get("minor"), int) or (version["major"], version["minor"]) < minimum):
+                raise ValueError("eval receipt toolchain version invalid")
+        for key in ("reported", "executable"):
+            if key in version and (not isinstance(version[key], str) or not 1 <= len(version[key]) <= 256 or any(ord(char) < 0x20 for char in version[key])):
+                raise ValueError("eval receipt toolchain version invalid")
     if versions["nvcc"].get("executable") != "/usr/local/cuda/bin/nvcc":
         raise ValueError("eval receipt CUDA compiler path invalid")
     packages = toolchain.get("packages")
@@ -441,7 +457,16 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     selected_metrics = {key: metrics[key] for key in ("case_count", "passed", "failed", "errors", "peak_rss_kib")}
     if summary is not None:
         selected_metrics["category_summary"] = summary
-    return {"status": status, "metrics": selected_metrics, "toolchain": toolchain}
+    selected_versions = {
+        name: {key: value for key, value in versions[name].items() if key in {"major", "minor", "reported", "executable"}}
+        for name in minimums
+    }
+    selected_packages = {name: packages[name] for name in expected_packages}
+    return {
+        "status": status,
+        "metrics": selected_metrics,
+        "toolchain": {"schema": toolchain["schema"], "status": toolchain["status"], "versions": selected_versions, "packages": selected_packages},
+    }
 
 
 _STARTUP_PREFLIGHT_VALIDATOR_CODES = frozenset({
@@ -478,6 +503,9 @@ def _verify_startup_preflight_receipt(path: Path, artifact: dict[str, Any]) -> d
                 payload.get("size_bytes") != artifact["size_bytes"] or payload.get("sha256") != artifact["sha256"] or
                 payload.get("gguf_version") != 3):
             raise ValueError("startup preflight receipt identity invalid")
+    elif status == "not_started":
+        if set(payload) != {"schema", "status", "error_code"} or payload.get("error_code") != "engine_model_preflight_not_started":
+            raise ValueError("startup preflight receipt not_started outcome invalid")
     elif status in {"rejected", "timeout", "oversize", "terminated", "failed"}:
         if not set(payload) <= {"schema", "status", "error_code", "validator_code", "child"}:
             raise ValueError("startup preflight receipt outcome invalid")
@@ -503,6 +531,8 @@ def _verify_startup_preflight_receipt(path: Path, artifact: dict[str, Any]) -> d
                                   ("signal" in child and child["signal"] < 1)):
             raise ValueError("startup preflight receipt child invalid")
         if status == "terminated" and (not isinstance(child, dict) or "signal" not in child):
+            raise ValueError("startup preflight receipt child invalid")
+        if status in {"rejected", "failed"} and not isinstance(child, dict):
             raise ValueError("startup preflight receipt child invalid")
         if isinstance(child, dict) and "signal" in child and status != "terminated":
             raise ValueError("startup preflight receipt child invalid")
@@ -530,6 +560,9 @@ def _salvage(
     destination.mkdir(parents=True, exist_ok=True)
     results = []
     for name in names:
+        if deadline is not None and deadline - time.monotonic() - 30.0 <= 0.0:
+            results.append({"name": name, "status": "salvage_failed", "error_code": "salvage_deadline_reserve"})
+            continue
         try:
             sf._preflight(info["phase_id"])
             command = sf.scp_base(info["instance_info"], identity, known_hosts) + [
@@ -540,7 +573,11 @@ def _salvage(
             # provider deadline and retaining a cleanup reserve.
             timeout = max(120.0, float(q4_expected_gib) * 60.0) if name.endswith("Q4_K_M.gguf") else 30.0
             if deadline is not None:
-                timeout = min(timeout, max(30.0, deadline - time.monotonic() - 30.0))
+                remaining = deadline - time.monotonic() - 30.0
+                if remaining <= 0.0:
+                    results.append({"name": name, "status": "salvage_failed", "error_code": "salvage_deadline_reserve"})
+                    continue
+                timeout = min(timeout, remaining)
             receipt = _remote(command, timeout=timeout)
         except Exception as exc:
             receipt = {"status": "salvage_failed", "error_type": type(exc).__name__}
@@ -599,6 +636,25 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
         signal.signal(signal.SIGINT, cancel)
         signal.signal(signal.SIGTERM, cancel)
         watchdog: subprocess.Popen[bytes] | None = None
+        def stop_watchdog() -> None:
+            nonlocal watchdog
+            if watchdog is None or watchdog.poll() is not None:
+                return
+            try:
+                watchdog.terminate()
+            except OSError:
+                pass
+            try:
+                watchdog.wait(timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    watchdog.kill()
+                except OSError:
+                    pass
+                try:
+                    watchdog.wait(timeout=10)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
         # Reserve the possible provider POST before uploading the key or
         # creating an instance. A failed append is a hard stop: no mutation is
         # allowed without a durable budget/ownership reservation.
@@ -614,6 +670,8 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 instance_id = sf.create_instance(api_key, env, phase_id=phase_id, run_id=run_id, candidate=candidate, ssh_key_id=key_id, nonce=nonce, max_runtime_hours=runtime)
                 created_monotonic = time.monotonic()
                 provider_deadline = created_monotonic + float(config["modes"][mode]["provider_backstop_hours"]) * 3600
+                run_deadline = created_monotonic + runtime * 3600
+                execution_deadline = min(provider_deadline, run_deadline)
             except Exception as exc:
                 incident = {
                     "phase_id": phase_id,
@@ -666,7 +724,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             # watchdog are in place.
             sf.append_cost_event({"instance_id": attempt_id, "phase_id": phase_id, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
             j1m_runner.write_progress(progress_path, "wait-active-starting", phase_id=phase_id)
-            wait_budget = int(_eval_timeout(provider_deadline, float(config["modes"][mode].get("activation_timeout_seconds", 1800))))
+            wait_budget = int(_eval_timeout(execution_deadline, float(config["modes"][mode].get("activation_timeout_seconds", 1800))))
             info = sf.wait_active(api_key, phase_id, instance_id, timeout_seconds=wait_budget)
             lifecycle["instance_info"] = info
             sf.verify_instance_ownership(info, instance_id=instance_id, phase_id=phase_id, nonce=nonce, expected_name=sf.owned_instance_name(run_id, nonce), ssh_key_id=key_id, expected_cloud=candidate.cloud, expected_region=candidate.region, expected_instance_type=candidate.instance_type, expected_hourly_usd=candidate.hourly_usd, expected_gpu=candidate.gpu, expected_gpu_count=1, expected_vram_gb=candidate.vram_gb, expected_os_image=candidate.os_image)
@@ -683,19 +741,19 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 ("scratch_writable", ["test", "-w", "/scratch"]),
             )
             for stage_name, stage_argv in workspace_stages:
-                result = _remote(sf.ssh_base(info, identity, known_hosts) + stage_argv, timeout=30)
+                result = _remote(sf.ssh_base(info, identity, known_hosts) + stage_argv, timeout=_eval_timeout(execution_deadline, 30.0))
                 lifecycle[stage_name] = result
                 if result["status"] != "completed":
                     raise sf.ShadeformError(f"remote {stage_name} preflight failed")
             shutdown_minutes = str(config["modes"][mode]["host_shutdown_delay_minutes"])
-            lifecycle["host_shutdown_backstop"] = _remote(sf.ssh_base(info, identity, known_hosts) + ["sudo", "shutdown", "-h", f"+{shutdown_minutes}"], timeout=30)
+            lifecycle["host_shutdown_backstop"] = _remote(sf.ssh_base(info, identity, known_hosts) + ["sudo", "shutdown", "-h", f"+{shutdown_minutes}"], timeout=_eval_timeout(execution_deadline, 30.0))
             if lifecycle["host_shutdown_backstop"]["status"] != "completed":
                 raise sf.ShadeformError("host shutdown backstop could not be armed")
             upload = sf.scp_base(info, identity, known_hosts) + [str(config_path), f"{ssh_user}@{info['ip']}:{remote_root}/j1m-config.json"]
-            lifecycle["upload"] = _remote(upload, timeout=120)
+            lifecycle["upload"] = _remote(upload, timeout=_eval_timeout(execution_deadline, 120.0))
             source_lock = ROOT / config["source"]["lock"]
             for local, remote in ((ROOT / "scripts" / "j1m_runner.py", f"{remote_root}/j1m_runner.py"), (source_lock, f"{remote_root}/qwen35-9b.source-lock.json")):
-                upload_receipt = _remote(sf.scp_base(info, identity, known_hosts) + [str(local), f"{ssh_user}@{info['ip']}:{remote}"], timeout=120)
+                upload_receipt = _remote(sf.scp_base(info, identity, known_hosts) + [str(local), f"{ssh_user}@{info['ip']}:{remote}"], timeout=_eval_timeout(execution_deadline, 120.0))
                 lifecycle.setdefault("uploads", []).append(upload_receipt)
                 if upload_receipt["status"] != "completed":
                     raise sf.ShadeformError("required J1M upload failed")
@@ -703,7 +761,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 lifecycle["job"] = _remote(
                     sf.ssh_base(info, identity, known_hosts)
                     + _remote_job_command(mode, remote_root, int(config["resources"]["required_scratch_gib"])),
-                    timeout=120,
+                    timeout=_eval_timeout(execution_deadline, 120.0),
                 )
             elif mode == "build":
                 # Qwen3.5-9B is public at the pinned revision. Do not place
@@ -714,7 +772,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 )
                 j1m_runner.write_progress(progress_path, "remote-build-starting", phase_id=phase_id)
                 transfer_reserve = float(config["modes"][mode].get("transfer_reserve_seconds", 0))
-                lifecycle["job"] = _remote(remote_job, timeout=_eval_timeout(provider_deadline, float("inf"), reserve=transfer_reserve + 120.0))
+                lifecycle["job"] = _remote(remote_job, timeout=_eval_timeout(execution_deadline, float("inf"), reserve=transfer_reserve + 120.0))
             else:
                 eval_commands = _eval_remote_commands(config, remote_root)
                 _progress(progress_path, "eval-bootstrap-starting", phase_id=phase_id)
@@ -725,7 +783,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 for index, command in enumerate(eval_commands[:3]):
                     lifecycle["stage"] = f"eval-bootstrap:{command[0]}"
                     _progress(progress_path, "eval-bootstrap-stage-starting", phase_id=phase_id, operation_stage=lifecycle["stage"])
-                    stage = _remote(sf.ssh_base(info, identity, known_hosts) + command, timeout=_eval_timeout(provider_deadline, bootstrap_timeouts[index]))
+                    stage = _remote(sf.ssh_base(info, identity, known_hosts) + command, timeout=_eval_timeout(execution_deadline, bootstrap_timeouts[index]))
                     lifecycle.setdefault("eval_stages", []).append(stage)
                     _progress(progress_path, "eval-bootstrap-stage-result", phase_id=phase_id, operation_stage=lifecycle["stage"], status=stage["status"], exit_code=stage.get("exit_code"))
                     if stage["status"] != "completed":
@@ -741,7 +799,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                         scp = [scp[0], "-r", *scp[1:]]
                     destination = f"{ssh_user}@{info['ip']}:{remote}"
                     requested_timeout = float(config["modes"]["eval"]["stage_budgets_seconds"]["model_upload"]) if local == model_artifact else small_upload_timeout
-                    timeout = _eval_timeout(provider_deadline, requested_timeout)
+                    timeout = _eval_timeout(execution_deadline, requested_timeout)
                     upload_receipt = _remote(scp + [str(local), destination], timeout=timeout)
                     lifecycle.setdefault("eval_uploads", []).append({"name": local.name, **upload_receipt})
                     _progress(progress_path, "eval-upload-result", phase_id=phase_id, operation_stage=lifecycle["stage"], status=upload_receipt["status"], exit_code=upload_receipt.get("exit_code"))
@@ -752,7 +810,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     if any("remote_model_eval.py" in part for part in command):
                         lifecycle["remote_model_eval_attempted"] = True
                     _progress(progress_path, "eval-stage-starting", phase_id=phase_id, operation_stage=lifecycle["stage"])
-                    stage = _remote(sf.ssh_base(info, identity, known_hosts) + command, timeout=_eval_timeout(provider_deadline, _eval_stage_timeout(config, command)))
+                    stage = _remote(sf.ssh_base(info, identity, known_hosts) + command, timeout=_eval_timeout(execution_deadline, _eval_stage_timeout(config, command)))
                     lifecycle.setdefault("eval_stages", []).append(stage)
                     _progress(progress_path, "eval-stage-result", phase_id=phase_id, operation_stage=lifecycle["stage"], status=stage["status"], exit_code=stage.get("exit_code"))
                     if stage["status"] != "completed":
@@ -785,22 +843,6 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 _persist_lifecycle(phase_id, lifecycle)
             except Exception:
                 pass
-            if watchdog is not None and watchdog.poll() is None:
-                try:
-                    watchdog.terminate()
-                except OSError:
-                    pass
-                try:
-                    watchdog.wait(timeout=10)
-                except (OSError, subprocess.TimeoutExpired):
-                    try:
-                        watchdog.kill()
-                    except OSError:
-                        pass
-                    try:
-                        watchdog.wait(timeout=10)
-                    except (OSError, subprocess.TimeoutExpired):
-                        pass
             _progress(progress_path, "teardown-salvage-starting", phase_id=phase_id, failed_stage=lifecycle.get("failed_stage"))
             fetch_allowlist = (
                 config["artifacts"]["local_fetch_allowlist"] if mode == "build"
@@ -814,7 +856,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     known_hosts,
                     artifact_destination,
                     fetch_allowlist,
-                    deadline=provider_deadline if "provider_deadline" in locals() else None,
+                    deadline=execution_deadline if "execution_deadline" in locals() else None,
                     q4_expected_gib=float(config["resources"].get("expected_q4_gib", 6.0)),
                 ) if lifecycle.get("instance_info") else []
             except Exception as exc:
@@ -850,7 +892,13 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             # best-effort and independent for each allowlisted artifact.
             if instance_id is not None:
                 if recorded:
-                    lifecycle["deletion"] = teardown_exact(phase_id, instance_id, env_file=env_file)
+                    try:
+                        lifecycle["deletion"] = teardown_exact(phase_id, instance_id, env_file=env_file)
+                    finally:
+                        # Even a failed deletion attempt must not leave the
+                        # watchdog process unmanaged after its exact cleanup
+                        # call has returned or raised.
+                        stop_watchdog()
                 else:
                     # Ledger write failed: exact ID is still known, so delete
                     # it before attempting any key/bookkeeping cleanup.
@@ -882,6 +930,10 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                         sf.append_incident({"phase_id": phase_id, "incident": "create-key-delete-failed", "ssh_key_id": key_id, "nonce": nonce, "error_type": type(exc).__name__})
                     except Exception:
                         pass
+            # Keep the watchdog alive through salvage and exact instance
+            # deletion. It is stopped only after the provider cleanup handle
+            # has completed, so a launcher failure cannot orphan the host.
+            stop_watchdog()
             if attempt_reserved and settle_attempt_after_cleanup:
                 try:
                     sf.append_cost_event({"instance_id": attempt_id, "phase_id": phase_id, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})

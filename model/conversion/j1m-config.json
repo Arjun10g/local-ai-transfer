@@ -62,7 +62,7 @@
       "gpu_layers": 99,
       "runtime_hours": 1.94,
       "external_watchdog_seconds": 6600,
-      "host_shutdown_delay_minutes": 94,
+      "host_shutdown_delay_minutes": 92,
       "provider_backstop_hours": 2.425,
       "transfer_reserve_seconds": 300,
       "activation_timeout_seconds": 600,

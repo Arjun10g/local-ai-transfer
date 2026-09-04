@@ -564,6 +564,28 @@ class StaticSafetyTests(unittest.TestCase):
                 orchestrator._salvage(info, identity, known_hosts, destination, ["Qwen3.5-9B-Q4_K_M.gguf"], q4_expected_gib=6, deadline=time.monotonic() + 100)
             self.assertLessEqual(remote.call_args.kwargs["timeout"], 70)
 
+    def test_salvage_stops_without_scp_when_only_deletion_reserve_remains(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_salvage_reserve")
+        info = {"phase_id": "j1m-test", "instance_info": {"ssh_user": "u", "ip": "127.0.0.1"}}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(orchestrator.sf, "_preflight"), mock.patch.object(orchestrator.sf, "scp_base", return_value=["scp"]), mock.patch.object(orchestrator, "_remote") as remote:
+            result = orchestrator._salvage(info, Path(directory) / "id", Path(directory) / "known", Path(directory) / "out", ["one.json", "two.json"], deadline=time.monotonic() + 0.01)
+        remote.assert_not_called()
+        self.assertEqual([item["status"] for item in result], ["salvage_failed", "salvage_failed"])
+
+    def test_eval_deadline_envelope_keeps_host_shutdown_jitter(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_jitter")
+        config = load(ROOT / "scripts/j1m_runner.py", "j1m_jitter_config").load_config()
+        envelope = orchestrator._eval_deadline_ceiling(config)
+        self.assertGreaterEqual(envelope["watchdog_seconds"] - envelope["host_shutdown_from_create_seconds"], 120)
+
+    def test_orchestrator_failed_remote_receipt_does_not_retain_stdout(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_no_stdout")
+        result = types.SimpleNamespace(returncode=2, stdout="model response SECRET_PROMPT", stderr="safe failure")
+        with mock.patch.object(orchestrator.subprocess, "run", return_value=result):
+            receipt = orchestrator._remote(["ssh", "host", "eval"], timeout=1)
+        self.assertNotIn("stdout_tail", receipt)
+        self.assertNotIn("SECRET_PROMPT", json.dumps(receipt))
+
     def test_remote_prove_uses_the_uploaded_config(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_prove_argv")
         command = orchestrator._remote_job_command("prove", "/scratch/j1m", 70)
@@ -877,11 +899,26 @@ class StaticSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "child"):
                 orchestrator._verify_startup_preflight_receipt(path, artifact)
 
+    def test_remote_eval_startup_verifier_accepts_typed_not_started_outcome(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_not_started")
+        artifact = {"size_bytes": 4, "sha256": "a" * 64}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "startup-preflight-receipt.json"
+            path.write_text(json.dumps({"schema": "local_bmo.j1m.startup-preflight-receipt.v1", "status": "not_started", "error_code": "engine_model_preflight_not_started"}), encoding="utf-8")
+            self.assertEqual(orchestrator._verify_startup_preflight_receipt(path, artifact)["status"], "not_started")
+            path.write_text(json.dumps({"schema": "local_bmo.j1m.startup-preflight-receipt.v1", "status": "not_started", "error_code": "engine_model_preflight_not_started", "child": {"exit_code": 0}}), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                orchestrator._verify_startup_preflight_receipt(path, artifact)
+
     def test_remote_eval_startup_literals_map_to_finite_category_codes(self):
         remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_stderr_categories")
         self.assertEqual(remote._exact_serve_stderr_code("exact configured CUDA device is unavailable\n"), "engine_cuda_unavailable")
         self.assertEqual(remote._exact_serve_stderr_code("llama model load failed\n"), "engine_model_load_failed")
         self.assertEqual(remote._exact_serve_stderr_code("loopback bind/listen failed\n"), "engine_bind_failed")
+        native_main = (ROOT / "native/main.cpp").read_text(encoding="utf-8")
+        for literal in ("engine initialization failed", "server start failed"):
+            self.assertIn(f'"{literal}\\n"', native_main)
+            self.assertEqual(remote._exact_serve_stderr_code(literal + "\n"), "engine_startup_failed")
         self.assertIsNone(remote._exact_serve_stderr_code("prefix\nllama model load failed\ntrailing diagnostics"))
 
     def test_remote_eval_serve_eof_is_finite_and_secret_free(self):
