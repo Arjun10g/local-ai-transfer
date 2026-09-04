@@ -1,7 +1,9 @@
 import importlib.util
 import json
 import tempfile
+import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -72,7 +74,7 @@ class ShadeformPreflightTests(unittest.TestCase):
             selected, report = self.module.select_profiles(json.loads(catalogue.read_text()), values, 1.0)
             self.assertEqual([profile["id"] for profile in selected], ["cheap"])
             self.assertEqual(selected[0]["hourly_usd"], 1.25)
-            self.assertEqual(selected[0]["worst_case_runtime_cost_usd"], 1.25)
+            self.assertEqual(selected[0]["worst_case_runtime_cost_usd"], 1.5625)
             self.assertEqual(report["forgone_cheaper_options"][0]["identity"]["id"], "forgone")
             self.assertIn("cloud_excluded", report["forgone_cheaper_options"][0]["reasons"])
             redacted = self.module.redact(values)
@@ -106,6 +108,35 @@ class ShadeformPreflightTests(unittest.TestCase):
             self.assertEqual(selected, [])
             self.assertTrue(report["pending_ledger_cost"])
             self.assertIn("pending_ledger_cost", report["excluded_profiles"][0]["reasons"])
+
+    def test_budget_uses_provider_backstop_not_requested_runtime(self):
+        values = {"SHADEFORM_API_KEY": "secret", "SHADEFORM_MAX_HOURLY_COST_USD": "10", "SHADEFORM_MAX_TOTAL_COST_USD": "3.5"}
+        catalogue = {"profiles": [{"id": "x", "hourly_usd": 3.0, "available": True}]}
+        selected, report = self.module.select_profiles(catalogue, values, 1.0)
+        self.assertEqual(selected, [])
+        self.assertEqual(report["provider_backstop_hours"], 1.25)
+        self.assertIn("worst_case_provider_backstop_over_remaining_budget", report["excluded_profiles"][0]["reasons"])
+
+    def test_ledger_latest_settled_event_replaces_pending(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Path(directory) / "ledger.jsonl"
+            ledger.write_text("\n".join([
+                json.dumps({"instance_id": "attempt-1", "status": "pending", "estimated_cost_usd": 2}),
+                json.dumps({"instance_id": "attempt-1", "status": "settled", "actual_cost_usd": 0.5}),
+            ]) + "\n", encoding="utf-8")
+            self.assertEqual(self.module.read_ledger(ledger), (0.5, [], False))
+
+
+class RemoteExternalToolsGateTests(unittest.TestCase):
+    def test_inherited_remote_qa_cannot_reach_provider(self):
+        module = load_module(ROOT / "scripts/shadeform/remote_external_tools.py", "remote_external_tools_gate")
+        args = types.SimpleNamespace()
+        with mock.patch.object(module.shadeform, "load_env") as load_env, mock.patch.object(module.shadeform, "list_candidates") as list_candidates, mock.patch.object(module.shadeform, "create_instance") as create_instance:
+            with self.assertRaisesRegex(module.RunnerError, "gated"):
+                module.execute(args)
+        load_env.assert_not_called()
+        list_candidates.assert_not_called()
+        create_instance.assert_not_called()
 
 
 if __name__ == "__main__":

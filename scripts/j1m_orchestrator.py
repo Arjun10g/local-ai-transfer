@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 _STDERR_TAIL_LIMIT = 1200
 _EVAL_FIXTURE_MAX_BYTES = 256 * 1024
 _EVAL_RECEIPT_MAX_BYTES = 64 * 1024
+_EVAL_ARTIFACT_RECEIPT_MAX_BYTES = 8 * 1024
 _PREFLIGHT_RECEIPT_MAX_BYTES = 1024
 _DELETION_RESERVE_SECONDS = 480.0
 # This is source-controlled acceptance data, not a value supplied by a run
@@ -439,7 +440,7 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
             model_preflight.get("sha256") != artifact["sha256"] or model_preflight.get("gguf_version") != 3):
         raise ValueError("eval receipt model preflight invalid")
     metrics = payload.get("metrics")
-    if (not isinstance(metrics, dict) or set(metrics) - {"case_count", "passed", "failed", "errors", "peak_rss_kib", "category_summary"} or
+    if (not isinstance(metrics, dict) or set(metrics) != {"case_count", "passed", "failed", "errors", "peak_rss_kib", "category_summary"} or
             payload.get("status") not in {"verified", "completed_with_failures"} or
             any(isinstance(metrics.get(key), bool) or not isinstance(metrics.get(key), int) or metrics[key] < 0 for key in ("case_count", "passed", "failed", "errors"))):
         raise ValueError("eval receipt metrics invalid")
@@ -531,6 +532,27 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
         "metrics": selected_metrics,
         "toolchain": {"schema": toolchain["schema"], "status": toolchain["status"], "required": dict(toolchain["required"]), "versions": selected_versions, "packages": selected_packages, "package_install": toolchain["package_install"]},
     }
+
+
+def _verify_eval_artifact_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]:
+    """Verify the separately salvaged artifact-preparation attestation."""
+
+    payload = _bounded_json(path, _EVAL_ARTIFACT_RECEIPT_MAX_BYTES)
+    required = {"schema", "status", "name", "size_bytes", "sha256", "manifest_sha256", "manifest_lock_sha256"}
+    if not isinstance(payload, dict) or set(payload) != required or payload.get("schema") != "local_bmo.j1m.remote-eval-artifact-receipt.v1" or payload.get("status") != "verified":
+        raise ValueError("eval artifact receipt schema mismatch")
+    if (payload.get("name") != artifact.get("name") or payload.get("size_bytes") != artifact.get("size_bytes") or
+            payload.get("sha256") != artifact.get("sha256")):
+        raise ValueError("eval artifact receipt identity mismatch")
+    for field in ("manifest_sha256", "manifest_lock_sha256"):
+        value = payload.get(field)
+        if not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value) or value != _APPROVED_EVAL_MANIFEST_SHA256:
+            raise ValueError("eval artifact receipt trust anchor mismatch")
+    if not isinstance(payload.get("size_bytes"), int) or isinstance(payload.get("size_bytes"), bool) or payload["size_bytes"] <= 0:
+        raise ValueError("eval artifact receipt size invalid")
+    if not isinstance(payload.get("sha256"), str) or len(payload["sha256"]) != 64 or any(char not in "0123456789abcdef" for char in payload["sha256"]):
+        raise ValueError("eval artifact receipt hash invalid")
+    return {key: payload[key] for key in ("schema", "status", "name", "size_bytes", "sha256", "manifest_sha256", "manifest_lock_sha256")}
 
 
 _STARTUP_PREFLIGHT_VALIDATOR_CODES = frozenset({
@@ -1007,6 +1029,14 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             if mode == "prove" and lifecycle.get("job", {}).get("status") == "completed" and not any(item.get("name") == "proving-receipt.json" and item.get("status") == "completed" for item in lifecycle["salvage"]):
                 lifecycle["receipt_error"] = "proving receipt was not salvaged before teardown"
             if mode == "eval":
+                artifact_saved = next((item for item in lifecycle["salvage"] if item.get("name") == "eval-artifact-receipt.json" and item.get("status") == "completed"), None)
+                if artifact_saved is None:
+                    lifecycle["receipt_error"] = "eval artifact receipt was not salvaged"
+                else:
+                    try:
+                        lifecycle["eval_artifact_receipt"] = _verify_eval_artifact_receipt(artifact_destination / "eval-artifact-receipt.json", eval_artifact)
+                    except Exception:
+                        lifecycle["receipt_error"] = "eval artifact receipt invalid"
                 preflight_saved = next((item for item in lifecycle["salvage"] if item.get("name") == "startup-preflight-receipt.json" and item.get("status") == "completed"), None)
                 if lifecycle.get("remote_model_eval_attempted"):
                     if preflight_saved is None:
@@ -1014,7 +1044,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     else:
                         try:
                             lifecycle["preflight_receipt"] = _verify_startup_preflight_receipt(artifact_destination / "startup-preflight-receipt.json", eval_artifact)
-                        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                        except Exception as exc:
                             lifecycle["receipt_error"] = type(exc).__name__
                     if lifecycle.get("preflight_receipt", {}).get("status") != "verified":
                         lifecycle["receipt_error"] = lifecycle.get("receipt_error", "startup preflight did not verify")
@@ -1024,9 +1054,10 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 else:
                     try:
                         lifecycle["eval_receipt"] = _verify_eval_receipt(artifact_destination / "eval-receipt.json", eval_artifact)
-                    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    except Exception as exc:
                         lifecycle["receipt_error"] = type(exc).__name__
-                if lifecycle.get("receipt_error") or lifecycle.get("eval_receipt", {}).get("status") != "verified":
+                if (lifecycle.get("receipt_error") or lifecycle.get("eval_artifact_receipt", {}).get("status") != "verified" or
+                        lifecycle.get("eval_receipt", {}).get("status") != "verified"):
                     lifecycle["status"] = "failed"
             # The shared teardown performs exact deletion before cost/key
             # bookkeeping and emits a receipt, while remote salvage above is

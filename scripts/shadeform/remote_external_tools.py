@@ -43,6 +43,10 @@ MAX_REMOTE_ROOT = 96
 DEFAULT_RUNTIME_HOURS = 0.25
 DEFAULT_FUZZ_CASES = 64
 DEFAULT_SOAK_ITERATIONS = 25
+# This inherited wrapper is not an approved lifecycle implementation. Keep
+# planning and self-tests available, but fail closed before it can read
+# credentials, list candidates, or issue any provider mutation.
+REMOTE_EXECUTION_ENABLED = False
 
 # This is an audited transitive closure, not a repository upload.  Keep this
 # list explicit so a new provider import cannot accidentally broaden the
@@ -278,6 +282,8 @@ def _stop_watchdog(watchdog: subprocess.Popen[bytes] | None) -> None:
 
 
 def execute(args: argparse.Namespace) -> dict[str, object]:
+    if not REMOTE_EXECUTION_ENABLED:
+        raise RunnerError("remote external-tools QA execution is gated pending lifecycle redesign")
     env = shadeform.load_env(args.env_file)
     _assert_review_markers(env)
     plan = build_plan(phase_id=args.phase_id, run_id=args.run_id, runtime_hours=args.runtime_hours, fuzz_cases=args.fuzz_cases, soak_iterations=args.soak_iterations, env=env)

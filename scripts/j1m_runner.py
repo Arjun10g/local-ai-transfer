@@ -34,6 +34,8 @@ CHILD_ENV_ALLOWLIST = frozenset({
     "HF_HOME", "HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE",
 })
 _COMMAND_LOG_TAIL_LIMIT = 1200
+_RECEIPT_MAX_BYTES = 2 * 1024 * 1024
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def utc_now() -> str:
@@ -70,6 +72,119 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _bounded_json_file(path: Path, *, limit: int = _RECEIPT_MAX_BYTES) -> Any:
+    """Read one receipt snapshot, rejecting oversize and duplicate keys."""
+    with path.open("rb") as stream:
+        raw = stream.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError(f"receipt exceeds {limit} bytes: {path.name}")
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate receipt key: {key}")
+            result[key] = value
+        return result
+    try:
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicates)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid receipt JSON: {path.name}") from exc
+
+
+def _receipt_sha(value: object, field: str) -> str:
+    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+        raise ValueError(f"invalid {field}")
+    return value
+
+
+def _validate_producer_receipts(output_dir: Path, source_lock: Path, *, llama_revision: str | None) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    """Validate every producer receipt before a completion manifest is emitted."""
+    source_lock_payload = _bounded_json_file(source_lock)
+    if not isinstance(source_lock_payload, dict) or source_lock_payload.get("schema_version") != "1.0.0":
+        raise ValueError("source lock schema is invalid")
+    source = _bounded_json_file(output_dir / "source-model-receipt.json")
+    source_keys = {"schema", "status", "model_id", "revision", "checked_files", "file_hashes", "license_sha256", "tokenizer_sha256", "chat_template_sha256", "verified_at_utc"}
+    if (not isinstance(source, dict) or set(source) != source_keys or source["schema"] != "local_bmo.j1m.source-model-receipt.v1" or source["status"] != "verified" or source["model_id"] != source_lock_payload.get("model_id") or source["revision"] != source_lock_payload.get("revision")):
+        raise ValueError("source receipt identity is invalid")
+    checked = source["checked_files"]
+    hashes = source["file_hashes"]
+    if (not isinstance(checked, list) or len(checked) > 10000 or len(set(checked)) != len(checked) or any(not isinstance(item, str) or not item or len(item) > 512 for item in checked) or not isinstance(hashes, dict) or set(hashes) != set(checked)):
+        raise ValueError("source receipt file inventory is invalid")
+    for digest in hashes.values():
+        _receipt_sha(digest, "source file hash")
+    lock_hashes = {
+        str(item["path"]): str(item.get("sha256") or item.get("lfs_sha256"))
+        for item in source_lock_payload.get("source_files", [])
+        if isinstance(item, dict) and not item.get("excluded_from_text_only") and (item.get("sha256") or item.get("lfs_sha256"))
+    }
+    if set(hashes) != set(lock_hashes) or any(lock_hashes.get(name) != digest for name, digest in hashes.items()):
+        raise ValueError("source receipt hash is not bound to the immutable source lock")
+    for field in ("license_sha256", "tokenizer_sha256", "chat_template_sha256"):
+        _receipt_sha(source[field], field)
+    if not isinstance(source["verified_at_utc"], str) or not source["verified_at_utc"]:
+        raise ValueError("source receipt timestamp is invalid")
+
+    tensor = _bounded_json_file(output_dir / "tensor-metadata.json")
+    tensor_keys = {"schema", "status", "text_only", "tensor_count", "tensors", "gguf_metadata", "vision_projection_present", "chat_template_sha256"}
+    if (not isinstance(tensor, dict) or set(tensor) != tensor_keys or tensor["schema"] != "local_bmo.j1m.tensor-metadata.v1" or tensor["status"] != "verified" or tensor["text_only"] is not True or tensor["vision_projection_present"] is not False):
+        raise ValueError("tensor receipt schema or policy is invalid")
+    tensors = tensor["tensors"]
+    if (not isinstance(tensors, list) or len(tensors) != tensor["tensor_count"] or len(tensors) > 200000 or isinstance(tensor["tensor_count"], bool) or not isinstance(tensor["tensor_count"], int) or any(not isinstance(item, dict) or set(item) != {"name", "shape", "type"} or not isinstance(item["name"], str) or not isinstance(item["shape"], list) or len(item["shape"]) > 16 or any(isinstance(dim, bool) or not isinstance(dim, int) or dim < 0 for dim in item["shape"]) or not isinstance(item["type"], str) for item in tensors)):
+        raise ValueError("tensor inventory is invalid")
+    metadata = tensor["gguf_metadata"]
+    if not isinstance(metadata, dict) or set(metadata) - {"general.architecture", "general.file_type", "general.version", "tokenizer.chat_template", "gguf.version"} or str(metadata.get("general.architecture", "")).lower().replace(".", "").replace("_", "") != "qwen35":
+        raise ValueError("GGUF metadata identity is invalid")
+    _receipt_sha(tensor["chat_template_sha256"], "tensor chat template hash")
+    if tensor["chat_template_sha256"] != source["chat_template_sha256"]:
+        raise ValueError("tensor chat template hash is not bound to the source receipt")
+
+    toolchain = _bounded_json_file(output_dir / "toolchain.json")
+    toolchain_keys = {"schema", "llama_cpp_head", "python", "cmake", "compiler", "os_packages", "pip_freeze", "dependency_wheelhouse_lock"}
+    if not isinstance(toolchain, dict) or set(toolchain) != toolchain_keys or toolchain.get("schema") != "local_bmo.j1m.toolchain.v1" or (llama_revision is not None and toolchain.get("llama_cpp_head") != llama_revision):
+        raise ValueError("toolchain receipt identity is invalid")
+    if any(not isinstance(toolchain.get(field), str) or not toolchain[field] or len(toolchain[field]) > 4096 for field in ("llama_cpp_head", "python", "cmake", "compiler")) or not isinstance(toolchain.get("pip_freeze"), str) or len(toolchain["pip_freeze"]) > _RECEIPT_MAX_BYTES or not isinstance(toolchain["os_packages"], list) or len(toolchain["os_packages"]) > 64 or any(not isinstance(item, str) or len(item) > 512 for item in toolchain["os_packages"]):
+        raise ValueError("toolchain receipt shape is invalid")
+    dependency_lock = toolchain["dependency_wheelhouse_lock"]
+    if not isinstance(dependency_lock, dict) or (dependency_lock and dependency_lock.get("schema") != "local_bmo.j1m.wheelhouse-lock.v1"):
+        raise ValueError("toolchain dependency lock is invalid")
+
+    command_receipt = _bounded_json_file(output_dir / "command-receipt.json")
+    if not isinstance(command_receipt, list) or not command_receipt or len(command_receipt) > 128:
+        raise ValueError("command receipt sequence is invalid")
+    base = {"stage", "argv", "started_at_utc", "ended_at_utc", "exit_code", "status"}
+    optional = {"stdout_tail", "stderr_tail", "error_type"}
+    for expected_stage, item in enumerate(command_receipt, 1):
+        if not isinstance(item, dict) or not base <= set(item) or set(item) - base - optional:
+            raise ValueError("command receipt entry is invalid")
+        if isinstance(item["stage"], bool) or not isinstance(item["stage"], int) or item["stage"] <= 0 or not isinstance(item["argv"], list) or not item["argv"] or any(not isinstance(arg, str) or "\x00" in arg or len(arg) > 4096 for arg in item["argv"]):
+            raise ValueError("command receipt argv is invalid")
+        if item["status"] not in {"completed", "failed", "launch_failed", "transport_timeout"} or item["stage"] != expected_stage or item["status"] != "completed" or item["exit_code"] != 0:
+            raise ValueError("command receipt status is invalid")
+        if any(not isinstance(item[field], str) or not item[field] for field in ("started_at_utc", "ended_at_utc")):
+            raise ValueError("command receipt timestamp is invalid")
+        for field in optional & set(item):
+            if not isinstance(item[field], str) or len(item[field]) > _COMMAND_LOG_TAIL_LIMIT:
+                raise ValueError("command receipt diagnostic is invalid")
+
+    scan = _bounded_json_file(output_dir / "scan-receipt.json")
+    if not isinstance(scan, dict) or set(scan) != {"schema", "status", "inventory_scope", "text_only", "artifacts", "vision_projection_present"} or scan["schema"] != "local_bmo.j1m.scan-receipt.v1" or scan["status"] != "verified" or scan["inventory_scope"] != "pre_cleanup_conversion_outputs" or scan["text_only"] is not True or scan["vision_projection_present"] is not False:
+        raise ValueError("scan receipt is invalid")
+    scan_artifacts = scan["artifacts"]
+    expected_names = {"Qwen3.5-9B-bf16.gguf", "Qwen3.5-9B-Q8_0.gguf", "Qwen3.5-9B-Q4_K_M.gguf"}
+    if not isinstance(scan_artifacts, list) or len(scan_artifacts) != 3 or {item.get("name") for item in scan_artifacts if isinstance(item, dict)} != expected_names or any(not isinstance(item, dict) or set(item) != {"name", "size_bytes", "sha256"} or not isinstance(item["name"], str) or isinstance(item["size_bytes"], bool) or not isinstance(item["size_bytes"], int) or item["size_bytes"] <= 0 for item in scan_artifacts):
+        raise ValueError("scan artifact inventory is invalid")
+    for item in scan_artifacts:
+        _receipt_sha(item["sha256"], "scan artifact hash")
+    post = _bounded_json_file(output_dir / "post-cleanup-receipt.json")
+    if not isinstance(post, dict) or set(post) != {"schema", "status", "inventory_scope", "intermediates_absent", "remaining_gguf", "forbidden_artifacts", "q4"} or post["schema"] != "local_bmo.j1m.post-cleanup-receipt.v1" or post["status"] != "verified" or post["inventory_scope"] != "post_cleanup_filesystem" or post["intermediates_absent"] is not True or post["remaining_gguf"] != ["Qwen3.5-9B-Q4_K_M.gguf"] or post["forbidden_artifacts"] != []:
+        raise ValueError("post-cleanup receipt is invalid")
+    q4_scan = next(item for item in scan_artifacts if item["name"] == "Qwen3.5-9B-Q4_K_M.gguf")
+    if (not isinstance(post["q4"], dict) or set(post["q4"]) != {"size_bytes", "sha256"} or
+            post["q4"] != {"size_bytes": q4_scan["size_bytes"], "sha256": q4_scan["sha256"]}):
+        raise ValueError("post-cleanup Q4 identity is invalid")
+    return source, tensor, toolchain, command_receipt, scan, post
 
 
 def _normalize_gguf_value(value: Any) -> Any:
@@ -268,35 +383,22 @@ def write_artifacts(output_dir: Path, names: list[str], *, source_lock: Path = S
     source_receipt = output_dir / "source-model-receipt.json"
     if not source_receipt.is_file():
         raise ValueError("source-model-receipt.json must be emitted by hash verification before artifacts")
-    source = json.loads(source_receipt.read_text(encoding="utf-8"))
-    if source.get("status") != "verified":
-        raise ValueError("source receipt is not verified")
-    tensor = json.loads(tensor_path.read_text(encoding="utf-8"))
-    if tensor.get("status") != "verified":
-        raise ValueError("tensor metadata was not verified by the pinned GGUF reader")
     toolchain_path = output_dir / "toolchain.json"
     if not toolchain_path.is_file():
         raise ValueError("toolchain receipt is required before model receipt")
-    toolchain = json.loads(toolchain_path.read_text(encoding="utf-8"))
     for required in ("command-receipt.json", "scan-receipt.json", "post-cleanup-receipt.json"):
         if not (output_dir / required).is_file():
             raise ValueError(f"{required} is required before final manifest")
-    command_receipt = json.loads((output_dir / "command-receipt.json").read_text(encoding="utf-8"))
-    scan_receipt = json.loads((output_dir / "scan-receipt.json").read_text(encoding="utf-8"))
-    required_receipt_fields = {"stage", "argv", "started_at_utc", "ended_at_utc", "exit_code", "status"}
-    post_cleanup_receipt = json.loads((output_dir / "post-cleanup-receipt.json").read_text(encoding="utf-8"))
+    source, tensor, toolchain, command_receipt, scan_receipt, post_cleanup_receipt = _validate_producer_receipts(
+        output_dir, source_lock, llama_revision=llama_revision,
+    )
     scan_artifacts = scan_receipt.get("artifacts")
-    expected_primary = {"Qwen3.5-9B-bf16.gguf", "Qwen3.5-9B-Q8_0.gguf", "Qwen3.5-9B-Q4_K_M.gguf"}
-    if not isinstance(scan_artifacts, list) or {item.get("name") for item in scan_artifacts if isinstance(item, dict)} != expected_primary or any(not isinstance(item, dict) or set(item) != {"name", "size_bytes", "sha256"} or not isinstance(item["size_bytes"], int) or not isinstance(item["sha256"], str) or len(item["sha256"]) != 64 for item in scan_artifacts):
-        raise ValueError("scan receipt does not contain exact validated intermediate hashes")
     artifact_hashes = {item["name"]: {"size_bytes": item["size_bytes"], "sha256": item["sha256"]} for item in scan_artifacts}
     q4 = output_dir / "Qwen3.5-9B-Q4_K_M.gguf"
     current_q4 = {"size_bytes": q4.stat().st_size, "sha256": _sha256(q4)} if q4.is_file() else None
     post_q4 = post_cleanup_receipt.get("q4")
     if current_q4 != artifact_hashes.get("Qwen3.5-9B-Q4_K_M.gguf") or post_q4 != current_q4:
         raise ValueError("Q4 hash/size does not agree across pre- and post-cleanup receipts")
-    if not isinstance(command_receipt, list) or not command_receipt or any(not isinstance(item, dict) or not required_receipt_fields.issubset(item) for item in command_receipt) or scan_receipt.get("status") != "verified" or scan_receipt.get("inventory_scope") != "pre_cleanup_conversion_outputs" or post_cleanup_receipt.get("status") != "verified" or post_cleanup_receipt.get("inventory_scope") != "post_cleanup_filesystem" or post_cleanup_receipt.get("intermediates_absent") is not True or post_cleanup_receipt.get("remaining_gguf") != ["Qwen3.5-9B-Q4_K_M.gguf"]:
-        raise ValueError("command and scan receipts are not complete")
     converter_commands = [command for command in (commands or []) if any("convert_hf_to_gguf.py" in part for part in command) or "Q4_K_M" in command]
     (output_dir / "conversion-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.conversion-receipt.v1", "status": "conversion-complete", "text_only": True, "source_revision": source.get("revision"), "llama_cpp_revision": llama_revision, "artifacts": artifact_hashes, "converter_and_quantizer_argv": converter_commands, "command_receipt_sha256": _sha256(output_dir / "command-receipt.json"), "toolchain": toolchain, "no_mmproj": True, "no_mtp": True}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     (output_dir / "model-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.model-receipt.v1", "status": "checksums-and-tensor-inventory-verified", "text_only": True, "q4_artifact": artifact_hashes.get("Qwen3.5-9B-Q4_K_M.gguf"), "tensor_metadata_sha256": _sha256(tensor_path), "gguf_metadata": tensor.get("gguf_metadata", {}), "vision_projection_present": tensor.get("vision_projection_present"), "scan_receipt_sha256": _sha256(output_dir / "scan-receipt.json"), "tokenizer_sha256": source.get("tokenizer_sha256"), "chat_template_sha256": source.get("chat_template_sha256"), "license_sha256": source.get("license_sha256")}, indent=2, sort_keys=True) + "\n", encoding="utf-8")

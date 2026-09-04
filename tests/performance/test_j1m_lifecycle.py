@@ -218,11 +218,14 @@ class J1MConfigTests(unittest.TestCase):
             (root / "Qwen3.5-9B-Q8_0.gguf").unlink()
             post_cleanup = self.j1m.post_cleanup_verify(root)
             self.assertEqual(post_cleanup["inventory_scope"], "post_cleanup_filesystem")
-            (root / "source-model-receipt.json").write_text(json.dumps({"status": "verified", "revision": "a" * 40, "tokenizer_sha256": "b" * 64, "chat_template_sha256": "c" * 64, "license_sha256": "d" * 64}), encoding="utf-8")
-            (root / "tensor-metadata.json").write_text(json.dumps({"status": "verified", "tensor_count": 3}), encoding="utf-8")
-            (root / "toolchain.json").write_text(json.dumps({"schema": "local_bmo.j1m.toolchain.v1", "llama_cpp_head": "e" * 40}), encoding="utf-8")
+            lock = json.loads((ROOT / "model" / "source-lock" / "qwen35-9b.source-lock.json").read_text(encoding="utf-8"))
+            source_hashes = {item["path"]: item.get("sha256") or item.get("lfs_sha256") for item in lock["source_files"] if not item.get("excluded_from_text_only") and (item.get("sha256") or item.get("lfs_sha256"))}
+            (root / "source-model-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.source-model-receipt.v1", "status": "verified", "model_id": lock["model_id"], "revision": lock["revision"], "checked_files": list(source_hashes), "file_hashes": source_hashes, "tokenizer_sha256": "b" * 64, "chat_template_sha256": "c" * 64, "license_sha256": "d" * 64, "verified_at_utc": "2026-01-01T00:00:00+00:00"}), encoding="utf-8")
+            (root / "tensor-metadata.json").write_text(json.dumps({"schema": "local_bmo.j1m.tensor-metadata.v1", "status": "verified", "text_only": True, "tensor_count": 0, "tensors": [], "gguf_metadata": {"general.architecture": "qwen35"}, "vision_projection_present": False, "chat_template_sha256": "c" * 64}), encoding="utf-8")
+            (root / "toolchain.json").write_text(json.dumps({"schema": "local_bmo.j1m.toolchain.v1", "llama_cpp_head": "e" * 40, "python": "Python 3.11", "cmake": "cmake 3.28", "compiler": "cc 12", "os_packages": [], "pip_freeze": "", "dependency_wheelhouse_lock": {}}), encoding="utf-8")
             (root / "command-receipt.json").write_text(json.dumps([{"stage": 1, "argv": ["source-check"], "started_at_utc": "2026-01-01T00:00:00+00:00", "ended_at_utc": "2026-01-01T00:00:01+00:00", "exit_code": 0, "status": "completed"}]) + "\n", encoding="utf-8")
-            (root / "scan-receipt.json").write_text(json.dumps({"status": "verified", "inventory_scope": "pre_cleanup_conversion_outputs", "artifacts": scan_records}), encoding="utf-8")
+            (root / "scan-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.scan-receipt.v1", "status": "verified", "inventory_scope": "pre_cleanup_conversion_outputs", "text_only": True, "artifacts": scan_records, "vision_projection_present": False}), encoding="utf-8")
+            (root / "post-cleanup-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.post-cleanup-receipt.v1", "status": "verified", "inventory_scope": "post_cleanup_filesystem", "intermediates_absent": True, "remaining_gguf": ["Qwen3.5-9B-Q4_K_M.gguf"], "forbidden_artifacts": [], "q4": {"size_bytes": (root / "Qwen3.5-9B-Q4_K_M.gguf").stat().st_size, "sha256": hashlib.sha256((root / "Qwen3.5-9B-Q4_K_M.gguf").read_bytes()).hexdigest()}}), encoding="utf-8")
             manifest = self.j1m.write_artifacts(root, names)
             self.assertEqual(len(manifest["artifacts"]), 9)
             self.assertEqual(manifest["inventory_scope"], "post_cleanup_deployable_allowlist")
@@ -231,6 +234,12 @@ class J1MConfigTests(unittest.TestCase):
             self.assertNotEqual(manifest["tensor_metadata"]["status"], "pending_converter_receipt")
             self.assertTrue((root / "manifest.json").is_file())
             self.assertTrue((root / "checksums.sha256").is_file())
+            forged = json.loads((root / "source-model-receipt.json").read_text(encoding="utf-8"))
+            forged["status"] = "verified"
+            forged["file_hashes"][next(iter(forged["file_hashes"]))] = "f" * 64
+            (root / "source-model-receipt.json").write_text(json.dumps(forged), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "source receipt hash"):
+                self.j1m.write_artifacts(root, names)
 
     def test_deployable_bundle_remains_verifiable_without_intermediates(self):
         fetch = load(ROOT / "scripts/j1m_fetch.py", "j1m_fetch_bundle")
@@ -240,14 +249,16 @@ class J1MConfigTests(unittest.TestCase):
             remote.mkdir()
             for name in ("Qwen3.5-9B-bf16.gguf", "Qwen3.5-9B-Q8_0.gguf", "Qwen3.5-9B-Q4_K_M.gguf"):
                 (remote / name).write_bytes(name.encode())
-            (remote / "source-model-receipt.json").write_text(json.dumps({"status": "verified", "revision": "a" * 40, "tokenizer_sha256": "b" * 64, "chat_template_sha256": "c" * 64, "license_sha256": "d" * 64}), encoding="utf-8")
-            (remote / "tensor-metadata.json").write_text(json.dumps({"status": "verified"}), encoding="utf-8")
-            (remote / "toolchain.json").write_text(json.dumps({"schema": "local_bmo.j1m.toolchain.v1"}), encoding="utf-8")
+            lock = json.loads((ROOT / "model" / "source-lock" / "qwen35-9b.source-lock.json").read_text(encoding="utf-8"))
+            source_hashes = {item["path"]: item.get("sha256") or item.get("lfs_sha256") for item in lock["source_files"] if not item.get("excluded_from_text_only") and (item.get("sha256") or item.get("lfs_sha256"))}
+            (remote / "source-model-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.source-model-receipt.v1", "status": "verified", "model_id": lock["model_id"], "revision": lock["revision"], "checked_files": list(source_hashes), "file_hashes": source_hashes, "tokenizer_sha256": "b" * 64, "chat_template_sha256": "c" * 64, "license_sha256": "d" * 64, "verified_at_utc": "2026-01-01T00:00:00+00:00"}), encoding="utf-8")
+            (remote / "tensor-metadata.json").write_text(json.dumps({"schema": "local_bmo.j1m.tensor-metadata.v1", "status": "verified", "text_only": True, "tensor_count": 0, "tensors": [], "gguf_metadata": {"general.architecture": "qwen35"}, "vision_projection_present": False, "chat_template_sha256": "c" * 64}), encoding="utf-8")
+            (remote / "toolchain.json").write_text(json.dumps({"schema": "local_bmo.j1m.toolchain.v1", "llama_cpp_head": "e" * 40, "python": "Python 3.11", "cmake": "cmake 3.28", "compiler": "cc 12", "os_packages": [], "pip_freeze": "", "dependency_wheelhouse_lock": {}}), encoding="utf-8")
             (remote / "command-receipt.json").write_text(json.dumps([{"stage": 1, "argv": ["source-check"], "started_at_utc": "2026-01-01T00:00:00+00:00", "ended_at_utc": "2026-01-01T00:00:01+00:00", "exit_code": 0, "status": "completed"}]) + "\n", encoding="utf-8")
             scan_records = [{"name": name, "size_bytes": (remote / name).stat().st_size, "sha256": hashlib.sha256((remote / name).read_bytes()).hexdigest()} for name in ("Qwen3.5-9B-bf16.gguf", "Qwen3.5-9B-Q8_0.gguf", "Qwen3.5-9B-Q4_K_M.gguf")]
-            (remote / "scan-receipt.json").write_text(json.dumps({"status": "verified", "inventory_scope": "pre_cleanup_conversion_outputs", "artifacts": scan_records}), encoding="utf-8")
+            (remote / "scan-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.scan-receipt.v1", "status": "verified", "inventory_scope": "pre_cleanup_conversion_outputs", "text_only": True, "artifacts": scan_records, "vision_projection_present": False}), encoding="utf-8")
             q4 = remote / "Qwen3.5-9B-Q4_K_M.gguf"
-            (remote / "post-cleanup-receipt.json").write_text(json.dumps({"status": "verified", "inventory_scope": "post_cleanup_filesystem", "intermediates_absent": True, "remaining_gguf": [q4.name], "q4": {"size_bytes": q4.stat().st_size, "sha256": hashlib.sha256(q4.read_bytes()).hexdigest()}}), encoding="utf-8")
+            (remote / "post-cleanup-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.post-cleanup-receipt.v1", "status": "verified", "inventory_scope": "post_cleanup_filesystem", "intermediates_absent": True, "remaining_gguf": [q4.name], "forbidden_artifacts": [], "q4": {"size_bytes": q4.stat().st_size, "sha256": hashlib.sha256(q4.read_bytes()).hexdigest()}}), encoding="utf-8")
             self.j1m.write_artifacts(remote, ["Qwen3.5-9B-bf16.gguf", "Qwen3.5-9B-Q8_0.gguf", "Qwen3.5-9B-Q4_K_M.gguf"])
             (remote / "Qwen3.5-9B-bf16.gguf").unlink()
             (remote / "Qwen3.5-9B-Q8_0.gguf").unlink()
@@ -944,6 +955,32 @@ class StaticSafetyTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 orchestrator._verify_eval_artifact(artifact, manifest, config, expected_manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest())
 
+    def test_eval_artifact_receipt_is_exact_and_trust_bound(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_eval_artifact_receipt")
+        artifact = {"name": "Qwen3.5-9B-Q4_K_M.gguf", "size_bytes": 4, "sha256": "a" * 64}
+        receipt = {"schema": "local_bmo.j1m.remote-eval-artifact-receipt.v1", "status": "verified", **artifact, "manifest_sha256": orchestrator._APPROVED_EVAL_MANIFEST_SHA256, "manifest_lock_sha256": orchestrator._APPROVED_EVAL_MANIFEST_SHA256}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "eval-artifact-receipt.json"
+            with self.assertRaises(OSError):
+                orchestrator._verify_eval_artifact_receipt(path, artifact)
+            path.write_text(json.dumps(receipt), encoding="utf-8")
+            selected = orchestrator._verify_eval_artifact_receipt(path, artifact)
+            self.assertEqual(selected["sha256"], artifact["sha256"])
+            for hostile in (
+                {**receipt, "sha256": "b" * 64},
+                {**receipt, "manifest_sha256": "c" * 64},
+                {**receipt, "extra": "forged"},
+            ):
+                path.write_text(json.dumps(hostile), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    orchestrator._verify_eval_artifact_receipt(path, artifact)
+            path.write_text('{"schema":"local_bmo.j1m.remote-eval-artifact-receipt.v1","schema":"local_bmo.j1m.remote-eval-artifact-receipt.v1"}', encoding="utf-8")
+            with self.assertRaises(ValueError):
+                orchestrator._verify_eval_artifact_receipt(path, artifact)
+            path.write_bytes(b"{" + b"x" * (orchestrator._EVAL_ARTIFACT_RECEIPT_MAX_BYTES + 1))
+            with self.assertRaises(ValueError):
+                orchestrator._verify_eval_artifact_receipt(path, artifact)
+
     def test_remote_eval_redacts_diagnostics_and_never_accepts_bearer_argv(self):
         remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_security")
         source = (ROOT / "scripts/test/remote_model_eval.py").read_text(encoding="utf-8")
@@ -1264,6 +1301,13 @@ class StaticSafetyTests(unittest.TestCase):
             self.assertEqual(selected["artifact"]["modality"], "text_only_no_mmproj")
             self.assertEqual(selected["artifact"]["quantization"], "Q4_K_M")
             self.assertEqual(set(selected["toolchain"]["versions"]), {"python3", "git", "cmake", "g++", "nvcc"})
+            missing_rss = json.loads(receipt.read_text(encoding="utf-8"))
+            missing_rss["metrics"].pop("peak_rss_kib")
+            receipt.write_text(json.dumps(missing_rss), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "metrics"):
+                orchestrator._verify_eval_receipt(receipt, artifact)
+            missing_rss["metrics"]["peak_rss_kib"] = 123
+            receipt.write_text(json.dumps(missing_rss), encoding="utf-8")
             failed = json.loads(receipt.read_text())
             failed["status"] = "completed_with_failures"
             failed["metrics"]["passed"] -= 1

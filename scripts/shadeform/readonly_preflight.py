@@ -211,8 +211,7 @@ def profile_reasons(profile: dict, rules: dict[str, object], *, include_rate: bo
 def read_ledger(path: Path | None) -> tuple[float, list[dict], bool]:
     if not path or not path.exists():
         return 0.0, [], False
-    total = 0.0
-    pending: list[dict] = []
+    latest: dict[str, tuple[int, dict]] = {}
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError as exc:
@@ -224,15 +223,24 @@ def read_ledger(path: Path | None) -> tuple[float, list[dict], bool]:
             event = json.loads(line)
         except json.JSONDecodeError as exc:
             raise ValueError(f"ledger line {number} is invalid JSON") from exc
+        if not isinstance(event, dict):
+            raise ValueError(f"ledger line {number} is not an object")
+        identity_key = event.get("instance_id") or event.get("run_id") or f"line:{number}"
+        if not isinstance(identity_key, str) or not identity_key or len(identity_key) > 256:
+            raise ValueError(f"ledger line {number} has an invalid identity")
+        latest[identity_key] = (number, event)
+    total = 0.0
+    pending: list[dict] = []
+    for number, event in latest.values():
         status = str(event.get("status", event.get("cost_status", ""))).lower()
         if status == "pending" or event.get("pending") is True:
             pending.append({"line": number, "run_id": event.get("run_id"), "status": "pending"})
             continue
-        for key in ("actual_cost_usd", "estimated_cost_usd"):
-            value = event.get(key)
-            if isinstance(value, (int, float)):
-                total += float(value)
-                break
+        value = event.get("actual_cost_usd")
+        if not isinstance(value, (int, float)):
+            value = event.get("estimated_cost_usd")
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+            total += float(value)
     return total, pending, bool(pending)
 
 
@@ -242,22 +250,23 @@ def select_profiles(catalogue: dict, values: dict[str, str], hours: float, ledge
     rules = policy(values)
     spent, pending, has_pending = read_ledger(ledger_path)
     remaining = rules["max_total_cost_usd"] - spent
+    provider_backstop_hours = max(0.25, hours * 1.25)
     all_profiles = [profile for profile in catalogue["profiles"] if isinstance(profile, dict)]
     eligible: list[dict] = []
     excluded: list[dict] = []
     for profile in all_profiles:
         reasons = profile_reasons(profile, rules)
-        worst_case = float(profile.get("hourly_usd", 0) or 0) * hours
+        worst_case = float(profile.get("hourly_usd", 0) or 0) * provider_backstop_hours
         if worst_case > remaining:
-            reasons.append("worst_case_runtime_over_remaining_budget")
+            reasons.append("worst_case_provider_backstop_over_remaining_budget")
         if reasons or has_pending:
             excluded.append({"identity": identity(profile), "reasons": reasons + (["pending_ledger_cost"] if has_pending else [])})
         else:
-            eligible.append({**identity(profile), "worst_case_runtime_hours": hours, "worst_case_runtime_cost_usd": round(worst_case, 6)})
+            eligible.append({**identity(profile), "worst_case_runtime_hours": hours, "provider_backstop_hours": provider_backstop_hours, "worst_case_runtime_cost_usd": round(worst_case, 6), "worst_case_provider_backstop_cost_usd": round(worst_case, 6)})
     eligible.sort(key=lambda item: (not rules["prefer_interruptible"] or not item["interruptible"], item["hourly_usd"]))
     threshold = eligible[0]["hourly_usd"] if eligible else float("inf")
     forgone = [item for item in excluded if isinstance(item["identity"].get("hourly_usd"), (int, float)) and item["identity"]["hourly_usd"] < threshold]
-    return eligible, {"rules": rules, "ledger_spent_usd": round(spent, 6), "remaining_total_project_budget_usd": round(remaining, 6), "pending_ledger_cost": has_pending, "pending_events": pending, "excluded_profiles": excluded, "forgone_cheaper_options": forgone}
+    return eligible, {"rules": rules, "provider_backstop_hours": provider_backstop_hours, "ledger_spent_usd": round(spent, 6), "remaining_total_project_budget_usd": round(remaining, 6), "pending_ledger_cost": has_pending, "pending_events": pending, "excluded_profiles": excluded, "forgone_cheaper_options": forgone}
 
 
 def mutation_readiness(values: dict[str, str]) -> dict[str, object]:
