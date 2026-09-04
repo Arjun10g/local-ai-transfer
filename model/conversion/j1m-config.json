@@ -117,6 +117,8 @@
     ],
     "prove_fetch_allowlist": ["proving-receipt.json"],
     "eval_fetch_allowlist": ["eval-receipt.json", "startup-preflight-receipt.json", "eval-artifact-receipt.json", "toolchain-receipt.json", "cuda-device-receipt.json"],
+    "eval_manifest_path": "artifacts/qwen35-9b/model-manifest.json",
+    "eval_manifest_sha256": "3bcfe1796e2ec24c556c2455d583bb3763039aeaf9b5119ddc1c498459fbeb99",
     "vision_projection": "excluded"
   },
   "budget_policy": {

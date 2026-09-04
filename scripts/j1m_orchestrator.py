@@ -35,6 +35,12 @@ _EVAL_FIXTURE_MAX_BYTES = 256 * 1024
 _EVAL_RECEIPT_MAX_BYTES = 64 * 1024
 _PREFLIGHT_RECEIPT_MAX_BYTES = 1024
 _DELETION_RESERVE_SECONDS = 480.0
+# This is source-controlled acceptance data, not a value supplied by a run
+# configuration.  The config repeats it for operator visibility/parity checks,
+# but a caller cannot turn an arbitrary manifest plus a self-authored lock into
+# an accepted eval artifact by changing JSON configuration.
+_APPROVED_EVAL_MANIFEST_RELATIVE = Path("artifacts/qwen35-9b/model-manifest.json")
+_APPROVED_EVAL_MANIFEST_SHA256 = "3bcfe1796e2ec24c556c2455d583bb3763039aeaf9b5119ddc1c498459fbeb99"
 
 
 class OperatorCancelled(Exception):
@@ -156,7 +162,7 @@ def _remote_job_command(mode: str, remote_root: str, required_scratch_gib: int) 
     raise ValueError(f"unsupported J1M mode: {mode}")
 
 
-def _verify_eval_artifact(path: Path | None, manifest_path: Path, config: dict[str, Any]) -> dict[str, Any]:
+def _verify_eval_artifact(path: Path | None, manifest_path: Path, config: dict[str, Any], *, expected_manifest_sha256: str | None = None) -> dict[str, Any]:
     """Verify the accepted Q4 identity without requiring local model bytes."""
 
     expected_name = "Qwen3.5-9B-Q4_K_M.gguf"
@@ -164,6 +170,18 @@ def _verify_eval_artifact(path: Path | None, manifest_path: Path, config: dict[s
         raise ValueError("eval artifact has the wrong name or is missing")
     manifest_bytes = _bounded_bytes(manifest_path, _EVAL_FIXTURE_MAX_BYTES)
     manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
+    if expected_manifest_sha256 is None:
+        configured_artifacts = config.get("artifacts")
+        if (not isinstance(configured_artifacts, dict) or
+                configured_artifacts.get("eval_manifest_path") != str(_APPROVED_EVAL_MANIFEST_RELATIVE) or
+                configured_artifacts.get("eval_manifest_sha256") != _APPROVED_EVAL_MANIFEST_SHA256 or
+                manifest_path.resolve() != (ROOT / _APPROVED_EVAL_MANIFEST_RELATIVE).resolve()):
+            raise ValueError("eval manifest path is not the approved trust anchor")
+        trusted_digest = _APPROVED_EVAL_MANIFEST_SHA256
+    else:
+        trusted_digest = expected_manifest_sha256
+    if not isinstance(trusted_digest, str) or len(trusted_digest) != 64 or set(trusted_digest) - set("0123456789abcdef") or manifest_digest != trusted_digest:
+        raise ValueError("eval manifest trust anchor mismatch")
     def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key, value in pairs:
@@ -675,6 +693,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
         key_id: str | None = None
         instance_id: str | None = None
         ambiguous_create = False
+        key_ambiguity_unresolved = False
         attempt_reserved = False
         settle_attempt_after_cleanup = False
         recorded = False
@@ -691,6 +710,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
         watchdog: subprocess.Popen[bytes] | None = None
         attempt_id: str | None = None
         cleanup_failure: BaseException | None = None
+        key_fingerprint: str | None = None
         def stop_watchdog() -> None:
             nonlocal watchdog
             if watchdog is None or watchdog.poll() is not None:
@@ -727,7 +747,14 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             # creating an instance. Keeping this in the protected region means
             # a ledger/filesystem failure still restores signals and persists
             # a terminal lifecycle marker without making a provider call.
-            attempt_id = sf.reserve_create_attempt(phase_id, nonce, candidate, backstop_hours=float(config["modes"][mode]["provider_backstop_hours"]), public_key_sha256=hashlib.sha256(public_key.encode("utf-8")).hexdigest())
+            key_fingerprint = sf.ssh_public_key_fingerprint(public_key)
+            lifecycle["ssh_public_key_fingerprint"] = key_fingerprint
+            attempt_id = sf.reserve_create_attempt(
+                phase_id, nonce, candidate,
+                backstop_hours=float(config["modes"][mode]["provider_backstop_hours"]),
+                public_key_sha256=hashlib.sha256(public_key.encode("utf-8")).hexdigest(),
+                public_key_fingerprint=key_fingerprint,
+            )
             attempt_reserved = True
             try:
                 key_id = sf.add_ssh_key(api_key, phase_id, f"j1m-{nonce}", public_key)
@@ -737,12 +764,14 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 # exact public-key fingerprint; unresolved ambiguity blocks
                 # instance creation and is retained as a finite incident.
                 lifecycle["ssh_key_create_ambiguous"] = True
+                key_ambiguity_unresolved = True
                 try:
                     key_id = sf.reconcile_ssh_key(
                         api_key, phase_id, expected_name=f"j1m-{nonce}",
                         expected_public_key=public_key,
                     )
                     lifecycle["ssh_key_reconciliation"] = {"status": "exact_match"}
+                    key_ambiguity_unresolved = False
                 except Exception as reconcile_exc:
                     lifecycle["ssh_key_reconciliation"] = {
                         "status": "unresolved",
@@ -767,7 +796,13 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             sf.verify_ssh_key_ownership(api_key, phase_id, key_id, expected_name=f"j1m-{nonce}", expected_public_key=public_key)
             # Bind the exact provider key ID into the already-pending attempt
             # reservation before allowing the instance create POST.
-            sf.reserve_create_attempt(phase_id, nonce, candidate, backstop_hours=float(config["modes"][mode]["provider_backstop_hours"]), public_key_sha256=hashlib.sha256(public_key.encode("utf-8")).hexdigest(), ssh_key_id=key_id)
+            sf.reserve_create_attempt(
+                phase_id, nonce, candidate,
+                backstop_hours=float(config["modes"][mode]["provider_backstop_hours"]),
+                public_key_sha256=hashlib.sha256(public_key.encode("utf-8")).hexdigest(),
+                public_key_fingerprint=key_fingerprint,
+                ssh_key_id=key_id,
+            )
             try:
                 instance_id = sf.create_instance(api_key, env, phase_id=phase_id, run_id=run_id, candidate=candidate, ssh_key_id=key_id, nonce=nonce, max_runtime_hours=runtime)
                 created_monotonic = time.monotonic()
@@ -802,7 +837,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             launcher_pid = os.getpid()
             launcher_start_marker = sf.process_start_marker(launcher_pid)
             activation_seconds = int(config["modes"][mode].get("activation_timeout_seconds", 1800))
-            record = sf.OwnedResource(phase_id=phase_id, run_id=run_id, instance_id=instance_id, ownership_nonce=nonce, ssh_key_id=key_id, ssh_key_name=f"j1m-{nonce}", gpu=candidate.gpu, cloud=candidate.cloud, region=candidate.region, hourly_usd=candidate.hourly_usd, created_at_utc=sf.utc_now().isoformat(), active_deadline_utc=(sf.utc_now() + sf.timedelta(seconds=activation_seconds)).isoformat(), run_deadline_utc=(sf.utc_now() + sf.timedelta(hours=runtime)).isoformat(), instance_type=candidate.instance_type, launcher_pid=launcher_pid, launcher_start_marker=launcher_start_marker)
+            record = sf.OwnedResource(phase_id=phase_id, run_id=run_id, instance_id=instance_id, ownership_nonce=nonce, ssh_key_id=key_id, ssh_key_name=f"j1m-{nonce}", gpu=candidate.gpu, cloud=candidate.cloud, region=candidate.region, hourly_usd=candidate.hourly_usd, created_at_utc=sf.utc_now().isoformat(), active_deadline_utc=(sf.utc_now() + sf.timedelta(seconds=activation_seconds)).isoformat(), run_deadline_utc=(sf.utc_now() + sf.timedelta(hours=runtime)).isoformat(), instance_type=candidate.instance_type, launcher_pid=launcher_pid, launcher_start_marker=launcher_start_marker, ssh_public_key_fingerprint=key_fingerprint)
             # Ownership record is written before any poll/upload. If this
             # fails, the fallback below still deletes the exact returned ID.
             sf.write_owned_resource(record)
@@ -929,7 +964,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             _progress(progress_path, "completed", phase_id=phase_id, mode=mode)
         except (KeyboardInterrupt, OperatorCancelled):
             lifecycle["status"] = "cancelled_by_operator"
-            if instance_id is None and not ambiguous_create:
+            if instance_id is None and not ambiguous_create and not key_ambiguity_unresolved:
                 settle_attempt_after_cleanup = True
             raise
         except Exception as exc:
@@ -937,7 +972,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             # failures occur outside the create-specific handler. They still
             # reconcile the pre-create reservation after finally cleanup when
             # no instance POST could have succeeded.
-            if instance_id is None and not ambiguous_create:
+            if instance_id is None and not ambiguous_create and not key_ambiguity_unresolved:
                 settle_attempt_after_cleanup = True
             lifecycle["status"] = lifecycle.get("status") if lifecycle.get("status") not in {None, "starting", "active"} else "failed"
             lifecycle["failure"] = {"error_type": type(exc).__name__}
@@ -1006,7 +1041,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     try:
                         lifecycle["deletion"] = teardown_exact(
                             phase_id, instance_id, env_file=env_file,
-                            deadline=(execution_deadline + _DELETION_RESERVE_SECONDS)
+                            deadline=execution_deadline
                             if "execution_deadline" in locals() else None,
                         )
                     except Exception as exc:
@@ -1034,7 +1069,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     try:
                         lifecycle["deletion"] = sf._delete_instance(
                             api_key, phase_id, instance_id,
-                            deadline=(execution_deadline + _DELETION_RESERVE_SECONDS)
+                            deadline=execution_deadline
                             if "execution_deadline" in locals() else None,
                         )
                     except Exception as exc:

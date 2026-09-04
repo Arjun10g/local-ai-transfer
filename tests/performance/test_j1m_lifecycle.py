@@ -127,11 +127,13 @@ class J1MConfigTests(unittest.TestCase):
         from scripts import shadeform_lifecycle as sf
         candidate = sf.Candidate("A100", "cloud", "region", "a100-80", 1.35, 80, "ubuntu", False)
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(sf, "COST_LEDGER", Path(directory) / "cost-ledger.jsonl"):
-            attempt_id = sf.reserve_create_attempt("j1m-reservation-test", "c" * 32, candidate, backstop_hours=0.3125, public_key_sha256="d" * 64)
+            fingerprint = sf.ssh_public_key_fingerprint("ssh-ed25519 AAAA")
+            attempt_id = sf.reserve_create_attempt("j1m-reservation-test", "c" * 32, candidate, backstop_hours=0.3125, public_key_sha256="d" * 64, public_key_fingerprint=fingerprint)
             event = json.loads(Path(directory, "cost-ledger.jsonl").read_text().strip())
             self.assertEqual(attempt_id, "attempt-" + "c" * 32)
             self.assertEqual(event["status"], "pending")
             self.assertEqual(event["estimated_cost_usd"], 0.421875)
+            self.assertEqual(event["ssh_public_key_fingerprint"], fingerprint)
             sf.reserve_create_attempt("j1m-reservation-test", "c" * 32, candidate, backstop_hours=0.3125, public_key_sha256="d" * 64, ssh_key_id="key-123456")
             enriched = json.loads(Path(directory, "cost-ledger.jsonl").read_text().splitlines()[-1])
             self.assertEqual(enriched["ssh_key_id"], "key-123456")
@@ -157,6 +159,13 @@ class J1MConfigTests(unittest.TestCase):
         ])
         with mock.patch.object(sf, "request", side_effect=lambda *args, **kwargs: next(responses)):
             self.assertEqual(sf.reconcile_ssh_key("api", "j1m-key-test", expected_name=name, expected_public_key=public_key), "key-123456")
+        fingerprint = sf.ssh_public_key_fingerprint(public_key)
+        with mock.patch.object(sf, "request", return_value={"ssh_keys": [{"id": "key-123456", "name": name, "public_key": public_key}]}):
+            reconciled = sf.reconcile_ssh_key("api", "j1m-key-test", expected_name=name, expected_fingerprint=fingerprint)
+        self.assertEqual(reconciled, "key-123456")
+        with mock.patch.object(sf, "request", return_value={"deleted": True}) as delete_request:
+            self.assertEqual(sf.delete_ssh_key("api", "j1m-key-test", reconciled), {"deleted": True})
+        self.assertEqual(delete_request.call_args.args[2], "/sshkeys/key-123456/delete")
         with mock.patch.object(sf, "request", return_value={"ssh_keys": []}):
             with self.assertRaises(sf.AmbiguousProviderOutcome):
                 sf.reconcile_ssh_key("api", "j1m-key-test", expected_name=name, expected_public_key=public_key)
@@ -170,6 +179,12 @@ class J1MConfigTests(unittest.TestCase):
     def test_ssh_key_create_transport_or_schema_failure_is_ambiguous(self):
         from scripts import shadeform_lifecycle as sf
         with mock.patch.object(sf, "request", side_effect=TimeoutError("provider timeout")):
+            with self.assertRaises(sf.AmbiguousProviderOutcome):
+                sf.add_ssh_key("api", "j1m-key-test", "j1m-key", "ssh-ed25519 AAAA")
+        with mock.patch.object(sf, "request", side_effect=sf.ShadeformHTTPError(503, "temporary")):
+            with self.assertRaises(sf.AmbiguousProviderOutcome):
+                sf.add_ssh_key("api", "j1m-key-test", "j1m-key", "ssh-ed25519 AAAA")
+        with mock.patch.object(sf, "request", return_value=[{"id": "key-123456"}]):
             with self.assertRaises(sf.AmbiguousProviderOutcome):
                 sf.add_ssh_key("api", "j1m-key-test", "j1m-key", "ssh-ed25519 AAAA")
 
@@ -498,6 +513,8 @@ class StaticSafetyTests(unittest.TestCase):
             try:
                 sf.append_cost_event({"instance_id": "instance-ledger-1", "phase_id": "phase-a", "status": "pending", "estimated_cost_usd": 1.0})
                 self.assertEqual(sf.ledger_spend(), (0.0, ["instance-ledger-1"]))
+                with self.assertRaises(sf.BudgetError):
+                    sf.remaining_budget_usd({"SHADEFORM_MAX_TOTAL_COST_USD": "50"})
                 sf.append_cost_event({"instance_id": "instance-ledger-1", "phase_id": "phase-a", "status": "settled", "actual_cost_usd": 0.42})
                 self.assertEqual(sf.ledger_spend(), (0.42, []))
                 self.assertEqual(len(sf.COST_LEDGER.read_text().splitlines()), 2)
@@ -579,6 +596,7 @@ class StaticSafetyTests(unittest.TestCase):
             identity = Path(directory) / "id_ed25519"
             identity.write_text("private", encoding="utf-8")
             with contextlib.ExitStack() as stack:
+                teardown_failure = mock.patch.object(orchestrator, "teardown_exact", side_effect=RuntimeError("delete unavailable"))
                 patches = [
                     mock.patch.object(orchestrator.sf, "load_env", return_value={"SHADEFORM_API_KEY": "api"}),
                     mock.patch.object(orchestrator.sf, "require_env", return_value="api"),
@@ -600,13 +618,13 @@ class StaticSafetyTests(unittest.TestCase):
                     mock.patch.object(orchestrator.subprocess, "Popen", return_value=Watchdog()),
                     mock.patch.object(orchestrator, "_remote", side_effect=remote),
                     mock.patch.object(orchestrator, "_salvage", return_value=[]),
-                    mock.patch.object(orchestrator, "teardown_exact", side_effect=RuntimeError("delete unavailable")),
                     mock.patch.object(orchestrator, "_persist_lifecycle", side_effect=lambda phase, value: persisted.append(value)),
                     mock.patch.object(orchestrator, "_progress", side_effect=lambda path, event, **details: progress.append(event)),
                     mock.patch.object(orchestrator.j1m_runner, "write_progress"),
                 ]
                 for patcher in patches:
                     stack.enter_context(patcher)
+                teardown_mock = stack.enter_context(teardown_failure)
                 with self.assertRaisesRegex(RuntimeError, "teardown was not confirmed"):
                     orchestrator.execute(
                         Path(directory) / "env", config_path=ROOT / "model/conversion/j1m-config.json",
@@ -614,6 +632,7 @@ class StaticSafetyTests(unittest.TestCase):
                     )
         self.assertTrue(persisted)
         self.assertEqual(progress[-1], "failed")
+        self.assertIsNotNone(teardown_mock.call_args.kwargs.get("deadline"))
 
     def test_execute_reservation_failure_restores_signal_and_terminalizes(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_reservation_behavior")
@@ -642,6 +661,41 @@ class StaticSafetyTests(unittest.TestCase):
                         phase_id="reservation-behavior", run_id="test", artifact_destination=Path(directory) / "artifacts", mode="prove",
                     )
         self.assertTrue(persisted)
+        self.assertEqual(progress[-1], "failed")
+
+    def test_unresolved_ssh_key_ambiguity_keeps_reservation_pending(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_key_ambiguity")
+        from scripts import shadeform_lifecycle as sf
+        candidate = sf.Candidate("A100_80G", "hyperstack", "montreal-canada-2", "A100_80G", 1.35, 80, "ubuntu22.04_cuda12.2_shade_os", False)
+        progress = []
+        persisted = []
+        with tempfile.TemporaryDirectory() as directory:
+            identity = Path(directory) / "id_ed25519"
+            identity.write_text("private", encoding="utf-8")
+            with contextlib.ExitStack() as stack:
+                for patcher in [
+                    mock.patch.object(orchestrator.sf, "load_env", return_value={"SHADEFORM_API_KEY": "api"}),
+                    mock.patch.object(orchestrator.sf, "require_env", return_value="api"),
+                    mock.patch.object(orchestrator.sf, "list_candidates", return_value=[candidate]),
+                    mock.patch.object(orchestrator.sf, "create_ephemeral_ssh_key", return_value=(identity, "ssh-ed25519 AAAA")),
+                    mock.patch.object(orchestrator.sf, "reserve_create_attempt", return_value="attempt-x"),
+                    mock.patch.object(orchestrator.sf, "add_ssh_key", side_effect=sf.AmbiguousProviderOutcome("unknown")),
+                    mock.patch.object(orchestrator.sf, "reconcile_ssh_key", side_effect=sf.AmbiguousProviderOutcome("zero matches")),
+                    mock.patch.object(orchestrator.sf, "append_incident"),
+                    mock.patch.object(orchestrator.sf, "append_cost_event"),
+                    mock.patch.object(orchestrator, "_persist_lifecycle", side_effect=lambda phase, value: persisted.append(value)),
+                    mock.patch.object(orchestrator, "_progress", side_effect=lambda path, event, **details: progress.append(event)),
+                    mock.patch.object(orchestrator.j1m_runner, "write_progress"),
+                ]:
+                    stack.enter_context(patcher)
+                with self.assertRaises(sf.AmbiguousProviderOutcome):
+                    orchestrator.execute(
+                        Path(directory) / "env", config_path=ROOT / "model/conversion/j1m-config.json",
+                        phase_id="key-ambiguity", run_id="test", artifact_destination=Path(directory) / "artifacts", mode="prove",
+                    )
+                self.assertFalse(orchestrator.sf.append_cost_event.called)
+        self.assertTrue(persisted)
+        self.assertEqual(persisted[-1]["ssh_key_reconciliation"]["status"], "unresolved")
         self.assertEqual(progress[-1], "failed")
 
     def test_eval_rejects_local_artifact_execution_path(self):
@@ -859,6 +913,16 @@ class StaticSafetyTests(unittest.TestCase):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_eval_identity")
         j1m = load(ROOT / "scripts/j1m_runner.py", "j1m_eval_identity_config")
         config = j1m.load_config()
+        approved = orchestrator._verify_eval_artifact(
+            None, ROOT / "artifacts" / "qwen35-9b" / "model-manifest.json", config,
+        )
+        self.assertEqual(approved["name"], "Qwen3.5-9B-Q4_K_M.gguf")
+        tampered_config = json.loads(json.dumps(config))
+        tampered_config["artifacts"]["eval_manifest_sha256"] = "f" * 64
+        with self.assertRaisesRegex(ValueError, "trust anchor"):
+            orchestrator._verify_eval_artifact(
+                None, ROOT / "artifacts" / "qwen35-9b" / "model-manifest.json", tampered_config,
+            )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             artifact = root / "Qwen3.5-9B-Q4_K_M.gguf"
@@ -872,11 +936,13 @@ class StaticSafetyTests(unittest.TestCase):
                 "artifact": {"expected_file_name": artifact.name, "expected_size_bytes": artifact.stat().st_size, "sha256": digest, "modality_profile": "text_only_no_mmproj", "quantization_profile": "Q4_K_M"},
             }), encoding="utf-8")
             (root / "model-manifest.sha256").write_text(f"{hashlib.sha256(manifest.read_bytes()).hexdigest()}  model-manifest.json\n", encoding="utf-8")
-            identity = orchestrator._verify_eval_artifact(artifact, manifest, config)
+            with self.assertRaisesRegex(ValueError, "trust anchor"):
+                orchestrator._verify_eval_artifact(None, manifest, config)
+            identity = orchestrator._verify_eval_artifact(artifact, manifest, config, expected_manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest())
             self.assertEqual(identity["sha256"], digest)
             artifact.write_bytes(b"tampered")
             with self.assertRaises(ValueError):
-                orchestrator._verify_eval_artifact(artifact, manifest, config)
+                orchestrator._verify_eval_artifact(artifact, manifest, config, expected_manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest())
 
     def test_remote_eval_redacts_diagnostics_and_never_accepts_bearer_argv(self):
         remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_security")

@@ -145,6 +145,7 @@ class OwnedResource:
     run_deadline_utc: str | None = None
     instance_type: str | None = None
     launcher_start_marker: str | None = None
+    ssh_public_key_fingerprint: str | None = None
 
 
 def utc_now() -> datetime:
@@ -253,6 +254,9 @@ def read_owned_resource(phase_id: str) -> OwnedResource | None:
     validate_resource_id(record.instance_id, field="ledger instance id")
     validate_resource_id(record.ssh_key_id, field="ledger SSH key id")
     validate_nonce(record.ownership_nonce)
+    if (record.ssh_public_key_fingerprint is not None and
+            re.fullmatch(r"[A-Za-z0-9+/]{43}", record.ssh_public_key_fingerprint) is None):
+        raise ShadeformError("malformed ledger SSH public-key fingerprint")
     if record.phase_id != validate_phase_id(phase_id):
         raise ShadeformError("phase ledger is bound to a different phase")
     return record
@@ -263,6 +267,9 @@ def write_owned_resource(record: OwnedResource) -> None:
     validate_resource_id(record.instance_id, field="ledger instance id")
     validate_resource_id(record.ssh_key_id, field="ledger SSH key id")
     validate_nonce(record.ownership_nonce)
+    if (record.ssh_public_key_fingerprint is not None and
+            re.fullmatch(r"[A-Za-z0-9+/]{43}", record.ssh_public_key_fingerprint) is None):
+        raise ValueError("invalid ledger SSH public-key fingerprint")
     path = runtime_ledger_path(record.phase_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -377,13 +384,15 @@ def append_cost_event(event: dict[str, Any]) -> None:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
 
-def reserve_create_attempt(phase_id: str, nonce: str, candidate: Candidate, *, backstop_hours: float, public_key_sha256: str, ssh_key_id: str | None = None) -> str:
+def reserve_create_attempt(phase_id: str, nonce: str, candidate: Candidate, *, backstop_hours: float, public_key_sha256: str, public_key_fingerprint: str | None = None, ssh_key_id: str | None = None) -> str:
     """Durably reserve one possible create POST before any provider mutation."""
 
     validate_phase_id(phase_id)
     validate_nonce(nonce)
     if backstop_hours <= 0 or not re.fullmatch(r"[0-9a-f]{64}", public_key_sha256):
         raise ValueError("invalid create-attempt reservation inputs")
+    if public_key_fingerprint is not None and re.fullmatch(r"[A-Za-z0-9+/]{43}", public_key_fingerprint) is None:
+        raise ValueError("invalid SSH public-key fingerprint reservation input")
     if ssh_key_id is not None:
         validate_resource_id(ssh_key_id, field="SSH key id")
     attempt_id = f"attempt-{nonce}"
@@ -402,6 +411,8 @@ def reserve_create_attempt(phase_id: str, nonce: str, candidate: Candidate, *, b
         # The latest event enriches the same reservation with the provider key
         # ID, without rewriting its append-only history.
         event["ssh_key_id"] = ssh_key_id
+    if public_key_fingerprint is not None:
+        event["ssh_public_key_fingerprint"] = public_key_fingerprint
     append_cost_event(event)
     return attempt_id
 
@@ -839,9 +850,15 @@ def add_ssh_key(api_key: str, phase_id: str, name: str, public_key: str) -> str:
         # public key are verified immediately afterward through
         # /sshkeys/{id}/info.
         return validate_resource_id(response.get("id"), field="created SSH key id")
-    except ShadeformHTTPError:
+    except ShadeformHTTPError as exc:
+        # A 5xx, timeout-like 4xx, or rate-limit response can be emitted after
+        # the provider committed the POST. Reconcile those outcomes by the
+        # nonce/fingerprint; ordinary validation/auth 4xx responses are safe
+        # definitive rejections.
+        if exc.status >= 500 or exc.status in {408, 409, 425, 429}:
+            raise AmbiguousProviderOutcome("SSH key create outcome is unknown after provider response") from exc
         raise
-    except (ShadeformError, OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError, TypeError, ValueError) as exc:
+    except (ShadeformError, OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError, AttributeError, TypeError, ValueError) as exc:
         # A timeout or malformed successful response may follow a provider-side
         # key creation. The caller must reconcile by the unique nonce name and
         # public-key fingerprint before it can revoke anything or create an
@@ -877,14 +894,20 @@ def ssh_public_key_fingerprint(value: object) -> str:
     return base64.b64encode(hashlib.sha256(decoded).digest()).decode("ascii").rstrip("=")
 
 
-def reconcile_ssh_key(api_key: str, phase_id: str, *, expected_name: str, expected_public_key: str) -> str:
+def reconcile_ssh_key(api_key: str, phase_id: str, *, expected_name: str, expected_public_key: str | None = None, expected_fingerprint: str | None = None) -> str:
     """Reconcile one ambiguous key create, then return only an exact unique ID.
 
     The list is bounded and used only to identify a key with both the nonce-bound
     name and the expected public-key fingerprint. Any zero or multiple matches
     remains unresolved; no broad delete or instance create is permitted.
     """
-    expected_fingerprint = ssh_public_key_fingerprint(expected_public_key)
+    if expected_public_key is not None:
+        calculated_fingerprint = ssh_public_key_fingerprint(expected_public_key)
+        if expected_fingerprint is not None and expected_fingerprint != calculated_fingerprint:
+            raise ValueError("SSH key fingerprint binding mismatch")
+        expected_fingerprint = calculated_fingerprint
+    if expected_fingerprint is None or re.fullmatch(r"[A-Za-z0-9+/]{43}", expected_fingerprint) is None:
+        raise ValueError("SSH key reconciliation requires a bounded fingerprint")
     response = request(api_key, "GET", "/sshkeys", phase_id=phase_id)
     entries = response.get("ssh_keys") if isinstance(response, dict) else None
     if not isinstance(entries, list) or len(entries) > 256:
@@ -905,7 +928,8 @@ def reconcile_ssh_key(api_key: str, phase_id: str, *, expected_name: str, expect
             matches.append(key_id)
     if len(matches) != 1:
         raise AmbiguousProviderOutcome("SSH key reconciliation did not identify exactly one nonce-bound key")
-    verify_ssh_key_ownership(api_key, phase_id, matches[0], expected_name=expected_name, expected_public_key=expected_public_key)
+    if expected_public_key is not None:
+        verify_ssh_key_ownership(api_key, phase_id, matches[0], expected_name=expected_name, expected_public_key=expected_public_key)
     return matches[0]
 
 
