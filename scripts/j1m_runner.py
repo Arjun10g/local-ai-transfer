@@ -321,7 +321,7 @@ def command_plan(config: dict[str, Any], source: str = "/scratch/hf/Qwen3.5-9B",
         ["git", "clone", "--filter=blob:none", config["llama_cpp"]["repository"], llama["checkout"]],
         ["git", "-C", llama["checkout"], "checkout", "--detach", llama["revision"]],
         ["sudo", "apt-get", "update"],
-        ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "python3-venv"],
+        ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "python3-venv", "cmake", "build-essential"],
         ["python3", "-m", "venv", "/scratch/j1m/venv"],
         ["mkdir", "-p", wheelhouse],
         ["/scratch/j1m/venv/bin/pip", "wheel", "--disable-pip-version-check", "--no-input", "--wheel-dir", wheelhouse, "-r", f"{llama['checkout']}/{config['python_dependencies']['requirements_file']}", f"{llama['checkout']}/{config['python_dependencies']['local_gguf_package']}"],
@@ -335,7 +335,17 @@ def command_plan(config: dict[str, Any], source: str = "/scratch/hf/Qwen3.5-9B",
         ["python3", "--version"],
         ["mkdir", "-p", source, output],
         ["python3", runner, "--config", config_path, "--verify-llama", llama["checkout"], llama["revision"]],
-        ["cmake", "-S", llama["checkout"], "-B", f"{llama['checkout']}/build", "-DGGML_CUDA=OFF", "-DLLAMA_BUILD_TOOLS=ON"],
+        [
+            "cmake", "-S", llama["checkout"], "-B", f"{llama['checkout']}/build",
+            "-DGGML_CUDA=OFF",
+            "-DLLAMA_BUILD_TOOLS=ON",
+            "-DLLAMA_BUILD_TESTS=OFF",
+            "-DLLAMA_BUILD_EXAMPLES=OFF",
+            "-DLLAMA_BUILD_SERVER=OFF",
+            "-DLLAMA_BUILD_APP=OFF",
+            "-DLLAMA_BUILD_UI=OFF",
+            "-DLLAMA_OPENSSL=OFF",
+        ],
         ["cmake", "--build", f"{llama['checkout']}/build", "--target", "llama-quantize", "-j2"],
         [python_exec, runner, "--config", config_path, "--scratch", "/scratch", "--min-scratch-gib", str(config["resources"]["required_scratch_gib"])],
         [hf_exec, "download", config["source"]["model_id"], "--revision", config["source"]["revision"], "--local-dir", source],
@@ -414,6 +424,9 @@ def run_commands(commands: list[list[str]], progress_path: Path, *, cwd: Path | 
                 stage_receipt["stderr_tail"] = stderr_tail
         except subprocess.TimeoutExpired:
             stage_receipt = {"stage": index + 1, "argv": command, "started_at_utc": started_at, "ended_at_utc": utc_now(), "exit_code": None, "status": "transport_timeout"}
+        except OSError as exc:
+            message = re.sub(r"(?i)(api[_-]?key|token|password|secret)(\s*[=:]\s*)\S+", r"\1\2<redacted>", str(exc))
+            stage_receipt = {"stage": index + 1, "argv": command, "started_at_utc": started_at, "ended_at_utc": utc_now(), "exit_code": None, "status": "launch_failed", "error_type": type(exc).__name__, "stderr_tail": message[-_COMMAND_LOG_TAIL_LIMIT:]}
         # Manifest creation and intermediate cleanup are administrative stages;
         # they intentionally do not mutate the immutable conversion receipt.
         administrative = "--manifest" in command or "--post-cleanup" in command or (command and command[0] == "rm")
@@ -523,7 +536,7 @@ def main(argv: list[str] | None = None) -> int:
         head = subprocess.run(["git", "-C", str(checkout), "rev-parse", "HEAD"], check=True, capture_output=True, text=True, timeout=30).stdout.strip()
         try:
             os_packages = subprocess.run(
-                ["dpkg-query", "-W", "-f=${binary:Package}=${Version}\\n", "python3-venv"],
+                ["dpkg-query", "-W", "-f=${binary:Package}=${Version}\\n", "python3-venv", "cmake", "build-essential"],
                 check=True,
                 capture_output=True,
                 text=True,

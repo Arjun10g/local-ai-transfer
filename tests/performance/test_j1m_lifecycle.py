@@ -55,12 +55,17 @@ class J1MConfigTests(unittest.TestCase):
         self.assertTrue(any("--no-index" in command and "gguf" in command and "-e" not in command for command in plan["commands"]))
         self.assertNotIn("--token-file", [part for command in plan["commands"] for part in command])
         self.assertIn(["sudo", "apt-get", "update"], plan["commands"])
-        self.assertIn(["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "python3-venv"], plan["commands"])
+        self.assertIn(["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "python3-venv", "cmake", "build-essential"], plan["commands"])
         self.assertTrue(any("--verify-llama" in command for command in plan["commands"]))
         self.assertTrue(any("--inspect-tensors" in command for command in plan["commands"]))
         hf_commands = [command for command in plan["commands"] if any(part == "download" for part in command)]
         self.assertEqual(len(hf_commands), 1)
         self.assertNotIn("--local-dir-use-symlinks", hf_commands[0])
+        cmake_configure = next(command for command in plan["commands"] if command[:2] == ["cmake", "-S"])
+        self.assertIn("-DGGML_CUDA=OFF", cmake_configure)
+        self.assertIn("-DLLAMA_BUILD_TOOLS=ON", cmake_configure)
+        for disabled in ("TESTS", "EXAMPLES", "SERVER", "APP", "UI"):
+            self.assertIn(f"-DLLAMA_BUILD_{disabled}=OFF", cmake_configure)
         remote_plan = self.j1m.command_plan(config, runner="/scratch/j1m/j1m_runner.py", config_path="/scratch/j1m/j1m-config.json")
         nested_runner_commands = [command for command in remote_plan if "/scratch/j1m/j1m_runner.py" in command]
         self.assertTrue(nested_runner_commands)
@@ -290,6 +295,16 @@ class J1MConfigTests(unittest.TestCase):
             self.assertLessEqual(len(result[0]["stderr_tail"]), 1200)
             self.assertNotIn("do-not-retain", result[0]["stderr_tail"])
             self.assertIn("<redacted>", result[0]["stderr_tail"])
+
+    def test_missing_executable_is_persisted_as_stage_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            receipt_path = root / "command-receipt.json"
+            result = self.j1m.run_commands([["j1m-executable-that-does-not-exist"]], root / "progress.json", receipt_path=receipt_path)
+            self.assertEqual(result[0]["status"], "launch_failed")
+            self.assertEqual(result[0]["error_type"], "FileNotFoundError")
+            persisted = json.loads(receipt_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted[0]["status"], "launch_failed")
 
     def test_hf_token_is_injected_only_into_download_stage(self):
         with tempfile.TemporaryDirectory() as directory:
