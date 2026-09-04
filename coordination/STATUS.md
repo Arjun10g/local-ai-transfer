@@ -9,6 +9,7 @@
 - Critical path: contracts → fixture vertical slice → controlled model artifact → real CPU slice → tools → hardening/release
 - Shadeform policy: project `.env`, ownership-bound lifecycle, read-only catalogue before create, cost preflight, provider backstop longer than run, salvage before teardown, no idle instance
 - Known target: Dell Intel Core Ultra 7 vPro Enterprise-class platform; exact CPU SKU, GPU device ID/driver, and memory topology still require the read-only receipt, so accelerated target promotion and final Phase 8 acceptance cannot yet be claimed
+- Security note: `coordination/SECURITY_INCIDENTS.md` records a legacy reference credential exposure; the credential was removed from project env copies and requires rotation at the source
 
 ## Check-in cadence
 
