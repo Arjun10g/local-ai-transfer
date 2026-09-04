@@ -3,66 +3,70 @@
 - **Session:** S4
 - **Required model:** GPT-5.6 Luna
 - **Role:** QA/release, target clean-machine acceptance harness
-- **Timestamp (UTC):** 2026-09-04T17:09:43Z
+- **Timestamp (UTC):** 2026-09-04T17:32:44Z
 - **Branch/worktree:** `luna/windows-acceptance` / `wt-windows-acceptance`
 - **Current phase:** Phase 8 preparation only; no target execution
 - **Primary task ID:** QA-020
 - **Secondary task ID, if any:** PERF-019 receipt support
-- **Task state:** IN_PROGRESS
-- **Last merged `main` commit:** `90a2d43`
+- **Task state:** READY_FOR_REVIEW
+- **Last merged `main` commit:** `c7e14e0`
 
 ## Objective for this work interval
 
-Implement a read-only Windows clean-machine acceptance harness and operator checklist for the reported Dell Core Ultra 7 vPro Enterprise laptop. The harness will collect exact Windows/CPU/GPU/PNP/memory/Vulkan evidence, exercise the mandatory CPU and candidate Vulkan release paths on the target, validate portable launcher supervision and browser bootstrap, and define separately consented synthetic live checks for Graph mail, Teams, Outlook, Copilot, and browser actions. It will fail closed unless a complete target receipt proves the claim and will not label local fixtures or this development machine READY.
+Provide a target-only, receipt-gated Windows acceptance procedure for the reported Dell Core Ultra 7 vPro Enterprise laptop. Collect exact OS/CPU/DIMM/baseboard/BIOS/display-PNP/Vulkan evidence, exercise the mandatory CPU and unpromoted Vulkan-candidate paths, validate the portable launcher/Job/named-pipe/browser-bootstrap lifecycle, and define opt-in synthetic Graph/Teams/Outlook/browser/Copilot checks with explicit operator consent and no secret/content receipt logging. Never claim target readiness from local fixtures.
 
 ## Inputs and dependencies
 
-- Contract/version: existing release manifest, backend profile, host API, and portable launcher contracts at `90a2d43`
-- Required commits: current `main` at `90a2d43`; accepted release/model checksums and target transfer remain external dependencies
-- Model/build/profile IDs: fixed product GGUF identity; CPU mandatory; Intel Vulkan unpromoted candidate
-- Handoffs consumed: Sol's bounded QA-020/PERF-019-support assignment and user-reported hardware expectations
+- Contract/version: `windows-hardware-receipt` 1.1.0; `local_bmo.windows-clean-machine-acceptance.v1`; current release/host/native contracts
+- Required commits: current `main` `c7e14e0`; implementation `0c477f6`
+- Model/build/profile IDs: immutable Qwen3.5-9B Q4_K_M identity; CPU mandatory; Intel Vulkan candidate unpromoted; Node v24.20.0 pinned
+- Handoffs consumed: Sol assignment plus user-reported target values, treated only as expected assertions
 
 ## Work completed
 
-- Created a clean worktree and branch from current `main`.
-- Read the mandatory governance and execution documents and claimed QA-020 before implementation.
+- Extended the read-only Windows probe with exact board/BIOS/DIMM/CPU/display-PNP fields and hash-pinned bounded Vulkan summary/device identity.
+- Added a standard-user PowerShell target harness that verifies the generated portable package, runs offline CPU chat/cancel, tests bootstrap hostile origin/referrer/replay/bearer behavior, opens the real browser through ShellExecute, checks graceful and kill-on-close process-tree cleanup, and exercises an exact hash-bound Vulkan candidate without fallback.
+- Added explicitly opted-in, typed operator attestations for synthetic Outlook mail/Teams read and send, Outlook app open, browser open/fill, and prompt-only Copilot against a disposable workspace. No account/message/prompt/response/URL/token content enters the receipt.
+- Added a strict offline verifier that binds the separate hardware receipt bytes/hash, refuses fixture/unbound/duplicate/oversized receipts, checks the exact reported laptop envelope, separates `core_ready` from `full_access_ready`, and leaves overall status `NOT_READY` unless every receipt passes.
+- Added the target profile, operator runbook/checklist, release-operator pointer, and focused fail-closed tests.
+- Rebased cleanly onto current `main` before final evidence.
 
 ## Evidence
 
-- Commit: pending implementation; this startup packet is committed first
-- Commands: read-only repository inventory only
-- Tests: none yet
-- Machine: macOS arm64 development machine, not the target
-- Artifact/index: none; target receipt does not exist
-- Metrics: none
+- Commits: `e248e75` (claim), `0c477f6` (implementation)
+- Commands: `python3 -m unittest -v tests.release.test_windows_acceptance tests.performance.test_probe_and_preflight.HardwareProbeTests tests.performance.test_j1m_lifecycle.StaticSafetyTests.test_hardware_receipt_has_no_serial_or_full_output_path`; targeted `py_compile`; JSON parse checks; `git diff --check main...HEAD`
+- Tests: 11/11 focused tests pass after rebase; JSON and Python syntax checks pass; whitespace check passes
+- Machine: macOS arm64 development machine, not Windows and not the Dell target
+- Artifact/index: `qa/windows_acceptance/README.md`, `CHECKLIST.md`, `target-profile.json`; no real receipt checked in
+- Metrics: none; no model, binary, Vulkan, browser, provider, or target process was run locally
 
 ## Findings and changed assumptions
 
-- The user-reported Core Ultra 7 vPro, Intel integrated Graphics driver `32.0.101.8247`, 32 GB at 5600 MT/s, and Dell board `039NNG` revision `A00` are expected values to verify, not accepted machine evidence.
-- Vulkan remains a candidate and must be exercised or explicitly rejected with evidence; it is not promoted by this task.
-- Live account actions require separate, explicit operator consent and synthetic test targets. Presence of local model execution does not grant account or device authority.
+- The reported Intel Graphics driver `32.0.101.8247`, 32 GB at 5600 MT/s, board `039NNG` A00, and Core Ultra 7/vPro Enterprise label remain assertions until exact Windows evidence is captured. System-visible RAM may be below 32 GiB; the gate requires a 32 GiB DIMM sum and a sane 31–32 GiB OS-visible envelope.
+- `vulkaninfo --summary` can establish exact Intel integrated device/API identity only when its executable hash is approved. A candidate PASS is still not promotion; a clean explicit rejection is acceptable for a CPU-only core disposition.
+- Current product browser mutation is disabled by default and Copilot is prompt-only. Therefore the full-access check will honestly remain NOT_READY unless the reviewed runtime configuration exposes the requested browser action and every live synthetic check succeeds; this task does not alter host/provider implementations.
 
 ## Blockers
 
-- Fact/evidence: no accepted release transfer, exact target hardware receipt, Vulkan probe receipt, or target execution receipt is present.
-- Impact: current release status remains UNPROVEN and this task cannot produce READY locally.
-- What was tried: repository/governance inventory only; target work is intentionally not simulated as real evidence.
-- Proposed workaround: implement a statically testable harness and run it later on the approved target/package.
-- Decision/asset needed: approved release/model artifacts and operator-authorized target session.
-- Owner: Sol + operator.
-- Independent work continuing: harness, schema/gate, fixtures, and checklist.
+- Fact/evidence: no approved target transfer, exact Windows receipt, reviewed Vulkan executable/candidate hash, browser observation, live synthetic account run, or target process receipt exists.
+- Impact: current status is `NOT_READY`; QA-020 implementation is reviewable, but Phase 8 cannot pass.
+- What was tried: static contract verification and narrowly focused mocked/fail-closed tests only, per the laptop-crash constraint.
+- Proposed workaround: after REL-010, run the documented standard-user target sequence and return the two-file receipt bundle for offline verification/Sol decision.
+- Decision/asset needed: approved CPU package/model/Vulkan candidate/vulkaninfo hashes, optional reviewed live host config/test accounts, and operator consent.
+- Owner: Sol + operator; provider owners for any capability still disabled.
+- Independent work continuing: none within this bounded task.
 
 ## Handoffs
 
 - To: Sol
-- Handoff file: this packet; final evidence paths pending
-- Required by: QA-020 review
-- Acknowledged: assignment received
+- Handoff file: `qa/windows_acceptance/README.md` and `qa/windows_acceptance/CHECKLIST.md`
+- Required by: PERF-019/QA-020 target run and SOL-G8
+- Acknowledged: assignment received; review pending
 
 ## Next bounded action
 
-Add the target PowerShell collector/runner, offline receipt verifier, fixture-only regression tests, and operator checklist without changing model, host-tool, or provider implementations.
+Review/merge `0c477f6`, then run the harness once on the approved Dell target. Do not run it locally or substitute a fixture for target evidence.
 
 ## Sol action requested
 
-Review/merge after focused static tests; do not advance the target release gate without real Windows receipts.
+Review and merge. Keep Phase 8 and full-access status `NOT_READY` until a real receipt bundle passes `python -m qa.windows_acceptance.verify` and Sol reviews the residual Vulkan/provider limitations.
