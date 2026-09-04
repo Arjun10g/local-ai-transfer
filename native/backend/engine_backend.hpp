@@ -10,6 +10,7 @@ namespace lae {
 
 struct BackendConfig {
   std::string model_path;
+  std::string model_id = "fixture";
   std::string backend_profile = "fixture-cpu";
   unsigned context_tokens = 8192;
 };

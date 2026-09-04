@@ -17,9 +17,13 @@ if (envMode && configuredMode && envMode !== configuredMode) throw new Error('en
 const mode = envMode ?? configuredMode ?? 'fixture';
 const endpoint = process.env.LAE_ENGINE_ENDPOINT ?? fileConfig.engine?.endpoint;
 const token = process.env.LAE_ENGINE_TOKEN;
+const model = process.env.LAE_ENGINE_MODEL ?? fileConfig.engine?.model;
+const backend = process.env.LAE_ENGINE_BACKEND ?? fileConfig.engine?.backend;
+const requestTimeoutMs = Number(process.env.LAE_ENGINE_TIMEOUT_MS ?? fileConfig.engine?.request_timeout_ms ?? 120000);
 if (mode === 'fixture' && (endpoint || token)) throw new Error('native engine settings supplied while fixture mode is selected');
 const config = mergeConfig({ ...fileConfig, engine: { ...(fileConfig.engine ?? {}), mode } });
-const engine = mode === 'native' ? new NativeEngineClient({ endpoint, token }) : new FixtureEngineClient();
+if (mode === 'native' && (!model || !backend)) throw new Error('native engine model and backend must be explicit in config or environment');
+const engine = mode === 'native' ? new NativeEngineClient({ endpoint, token, model, backend, timeoutMs: requestTimeoutMs }) : new FixtureEngineClient();
 if (mode === 'native') await engine.waitReady();
 const controller = new ConversationController({ engine, toolRegistry: createLocalToolRegistry({ workspaces: config.workspace_roots, networkProvider: config.network.provider }) });
 const host = new HostServer({ controller, engine, config });

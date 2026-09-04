@@ -25,6 +25,8 @@ contents. Clients must branch on `code`, not message text.
 | `gguf_magic_invalid` | 400 | GGUF magic is invalid |
 | `gguf_version_unsupported` | 400 | GGUF version is unsupported |
 | `model_architecture_mismatch` | 400 | GGUF architecture differs from Qwen3.5 profile |
+| `model_changed_during_validation` | 400 | Model pathname, size, or modification time changed during validation |
+| `model_read_failed` | 400 | Model could not be read consistently during validation |
 
 The fixture uses only these codes and never silently falls back to another
 backend or model.

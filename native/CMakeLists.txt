@@ -2,6 +2,7 @@ add_library(lae_runtime
   backend/fixture_backend.cpp
   backend/llama_backend.cpp
   backend/llama_chat_template.cpp
+  config/runtime_config.cpp
   engine/engine.cpp
   model_validation/model_validator.cpp
   server/chat_request.cpp

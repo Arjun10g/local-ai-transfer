@@ -17,9 +17,12 @@ export function validateConfig(input = {}) {
     if (own(h, 'max_connections') && (!Number.isInteger(h.max_connections) || h.max_connections < 1 || h.max_connections > 256)) throw new Error('host.max_connections out of range');
   }
   if (own(input, 'engine')) {
-    const e = object(input.engine, 'engine'); keys(e, ['mode', 'endpoint'], 'engine');
+    const e = object(input.engine, 'engine'); keys(e, ['mode', 'endpoint', 'model', 'backend', 'request_timeout_ms'], 'engine');
     if (own(e, 'mode') && !MODES.includes(e.mode)) throw new Error('engine.mode unsupported');
     if (own(e, 'endpoint') && (typeof e.endpoint !== 'string' || e.endpoint.length > 512)) throw new Error('engine.endpoint invalid');
+    if (own(e, 'model') && (typeof e.model !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(e.model))) throw new Error('engine.model invalid');
+    if (own(e, 'backend') && (typeof e.backend !== 'string' || !/^[A-Za-z0-9._/-]{1,128}$/.test(e.backend))) throw new Error('engine.backend invalid');
+    if (own(e, 'request_timeout_ms') && (!Number.isInteger(e.request_timeout_ms) || e.request_timeout_ms < 1000 || e.request_timeout_ms > 120000)) throw new Error('engine.request_timeout_ms out of range');
   }
   if (own(input, 'workspace_roots')) {
     if (!Array.isArray(input.workspace_roots) || input.workspace_roots.length > 16 || input.workspace_roots.some(x => (typeof x === 'string' && (x.length < 1 || x.length > 1024)) || (x && typeof x === 'object' && !Array.isArray(x) && (Object.keys(x).some(key => !['id', 'path', 'read', 'write'].includes(key)) || typeof x.id !== 'string' || x.id.length < 1 || x.id.length > 64 || typeof x.path !== 'string' || x.path.length < 1 || x.path.length > 1024 || (x.read !== undefined && typeof x.read !== 'boolean') || (x.write !== undefined && typeof x.write !== 'boolean'))) || (typeof x !== 'string' && (!x || typeof x !== 'object' || Array.isArray(x))))) throw new Error('workspace_roots invalid');

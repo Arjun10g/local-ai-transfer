@@ -29,6 +29,7 @@ class Engine final {
   void stop();
   LifecycleState state() const;
   std::string backend_id() const;
+  std::string model_id() const;
   SessionInfo create_session();
   bool delete_session(const std::string& id);
   bool has_session(const std::string& id) const;
@@ -43,6 +44,7 @@ class Engine final {
   std::unique_ptr<EngineBackend> backend_;
   mutable std::mutex mutex_;
   LifecycleState state_ = LifecycleState::NEW;
+  std::string model_id_ = "fixture";
   std::map<std::string, SessionInfo> sessions_;
   std::map<std::string, Cancellation> active_;
   unsigned next_session_ = 1;
