@@ -2,21 +2,39 @@
 
 This is a REL-001 package skeleton, not a runnable release. It contains no
 model weights, compiler, Node modules, credentials, or installer. The approved
-Qwen3.5-9B Q4_K_M model must remain a separately verified local file. Set the
-absolute `model_path`, exact `model_size_bytes`, and exact `model_sha256` in
-`config.local.json`; `backend_profile` defaults to `cpu` and no model fallback
-is permitted. Supply `LAE_ENGINE_TOKEN` through the protected launch
-environment before invoking `Start-LocalAssistant.ps1`.
+Qwen3.5-9B Q4_K_M model must remain a separately verified local file. Its
+filename, 5,629,109,088-byte size, SHA-256, GGUF metadata and tensor inventory
+are compiled into the engine and planner; caller-supplied identity values are
+not accepted. `config.example.json` documents the strict native config only.
+
+`windows_backend_plan.py` is shipped beside the PowerShell scripts, removing a
+repository-relative script dependency. Build and run still require an already
+installed Python 3 interpreter selected by `-PythonCommand`; its absence is a
+clear hard failure. Therefore this skeleton is not yet a self-contained
+portable runtime. A future packaged launcher must eliminate that interpreter
+dependency before portability can be claimed.
 
 ## Explicit Windows backend choice
 
 `backend-profiles.json` and `backend-runtime.example.json` describe a
-receipt-gated choice with no fallback. Run `Build-WindowsBackend.ps1 -Backend cpu-safe ...` for
+receipt-gated choice with no fallback. The planner requires Windows x64/AMD64,
+at least 24 GiB installed and 12 GiB currently available RAM, and an absolute
+pinned model path. A nonexistent path can produce only a `planning-only` plan;
+an exact verified artifact advances it to `launch-preconditions-verified`.
+Neither state is called execution-ready: binary identity, model-load and startup
+self-test evidence remain `UNPROVEN` until actual execution.
+
+Run `Build-WindowsBackend.ps1 -Backend cpu-safe ...` for
 the product CPU engine, or select
 `-Backend intel-sycl-experimental -AllowExperimentalSycl ...` for an explicit
 upstream llama.cpp SYCL CLI diagnostic build (still experimental and blocked
 until a separate acceptance review). `Run-WindowsBackend.ps1` requires the
-same choice and never changes it to CPU when SYCL is unavailable. The SYCL
+same choice and never changes it to CPU when SYCL is unavailable. It consumes
+the packaged plan JSON, checks engine build identity, and passes that plan's
+exact model, backend, context, device and offload values to the engine; an
+unrelated config cannot substitute launch values. For the product engine,
+`LAE_ENGINE_TOKEN` is removed from the child environment and sent only through
+stdin, never argv. The SYCL
 runtime selects `SYCL0` and emits bounded one-token output through
 `llama-cli`; it does not expose an unauthenticated server and is not a
 promoted product backend until a separate review approves its compatibility.
@@ -53,7 +71,8 @@ machine: 8 GiB OS/application reserve, approximately 5.25 GiB resident Q4,
 fresh target measurement. “Core Ultra 7 vPro” is a family description, not an
 exact SKU; no macOS run or family-name inference is target validation.
 
-Before any release claim, provide the real `lae-engine-cpu.exe`, run the
+Before any release claim, provide the real `lae-engine-cpu.exe` and a packaged
+Python-independent launch path, run the
 allowlist/dependency/secret/weight scanner, generate checksums and SBOM, and
 complete native Windows launch and offline acceptance. No Shadeform, Intel,
 real-model, or native-Windows evidence is implied by this tree.

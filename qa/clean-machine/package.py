@@ -19,6 +19,7 @@ PACKAGE_ALLOWLIST = frozenset({
     "Start-LocalAssistant.ps1",
     "Build-WindowsBackend.ps1",
     "Run-WindowsBackend.ps1",
+    "windows_backend_plan.py",
     "Verify-Release.ps1",
     "config.example.json",
     "backend-profiles.json",
@@ -35,7 +36,8 @@ PACKAGE_ALLOWLIST = frozenset({
     "README-OPERATOR.md",
 })
 REQUIRED_STATIC = frozenset({
-    "lae-host.mjs", "Start-LocalAssistant.ps1", "config.example.json",
+    "lae-host.mjs", "Start-LocalAssistant.ps1", "Run-WindowsBackend.ps1",
+    "windows_backend_plan.py", "config.example.json",
     "ui/index.html", "THIRD_PARTY_NOTICES.md", "SBOM.spdx.json",
     "RELEASE_MANIFEST.json", "CHECKSUMS.sha256", "README-OPERATOR.md",
 })

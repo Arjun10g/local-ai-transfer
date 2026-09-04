@@ -14,7 +14,7 @@ class PackageScannerTests(unittest.TestCase):
     def test_weight_and_secret_files_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for relative in ("lae-host.mjs", "Start-LocalAssistant.ps1", "config.example.json", "ui/index.html", "THIRD_PARTY_NOTICES.md", "SBOM.spdx.json", "RELEASE_MANIFEST.json", "CHECKSUMS.sha256", "README-OPERATOR.md"):
+            for relative in ("lae-host.mjs", "Start-LocalAssistant.ps1", "Run-WindowsBackend.ps1", "windows_backend_plan.py", "config.example.json", "ui/index.html", "THIRD_PARTY_NOTICES.md", "SBOM.spdx.json", "RELEASE_MANIFEST.json", "CHECKSUMS.sha256", "README-OPERATOR.md"):
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("safe", encoding="utf-8")

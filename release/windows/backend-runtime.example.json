@@ -1,5 +1,8 @@
 {
   "schema": "local_bmo.windows-backend-runtime.v1",
+  "planning_status": "planning-only-until-artifact-is-present-and-verified",
+  "execution_ready": false,
+  "execution_evidence": "UNPROVEN-requires-binary-identity-model-load-and-startup-self-test",
   "selection": "operator-explicit-no-fallback",
   "hardware_receipt": "hardware-receipt.json",
   "vulkan_attestation": "windows-gpu-attestation.json",

@@ -104,45 +104,59 @@ int main() {
   assert(engine.state() == LifecycleState::STOPPED);
 
   const auto model_path = std::filesystem::temp_directory_path() / "Qwen3.5-9B-Q4_K_M.gguf";
-  {
-    std::ofstream model(model_path, std::ios::binary | std::ios::trunc);
-    const unsigned char fixture[] = {'G','G','U','F',3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-    model.write(reinterpret_cast<const char*>(fixture), sizeof(fixture));
-  }
-  lae::ModelProfile profile; profile.expected_size_bytes = 24; profile.expected_sha256 = "a4e5e156ddec27e286f75328784d7106b60a4eb1d246e950a001a3f944fbda99";
-  const auto accepted = lae::validate_model_file(model_path, profile, true);
-  assert(accepted.valid && accepted.code == "ok" && accepted.gguf_version == 3);
-  const auto rejected_real = lae::validate_model_file(model_path, profile, false);
-  assert(!rejected_real.valid && rejected_real.code == "model_profile_missing_metadata");
-  profile.expected_sha256 = std::string(64, '0');
-  const auto rejected_hash = lae::validate_model_file(model_path, profile, true);
-  assert(!rejected_hash.valid && rejected_hash.code == "model_hash_mismatch");
+  const std::string model_text = model_path.generic_string();
   const auto config_path = std::filesystem::temp_directory_path() / "lae-runtime-config.json";
   {
     std::ofstream config(config_path, std::ios::trunc);
-    config << "{\"model_path\":\"" << model_path.string() << "\",\"context_tokens\":8192,\"gpu_layers\":20,\"vulkan_device_name\":\"Intel Graphics\"}";
+    config << "{\"model_path\":\"" << model_text << "\",\"backend_profile\":\"cpu\",\"context_tokens\":8192}\n\t";
   }
   RuntimeConfigFile runtime_config;
   std::string config_error;
   std::error_code cleanup_error;
   assert(load_runtime_config(config_path, runtime_config, config_error));
-  assert(runtime_config.model_path == model_path.string() && runtime_config.backend_profile == "cpu" && runtime_config.context_tokens == 8192);
-  assert(runtime_config.gpu_layers == 20 && runtime_config.vulkan_device_name == "Intel Graphics");
+  assert(runtime_config.model_path == model_text && runtime_config.backend_profile == "cpu" && runtime_config.context_tokens == 8192);
+  assert(runtime_config.gpu_layers == 0 && runtime_config.vulkan_device_name.empty());
   {
     std::ofstream invalid_config(config_path, std::ios::trunc);
-    invalid_config << "{\"model_path\":\"" << model_path.string() << "\",\"gpu_layers\":100}";
+    invalid_config << "{\"model_path\":\"" << model_text << "\",\"model_path\":\"/other.gguf\"}";
   }
   assert(!load_runtime_config(config_path, runtime_config, config_error));
+  assert(config_error.find("duplicate") != std::string::npos);
+  {
+    std::ofstream invalid_config(config_path, std::ios::trunc);
+    invalid_config << "{\"model_path\":\"" << model_text << "\",\"model_sha256\":\"caller-controlled\"}";
+  }
+  assert(!load_runtime_config(config_path, runtime_config, config_error));
+  assert(config_error.find("unknown key") != std::string::npos);
+  {
+    std::ofstream invalid_config(config_path, std::ios::trunc);
+    invalid_config << "{\"model_path\":{\"value\":\"" << model_text << "\"}}";
+  }
+  assert(!load_runtime_config(config_path, runtime_config, config_error));
+  {
+    std::ofstream invalid_config(config_path, std::ios::trunc);
+    invalid_config << "{\"model_path\":\"relative.gguf\"}";
+  }
+  assert(!load_runtime_config(config_path, runtime_config, config_error));
+  {
+    std::ofstream invalid_config(config_path, std::ios::trunc);
+    invalid_config << "{\"model_path\":\"" << model_text << "\",\"backend_profile\":\"cpu\",\"gpu_layers\":20}";
+  }
+  assert(!load_runtime_config(config_path, runtime_config, config_error));
+  {
+    std::ofstream vulkan_config(config_path, std::ios::trunc);
+    vulkan_config << "{\"model_path\":\"" << model_text << "\",\"backend_profile\":\"intel-vulkan\",\"gpu_layers\":20,\"vulkan_device_name\":\"Intel Graphics\"}";
+  }
+  assert(load_runtime_config(config_path, runtime_config, config_error));
+  assert(runtime_config.backend_profile == "intel-vulkan" && runtime_config.gpu_layers == 20 && runtime_config.vulkan_device_name == "Intel Graphics");
   const auto relative_config = std::filesystem::path("runtime-config.json");
   assert(!load_runtime_config(relative_config, runtime_config, config_error));
-  const auto symlink_path = std::filesystem::temp_directory_path() / "lae-runtime-model-link.gguf";
-  std::filesystem::create_symlink(model_path, symlink_path, cleanup_error);
+  const auto symlink_path = std::filesystem::temp_directory_path() / "lae-runtime-config-link.json";
+  std::filesystem::create_symlink(config_path, symlink_path, cleanup_error);
   if (!cleanup_error) {
-    const auto symlink_result = lae::validate_model_file(symlink_path, profile, true);
-    assert(!symlink_result.valid && symlink_result.code == "model_symlink_forbidden");
+    assert(!load_runtime_config(symlink_path, runtime_config, config_error));
     std::filesystem::remove(symlink_path, cleanup_error);
   }
-  std::filesystem::remove(model_path, cleanup_error);
   std::filesystem::remove(config_path, cleanup_error);
   std::cout << "runtime contract/backend tests: PASS\\n";
 }

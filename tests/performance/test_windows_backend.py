@@ -9,11 +9,16 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MODULE_PATH = ROOT / "scripts" / "windows_backend_plan.py"
+MODULE_PATH = ROOT / "release" / "windows" / "windows_backend_plan.py"
 spec = importlib.util.spec_from_file_location("windows_backend_plan", MODULE_PATH)
 assert spec and spec.loader
 planner = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(planner)
+_previous_dont_write_bytecode = sys.dont_write_bytecode
+sys.dont_write_bytecode = True
+try:
+    spec.loader.exec_module(planner)
+finally:
+    sys.dont_write_bytecode = _previous_dont_write_bytecode
 
 
 def receipt(*, sycl=False, adapter_count=1, integrated=True):
@@ -49,6 +54,11 @@ def receipt(*, sycl=False, adapter_count=1, integrated=True):
 
 
 class WindowsBackendPlanTests(unittest.TestCase):
+    def planning_model(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        return Path(directory.name) / planner.MODEL_NAME
+
     def write_receipt(self, value):
         directory = tempfile.TemporaryDirectory()
         path = Path(directory.name) / "hardware-receipt.json"
@@ -70,11 +80,14 @@ class WindowsBackendPlanTests(unittest.TestCase):
 
     def test_cpu_requires_explicit_selection_and_reports_conservative_memory(self):
         path = self.write_receipt(receipt(integrated=None))
-        plan = planner.build_plan("cpu-safe", path)
+        plan = planner.build_plan("cpu-safe", path, model_path=str(self.planning_model()))
         self.assertEqual(plan["backend"], "cpu-safe")
         self.assertEqual(plan["selection"], "operator-explicit-no-fallback")
         self.assertEqual(plan["runtime"]["compiled_backend"], "cpu")
-        self.assertEqual(plan["status"], "planned")
+        self.assertEqual(plan["status"], "planning-only")
+        self.assertTrue(plan["planning_complete"])
+        self.assertFalse(plan["launch_preconditions_verified"])
+        self.assertFalse(plan["model"]["artifact_verified"])
         self.assertFalse(plan["execution_ready"])
         self.assertFalse(plan["runtime"]["gpu_offload"])
         self.assertEqual(plan["memory"]["default_context_tokens"], 8192)
@@ -85,12 +98,12 @@ class WindowsBackendPlanTests(unittest.TestCase):
     def test_sycl_is_not_inferred_from_intel_name_or_loader(self):
         path = self.write_receipt(receipt(integrated=None))
         with self.assertRaisesRegex(planner.BackendPlanError, "separately accepted and promoted"):
-            planner.build_plan("intel-sycl-experimental", path)
+            planner.build_plan("intel-sycl-experimental", path, model_path=str(self.planning_model()))
 
     def test_vulkan_product_profile_requires_receipt_and_has_bounded_offload(self):
         path = self.write_receipt(receipt(integrated=None))
         attestation = self.write_vulkan_attestation(path)
-        plan = planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
+        plan = planner.build_plan("intel-vulkan-conservative", path, model_path=str(self.planning_model()), attestation_path=attestation)
         self.assertTrue(plan["provenance"]["vulkan_source_closure"]["verified"])
         self.assertEqual(plan["runtime"]["compiled_backend"], "vulkan")
         self.assertEqual(plan["runtime"]["gpu_layers_default"], 20)
@@ -98,9 +111,9 @@ class WindowsBackendPlanTests(unittest.TestCase):
     def test_probe_shaped_unknown_integrated_field_needs_matching_attestation(self):
         path = self.write_receipt(receipt(integrated=None))
         with self.assertRaisesRegex(planner.BackendPlanError, "integrated-GPU attestation"):
-            planner.build_plan("intel-vulkan-conservative", path)
+            planner.build_plan("intel-vulkan-conservative", path, model_path=str(self.planning_model()))
         attestation = self.write_vulkan_attestation(path)
-        plan = planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
+        plan = planner.build_plan("intel-vulkan-conservative", path, model_path=str(self.planning_model()), attestation_path=attestation)
         self.assertTrue(plan["provenance"]["vulkan_source_closure"]["verified"])
 
     def test_vulkan_rejects_missing_loader_or_enumeration(self):
@@ -109,7 +122,7 @@ class WindowsBackendPlanTests(unittest.TestCase):
         path = self.write_receipt(value)
         attestation = self.write_vulkan_attestation(path)
         with self.assertRaisesRegex(planner.BackendPlanError, "loader"):
-            planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
+            planner.build_plan("intel-vulkan-conservative", path, model_path=str(self.planning_model()), attestation_path=attestation)
 
     def test_vulkan_rejects_unbound_or_mismatched_attestation(self):
         path = self.write_receipt(receipt())
@@ -118,7 +131,7 @@ class WindowsBackendPlanTests(unittest.TestCase):
         value["vulkan"]["driver_version"] = "wrong-driver"
         attestation.write_text(json.dumps(value), encoding="utf-8")
         with self.assertRaisesRegex(planner.BackendPlanError, "exact adapter and driver"):
-            planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
+            planner.build_plan("intel-vulkan-conservative", path, model_path=str(self.planning_model()), attestation_path=attestation)
 
     def test_vulkan_planner_rechecks_tampered_closure(self):
         path = self.write_receipt(receipt())
@@ -130,18 +143,18 @@ class WindowsBackendPlanTests(unittest.TestCase):
             (root / "ggml/src/ggml-vulkan/vulkan-shaders/add.comp").write_text("tampered", encoding="utf-8")
             with mock.patch.object(planner, "VULKAN_SOURCE_ROOT", root), mock.patch.object(planner, "VULKAN_SOURCE_MANIFEST", root / planner.VULKAN_SOURCE_MANIFEST.name):
                 with self.assertRaisesRegex(planner.BackendPlanError, "failed verification"):
-                    planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
+                    planner.build_plan("intel-vulkan-conservative", path, model_path=str(self.planning_model()), attestation_path=attestation)
 
     def test_sycl_remains_blocked_until_vulkan_profile_promotion(self):
         path = self.write_receipt(receipt(sycl=True))
         with self.assertRaisesRegex(planner.BackendPlanError, "separately accepted and promoted"):
-            planner.build_plan("intel-sycl-experimental", path)
+            planner.build_plan("intel-sycl-experimental", path, model_path=str(self.planning_model()))
 
     def test_sycl_rejects_ambiguous_integrated_adapters(self):
         path = self.write_receipt(receipt(sycl=True, adapter_count=2))
         with mock.patch.object(planner, "PRODUCT_VULKAN_PROFILE_PROMOTED", True):
             with self.assertRaisesRegex(planner.BackendPlanError, "exactly one explicitly integrated"):
-                planner.build_plan("intel-sycl-experimental", path)
+                planner.build_plan("intel-sycl-experimental", path, model_path=str(self.planning_model()))
 
     def test_sycl_rejects_adapter_without_explicit_integrated_evidence(self):
         value = receipt(sycl=True)
@@ -149,26 +162,62 @@ class WindowsBackendPlanTests(unittest.TestCase):
         path = self.write_receipt(value)
         with mock.patch.object(planner, "PRODUCT_VULKAN_PROFILE_PROMOTED", True):
             with self.assertRaisesRegex(planner.BackendPlanError, "exactly one explicitly integrated"):
-                planner.build_plan("intel-sycl-experimental", path)
+                planner.build_plan("intel-sycl-experimental", path, model_path=str(self.planning_model()))
 
     def test_neither_invalid_backend_nor_failed_sycl_falls_back(self):
         path = self.write_receipt(receipt())
         with self.assertRaises(planner.BackendPlanError):
-            planner.build_plan("intel-sycl-experimental", path)
+            planner.build_plan("intel-sycl-experimental", path, model_path=str(self.planning_model()))
         with self.assertRaises(planner.BackendPlanError):
-            planner.build_plan("auto", path)
+            planner.build_plan("auto", path, model_path=str(self.planning_model()))
 
     def test_model_identity_is_pinned(self):
         path = self.write_receipt(receipt())
-        with self.assertRaisesRegex(planner.BackendPlanError, "model identity"):
-            planner.build_plan("cpu-safe", path, model_size=1)
+        with self.assertRaisesRegex(planner.BackendPlanError, "absolute"):
+            planner.build_plan("cpu-safe", path, model_path=planner.MODEL_NAME)
+        with self.assertRaisesRegex(planner.BackendPlanError, "filename"):
+            planner.build_plan("cpu-safe", path, model_path=str(self.planning_model().with_name("caller.gguf")))
+        model = self.planning_model()
+        model.write_bytes(b"GGUF")
+        with self.assertRaisesRegex(planner.BackendPlanError, "size"):
+            planner.build_plan("cpu-safe", path, model_path=str(model))
+
+    def test_verified_artifact_still_does_not_claim_execution_readiness(self):
+        path = self.write_receipt(receipt())
+        model = self.planning_model()
+        with model.open("wb") as stream:
+            stream.truncate(planner.MODEL_SIZE_BYTES)
+        with mock.patch.object(planner, "_receipt_hash", side_effect=lambda value: planner.MODEL_SHA256 if value.name == planner.MODEL_NAME else "a" * 64):
+            plan = planner.build_plan("cpu-safe", path, model_path=str(model))
+        self.assertEqual(plan["status"], "launch-preconditions-verified")
+        self.assertTrue(plan["launch_preconditions_verified"])
+        self.assertTrue(plan["model"]["artifact_verified"])
+        self.assertFalse(plan["execution_ready"])
+        self.assertIn("UNPROVEN", plan["execution_evidence"])
 
     def test_receipt_must_be_windows_and_secret_free(self):
         value = receipt()
         value["os"]["caption"] = "Darwin"
         path = self.write_receipt(value)
         with self.assertRaisesRegex(planner.BackendPlanError, "does not prove Windows"):
-            planner.build_plan("cpu-safe", path)
+            planner.build_plan("cpu-safe", path, model_path=str(self.planning_model()))
+
+    def test_receipt_requires_x64_and_sane_available_memory(self):
+        value = receipt()
+        value["os"]["architecture"] = "ARM64"
+        path = self.write_receipt(value)
+        with self.assertRaisesRegex(planner.BackendPlanError, "x64/AMD64"):
+            planner.build_plan("cpu-safe", path, model_path=str(self.planning_model()))
+        value = receipt()
+        value["computer"]["available_memory_bytes"] = 8 * 1024**3
+        path = self.write_receipt(value)
+        with self.assertRaisesRegex(planner.BackendPlanError, "12 GiB available"):
+            planner.build_plan("cpu-safe", path, model_path=str(self.planning_model()))
+        value = receipt()
+        value["computer"]["available_memory_bytes"] = 33 * 1024**3
+        path = self.write_receipt(value)
+        with self.assertRaisesRegex(planner.BackendPlanError, "sane"):
+            planner.build_plan("cpu-safe", path, model_path=str(self.planning_model()))
 
     def test_scripts_require_explicit_backend_and_pin_sycl_flags(self):
         build = (ROOT / "release/windows/Build-WindowsBackend.ps1").read_text(encoding="utf-8")
@@ -181,10 +230,19 @@ class WindowsBackendPlanTests(unittest.TestCase):
         self.assertIn("LinkType", build)
         self.assertIn("LinkType", run)
         self.assertNotIn("--output", run)
-        self.assertIn("--device SYCL0", run)
-        self.assertIn("--backend intel-vulkan", run)
+        self.assertIn("--device $plan.runtime.device_selector", run)
+        self.assertIn("$plan.runtime.engine_cli_backend", run)
         self.assertIn("--n-predict 1", run)
         self.assertNotIn("--host 127.0.0.1", run)
+        self.assertNotIn("ConfigPath", run)
+        self.assertNotIn("'--config'", run)
+        self.assertIn("'--model', $plan.model.path", run)
+        self.assertIn("Remove-Item Env:LAE_ENGINE_TOKEN", run)
+        self.assertIn("$token | & $enginePath @engineArguments", run)
+        self.assertIn("Join-Path $PSScriptRoot 'windows_backend_plan.py'", run)
+        self.assertNotIn("scripts/windows_backend_plan.py", run)
+        self.assertNotIn("--model-size", build)
+        self.assertNotIn("--model-sha256", build)
         self.assertNotIn("llama-server", run.lower())
         self.assertNotIn("fallback", run.lower())
 
@@ -230,7 +288,7 @@ class WindowsBackendPlanTests(unittest.TestCase):
     def test_cli_accepts_vulkan_choice_and_reports_real_blocker(self):
         path = self.write_receipt(receipt(integrated=None))
         result = subprocess.run(
-            [sys.executable, str(MODULE_PATH), "--backend", "intel-vulkan-conservative", "--receipt", str(path)],
+            [sys.executable, str(MODULE_PATH), "--backend", "intel-vulkan-conservative", "--receipt", str(path), "--model-path", str(self.planning_model())],
             capture_output=True, text=True, check=False,
         )
         self.assertEqual(result.returncode, 2)

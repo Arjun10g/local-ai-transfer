@@ -1,3 +1,13 @@
+option(LAE_ENABLE_LLAMA_CPP "Build against the pinned llama.cpp backend" OFF)
+option(LAE_ENABLE_LLAMA_CUDA "Build the authenticated product engine with CUDA offload" OFF)
+option(LAE_ENABLE_LLAMA_VULKAN "Build the authenticated product engine with Vulkan offload" OFF)
+if(LAE_ENABLE_LLAMA_CPP)
+  set(_LAE_FIXTURE_CLI_DEFAULT OFF)
+else()
+  set(_LAE_FIXTURE_CLI_DEFAULT ON)
+endif()
+option(LAE_ENABLE_FIXTURE_CLI "Expose fixture-cpu through the engine CLI (test builds only)" ${_LAE_FIXTURE_CLI_DEFAULT})
+
 add_library(lae_runtime
   backend/fixture_backend.cpp
   backend/llama_backend.cpp
@@ -9,11 +19,13 @@ add_library(lae_runtime
   server/http_server.cpp
 )
 target_include_directories(lae_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(lae_runtime PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/llama.cpp/vendor)
 target_compile_definitions(lae_runtime PUBLIC LAE_API_VERSION="0.1.0" LAE_ENGINE_VERSION="0.1.0" LAE_LLAMA_CPP_REVISION="3581ba0cf591b3f772fbb002de0f70e294bc0396")
-
-option(LAE_ENABLE_LLAMA_CPP "Build against the pinned llama.cpp backend" OFF)
-option(LAE_ENABLE_LLAMA_CUDA "Build the authenticated product engine with CUDA offload" OFF)
-option(LAE_ENABLE_LLAMA_VULKAN "Build the authenticated product engine with Vulkan offload" OFF)
+if(LAE_ENABLE_FIXTURE_CLI)
+  target_compile_definitions(lae_runtime PUBLIC LAE_ENABLE_FIXTURE_CLI=1)
+else()
+  target_compile_definitions(lae_runtime PUBLIC LAE_ENABLE_FIXTURE_CLI=0)
+endif()
 if(LAE_ENABLE_LLAMA_VULKAN AND NOT LAE_ENABLE_LLAMA_CPP)
   message(FATAL_ERROR "LAE_ENABLE_LLAMA_VULKAN requires LAE_ENABLE_LLAMA_CPP=ON")
 endif()
@@ -117,10 +129,22 @@ add_executable(lae-runtime-tests ../tests/native/runtime_tests.cpp)
 target_link_libraries(lae-runtime-tests PRIVATE lae_runtime)
 add_test(NAME lae-runtime-tests COMMAND lae-runtime-tests)
 
+# Alternate model identity exists only in this standalone test binary. The
+# production runtime library and engine never receive LAE_ENABLE_TEST_MODEL_IDENTITY.
+add_executable(lae-model-validator-tests
+  model_validation/model_validator.cpp
+  ../tests/native/model_validator_tests.cpp
+)
+target_include_directories(lae-model-validator-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(lae-model-validator-tests PRIVATE LAE_ENABLE_TEST_MODEL_IDENTITY=1)
+add_test(NAME lae-model-validator-tests COMMAND lae-model-validator-tests)
+
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
-  add_test(NAME lae-http-negative-tests
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tests/native/http_negative_tests.py $<TARGET_FILE:lae-engine>)
+  if(LAE_ENABLE_FIXTURE_CLI)
+    add_test(NAME lae-http-negative-tests
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tests/native/http_negative_tests.py $<TARGET_FILE:lae-engine>)
+  endif()
   if(LAE_ENABLE_LLAMA_CPP)
     add_test(NAME lae-real-init-guard
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tests/native/real_init_guard.py $<TARGET_FILE:lae-engine>)

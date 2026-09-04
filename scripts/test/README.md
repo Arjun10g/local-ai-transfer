@@ -7,10 +7,13 @@ python3 scripts/test/run_qa.py --output out/evidence/qa-local/summary.json
 ```
 
 The command runs Python fixture tests, contract conformance, adversarial
-fixtures, Node's built-in host tests when Node is available, the REL-001
+fixtures, Node's built-in host and `tests/security` tests when Node is available, the REL-001
 skeleton scan, and local CMake/CTest if available. It never installs packages
 or contacts a network. Any unavailable/native-Windows/real-model/Shadeform
-capability is recorded as `SKIP`, not `PASS`.
+capability is recorded as mandatory `SKIP`/`UNPROVEN`, not `PASS`. A successful
+fixture run is therefore a typed `CONDITIONAL_PASS` with `release_passed=false`
+until every mandatory target-evidence record is proven. Node 24 specifically is
+mandatory release evidence even if a different local Node version runs the tests.
 
 ## Local Qwen tool-call evaluation
 
