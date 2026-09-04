@@ -7,12 +7,15 @@ import { mkdtemp, readFile, mkdir, writeFile } from 'node:fs/promises';
 import { createExternalToolRegistry } from '../../host/providers/index.mjs';
 import { BrowserActionProvider, CdpClient, createBrowserActionTools, hostIsPrivate, publicAddress, publicUrl } from '../../host/providers/browser-actions.mjs';
 import { MicrosoftGraphProvider, MicrosoftDeviceCodeCredential, MicrosoftGraphHttpsTransport, createMicrosoftGraphTools } from '../../host/providers/microsoft-graph.mjs';
-import { CopilotCliProvider, createCopilotTool, createCopilotVersionCheck, killCopilotProcessTree } from '../../host/providers/copilot-cli.mjs';
+import { CopilotCliProvider as ProductionCopilotCliProvider, createCopilotTool as productionCreateCopilotTool, createCopilotVersionCheck, killCopilotProcessTree } from '../../host/providers/copilot-cli.mjs';
 import { OperatorGrantStore } from '../../host/providers/operator-grants.mjs';
 import { ConversationController } from '../../host/agent/controller.mjs';
 import { mergeConfig, validateConfig } from '../../host/agent/config.mjs';
 import { HostServer } from '../../host/server/host-server.mjs';
 import { createWorkspaceContextReader } from '../../host/providers/copilot-context.mjs';
+
+class CopilotCliProvider extends ProductionCopilotCliProvider { constructor(options = {}) { super({ testOnly: true, protocol: 'legacy_stdin', ...options }); } }
+const createCopilotTool = options => options instanceof ProductionCopilotCliProvider ? productionCreateCopilotTool(options) : productionCreateCopilotTool({ testOnly: true, protocol: 'legacy_stdin', ...(options ?? {}) });
 
 const call = (name, arguments_, id = `call_${name.replaceAll('.', '_')}`) => ({ id, name, arguments: arguments_ });
 const value = result => JSON.parse(result.content[0].text);
@@ -22,7 +25,7 @@ test('external contract publishes complete strict schemas for every tool', async
   const contract = JSON.parse(await readFile(new URL('../../contracts/external-tools/v0.1.0.json', import.meta.url), 'utf8'));
   assert.equal(contract.version, '0.1.0'); assert.equal(contract.additionalProperties, false);
   assert.equal(new Set(contract.tools.map(tool => tool.name)).size, 17);
-  const riskTiers = new Set(contract.$defs.tool.properties.risk_tier.enum); for (const tool of contract.tools) { assert.ok(riskTiers.has(tool.risk_tier), `${tool.name} uses an undeclared risk tier`); assert.equal(tool.input_schema.type, 'object'); assert.equal(tool.input_schema.additionalProperties, false); assert.ok(typeof tool.input_schema.properties === 'object'); } for (const name of ['browser.session_start', 'browser.inspect_links', 'browser.inspect_page', 'browser.follow_link', 'browser.fill_field', 'browser.activate_control', 'browser.session_close']) { const definition = createExternalToolRegistry()[name]; assert.equal(definition.parameters.additionalProperties, false); assert.ok(definition.description); }
+  const riskTiers = new Set(contract.$defs.tool.properties.risk_tier.enum); for (const tool of contract.tools) { assert.ok(riskTiers.has(tool.risk_tier), `${tool.name} uses an undeclared risk tier`); assert.equal(tool.input_schema.type, 'object'); assert.equal(tool.input_schema.additionalProperties, false); assert.ok(typeof tool.input_schema.properties === 'object'); } for (const name of ['browser.session_start', 'browser.inspect_links', 'browser.inspect_page', 'browser.follow_link', 'browser.session_close']) { const definition = createExternalToolRegistry()[name]; assert.equal(definition.parameters.additionalProperties, false); assert.ok(definition.description); } assert.equal(createExternalToolRegistry()['browser.fill_field'], undefined); assert.equal(createExternalToolRegistry()['browser.activate_control'], undefined);
 });
 
 test('Graph provider is disabled/auth typed and rejects unknown or oversized arguments', async () => {
@@ -265,7 +268,7 @@ test('browser action provider uses isolated CDP sessions and binds inspected lin
 });
 
 test('browser page inspection exposes bounded opaque controls and binds field actions', async () => {
-  const provider = new BrowserActionProvider({ enabled: true, experimentalMutations: true, executable: '/approved/chrome', allowlist: ['/approved/chrome'], resolve: async () => ['93.184.216.34'] });
+  const provider = new BrowserActionProvider({ enabled: true, experimentalMutations: true, testOnly: true, executable: '/approved/chrome', allowlist: ['/approved/chrome'], resolve: async () => ['93.184.216.34'] });
   let filled = 0; let activated = 0;
   const cdp = { async inspectPage() { return { url: 'https://example.com/', title: 'Form', text: 'Hello', links: [], controls: [{ index: 0, kind: 'field', tag: 'input', type: 'text', label: 'Query', value: '', form_action: 'https://example.com/search' }, { index: 1, kind: 'control', tag: 'button', type: 'button', label: 'Refresh', form_action: '' }, { index: 2, kind: 'field', tag: 'input', type: 'password', label: 'Password', value: '', form_action: 'https://example.com/login' }] }; }, async fillControl(index, value) { assert.equal(index, 0); assert.equal(value, 'safe'); filled += 1; }, async activateControl(index) { assert.equal(index, 1); activated += 1; }, close() {} };
   const child = new EventEmitter(); child.exitCode = null; child.kill = () => {};
@@ -288,6 +291,7 @@ test('browser URL resolution returns one validated address and bounds CDP payloa
 });
 
 test('browser configuration requires absolute local executable paths and aborts before DNS', async () => {
+  assert.throws(() => new BrowserActionProvider({ experimentalMutations: true }), /test-only gate/);
   for (const path of ['chrome', 'https://example.test/chrome', '//server/chrome', '\\\\server\\chrome']) assert.throws(() => new BrowserActionProvider({ enabled: true, executable: path, allowlist: [path] }), /executable\/allowlist/);
   assert.throws(() => validateConfig({ providers: { browser_actions: { executable: 'chrome', allowlist: ['/approved/chrome'] } } }), /executable invalid/);
   const controller = new AbortController(); controller.abort(); let resolved = false; const provider = new BrowserActionProvider({ enabled: true, executable: '/approved/chrome', allowlist: ['/approved/chrome'], resolve: async () => { resolved = true; return ['93.184.216.34']; } }); await assert.rejects(() => provider.preview({ id: 'aborted', name: 'browser.session_start', arguments: { url: 'https://example.com/' }, signal: controller.signal }), error => error.code === 'provider_cancelled'); assert.equal(resolved, false);
@@ -369,6 +373,7 @@ test('Copilot Windows tree termination uses fixed taskkill argv without a shell'
 });
 
 test('Copilot provider rejects unsafe lifecycle bounds', () => {
+  assert.throws(() => new ProductionCopilotCliProvider({ protocol: 'legacy_stdin' }), /test gate/);
   assert.throws(() => new CopilotCliProvider({ timeoutMs: NaN }), /invalid Copilot timeout/);
   assert.throws(() => new CopilotCliProvider({ timeoutMs: 99 }), /invalid Copilot timeout/);
   assert.throws(() => new CopilotCliProvider({ maxOutput: 1023 }), /invalid Copilot output limit/);
