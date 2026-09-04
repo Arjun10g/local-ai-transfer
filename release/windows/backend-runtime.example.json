@@ -20,8 +20,8 @@
     "integrated_gpu_memory_is_shared_system_memory": true
   },
   "vulkan": {
-    "status": "blocked",
-    "blocked_reason": "missing_pinned_ggml_vulkan_source_closure",
+    "status": "implemented-not-promoted",
+    "blocked_reason": "requires_bound_windows_gpu_attestation_and_target_acceptance",
     "runtime_profile": "intel-vulkan",
     "device_name": "EXACT_NAME_FROM_BOUND_ATTESTATION",
     "gpu_layers": 20,

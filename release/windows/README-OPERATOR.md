@@ -14,23 +14,25 @@ environment before invoking `Start-LocalAssistant.ps1`.
 receipt-gated choice with no fallback. Run `Build-WindowsBackend.ps1 -Backend cpu-safe ...` for
 the product CPU engine, or select
 `-Backend intel-sycl-experimental -AllowExperimentalSycl ...` for an explicit
-upstream llama.cpp SYCL CLI diagnostic build (currently blocked until the
-product engine has a reviewed `GGML_VULKAN` profile). `Run-WindowsBackend.ps1` requires the
+upstream llama.cpp SYCL CLI diagnostic build (still experimental and blocked
+until a separate acceptance review). `Run-WindowsBackend.ps1` requires the
 same choice and never changes it to CPU when SYCL is unavailable. The SYCL
 runtime selects `SYCL0` and emits bounded one-token output through
 `llama-cli`; it does not expose an unauthenticated server and is not a
 promoted product backend until a separate review approves its compatibility.
 
 The profile order is CPU (mandatory baseline), Vulkan (primary accelerated
-candidate, currently blocked because the pinned vendor snapshot lacks the
-complete ggml-vulkan source/shader closure), then SYCL (experimental
-diagnostic, currently blocked). This
+candidate, source-locked and implemented but not promoted until target
+acceptance), then SYCL (experimental diagnostic, currently blocked). This
 package does not claim that Vulkan features or SYCL support are present on the
 target until the receipt proves them. Vulkan additionally requires a separate
 operator GPU attestation bound by receipt SHA-256, exact PNP ID, adapter name,
 driver, and Vulkan enumeration identity; the WMI probe cannot infer integrated
-status from an Intel product name. The dormant native profile is not buildable
-until that pinned closure is vendored and independently verified.
+status from an Intel product name. The `GGML_VULKAN` source/shader closure is
+vendored under `vendor/llama.cpp` and independently verified by
+`ggml-vulkan-source-lock.json`; a modified, missing, or unexpected closure
+file fails closed. The profile remains unpromoted until the bound Windows
+attestation and acceptance run are complete.
 
 The SYCL build requires an already-installed Visual Studio C++ toolchain,
 Intel oneAPI DPC++/C++ compiler and runtime, CMake, Ninja, and an existing

@@ -35,10 +35,10 @@
       "operator_selectable": false,
       "requires_receipt": true,
       "promotion_rank": 1,
-      "status": "blocked",
-      "blocked_reason": "missing_pinned_ggml_vulkan_source_closure",
+      "status": "implemented-not-promoted",
+      "blocked_reason": "requires_bound_windows_gpu_attestation_and_target_acceptance",
       "cmake_flags": ["-DLAE_ENABLE_LLAMA_CPP=ON", "-DGGML_VULKAN=ON"],
-      "implementation_status": "blocked",
+      "implementation_status": "implemented-source-locked-runtime",
       "gpu_layers_default": 20,
       "gpu_layers_max": 99,
       "requires_explicit_gpu_layer_policy": true

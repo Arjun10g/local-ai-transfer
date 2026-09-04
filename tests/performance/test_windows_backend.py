@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -83,29 +84,31 @@ class WindowsBackendPlanTests(unittest.TestCase):
 
     def test_sycl_is_not_inferred_from_intel_name_or_loader(self):
         path = self.write_receipt(receipt(integrated=None))
-        with self.assertRaisesRegex(planner.BackendPlanError, "GGML_VULKAN"):
+        with self.assertRaisesRegex(planner.BackendPlanError, "exactly one explicitly integrated"):
             planner.build_plan("intel-sycl-experimental", path)
 
     def test_vulkan_product_profile_requires_receipt_and_has_bounded_offload(self):
         path = self.write_receipt(receipt(integrated=None))
         attestation = self.write_vulkan_attestation(path)
-        with self.assertRaisesRegex(planner.BackendPlanError, "source/shader closure"):
-            planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
+        plan = planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
+        self.assertTrue(plan["provenance"]["vulkan_source_closure"]["verified"])
+        self.assertEqual(plan["runtime"]["compiled_backend"], "vulkan")
+        self.assertEqual(plan["runtime"]["gpu_layers_default"], 20)
 
     def test_probe_shaped_unknown_integrated_field_needs_matching_attestation(self):
         path = self.write_receipt(receipt(integrated=None))
-        with self.assertRaisesRegex(planner.BackendPlanError, "source/shader closure"):
+        with self.assertRaisesRegex(planner.BackendPlanError, "integrated-GPU attestation"):
             planner.build_plan("intel-vulkan-conservative", path)
         attestation = self.write_vulkan_attestation(path)
-        with self.assertRaisesRegex(planner.BackendPlanError, "source/shader closure"):
-            planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
+        plan = planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
+        self.assertTrue(plan["provenance"]["vulkan_source_closure"]["verified"])
 
     def test_vulkan_rejects_missing_loader_or_enumeration(self):
         value = receipt()
         value["vulkan"] = {"loader_present": False, "enumeration": None}
         path = self.write_receipt(value)
         attestation = self.write_vulkan_attestation(path)
-        with self.assertRaisesRegex(planner.BackendPlanError, "source/shader closure"):
+        with self.assertRaisesRegex(planner.BackendPlanError, "loader"):
             planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
 
     def test_vulkan_rejects_unbound_or_mismatched_attestation(self):
@@ -114,24 +117,37 @@ class WindowsBackendPlanTests(unittest.TestCase):
         value = json.loads(attestation.read_text(encoding="utf-8"))
         value["vulkan"]["driver_version"] = "wrong-driver"
         attestation.write_text(json.dumps(value), encoding="utf-8")
-        with self.assertRaisesRegex(planner.BackendPlanError, "source/shader closure"):
+        with self.assertRaisesRegex(planner.BackendPlanError, "exact adapter and driver"):
             planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
 
-    def test_sycl_is_blocked_until_product_vulkan_profile(self):
+    def test_vulkan_planner_rechecks_tampered_closure(self):
+        path = self.write_receipt(receipt())
+        attestation = self.write_vulkan_attestation(path)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "llama.cpp"
+            import shutil
+            shutil.copytree(planner.VULKAN_SOURCE_ROOT, root)
+            (root / "ggml/src/ggml-vulkan/vulkan-shaders/add.comp").write_text("tampered", encoding="utf-8")
+            with mock.patch.object(planner, "VULKAN_SOURCE_ROOT", root), mock.patch.object(planner, "VULKAN_SOURCE_MANIFEST", root / planner.VULKAN_SOURCE_MANIFEST.name):
+                with self.assertRaisesRegex(planner.BackendPlanError, "failed verification"):
+                    planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
+
+    def test_sycl_requires_explicit_integrated_evidence_after_vulkan_closure(self):
         path = self.write_receipt(receipt(sycl=True))
-        with self.assertRaisesRegex(planner.BackendPlanError, "GGML_VULKAN"):
-            planner.build_plan("intel-sycl-experimental", path)
+        plan = planner.build_plan("intel-sycl-experimental", path)
+        self.assertEqual(plan["runtime"]["compiled_backend"], "sycl")
+        self.assertTrue(plan["runtime"]["diagnostic_only"])
 
     def test_sycl_rejects_ambiguous_integrated_adapters(self):
         path = self.write_receipt(receipt(sycl=True, adapter_count=2))
-        with self.assertRaisesRegex(planner.BackendPlanError, "GGML_VULKAN"):
+        with self.assertRaisesRegex(planner.BackendPlanError, "exactly one explicitly integrated"):
             planner.build_plan("intel-sycl-experimental", path)
 
     def test_sycl_rejects_adapter_without_explicit_integrated_evidence(self):
         value = receipt(sycl=True)
         value["gpu_adapters"][0]["integrated"] = None
         path = self.write_receipt(value)
-        with self.assertRaisesRegex(planner.BackendPlanError, "GGML_VULKAN"):
+        with self.assertRaisesRegex(planner.BackendPlanError, "exactly one explicitly integrated"):
             planner.build_plan("intel-sycl-experimental", path)
 
     def test_neither_invalid_backend_nor_failed_sycl_falls_back(self):
@@ -181,17 +197,17 @@ class WindowsBackendPlanTests(unittest.TestCase):
         self.assertTrue(sycl["diagnostic_only"])
         self.assertFalse(sycl["operator_selectable"])
         self.assertIn("GGML_VULKAN", profiles["profiles"][1]["cmake_flags"][-1])
-        self.assertEqual(profiles["profiles"][1]["status"], "blocked")
-        self.assertEqual(profiles["profiles"][1]["blocked_reason"], "missing_pinned_ggml_vulkan_source_closure")
+        self.assertEqual(profiles["profiles"][1]["status"], "implemented-not-promoted")
+        self.assertEqual(profiles["profiles"][1]["implementation_status"], "implemented-source-locked-runtime")
         runtime = json.loads((ROOT / "release/windows/backend-runtime.example.json").read_text(encoding="utf-8"))
-        self.assertEqual(runtime["vulkan"]["status"], "blocked")
-        self.assertEqual(runtime["vulkan"]["blocked_reason"], "missing_pinned_ggml_vulkan_source_closure")
+        self.assertEqual(runtime["vulkan"]["status"], "implemented-not-promoted")
+        self.assertIn("attestation", runtime["vulkan"]["blocked_reason"])
         docs = (ROOT / "release/windows/README-OPERATOR.md").read_text(encoding="utf-8")
         self.assertIn("exact SKU", docs)
         self.assertIn("no fallback", docs.lower())
         self.assertIn("Vulkan (primary accelerated", docs)
-        self.assertIn("GGML_VULKAN", docs)
-        self.assertIn("not buildable", docs)
+        self.assertIn("GGML_VULKAN", docs.replace("ggml-vulkan", "GGML_VULKAN"))
+        self.assertIn("not promoted", docs.lower())
 
     def test_native_vulkan_profile_is_authenticated_and_never_cpu_fallback(self):
         cmake = (ROOT / "native/CMakeLists.txt").read_text(encoding="utf-8")
@@ -199,6 +215,8 @@ class WindowsBackendPlanTests(unittest.TestCase):
         backend = (ROOT / "native/backend/llama_backend.cpp").read_text(encoding="utf-8")
         self.assertIn("option(LAE_ENABLE_LLAMA_VULKAN", cmake)
         self.assertIn("set(GGML_VULKAN ON", cmake)
+        self.assertIn("vulkan_source_closure.py", cmake)
+        self.assertIn("LAE_VULKAN_CLOSURE_RESULT", cmake)
         self.assertIn("LAE_ENABLE_LLAMA_VULKAN=1", cmake)
         self.assertIn('backend == "intel-vulkan"', main)
         self.assertIn("--gpu-layers", main)
@@ -215,7 +233,7 @@ class WindowsBackendPlanTests(unittest.TestCase):
             capture_output=True, text=True, check=False,
         )
         self.assertEqual(result.returncode, 2)
-        self.assertIn("source/shader closure", result.stdout)
+        self.assertIn("integrated-GPU attestation", result.stdout)
         self.assertNotIn("invalid choice", result.stderr)
 
 
