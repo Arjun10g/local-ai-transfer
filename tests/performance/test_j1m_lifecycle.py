@@ -33,6 +33,9 @@ class J1MConfigTests(unittest.TestCase):
 
     def test_pins_source_converter_and_target_cost(self):
         config = self.j1m.load_config()
+        self.assertEqual(config["modes"]["eval"]["backend"], "cuda")
+        self.assertEqual(config["modes"]["eval"]["cuda_device_name"], "CUDA0")
+        self.assertEqual(config["modes"]["eval"]["cuda_architecture"], 80)
         self.assertEqual(config["source"]["authentication"], "public-unauthenticated")
         self.assertEqual(config["source"]["revision"], "c202236235762e1c871ad0ccb60c8ee5ba337b9a")
         self.assertEqual(config["llama_cpp"]["revision"], "3581ba0cf591b3f772fbb002de0f70e294bc0396")
@@ -512,6 +515,7 @@ class StaticSafetyTests(unittest.TestCase):
         j1m = load(ROOT / "scripts/j1m_runner.py", "j1m_eval_plan_config")
         config = j1m.load_config()
         plan = j1m.build_plan(config, "eval")
+        self.assertEqual(orchestrator.main(["--mode", "eval"]), 0)
         self.assertEqual(plan["active_run_cost_usd"], 1.0125)
         self.assertEqual(plan["provider_backstop_cost_usd"], 1.2656)
         self.assertGreater(config["modes"]["eval"]["provider_backstop_hours"], config["modes"]["eval"]["runtime_hours"])
@@ -520,6 +524,11 @@ class StaticSafetyTests(unittest.TestCase):
         flattened = [part for command in commands for part in command]
         self.assertIn(config["llama_cpp"]["revision"], flattened)
         self.assertIn("-DLAE_ENABLE_LLAMA_CPP=ON", flattened)
+        self.assertIn("-DLAE_ENABLE_LLAMA_CUDA=ON", flattened)
+        self.assertIn("-DCMAKE_CUDA_ARCHITECTURES=80", flattened)
+        self.assertIn("cuda_device_probe.py", " ".join(flattened))
+        self.assertIn("--backend", flattened)
+        self.assertIn("cuda", flattened)
         self.assertIn("--token-file", flattened)
         self.assertIn("remote_model_eval.py", " ".join(flattened))
         self.assertNotIn("--token", flattened)
@@ -530,8 +539,15 @@ class StaticSafetyTests(unittest.TestCase):
         j1m = load(ROOT / "scripts/j1m_runner.py", "j1m_eval_upload_config")
         uploads = orchestrator._eval_uploads(j1m.load_config(), "/scratch/j1m", Path("/tmp/Qwen3.5-9B-Q4_K_M.gguf"), Path("/tmp/model-manifest.json"))
         names = {local.name for local, _remote, _recursive in uploads}
-        self.assertEqual(names, {"Qwen3.5-9B-Q4_K_M.gguf", "model-manifest.json", "model-manifest.sha256", "remote_model_eval.py", "evaluate_tool_calls.py", "tool_call_eval.json", "CMakeLists.txt", "native"})
+        self.assertEqual(names, {"Qwen3.5-9B-Q4_K_M.gguf", "model-manifest.json", "model-manifest.sha256", "remote_model_eval.py", "evaluate_tool_calls.py", "cuda_device_probe.py", "cuda_source_closure.py", "ggml-cuda-source-lock.json", "tool_call_eval.json", "CMakeLists.txt", "native"})
         self.assertTrue(any(recursive and local.name == "native" for local, _remote, recursive in uploads))
+        closure_upload = next((remote for local, remote, _recursive in uploads if local.name == "cuda_source_closure.py"), None)
+        self.assertEqual(closure_upload, "/scratch/j1m/engine/scripts/cuda_source_closure.py")
+        lock_upload = next((remote for local, remote, _recursive in uploads if local.name == "ggml-cuda-source-lock.json"), None)
+        self.assertEqual(lock_upload, "/scratch/j1m/engine/vendor/llama.cpp/ggml-cuda-source-lock.json")
+        source = (ROOT / "scripts/j1m_orchestrator.py").read_text(encoding="utf-8")
+        self.assertIn("for command in eval_commands[:5]", source)
+        self.assertIn("for command in eval_commands[5:]", source)
         native_upload = next(remote for local, remote, recursive in uploads if local.name == "native" and recursive)
         self.assertEqual(native_upload, "/scratch/j1m/engine")
         self.assertNotIn("/engine/native/native", native_upload)
@@ -604,7 +620,8 @@ class StaticSafetyTests(unittest.TestCase):
             receipt = Path(directory) / "eval-receipt.json"
             receipt.write_text(json.dumps({
                 "schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "verified", "artifact": artifact,
-                "engine": {"llama_cpp_revision": config["llama_cpp"]["revision"], "compiled_backend": f"llama.cpp/{config['llama_cpp']['revision'][:8]}/cpu"},
+                "engine": {"llama_cpp_revision": config["llama_cpp"]["revision"], "compiled_backend": f"llama.cpp/{config['llama_cpp']['revision'][:8]}/cuda"},
+                "cuda_device": {"schema": "local_bmo.j1m.cuda-device-receipt.v1", "status": "verified", "selector": "CUDA0", "device_count": 1, "device": {"name": "NVIDIA A100 80GB", "memory_total_mib": 81920}},
                 "metrics": {"case_count": 8, "passed": 8, "failed": 0, "errors": 0, "peak_rss_kib": 123},
                 "prompt_response_logging": False, "token_logging": False,
             }), encoding="utf-8")
@@ -634,6 +651,61 @@ class StaticSafetyTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 remote._validate_metrics(invalid)
+
+    def test_cuda_probe_writes_single_a100_placement_receipt(self):
+        probe = load(ROOT / "scripts/test/cuda_device_probe.py", "cuda_device_probe_test")
+        result = types.SimpleNamespace(returncode=0, stdout="0, NVIDIA A100-SXM4-80GB, 81920, 550.54.15\n")
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(probe.subprocess, "run", return_value=result) as run:
+            receipt = probe.probe(Path(directory) / "cuda-device-receipt.json")
+            written = json.loads((Path(directory) / "cuda-device-receipt.json").read_text())
+        self.assertEqual(receipt["selector"], "CUDA0")
+        self.assertEqual(receipt["device_count"], 1)
+        self.assertEqual(run.call_args.args[0][:2], ["nvidia-smi", "--query-gpu=index,name,memory.total,driver_version"])
+        self.assertEqual(written["status"], "verified")
+
+    def test_eval_receipt_rejects_cpu_identity_for_cuda_lane(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_cuda_identity")
+        artifact = {"name": "Qwen3.5-9B-Q4_K_M.gguf", "size_bytes": 4, "sha256": "a" * 64, "llama_cpp_revision": "b" * 40}
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = Path(directory) / "eval-receipt.json"
+            receipt.write_text(json.dumps({"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "verified", "artifact": artifact, "engine": {"llama_cpp_revision": "b" * 40, "compiled_backend": "llama.cpp/bbbbbbbb/cpu"}, "metrics": {"case_count": 8, "passed": 8, "failed": 0, "errors": 0, "peak_rss_kib": 1}, "prompt_response_logging": False, "token_logging": False}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "engine identity"):
+                orchestrator._verify_eval_receipt(receipt, artifact)
+
+    def test_native_cuda_profile_is_explicit_and_fail_closed(self):
+        cmake = (ROOT / "native/CMakeLists.txt").read_text(encoding="utf-8")
+        backend = (ROOT / "native/backend/llama_backend.cpp").read_text(encoding="utf-8")
+        main = (ROOT / "native/main.cpp").read_text(encoding="utf-8")
+        self.assertIn("option(LAE_ENABLE_LLAMA_CUDA", cmake)
+        self.assertIn("set(GGML_CUDA ON", cmake)
+        self.assertIn("cuda_source_closure.py", cmake)
+        self.assertIn('--root "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/llama.cpp"', cmake)
+        self.assertIn('--manifest "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/llama.cpp/ggml-cuda-source-lock.json"', cmake)
+        self.assertIn("GGML_BACKEND_DEVICE_TYPE_GPU", backend)
+        self.assertIn("exact configured CUDA device is unavailable", backend)
+        self.assertIn('backend == "cuda"', main)
+        self.assertIn("--cuda-device-name", main)
+
+    def test_cuda_source_closure_lock_rejects_missing_modified_and_extra_files(self):
+        closure = load(ROOT / "scripts/cuda_source_closure.py", "cuda_source_closure_integrity")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "llama.cpp"
+            shutil.copytree(ROOT / "vendor/llama.cpp/ggml", root / "ggml")
+            shutil.copy2(ROOT / "vendor/llama.cpp/LICENSE", root / "LICENSE")
+            lock = root / "ggml-cuda-source-lock.json"
+            shutil.copy2(ROOT / "vendor/llama.cpp/ggml-cuda-source-lock.json", lock)
+            self.assertTrue(closure.verify_closure(root, lock)["verified"])
+            sample = next((root / "ggml/src/ggml-cuda").rglob("*"))
+            if not sample.is_file():
+                sample = next(path for path in (root / "ggml/src/ggml-cuda").rglob("*") if path.is_file())
+            sample.write_bytes(sample.read_bytes() + b"tamper")
+            with self.assertRaises(closure.CudaClosureError):
+                closure.verify_closure(root, lock)
+            sample.write_bytes((ROOT / "vendor/llama.cpp" / sample.relative_to(root)).read_bytes())
+            extra = root / "ggml/src/ggml-cuda/unexpected.txt"
+            extra.write_text("unexpected\n", encoding="utf-8")
+            with self.assertRaises(closure.CudaClosureError):
+                closure.verify_closure(root, lock)
 
     def test_remote_eval_main_returns_success_for_case_failures_and_emits_failed_receipt_on_shape_error(self):
         remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_main_status")

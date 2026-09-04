@@ -4,13 +4,14 @@ The `llama.cpp/` directory is a pruned source snapshot of upstream
 `ggml-org/llama.cpp` at immutable commit
 `3581ba0cf591b3f772fbb002de0f70e294bc0396` (detached source checkout, not a
 Git submodule). It contains the public headers, runtime `src/` model support,
-CPU ggml backend, the complete official `GGML_VULKAN` source/shader generator
-closure, CMake modules, and the official same-pin `common/jinja` template
+CPU ggml backend, the complete official `GGML_VULKAN` and `GGML_CUDA`
+source/shader/backend closures, CMake modules, and the official same-pin `common/jinja` template
 evaluator with its Unicode/nlohmann dependencies. Tests, examples, tools,
 conversion utilities, documentation, and nested VCS metadata remain excluded
 from this portable runtime bundle. The Vulkan closure is separately locked by
-`ggml-vulkan-source-lock.json` and contains 175 files (including the upstream
-license), each with an exact SHA-256 at the pinned revision.
+`ggml-vulkan-source-lock.json` and `ggml-cuda-source-lock.json`. The Vulkan
+lock contains 175 files and the CUDA lock contains 278 files (each including
+the upstream license), all with an exact SHA-256 at the pinned revision.
 
 The product build enables this source only with `LAE_ENABLE_LLAMA_CPP=ON` and
 disables upstream examples/tools/server/UI/common/test targets. CPU remains the

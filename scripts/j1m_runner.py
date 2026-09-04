@@ -54,6 +54,9 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
         raise ValueError("J1M llama.cpp revision must be an immutable commit SHA")
     if payload.get("text_only") is not True:
         raise ValueError("J1M must be text-only")
+    eval_mode = payload.get("modes", {}).get("eval", {})
+    if eval_mode.get("backend") != "cuda" or eval_mode.get("cuda_device_name") != "CUDA0" or eval_mode.get("cuda_architecture") != 80 or eval_mode.get("gpu_layers") != 99:
+        raise ValueError("eval must use the explicit CUDA A100 evaluation profile")
     return payload
 
 

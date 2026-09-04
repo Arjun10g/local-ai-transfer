@@ -28,7 +28,7 @@ lae::HttpServer* active_server = nullptr;
 volatile std::sig_atomic_t stop_requested = 0;
 void on_signal(int) { stop_requested = 1; }
 void usage() {
-  std::cout << "lae-engine 0.1.0\ncommands: serve verify-model version print-build-info probe\nserve options: --config <absolute-json> --backend cpu|intel-vulkan --model <absolute-gguf> --size <bytes> --sha256 <hex> --context <tokens> --gpu-layers <0..99> (--token-file <protected-file> | --token-stdin)\n";
+  std::cout << "lae-engine 0.1.0\ncommands: serve verify-model version print-build-info probe\nserve options: --config <absolute-json> --backend cpu|intel-vulkan|cuda --model <absolute-gguf> --size <bytes> --sha256 <hex> --context <tokens> --gpu-layers <0..99> (--token-file <protected-file> | --token-stdin)\n";
 }
 
 bool read_token_file(const std::string& path, std::string& token) {
@@ -86,6 +86,8 @@ int main(int argc, char** argv) {
 #if LAE_COMPILED_LLAMA_CPP
 #if LAE_ENABLE_LLAMA_VULKAN
     constexpr const char* compiled_backend = "llama.cpp/3581ba0c/vulkan";
+#elif LAE_ENABLE_LLAMA_CUDA
+    constexpr const char* compiled_backend = "llama.cpp/3581ba0c/cuda";
 #else
     constexpr const char* compiled_backend = "llama.cpp/3581ba0c/cpu";
 #endif
@@ -99,6 +101,8 @@ int main(int argc, char** argv) {
 #if LAE_COMPILED_LLAMA_CPP
 #if LAE_ENABLE_LLAMA_VULKAN
     constexpr const char* compiled_backend = "llama.cpp/3581ba0c/vulkan";
+#elif LAE_ENABLE_LLAMA_CUDA
+    constexpr const char* compiled_backend = "llama.cpp/3581ba0c/cuda";
 #else
     constexpr const char* compiled_backend = "llama.cpp/3581ba0c/cpu";
 #endif
@@ -116,10 +120,10 @@ int main(int argc, char** argv) {
 
   unsigned port = 0; unsigned context_tokens = 8192; unsigned gpu_layers = 20; std::uint64_t model_size = 0;
   std::string token; std::string token_file; bool token_file_seen = false; bool token_stdin = false; std::string backend = "fixture-cpu";
-  std::string model_path; std::string model_sha256; std::string vulkan_device_name;
+  std::string model_path; std::string model_sha256; std::string vulkan_device_name; std::string cuda_device_name;
   std::string config_path; bool config_seen = false; bool backend_seen = false; bool model_seen = false;
   bool size_seen = false; bool hash_seen = false; bool context_seen = false; bool gpu_layers_seen = false;
-  bool vulkan_device_seen = false;
+  bool vulkan_device_seen = false; bool cuda_device_seen = false;
   try {
   for (int i = 2; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -133,6 +137,7 @@ int main(int argc, char** argv) {
     else if (arg == "--context" && i + 1 < argc) { size_t end = 0; const auto value = std::stoull(argv[++i], &end); if (end != std::strlen(argv[i]) || value > 16384) throw std::invalid_argument("invalid context"); context_tokens = static_cast<unsigned>(value); context_seen = true; }
     else if (arg == "--gpu-layers" && i + 1 < argc) { size_t end = 0; const auto value = std::stoull(argv[++i], &end); if (end != std::strlen(argv[i]) || value > 99) throw std::invalid_argument("invalid gpu layers"); gpu_layers = static_cast<unsigned>(value); gpu_layers_seen = true; }
     else if (arg == "--vulkan-device-name" && i + 1 < argc) { vulkan_device_name = argv[++i]; if (vulkan_device_name.empty() || vulkan_device_name.size() > 256) throw std::invalid_argument("invalid Vulkan device name"); vulkan_device_seen = true; }
+    else if (arg == "--cuda-device-name" && i + 1 < argc) { cuda_device_name = argv[++i]; if (cuda_device_name.empty() || cuda_device_name.size() > 256) throw std::invalid_argument("invalid CUDA device name"); cuda_device_seen = true; }
     else if (arg == "--config" && i + 1 < argc) { config_path = argv[++i]; config_seen = true; }
     else { std::cerr << "unknown argument\n"; return 2; }
   }
@@ -148,6 +153,7 @@ int main(int argc, char** argv) {
     if (!context_seen) context_tokens = file_config.context_tokens;
     if (!gpu_layers_seen) gpu_layers = file_config.gpu_layers;
     if (!vulkan_device_seen) vulkan_device_name = file_config.vulkan_device_name;
+    if (!cuda_device_seen) cuda_device_name = file_config.cuda_device_name;
   }
   if (command == "verify-model") {
     if (model_path.empty()) { std::cerr << "verify-model requires --model\n"; return 2; }
@@ -162,14 +168,15 @@ int main(int argc, char** argv) {
   }
   if (context_tokens < 1 || context_tokens > 16384) { std::cerr << "context must be between 1 and 16384 tokens\n"; return 2; }
   std::unique_ptr<lae::EngineBackend> backend_instance;
-  lae::BackendConfig backend_config; backend_config.backend_profile = backend; backend_config.context_tokens = context_tokens; backend_config.gpu_layers = gpu_layers; backend_config.vulkan_device_name = vulkan_device_name;
+  lae::BackendConfig backend_config; backend_config.backend_profile = backend; backend_config.context_tokens = context_tokens; backend_config.gpu_layers = gpu_layers; backend_config.vulkan_device_name = vulkan_device_name; backend_config.cuda_device_name = cuda_device_name;
   if (backend == "fixture-cpu") {
     if (!model_path.empty()) { std::cerr << "fixture backend does not accept a model path\n"; return 2; }
     backend_instance = std::make_unique<lae::FixtureBackend>();
-  } else if (backend == "cpu" || backend == "intel-vulkan") {
+  } else if (backend == "cpu" || backend == "intel-vulkan" || backend == "cuda") {
     if (model_path.empty()) { std::cerr << "cpu backend requires --model\n"; return 2; }
     if (backend == "intel-vulkan" && (gpu_layers < 1 || gpu_layers > 99)) { std::cerr << "intel-vulkan requires 1..99 gpu layers\n"; return 2; }
     if (backend == "intel-vulkan" && vulkan_device_name.empty()) { std::cerr << "intel-vulkan requires an exact Vulkan device name\n"; return 2; }
+    if (backend == "cuda" && cuda_device_name.empty()) { std::cerr << "cuda requires an exact CUDA device name\n"; return 2; }
     lae::ModelProfile profile; profile.expected_size_bytes = model_size; profile.expected_sha256 = model_sha256;
     const auto result = lae::validate_model_file(model_path, profile);
     if (!result.valid) { std::cerr << "model validation failed: " << result.code << "\n"; return 2; }

@@ -1,3 +1,4 @@
 # Preserve upstream GGML_VULKAN bytes exactly; several official shader
 # sources intentionally end with a blank line and are hash-locked as-is.
 vendor/llama.cpp/ggml/src/ggml-vulkan/** whitespace=-blank-at-eof
+vendor/llama.cpp/ggml/src/ggml-cuda/** whitespace=-blank-at-eof

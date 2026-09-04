@@ -85,6 +85,7 @@ bool load_runtime_config(const std::filesystem::path& path, RuntimeConfigFile& c
   if (!number_field(json, "gpu_layers", number, present) || (present && number > 99)) { error = "config gpu_layers is invalid"; return false; }
   if (present) config.gpu_layers = static_cast<unsigned>(number);
   if (!string_field(json, "vulkan_device_name", config.vulkan_device_name, present)) { error = "config vulkan_device_name is invalid"; return false; }
+  if (!string_field(json, "cuda_device_name", config.cuda_device_name, present)) { error = "config cuda_device_name is invalid"; return false; }
   return true;
 }
 

@@ -54,6 +54,10 @@
       "active_cost_usd": 1.6875
     },
     "eval": {
+      "backend": "cuda",
+      "cuda_architecture": 80,
+      "cuda_device_name": "CUDA0",
+      "gpu_layers": 99,
       "runtime_hours": 0.75,
       "external_watchdog_seconds": 2700,
       "host_shutdown_delay_minutes": 36,

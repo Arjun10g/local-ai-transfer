@@ -134,7 +134,7 @@ def _file_tail(stream: Any) -> str:
     return _tail(stream.read())
 
 
-def _engine_build_info(engine: Path, expected_llama: str) -> dict[str, Any]:
+def _engine_build_info(engine: Path, expected_llama: str, expected_backend: str) -> dict[str, Any]:
     result = _run_bounded([os.fspath(engine), "print-build-info"], timeout=30, output_limit=MAX_ENGINE_LINE)
     if result.get("status") != "completed":
         raise ValueError("engine_build_info_failed")
@@ -142,7 +142,7 @@ def _engine_build_info(engine: Path, expected_llama: str) -> dict[str, Any]:
         payload = json.loads(result.get("stdout", ""))
     except (TypeError, json.JSONDecodeError) as exc:
         raise ValueError("engine_build_info_invalid") from exc
-    if not isinstance(payload, dict) or payload.get("llama_cpp_revision") != expected_llama or payload.get("compiled_backend") != f"llama.cpp/{expected_llama[:8]}/cpu":
+    if not isinstance(payload, dict) or payload.get("llama_cpp_revision") != expected_llama or payload.get("compiled_backend") != f"llama.cpp/{expected_llama[:8]}/{expected_backend}":
         raise ValueError("engine_llama_identity_mismatch")
     return {key: payload[key] for key in ("engine_version", "api_version", "compiled_backend", "llama_cpp_revision", "model") if key in payload}
 
@@ -169,7 +169,20 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any]) -> 
     rev = _run_bounded(["git", "-C", os.fspath(checkout), "rev-parse", "HEAD"], timeout=30, output_limit=128)
     if rev.get("status") != "completed" or rev.get("stdout", "").strip() != artifact["llama_cpp_revision"]:
         raise ValueError("llama_checkout_revision_mismatch")
-    build_info = _engine_build_info(engine, artifact["llama_cpp_revision"])
+    backend = getattr(args, "backend", "cpu")
+    if backend not in {"cpu", "cuda"}:
+        raise ValueError("evaluation_backend_invalid")
+    cuda_receipt = None
+    if backend == "cuda":
+        receipt_path = Path(getattr(args, "cuda_device_receipt", ""))
+        try:
+            cuda_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError("cuda_device_receipt_invalid") from exc
+        device = cuda_receipt.get("device") if isinstance(cuda_receipt, dict) else None
+        if (not isinstance(cuda_receipt, dict) or cuda_receipt.get("schema") != "local_bmo.j1m.cuda-device-receipt.v1" or cuda_receipt.get("status") != "verified" or cuda_receipt.get("selector") != getattr(args, "cuda_device_name", "") or cuda_receipt.get("device_count") != 1 or not isinstance(device, dict) or "a100" not in str(device.get("name", "")).lower() or not isinstance(device.get("memory_total_mib"), int) or device["memory_total_mib"] < 70000):
+            raise ValueError("cuda_device_receipt_invalid")
+    build_info = _engine_build_info(engine, artifact["llama_cpp_revision"], backend)
     token_file = Path(args.token_file)
     _write_token(token_file)
     process: subprocess.Popen[str] | None = None
@@ -180,11 +193,13 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any]) -> 
         # a bearer as a command-line argument would expose it through process
         # inspection and is forbidden by the evaluation contract.
         launch = [
-            os.fspath(engine), "serve", "--port", "0", "--backend", "cpu",
+            os.fspath(engine), "serve", "--port", "0", "--backend", backend,
             "--model", args.model, "--size", str(artifact["size_bytes"]),
             "--sha256", artifact["sha256"], "--context", "2048",
             "--token-file", os.fspath(token_file),
         ]
+        if backend == "cuda":
+            launch.extend(["--gpu-layers", "99", "--cuda-device-name", args.cuda_device_name])
         engine_stderr = tempfile.TemporaryFile()
         process = subprocess.Popen(launch, stdout=subprocess.PIPE, stderr=engine_stderr, text=True)
         if process.stdout is None:
@@ -227,6 +242,7 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any]) -> 
             "status": status,
             "artifact": artifact,
             "engine": build_info,
+            **({"cuda_device": cuda_receipt} if cuda_receipt is not None else {}),
             "metrics": {key: metrics[key] for key in ("case_count", "passed", "failed", "errors", "peak_rss_kib")},
             "duration_ms": round((time.monotonic() - started) * 1000, 1),
             "prompt_response_logging": False,
@@ -262,6 +278,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--evaluator", required=True)
     parser.add_argument("--fixture", required=True)
     parser.add_argument("--token-file", required=True)
+    parser.add_argument("--backend", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--cuda-device-name", default="")
+    parser.add_argument("--cuda-device-receipt", default="")
     parser.add_argument("--receipt", required=True)
     parser.add_argument("--timeout", type=float, default=600.0)
     args = parser.parse_args(argv)

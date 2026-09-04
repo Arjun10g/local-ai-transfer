@@ -14,6 +14,7 @@ struct RuntimeConfigFile {
   unsigned context_tokens = 8192;
   unsigned gpu_layers = 20;
   std::string vulkan_device_name;
+  std::string cuda_device_name;
 };
 
 bool load_runtime_config(const std::filesystem::path& path, RuntimeConfigFile& config,
