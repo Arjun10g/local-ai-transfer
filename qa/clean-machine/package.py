@@ -59,6 +59,17 @@ def scan_tree(root: str | Path, *, require_runtime: bool = False) -> dict[str, o
         findings.extend(f"missing-required:{name}" for name in sorted(REQUIRED_STATIC - files))
     if require_runtime and "lae-engine-cpu.exe" not in files:
         findings.append("missing-required:lae-engine-cpu.exe")
+    manifest_path = base / "RELEASE_MANIFEST.json"
+    if manifest_path.is_file():
+        try:
+            manifest = __import__("json").loads(manifest_path.read_text(encoding="utf-8"))
+            listed = {str(name).replace("\\", "/") for name in manifest.get("files", [])}
+            if listed != files:
+                findings.append("manifest-file-list-mismatch")
+            if manifest.get("model_included") is not False:
+                findings.append("manifest-model-included")
+        except (OSError, ValueError, TypeError):
+            findings.append("manifest-invalid")
     secret_files: list[str] = []
     for name in sorted(files):
         path = base / name
@@ -68,7 +79,13 @@ def scan_tree(root: str | Path, *, require_runtime: bool = False) -> dict[str, o
         if len(data) > 64 * 1024 * 1024:
             findings.append(f"oversized:{name}")
     findings.extend(f"secret-pattern:{name}" for name in secret_files)
-    return {"status": "PASS" if not findings else "FAIL", "files": sorted(files), "findings": findings, "native_windows_launch": "SKIP"}
+    dependency_results = []
+    for name in sorted(files):
+        if Path(name).suffix.lower() in {".exe", ".dll"}:
+            dependency = scan_binary_dependencies(base / name)
+            dependency_results.append(dependency)
+            findings.extend(f"unresolved-dll:{name}:{dll}" for dll in dependency["unresolved"])
+    return {"status": "PASS" if not findings else "FAIL", "files": sorted(files), "findings": findings, "dependencies": dependency_results or "SKIP-no-binaries", "native_windows_launch": "SKIP"}
 
 
 def scan_binary_dependencies(path: str | Path) -> dict[str, object]:
