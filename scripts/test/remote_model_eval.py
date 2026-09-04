@@ -182,6 +182,22 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any]) -> 
         device = cuda_receipt.get("device") if isinstance(cuda_receipt, dict) else None
         if (not isinstance(cuda_receipt, dict) or cuda_receipt.get("schema") != "local_bmo.j1m.cuda-device-receipt.v1" or cuda_receipt.get("status") != "verified" or cuda_receipt.get("selector") != getattr(args, "cuda_device_name", "") or cuda_receipt.get("device_count") != 1 or not isinstance(device, dict) or "a100" not in str(device.get("name", "")).lower() or not isinstance(device.get("memory_total_mib"), int) or device["memory_total_mib"] < 70000):
             raise ValueError("cuda_device_receipt_invalid")
+    try:
+        toolchain = json.loads(Path(args.toolchain_receipt).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("toolchain_receipt_invalid") from exc
+    versions = toolchain.get("versions") if isinstance(toolchain, dict) else None
+    minimums = {"python3": (3, 8), "git": (2, 30), "cmake": (3, 18), "g++": (9, 0), "nvcc": (11, 0)}
+    if (not isinstance(toolchain, dict) or toolchain.get("schema") != "local_bmo.j1m.remote-toolchain-receipt.v1" or toolchain.get("status") != "verified" or not isinstance(versions, dict)):
+        raise ValueError("toolchain_receipt_invalid")
+    for name, minimum in minimums.items():
+        version = versions.get(name)
+        if (not isinstance(version, dict) or isinstance(version.get("major"), bool) or not isinstance(version.get("major"), int) or isinstance(version.get("minor"), bool) or not isinstance(version.get("minor"), int) or (version["major"], version["minor"]) < minimum):
+            raise ValueError("toolchain_receipt_invalid")
+    packages = toolchain.get("packages")
+    expected_packages = {"ca-certificates", "cmake", "build-essential", "git", "python3", "python3-venv"}
+    if not isinstance(packages, dict) or set(packages) != expected_packages or any(not isinstance(value, str) or not value or len(value) > 160 for value in packages.values()):
+        raise ValueError("toolchain_receipt_invalid")
     build_info = _engine_build_info(engine, artifact["llama_cpp_revision"], backend)
     token_file = Path(args.token_file)
     _write_token(token_file)
@@ -243,6 +259,7 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any]) -> 
             "artifact": artifact,
             "engine": build_info,
             **({"cuda_device": cuda_receipt} if cuda_receipt is not None else {}),
+            "toolchain": toolchain,
             "metrics": {key: metrics[key] for key in ("case_count", "passed", "failed", "errors", "peak_rss_kib")},
             "duration_ms": round((time.monotonic() - started) * 1000, 1),
             "prompt_response_logging": False,
@@ -281,6 +298,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--backend", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--cuda-device-name", default="")
     parser.add_argument("--cuda-device-receipt", default="")
+    parser.add_argument("--toolchain-receipt", required=True)
     parser.add_argument("--receipt", required=True)
     parser.add_argument("--timeout", type=float, default=600.0)
     args = parser.parse_args(argv)

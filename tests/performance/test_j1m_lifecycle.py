@@ -476,12 +476,46 @@ class StaticSafetyTests(unittest.TestCase):
     def test_deadline_backstops_exceed_watchdog_and_run(self):
         j1m = load(ROOT / "scripts/j1m_runner.py", "j1m_deadline")
         config = j1m.load_config()
-        for mode in ("prove", "build"):
+        for mode in ("prove", "build", "eval"):
             selected = config["modes"][mode]
             self.assertGreater(selected["provider_backstop_hours"], selected["runtime_hours"])
             self.assertLess(selected["external_watchdog_seconds"], selected["provider_backstop_hours"] * 3600)
             self.assertGreater(selected["transfer_reserve_seconds"], 0)
         self.assertEqual(config["resources"]["expected_q4_gib"], 6)
+        selected = config["modes"]["eval"]
+        budgets = selected["stage_budgets_seconds"]
+        cumulative = sum(budgets.values())
+        self.assertLess(cumulative, selected["runtime_hours"] * 3600)
+        # All clocks are measured from creation, while shutdown is armed only
+        # after activation. Include the worst-case activation offset rather
+        # than comparing independent scalar durations.
+        run_seconds = selected["runtime_hours"] * 3600
+        watchdog_seconds = selected["external_watchdog_seconds"]
+        host_shutdown_seconds = selected["activation_timeout_seconds"] + 120 + 3 * 15 + 5 * 30 + 30 + selected["host_shutdown_delay_minutes"] * 60
+        provider_seconds = selected["provider_backstop_hours"] * 3600
+        self.assertLess(cumulative, watchdog_seconds)
+        self.assertLess(watchdog_seconds, run_seconds)
+        self.assertLess(host_shutdown_seconds, run_seconds)
+        self.assertLess(run_seconds, provider_seconds)
+        # Remote-only eval never transfers the model from this laptop; this
+        # bucket is retained only for non-eval compatibility.
+        self.assertEqual(budgets["model_upload"], 600)
+        self.assertNotIn("timedelta(minutes=30)", (ROOT / "scripts/j1m_orchestrator.py").read_text(encoding="utf-8"))
+
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_deadline_ceiling")
+        envelope = orchestrator._eval_deadline_ceiling(config)
+        self.assertEqual(envelope["upload_count"], 12)
+        self.assertLess(envelope["ceiling_seconds"], envelope["watchdog_seconds"])
+        self.assertLess(envelope["host_shutdown_from_create_seconds"], envelope["watchdog_seconds"])
+
+    def test_eval_rejects_local_artifact_execution_path(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_reject_local_eval")
+        with self.assertRaises(ValueError):
+            orchestrator.execute(
+                ROOT / ".env", config_path=ROOT / "model/conversion/j1m-config.json",
+                phase_id="local-eval-refused", run_id="J1M", artifact_destination=Path("/tmp/eval"),
+                mode="eval", model_artifact=Path("/tmp/Qwen3.5-9B-Q4_K_M.gguf"),
+            )
 
     def test_salvage_timeout_is_size_aware_and_deadline_bounded(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_timeout")
@@ -510,14 +544,14 @@ class StaticSafetyTests(unittest.TestCase):
         command = orchestrator._remote_job_command("build", "/scratch/j1m", 70)
         self.assertEqual(command, ["python3", "/scratch/j1m/j1m_runner.py", "--run", "--config", "/scratch/j1m/j1m-config.json"])
 
-    def test_eval_plan_is_bounded_and_builds_pinned_cpu_backend(self):
+    def test_eval_plan_is_bounded_and_builds_pinned_cuda_backend_remotely(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_eval_plan")
         j1m = load(ROOT / "scripts/j1m_runner.py", "j1m_eval_plan_config")
         config = j1m.load_config()
         plan = j1m.build_plan(config, "eval")
         self.assertEqual(orchestrator.main(["--mode", "eval"]), 0)
-        self.assertEqual(plan["active_run_cost_usd"], 1.0125)
-        self.assertEqual(plan["provider_backstop_cost_usd"], 1.2656)
+        self.assertEqual(plan["active_run_cost_usd"], 2.619)
+        self.assertEqual(plan["provider_backstop_cost_usd"], 2.7)
         self.assertGreater(config["modes"]["eval"]["provider_backstop_hours"], config["modes"]["eval"]["runtime_hours"])
         self.assertEqual(config["artifacts"]["eval_fetch_allowlist"], ["eval-receipt.json"])
         commands = orchestrator._eval_remote_commands(config, "/scratch/j1m")
@@ -530,6 +564,7 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertIn("--backend", flattened)
         self.assertIn("cuda", flattened)
         self.assertIn("--token-file", flattened)
+        self.assertIn("--toolchain-receipt", flattened)
         self.assertIn("remote_model_eval.py", " ".join(flattened))
         self.assertNotIn("--token", flattened)
         self.assertTrue(all(";" not in part and "&&" not in part for part in flattened))
@@ -539,15 +574,30 @@ class StaticSafetyTests(unittest.TestCase):
         j1m = load(ROOT / "scripts/j1m_runner.py", "j1m_eval_upload_config")
         uploads = orchestrator._eval_uploads(j1m.load_config(), "/scratch/j1m", Path("/tmp/Qwen3.5-9B-Q4_K_M.gguf"), Path("/tmp/model-manifest.json"))
         names = {local.name for local, _remote, _recursive in uploads}
-        self.assertEqual(names, {"Qwen3.5-9B-Q4_K_M.gguf", "model-manifest.json", "model-manifest.sha256", "remote_model_eval.py", "evaluate_tool_calls.py", "cuda_device_probe.py", "cuda_source_closure.py", "ggml-cuda-source-lock.json", "tool_call_eval.json", "CMakeLists.txt", "native"})
+        self.assertEqual(names, {"Qwen3.5-9B-Q4_K_M.gguf", "model-manifest.json", "model-manifest.sha256", "remote_model_eval.py", "remote_eval_prepare.py", "evaluate_tool_calls.py", "cuda_device_probe.py", "remote_toolchain_probe.py", "cuda_source_closure.py", "ggml-cuda-source-lock.json", "tool_call_eval.json", "CMakeLists.txt", "native"})
         self.assertTrue(any(recursive and local.name == "native" for local, _remote, recursive in uploads))
         closure_upload = next((remote for local, remote, _recursive in uploads if local.name == "cuda_source_closure.py"), None)
         self.assertEqual(closure_upload, "/scratch/j1m/engine/scripts/cuda_source_closure.py")
         lock_upload = next((remote for local, remote, _recursive in uploads if local.name == "ggml-cuda-source-lock.json"), None)
-        self.assertEqual(lock_upload, "/scratch/j1m/engine/vendor/llama.cpp/ggml-cuda-source-lock.json")
+        self.assertEqual(lock_upload, "/scratch/j1m/ggml-cuda-source-lock.json")
         source = (ROOT / "scripts/j1m_orchestrator.py").read_text(encoding="utf-8")
-        self.assertIn("for command in eval_commands[:5]", source)
-        self.assertIn("for command in eval_commands[5:]", source)
+        self.assertIn("eval_commands[:3]", source)
+        self.assertIn("eval_commands[3:]", source)
+        commands = orchestrator._eval_remote_commands(j1m.load_config(), "/scratch/j1m")
+        self.assertEqual(commands[1][:2], ["sudo", "apt-get"])
+        self.assertEqual(commands[2][:5], ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install"])
+        j1m_index = next(index for index, command in enumerate(commands) if "j1m_runner.py" in command[1])
+        toolchain_index = next(index for index, command in enumerate(commands) if "remote_toolchain_probe.py" in command[1])
+        self.assertGreater(toolchain_index, j1m_index)
+        self.assertLess(toolchain_index, next(index for index, command in enumerate(commands) if command[0:2] == ["cmake", "-S"]))
+        self.assertIn(["cp", "/scratch/j1m/ggml-cuda-source-lock.json", "/scratch/j1m/engine/vendor/llama.cpp/ggml-cuda-source-lock.json"], commands)
+        self.assertIn(["cp", "-a", "/scratch/llama.cpp", "/scratch/j1m/engine/vendor/llama.cpp"], commands)
+        self.assertIn(["python3", "/scratch/j1m/remote_eval_prepare.py", "--artifact", "/scratch/j1m/artifacts/Qwen3.5-9B-Q4_K_M.gguf", "--manifest", "/scratch/j1m/model-manifest.json", "--output", "/scratch/j1m/artifacts/eval-artifact-receipt.json"], commands)
+        self.assertIn(["python3", "/scratch/j1m/j1m_runner.py", "--run", "--config", "/scratch/j1m/j1m-config.json"], commands)
+        self.assertEqual(orchestrator._eval_stage_timeout(j1m.load_config(), next(command for command in commands if "j1m_runner.py" in command[1])), 1800.0)
+        eval_command = next(command for command in commands if command and command[0] == "python3" and any("remote_model_eval.py" in part for part in command))
+        self.assertEqual(eval_command[eval_command.index("--model") + 1], "/scratch/j1m/artifacts/Qwen3.5-9B-Q4_K_M.gguf")
+        self.assertEqual(eval_command[eval_command.index("--llama-checkout") + 1], "/scratch/llama.cpp")
         native_upload = next(remote for local, remote, recursive in uploads if local.name == "native" and recursive)
         self.assertEqual(native_upload, "/scratch/j1m/engine")
         self.assertNotIn("/engine/native/native", native_upload)
@@ -561,6 +611,45 @@ class StaticSafetyTests(unittest.TestCase):
             shutil.copytree(source, target / source.name)
             self.assertTrue((target / "native" / "engine" / "marker.txt").is_file())
             self.assertFalse((target / "native" / "native").exists())
+
+    def test_eval_remote_only_upload_omits_large_local_model(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_remote_only_uploads")
+        j1m = load(ROOT / "scripts/j1m_runner.py", "j1m_remote_only_upload_config")
+        uploads = orchestrator._eval_uploads(
+            j1m.load_config(), "/scratch/j1m", None,
+            ROOT / "artifacts" / "qwen35-9b" / "model-manifest.json",
+        )
+        names = {local.name for local, _remote, _recursive in uploads}
+        self.assertNotIn("Qwen3.5-9B-Q4_K_M.gguf", names)
+        self.assertIn("model-manifest.json", names)
+        self.assertIn("remote_eval_prepare.py", names)
+        self.assertNotIn("/model/Qwen3.5-9B-Q4_K_M.gguf", " ".join(remote for _local, remote, _recursive in uploads))
+
+    def test_remote_eval_prepare_verifies_small_fixture_without_local_model(self):
+        remote = load(ROOT / "scripts/test/remote_eval_prepare.py", "remote_eval_prepare_fixture")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact = root / "Qwen3.5-9B-Q4_K_M.gguf"
+            artifact.write_bytes(b"q4 fixture")
+            digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+            manifest = root / "model-manifest.json"
+            manifest.write_text(json.dumps({"artifact": {
+                "expected_file_name": artifact.name,
+                "expected_size_bytes": artifact.stat().st_size,
+                "sha256": digest,
+                "quantization_profile": "Q4_K_M",
+                "modality_profile": "text_only_no_mmproj",
+            }}), encoding="utf-8")
+            (root / "model-manifest.sha256").write_text(
+                f"{hashlib.sha256(manifest.read_bytes()).hexdigest()}  model-manifest.json\n",
+                encoding="utf-8",
+            )
+            receipt = remote.verify(artifact, manifest, root / "receipt.json")
+            self.assertEqual(receipt["status"], "verified")
+            self.assertEqual(json.loads((root / "receipt.json").read_text())["sha256"], digest)
+            (root / "model-manifest.sha256").write_text("0" * 64 + "  model-manifest.json\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "lock_mismatch"):
+                remote.verify(artifact, manifest, root / "receipt-2.json")
 
     def test_eval_artifact_identity_is_stream_hash_locked(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_eval_identity")
@@ -622,6 +711,7 @@ class StaticSafetyTests(unittest.TestCase):
                 "schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "verified", "artifact": artifact,
                 "engine": {"llama_cpp_revision": config["llama_cpp"]["revision"], "compiled_backend": f"llama.cpp/{config['llama_cpp']['revision'][:8]}/cuda"},
                 "cuda_device": {"schema": "local_bmo.j1m.cuda-device-receipt.v1", "status": "verified", "selector": "CUDA0", "device_count": 1, "device": {"name": "NVIDIA A100 80GB", "memory_total_mib": 81920}},
+                "toolchain": {"schema": "local_bmo.j1m.remote-toolchain-receipt.v1", "status": "verified", "versions": {"python3": {"major": 3, "minor": 10}, "git": {"major": 2, "minor": 39}, "cmake": {"major": 3, "minor": 22}, "g++": {"major": 11, "minor": 4}, "nvcc": {"major": 12, "minor": 2}}, "packages": {"ca-certificates": "20240101", "cmake": "3.22.1", "build-essential": "12.9", "git": "1:2.39.2", "python3": "3.10.12", "python3-venv": "3.10.12"}},
                 "metrics": {"case_count": 8, "passed": 8, "failed": 0, "errors": 0, "peak_rss_kib": 123},
                 "prompt_response_logging": False, "token_logging": False,
             }), encoding="utf-8")
@@ -639,6 +729,12 @@ class StaticSafetyTests(unittest.TestCase):
             failed["metrics"] = {"case_count": 8, "passed": 8, "failed": 0, "errors": 0, "peak_rss_kib": 123}
             receipt.write_text(json.dumps(failed), encoding="utf-8")
             with self.assertRaises(ValueError):
+                orchestrator._verify_eval_receipt(receipt, artifact)
+            failed["status"] = "verified"
+            failed["metrics"] = {"case_count": 8, "passed": 8, "failed": 0, "errors": 0, "peak_rss_kib": 123}
+            failed.pop("toolchain", None)
+            receipt.write_text(json.dumps(failed), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "toolchain"):
                 orchestrator._verify_eval_receipt(receipt, artifact)
 
     def test_remote_eval_metrics_reject_bool_missing_and_bad_totals(self):
@@ -662,6 +758,28 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertEqual(receipt["device_count"], 1)
         self.assertEqual(run.call_args.args[0][:2], ["nvidia-smi", "--query-gpu=index,name,memory.total,driver_version"])
         self.assertEqual(written["status"], "verified")
+
+    def test_remote_toolchain_probe_requires_cmake_and_nvcc_versions(self):
+        probe = load(ROOT / "scripts/test/remote_toolchain_probe.py", "remote_toolchain_probe_test")
+        versions = {
+            "python3": "Python 3.10.12\n",
+            "git": "git version 2.39.2\n",
+            "cmake": "cmake version 3.22.1\n",
+            "g++": "g++ (Ubuntu 11.4.0) 11.4.0\n",
+            "nvcc": "Cuda compilation tools, release 12.2, V12.2.140\n",
+        }
+        def run(command, **_kwargs):
+            if command[0] == "dpkg-query":
+                return types.SimpleNamespace(returncode=0, stdout="ca-certificates=20240101\ncmake=3.22.1\nbuild-essential=12.9\ngit=1:2.39.2\npython3=3.10.12\npython3-venv=3.10.12\n", stderr="")
+            return types.SimpleNamespace(returncode=0, stdout=versions[command[0]], stderr="")
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(probe.subprocess, "run", side_effect=run):
+            receipt = probe.probe(Path(directory) / "toolchain-receipt.json")
+            self.assertEqual(receipt["status"], "verified")
+            self.assertEqual(json.loads((Path(directory) / "toolchain-receipt.json").read_text())["versions"]["cmake"]["major"], 3)
+            self.assertEqual(receipt["packages"]["cmake"], "3.22.1")
+        with mock.patch.object(probe.subprocess, "run", side_effect=FileNotFoundError):
+            with self.assertRaisesRegex(RuntimeError, "cmake_unavailable"):
+                probe._probe("cmake")
 
     def test_eval_receipt_rejects_cpu_identity_for_cuda_lane(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_cuda_identity")
@@ -712,7 +830,7 @@ class StaticSafetyTests(unittest.TestCase):
         artifact = {"name": "Qwen3.5-9B-Q4_K_M.gguf", "size_bytes": 4, "sha256": "a" * 64, "llama_cpp_revision": "b" * 40}
         with tempfile.TemporaryDirectory() as directory:
             receipt = Path(directory) / "eval-receipt.json"
-            args = ["--model", "m", "--model-manifest", "mm", "--model-manifest-lock", "ml", "--source-revision", "c" * 40, "--llama-revision", "b" * 40, "--llama-checkout", "checkout", "--engine", "engine", "--evaluator", "eval", "--fixture", "fixture", "--token-file", "token", "--receipt", str(receipt)]
+            args = ["--model", "m", "--model-manifest", "mm", "--model-manifest-lock", "ml", "--source-revision", "c" * 40, "--llama-revision", "b" * 40, "--llama-checkout", "checkout", "--engine", "engine", "--evaluator", "eval", "--fixture", "fixture", "--token-file", "token", "--toolchain-receipt", "toolchain", "--receipt", str(receipt)]
             failed_metrics = {"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "completed_with_failures", "artifact": artifact, "engine": {"llama_cpp_revision": "b" * 40, "compiled_backend": "llama.cpp/bbbbbbbb/cpu"}, "metrics": {"case_count": 8, "passed": 7, "failed": 1, "errors": 0, "peak_rss_kib": 1}, "prompt_response_logging": False, "token_logging": False}
             with mock.patch.object(remote, "verify_artifact", return_value=artifact), mock.patch.object(remote, "_launch_and_evaluate", return_value=failed_metrics):
                 self.assertEqual(remote.main(args), 0)
