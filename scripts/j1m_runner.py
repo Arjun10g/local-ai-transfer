@@ -141,7 +141,7 @@ def scan_artifacts(output_dir: Path) -> dict[str, Any]:
     vision_present = tensor_metadata.get("vision_projection_present")
     if vision_present is not False:
         raise ValueError("GGUF inspection did not prove absence of vision/mmproj tensors")
-    payload = {"schema": "local_bmo.j1m.scan-receipt.v1", "status": "verified", "text_only": True, "artifacts": records, "vision_projection_present": vision_present}
+    payload = {"schema": "local_bmo.j1m.scan-receipt.v1", "status": "verified", "inventory_scope": "pre_cleanup_conversion_outputs", "text_only": True, "artifacts": records, "vision_projection_present": vision_present}
     (output_dir / "scan-receipt.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return payload
 
@@ -188,6 +188,8 @@ def artifact_manifest(output_dir: Path, names: list[str], *, tensor_metadata: di
     return {
         "schema": "local_bmo.j1m.artifact-manifest.v1",
         "created_at_utc": utc_now(),
+        "inventory_scope": "post_cleanup_deployable_allowlist",
+        "deployable_model_artifacts": ["Qwen3.5-9B-Q4_K_M.gguf"],
         "text_only": True,
         "artifacts": artifacts,
         "tensor_metadata": tensor_metadata or {"status": "pending_converter_receipt"},
@@ -252,7 +254,7 @@ def write_artifacts(output_dir: Path, names: list[str], *, source_lock: Path = S
     command_receipt = json.loads((output_dir / "command-receipt.json").read_text(encoding="utf-8"))
     scan_receipt = json.loads((output_dir / "scan-receipt.json").read_text(encoding="utf-8"))
     required_receipt_fields = {"stage", "argv", "started_at_utc", "ended_at_utc", "exit_code", "status"}
-    if not isinstance(command_receipt, list) or not command_receipt or any(not isinstance(item, dict) or not required_receipt_fields.issubset(item) for item in command_receipt) or scan_receipt.get("status") != "verified":
+    if not isinstance(command_receipt, list) or not command_receipt or any(not isinstance(item, dict) or not required_receipt_fields.issubset(item) for item in command_receipt) or scan_receipt.get("status") != "verified" or scan_receipt.get("inventory_scope") != "pre_cleanup_conversion_outputs":
         raise ValueError("command and scan receipts are not complete")
     converter_commands = [command for command in (commands or []) if any("convert_hf_to_gguf.py" in part for part in command) or "Q4_K_M" in command]
     (output_dir / "conversion-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.conversion-receipt.v1", "status": "conversion-complete", "text_only": True, "source_revision": source.get("revision"), "llama_cpp_revision": llama_revision, "artifacts": artifact_hashes, "converter_and_quantizer_argv": converter_commands, "command_receipt_sha256": _sha256(output_dir / "command-receipt.json"), "toolchain": toolchain, "no_mmproj": True, "no_mtp": True}, indent=2, sort_keys=True) + "\n", encoding="utf-8")

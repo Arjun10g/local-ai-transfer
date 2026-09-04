@@ -76,6 +76,8 @@ def copy_selected(remote_dir: Path, local_dir: Path, names: list[str]) -> list[d
 
 def verify_local_bundle(local_dir: Path) -> None:
     manifest = json.loads((local_dir / "manifest.json").read_text(encoding="utf-8"))
+    if manifest.get("inventory_scope") != "post_cleanup_deployable_allowlist" or manifest.get("deployable_model_artifacts") != ["Qwen3.5-9B-Q4_K_M.gguf"]:
+        raise ValueError("manifest does not identify the post-cleanup Q4 deployable scope")
     expected = {}
     for item in manifest.get("artifacts", []):
         if not isinstance(item, dict) or set(item) != {"name", "size_bytes", "sha256"}:
@@ -85,7 +87,7 @@ def verify_local_bundle(local_dir: Path) -> None:
         if name not in LOCAL_ALLOWLIST or name in expected:
             raise ValueError(f"manifest contains a non-deployable or duplicate artifact: {name}")
         expected[name] = str(item["sha256"])
-    if "Qwen3.5-9B-Q4_K_M.gguf" not in expected:
+    if "Qwen3.5-9B-Q4_K_M.gguf" not in expected or any(name in expected for name in ("Qwen3.5-9B-bf16.gguf", "Qwen3.5-9B-Q8_0.gguf")):
         raise ValueError("manifest does not contain the deployable Q4 artifact")
     checksum_lines = (local_dir / "checksums.sha256").read_text(encoding="utf-8").splitlines()
     checksums: dict[str, str] = {}
