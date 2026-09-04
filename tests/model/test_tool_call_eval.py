@@ -1,10 +1,22 @@
 import unittest
 import os
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.test.evaluate_tool_calls import evaluate_case, load_bearer_token, load_fixture, parse_tool_call, run_local
+from scripts.test.evaluate_tool_calls import (
+    MODEL_OUTPUT_MAX_CHARS,
+    RESPONSE_MAX_BYTES,
+    TOKEN_MAX_BYTES,
+    _post,
+    evaluate_case,
+    load_bearer_token,
+    load_fixture,
+    parse_tool_call,
+    run_local,
+    validate_endpoint,
+)
 
 
 class ToolCallEvaluatorTests(unittest.TestCase):
@@ -61,6 +73,11 @@ class ToolCallEvaluatorTests(unittest.TestCase):
             link.symlink_to(path)
             with self.assertRaisesRegex(ValueError, "regular"):
                 load_bearer_token(link, "__NO_TOKEN_ENV__")
+            path.unlink()
+            path.write_bytes(b"x" * (TOKEN_MAX_BYTES + 1))
+            path.chmod(0o600)
+            with self.assertRaisesRegex(ValueError, "too_large"):
+                load_bearer_token(path, "__NO_TOKEN_ENV__")
         old = os.environ.get("__EVAL_TOKEN_TEST")
         os.environ["__EVAL_TOKEN_TEST"] = "inherited-token-20260904"
         try:
@@ -80,6 +97,58 @@ class ToolCallEvaluatorTests(unittest.TestCase):
         self.assertEqual(payload["tools"], fixture["tools"])
         self.assertEqual(payload["messages"], fixture["cases"][0]["messages"])
         self.assertNotIn("system", {message["role"] for message in payload["messages"]})
+
+    def test_endpoint_is_explicit_loopback_http_only(self):
+        self.assertEqual(validate_endpoint("http://127.0.0.1:49912/v1/chat/completions"), "http://127.0.0.1:49912/v1/chat/completions")
+        self.assertEqual(validate_endpoint("http://localhost:49912/v1/chat/completions"), "http://localhost:49912/v1/chat/completions")
+        invalid = (
+            "https://127.0.0.1:49912/v1/chat/completions",
+            "http://192.0.2.1:49912/v1/chat/completions",
+            "http://[::1]:49912/v1/chat/completions",
+            "http://user:password@localhost:49912/v1/chat/completions",
+            "http://localhost/v1/chat/completions",
+            "http://localhost:49912/v1/other",
+            "http://localhost:49912/v1/chat/completions?redirect=remote",
+        )
+        for endpoint in invalid:
+            with self.subTest(endpoint=endpoint):
+                with self.assertRaisesRegex(ValueError, "loopback"):
+                    validate_endpoint(endpoint)
+
+    def test_http_and_decoded_model_output_are_bounded(self):
+        class OversizedResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, limit):
+                self.limit = limit
+                return b"x" * (RESPONSE_MAX_BYTES + 1)
+
+        with patch("scripts.test.evaluate_tool_calls.urllib.request.urlopen", return_value=OversizedResponse()):
+            with self.assertRaisesRegex(ValueError, "response_too_large"):
+                _post("http://127.0.0.1:49912/v1/chat/completions", "test-token-20260904", {}, 0.1)
+
+        class FixedResponse:
+            def __init__(self, body):
+                self.body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, limit):
+                return self.body
+
+        session = FixedResponse(b'{"id":"s"}')
+        body = json.dumps({"choices": [{"message": {"content": "x" * (MODEL_OUTPUT_MAX_CHARS + 1)}}]}).encode()
+        with patch("scripts.test.evaluate_tool_calls.urllib.request.urlopen", side_effect=[session, FixedResponse(body)]):
+            with self.assertRaisesRegex(ValueError, "model_output_too_large"):
+                _post("http://127.0.0.1:49912/v1/chat/completions", "test-token-20260904", {}, 0.1)
 
 
 if __name__ == "__main__":

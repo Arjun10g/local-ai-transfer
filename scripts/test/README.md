@@ -27,7 +27,9 @@ python3 -m unittest discover -s tests/model -p 'test_*.py' -q
 Against an already-running local engine, provide a protected token file or an
 inherited `LAE_EVAL_TOKEN` environment variable (the evaluator never prints
 or accepts token material as an argument), and optionally pass the engine PID
-for RSS samples:
+for RSS samples. The endpoint is fail-closed to explicit-port HTTP on
+`127.0.0.1` or `localhost`, with exactly `/v1/chat/completions` and no
+credentials/query/fragment:
 
 ```text
 python3 scripts/test/evaluate_tool_calls.py \

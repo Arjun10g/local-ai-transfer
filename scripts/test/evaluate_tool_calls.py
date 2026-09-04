@@ -16,6 +16,7 @@ import stat
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,9 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = ROOT / "tests" / "model" / "tool_call_eval.json"
 TOKEN_ENV = "LAE_EVAL_TOKEN"
+TOKEN_MAX_BYTES = 4096
+RESPONSE_MAX_BYTES = 1024 * 1024
+MODEL_OUTPUT_MAX_CHARS = 65536
 TOOL_CALL = re.compile(
     r"\A\s*<tool_call>\s*<function=([a-z][a-z0-9_.-]{1,95})>"
     r"(.*?)</function>\s*</tool_call>\s*\Z",
@@ -31,6 +35,38 @@ TOOL_CALL = re.compile(
 PARAMETER = re.compile(
     r"<parameter=([a-z][a-z0-9_.-]{0,95})>(.*?)</parameter>", re.DOTALL
 )
+
+
+def validate_endpoint(endpoint: str) -> str:
+    """Allow only the local native completion endpoint before auth is used."""
+    if not isinstance(endpoint, str) or endpoint != endpoint.strip():
+        raise ValueError("endpoint_must_be_loopback_http")
+    try:
+        parts = urllib.parse.urlsplit(endpoint)
+        hostname = parts.hostname
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError("endpoint_must_be_loopback_http") from exc
+    if (
+        parts.scheme.lower() != "http"
+        or hostname not in {"127.0.0.1", "localhost"}
+        or parts.username is not None
+        or parts.password is not None
+        or port is None
+        or not 1 <= port <= 65535
+        or parts.path != "/v1/chat/completions"
+        or parts.query
+        or parts.fragment
+    ):
+        raise ValueError("endpoint_must_be_loopback_http")
+    return endpoint
+
+
+def _read_response(response: Any, limit: int) -> bytes:
+    data = response.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("response_too_large")
+    return data
 
 
 def load_fixture(path: Path = FIXTURE) -> dict[str, Any]:
@@ -137,6 +173,7 @@ def evaluate_case(case: dict[str, Any], output: str, tools: list[dict[str, Any]]
 
 
 def _post(endpoint: str, token: str, payload: dict[str, Any], timeout: float) -> str:
+    validate_endpoint(endpoint)
     session_endpoint = endpoint.removesuffix("/v1/chat/completions") + "/v1/sessions"
     session_request = urllib.request.Request(
         session_endpoint,
@@ -145,7 +182,7 @@ def _post(endpoint: str, token: str, payload: dict[str, Any], timeout: float) ->
         method="POST",
     )
     with urllib.request.urlopen(session_request, timeout=timeout) as response:
-        session = json.loads(response.read().decode("utf-8"))
+        session = json.loads(_read_response(response, RESPONSE_MAX_BYTES).decode("utf-8"))
     if not isinstance(session.get("id"), str):
         raise ValueError("native engine returned no session id")
     payload = {**payload, "session_id": session["id"]}
@@ -156,8 +193,14 @@ def _post(endpoint: str, token: str, payload: dict[str, Any], timeout: float) ->
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        data = json.loads(response.read().decode("utf-8"))
-    return str(data.get("choices", [{}])[0].get("message", {}).get("content", ""))
+        data = json.loads(_read_response(response, RESPONSE_MAX_BYTES).decode("utf-8"))
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise ValueError("native engine response_missing_content") from exc
+    if not isinstance(content, str) or len(content) > MODEL_OUTPUT_MAX_CHARS:
+        raise ValueError("model_output_too_large")
+    return content
 
 
 def _rss_kib(pid: int) -> int | None:
@@ -172,6 +215,7 @@ def run_local(
     fixture: dict[str, Any], endpoint: str, token: str, *, timeout: float,
     max_cases: int, engine_pid: int | None = None,
 ) -> dict[str, Any]:
+    validate_endpoint(endpoint)
     cases = fixture["cases"][:max_cases]
     records = []
     peak_rss = _rss_kib(engine_pid) if engine_pid is not None else None
@@ -217,12 +261,22 @@ def load_bearer_token(token_file: Path | None, token_env: str) -> str:
             raise ValueError("token_file_must_be_regular")
         if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
             raise ValueError("token_file_permissions")
+        if info.st_size > TOKEN_MAX_BYTES:
+            raise ValueError("token_file_too_large")
         try:
-            token = token_file.read_text(encoding="utf-8").strip()
+            with token_file.open("rb") as stream:
+                raw = stream.read(TOKEN_MAX_BYTES + 1)
+            if len(raw) > TOKEN_MAX_BYTES:
+                raise ValueError("token_file_too_large")
+            token = raw.decode("utf-8").strip()
+        except UnicodeDecodeError as exc:
+            raise ValueError("token_file_unreadable") from exc
         except OSError as exc:
             raise ValueError("token_file_unreadable") from exc
     else:
         token = os.environ.get(token_env, "").strip()
+    if len(token.encode("utf-8")) > TOKEN_MAX_BYTES:
+        raise ValueError("token_too_large")
     if len(token) < 16:
         raise ValueError("token_missing_or_too_short")
     return token
@@ -246,10 +300,11 @@ def main(argv: list[str] | None = None) -> int:
     if not args.endpoint:
         parser.error("--endpoint is required unless --dry-run")
     try:
+        endpoint = validate_endpoint(args.endpoint)
         token = load_bearer_token(args.token_file, args.token_env)
     except ValueError as exc:
         parser.error(str(exc))
-    result = run_local(fixture, args.endpoint, token, timeout=args.timeout, max_cases=min(args.max_cases, int(fixture["limits"]["max_cases"])), engine_pid=args.engine_pid)
+    result = run_local(fixture, endpoint, token, timeout=args.timeout, max_cases=min(args.max_cases, int(fixture["limits"]["max_cases"])), engine_pid=args.engine_pid)
     print(json.dumps(result, sort_keys=True))
     return 0 if result["errors"] == 0 and result["failed"] == 0 else 1
 
