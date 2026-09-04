@@ -15,7 +15,7 @@ initialization. `readyz` returns HTTP 200 only in `READY` or `BUSY`.
 The server binds only to `127.0.0.1`; `--port 0` chooses an ephemeral port.
 `GET /healthz` is unauthenticated and reports process/lifecycle liveness.
 Every other route requires `Authorization: Bearer <launch-token>`.
-Requests are capped at 64 KiB and one active generation is allowed per engine.
+Requests are capped at 64 KiB, at most 16 connections are active, and one active generation is allowed per engine.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|

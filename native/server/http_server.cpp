@@ -176,6 +176,11 @@ void HttpServer::accept_loop() {
 #else
     if (client < 0) { if (!stopping_) continue; break; }
 #endif
+    if (active_connections_.fetch_add(1) >= 16) {
+      active_connections_.fetch_sub(1);
+      close_socket(client);
+      continue;
+    }
     std::lock_guard<std::mutex> lock(workers_mutex_);
     workers_.emplace_back(&HttpServer::handle, this, client);
   }
@@ -196,6 +201,10 @@ void HttpServer::respond(Socket client, int status, const std::string& type, con
 }
 
 void HttpServer::handle(Socket client) {
+  struct ConnectionGuard {
+    std::atomic<unsigned>& count;
+    ~ConnectionGuard() { count.fetch_sub(1); }
+  } connection_guard{active_connections_};
   const std::string request_id = next_request_id();
   std::string raw; char buffer[4096];
   while (raw.find("\r\n\r\n") == std::string::npos && raw.size() <= kMaxBody + 8192) {

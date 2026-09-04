@@ -1,7 +1,7 @@
 {
   "api_version": "0.1.0",
   "lifecycle_states": ["NEW", "VERIFYING_MODEL", "LOADING_MODEL", "WARMING", "READY", "BUSY", "DEGRADED", "STOPPING", "STOPPED", "FAILED"],
-  "limits": {"max_body_bytes": 65536, "max_tokens": 64, "max_active_generations": 1},
+  "limits": {"max_body_bytes": 65536, "max_connections": 16, "max_tokens": 64, "max_active_generations": 1},
   "routes": [
     {"method":"GET","path":"/healthz","auth":false}, {"method":"GET","path":"/readyz","auth":true},
     {"method":"GET","path":"/version","auth":true}, {"method":"GET","path":"/build-info","auth":true},

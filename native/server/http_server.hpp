@@ -36,6 +36,7 @@ class HttpServer final {
   std::thread accept_thread_;
   std::mutex workers_mutex_;
   std::vector<std::thread> workers_;
+  std::atomic<unsigned> active_connections_{0};
 };
 
 }  // namespace lae
