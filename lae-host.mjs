@@ -33,5 +33,5 @@ const controller = new ConversationController({ engine, toolRegistry: { ...creat
 const host = new HostServer({ controller, engine, config, providers: externalTools.providerStatus, operatorGrants });
 const address = await host.listen(Number(process.env.LAE_PORT ?? 0));
 console.log(JSON.stringify({ ready: true, host: address.host, port: address.port, engine: mode, network: config.network.provider }));
-const shutdown = async () => { await host.close(); process.exit(0); };
+const shutdown = async () => { await externalTools.shutdown?.(); await host.close(); process.exit(0); };
 process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown);
