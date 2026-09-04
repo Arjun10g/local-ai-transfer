@@ -338,6 +338,12 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     recorded = payload.get("artifact")
     if not isinstance(recorded, dict) or recorded.get("name") != artifact["name"] or recorded.get("size_bytes") != artifact["size_bytes"] or recorded.get("sha256") != artifact["sha256"]:
         raise ValueError("eval receipt artifact mismatch")
+    model_preflight = payload.get("model_preflight")
+    if (not isinstance(model_preflight, dict) or set(model_preflight) != {"valid", "code", "status", "size_bytes", "sha256", "gguf_version"} or
+            model_preflight.get("valid") is not True or model_preflight.get("code") != "ok" or
+            model_preflight.get("status") != "verified" or model_preflight.get("size_bytes") != artifact["size_bytes"] or
+            model_preflight.get("sha256") != artifact["sha256"] or model_preflight.get("gguf_version") != 3):
+        raise ValueError("eval receipt model preflight invalid")
     metrics = payload.get("metrics")
     if not isinstance(metrics, dict) or payload.get("status") not in {"verified", "completed_with_failures"} or any(isinstance(metrics.get(key), bool) or not isinstance(metrics.get(key), int) or metrics[key] < 0 for key in ("case_count", "passed", "failed", "errors")):
         raise ValueError("eval receipt metrics invalid")
@@ -395,6 +401,60 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     if summary is not None:
         selected_metrics["category_summary"] = summary
     return {"status": status, "metrics": selected_metrics, "toolchain": toolchain}
+
+
+_STARTUP_PREFLIGHT_VALIDATOR_CODES = frozenset({
+    "ok", "model_path_not_absolute", "model_path_unsafe", "model_symlink_forbidden", "model_not_regular_file",
+    "model_path_invalid", "model_filename_mismatch", "model_mmproj_forbidden", "model_stat_failed", "model_lock_failed",
+    "model_open_failed", "model_changed_during_validation", "model_read_failed", "model_size_mismatch", "model_hash_mismatch",
+    "model_architecture_mismatch", "model_architecture_profile_mismatch", "model_chat_template_mismatch", "model_metadata_profile_mismatch",
+    "model_quantization_profile_mismatch", "model_tensor_profile_mismatch", "model_tokenizer_profile_mismatch", "gguf_alignment_invalid",
+    "gguf_chat_template_invalid", "gguf_count_invalid", "gguf_count_overflow", "gguf_magic_invalid", "gguf_metadata_array_invalid",
+    "gguf_metadata_key_invalid", "gguf_metadata_too_large", "gguf_metadata_type_invalid", "gguf_metadata_type_unsupported",
+    "gguf_string_invalid", "gguf_tensor_data_size_mismatch", "gguf_tensor_name_invalid", "gguf_tensor_offset_invalid",
+    "gguf_tensor_out_of_bounds", "gguf_tensor_overlap", "gguf_tensor_shape_invalid", "gguf_tensor_size_overflow",
+    "gguf_tensor_type_unsupported", "gguf_truncated", "gguf_version_unsupported",
+})
+
+
+def _verify_startup_preflight_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]:
+    """Validate the separately salvaged startup identity outcome."""
+
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("startup preflight receipt duplicate key")
+            result[key] = value
+        return result
+
+    payload = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicates)
+    if not isinstance(payload, dict) or payload.get("schema") != "local_bmo.j1m.startup-preflight-receipt.v1":
+        raise ValueError("startup preflight receipt schema invalid")
+    status = payload.get("status")
+    if status == "verified":
+        if (set(payload) != {"schema", "status", "size_bytes", "sha256", "gguf_version"} or
+                payload.get("size_bytes") != artifact["size_bytes"] or payload.get("sha256") != artifact["sha256"] or
+                payload.get("gguf_version") != 3):
+            raise ValueError("startup preflight receipt identity invalid")
+    elif status in {"rejected", "timeout", "oversize", "terminated", "failed"}:
+        if not set(payload) <= {"schema", "status", "error_code", "validator_code", "child"}:
+            raise ValueError("startup preflight receipt outcome invalid")
+        if "error_code" in payload and (not isinstance(payload["error_code"], str) or payload["error_code"] not in {
+            "engine_model_preflight_failed", "engine_model_preflight_invalid", "engine_model_preflight_exit",
+            "engine_model_preflight_output_too_large", "engine_model_preflight_timeout", "engine_model_preflight_terminated_by_signal",
+        }):
+            raise ValueError("startup preflight receipt outcome invalid")
+        if "validator_code" in payload and payload["validator_code"] not in _STARTUP_PREFLIGHT_VALIDATOR_CODES:
+            raise ValueError("startup preflight receipt outcome invalid")
+        child = payload.get("child")
+        if child is not None and (not isinstance(child, dict) or set(child) not in ({"exit_code"}, {"signal"}) or
+                                  not isinstance(next(iter(child.values())), int) or isinstance(next(iter(child.values())), bool) or
+                                  not 0 <= next(iter(child.values())) <= 255):
+            raise ValueError("startup preflight receipt child invalid")
+    else:
+        raise ValueError("startup preflight receipt outcome invalid")
+    return {"status": status}
 
 
 def _salvage(
@@ -631,6 +691,8 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                         raise sf.ShadeformError("required eval upload failed")
                 for command in eval_commands[3:]:
                     lifecycle["stage"] = _eval_stage_label(command)
+                    if any("remote_model_eval.py" in part for part in command):
+                        lifecycle["remote_model_eval_attempted"] = True
                     _progress(progress_path, "eval-stage-starting", phase_id=phase_id, operation_stage=lifecycle["stage"])
                     stage = _remote(sf.ssh_base(info, identity, known_hosts) + command, timeout=_eval_timeout(provider_deadline, _eval_stage_timeout(config, command)))
                     lifecycle.setdefault("eval_stages", []).append(stage)
@@ -704,6 +766,17 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             if mode == "prove" and lifecycle.get("job", {}).get("status") == "completed" and not any(item.get("name") == "proving-receipt.json" and item.get("status") == "completed" for item in lifecycle["salvage"]):
                 lifecycle["receipt_error"] = "proving receipt was not salvaged before teardown"
             if mode == "eval":
+                preflight_saved = next((item for item in lifecycle["salvage"] if item.get("name") == "startup-preflight-receipt.json" and item.get("status") == "completed"), None)
+                if lifecycle.get("remote_model_eval_attempted"):
+                    if preflight_saved is None:
+                        lifecycle["receipt_error"] = "startup preflight receipt was not salvaged"
+                    else:
+                        try:
+                            lifecycle["preflight_receipt"] = _verify_startup_preflight_receipt(artifact_destination / "startup-preflight-receipt.json", eval_artifact)
+                        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                            lifecycle["receipt_error"] = type(exc).__name__
+                    if lifecycle.get("preflight_receipt", {}).get("status") != "verified":
+                        lifecycle["receipt_error"] = lifecycle.get("receipt_error", "startup preflight did not verify")
                 saved_receipt = next((item for item in lifecycle["salvage"] if item.get("name") == "eval-receipt.json" and item.get("status") == "completed"), None)
                 if saved_receipt is None:
                     lifecycle["receipt_error"] = "eval receipt was not salvaged before teardown"

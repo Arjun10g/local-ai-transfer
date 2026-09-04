@@ -792,6 +792,28 @@ class StaticSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "engine_model_preflight_invalid"):
                 remote._write_preflight_receipt(path, {**preflight, "path": "/secret/token"})
 
+    def test_remote_eval_preflight_always_salvages_bounded_outcome(self):
+        remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_outcomes")
+        args = types.SimpleNamespace(engine="/approved/lae-engine", model="/approved/model")
+        artifact = {"size_bytes": 42, "sha256": "a" * 64}
+        outcomes = (
+            ({"status": "timeout", "exit_code": None}, "timeout"),
+            ({"status": "output_too_large", "exit_code": 0}, "oversize"),
+            ({"status": "failed", "exit_code": -9}, "terminated"),
+            ({"status": "completed", "exit_code": 0, "stdout": "not-json"}, "rejected"),
+            ({"status": "failed", "exit_code": 2, "stdout": json.dumps({"valid": False, "code": "model_hash_mismatch", "size_bytes": 0, "sha256": "", "gguf_version": 0})}, "rejected"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for index, (result, expected_status) in enumerate(outcomes):
+                path = Path(directory) / f"preflight-{index}.json"
+                with mock.patch.object(remote, "_run_bounded", return_value=result):
+                    with self.assertRaises(ValueError):
+                        remote._engine_model_preflight(args, artifact, receipt_path=path)
+                saved = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(saved["status"], expected_status)
+                self.assertNotIn("stderr", json.dumps(saved))
+                self.assertNotIn("/approved", json.dumps(saved))
+
     def test_remote_eval_ready_reader_bounds_partial_lines(self):
         remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_ready_reader")
         read_fd, write_fd = os.pipe()
@@ -904,6 +926,7 @@ class StaticSafetyTests(unittest.TestCase):
             receipt.write_text(json.dumps({
                 "schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "verified", "artifact": artifact,
                 "engine": {"llama_cpp_revision": config["llama_cpp"]["revision"], "compiled_backend": f"llama.cpp/{config['llama_cpp']['revision'][:8]}/cuda"},
+                "model_preflight": {"valid": True, "code": "ok", "status": "verified", "size_bytes": 4, "sha256": "a" * 64, "gguf_version": 3},
                 "cuda_device": {"schema": "local_bmo.j1m.cuda-device-receipt.v1", "status": "verified", "selector": "CUDA0", "device_count": 1, "device": {"name": "NVIDIA A100 80GB", "memory_total_mib": 81920}},
                 "toolchain": {"schema": "local_bmo.j1m.remote-toolchain-receipt.v1", "status": "verified", "versions": {"python3": {"major": 3, "minor": 10}, "git": {"major": 2, "minor": 39}, "cmake": {"major": 3, "minor": 22}, "g++": {"major": 11, "minor": 4}, "nvcc": {"major": 12, "minor": 2, "executable": "/usr/local/cuda/bin/nvcc"}}, "packages": {"ca-certificates": "20240101", "cmake": "3.22.1", "build-essential": "12.9", "git": "1:2.39.2", "python3": "3.10.12", "python3-venv": "3.10.12"}},
                 "metrics": {"case_count": case_count, "passed": case_count, "failed": 0, "errors": 0, "peak_rss_kib": 123, "category_summary": category_summary},
@@ -939,6 +962,24 @@ class StaticSafetyTests(unittest.TestCase):
             receipt.write_text(json.dumps(failed), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "metrics"):
                 orchestrator._verify_eval_receipt(receipt, artifact)
+
+    def test_eval_receipts_require_separate_verified_startup_preflight(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_preflight_receipts")
+        artifact = {"name": "Qwen3.5-9B-Q4_K_M.gguf", "size_bytes": 4, "sha256": "a" * 64}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "startup-preflight-receipt.json"
+            path.write_text(json.dumps({"schema": "local_bmo.j1m.startup-preflight-receipt.v1", "status": "verified", "size_bytes": 4, "sha256": "a" * 64, "gguf_version": 3}), encoding="utf-8")
+            self.assertEqual(orchestrator._verify_startup_preflight_receipt(path, artifact)["status"], "verified")
+            for hostile in (
+                {"schema": "local_bmo.j1m.startup-preflight-receipt.v1", "status": "verified", "size_bytes": 4, "sha256": "b" * 64, "gguf_version": 3},
+                {"schema": "local_bmo.j1m.startup-preflight-receipt.v1", "status": "rejected", "validator_code": "/secret/path"},
+            ):
+                path.write_text(json.dumps(hostile), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    orchestrator._verify_startup_preflight_receipt(path, artifact)
+            path.write_text('{"schema":"local_bmo.j1m.startup-preflight-receipt.v1","status":"verified","status":"rejected"}', encoding="utf-8")
+            with self.assertRaises(ValueError):
+                orchestrator._verify_startup_preflight_receipt(path, artifact)
 
     def test_remote_eval_metrics_reject_bool_missing_and_bad_totals(self):
         remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_metrics")
@@ -1002,7 +1043,7 @@ class StaticSafetyTests(unittest.TestCase):
         case_count = len(fixture["cases"])
         with tempfile.TemporaryDirectory() as directory:
             receipt = Path(directory) / "eval-receipt.json"
-            receipt.write_text(json.dumps({"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "verified", "artifact": artifact, "engine": {"llama_cpp_revision": "b" * 40, "compiled_backend": "llama.cpp/bbbbbbbb/cpu"}, "metrics": {"case_count": case_count, "passed": case_count, "failed": 0, "errors": 0, "peak_rss_kib": 1, "category_summary": category_summary}, "prompt_response_logging": False, "token_logging": False}), encoding="utf-8")
+            receipt.write_text(json.dumps({"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "verified", "artifact": artifact, "model_preflight": {"valid": True, "code": "ok", "status": "verified", "size_bytes": 4, "sha256": "a" * 64, "gguf_version": 3}, "engine": {"llama_cpp_revision": "b" * 40, "compiled_backend": "llama.cpp/bbbbbbbb/cpu"}, "metrics": {"case_count": case_count, "passed": case_count, "failed": 0, "errors": 0, "peak_rss_kib": 1, "category_summary": category_summary}, "prompt_response_logging": False, "token_logging": False}), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "engine identity"):
                 orchestrator._verify_eval_receipt(receipt, artifact)
 
@@ -1063,7 +1104,7 @@ class StaticSafetyTests(unittest.TestCase):
             self.assertEqual(startup_receipt["error_code"], "engine_not_ready")
             self.assertEqual(startup_receipt["child"], {"exit_code": 2})
 
-            def fail_after_preflight(call_args, _artifact):
+            def fail_after_preflight(call_args, _artifact, **_kwargs):
                 call_args._preflight_summary = {"status": "verified", "size_bytes": 42, "sha256": "a" * 64, "gguf_version": 3}
                 raise ValueError("engine_ready_timeout:/private/token")
 
