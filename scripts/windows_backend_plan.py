@@ -98,6 +98,13 @@ def _intel_integrated_adapters(receipt: dict[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
+def _intel_adapters_with_identity(receipt: dict[str, Any]) -> list[dict[str, Any]]:
+    adapters = receipt.get("gpu_adapters")
+    if not isinstance(adapters, list):
+        raise BackendPlanError("receipt has no GPU adapter list")
+    return [adapter for adapter in adapters if isinstance(adapter, dict) and adapter.get("is_intel") is True and isinstance(adapter.get("pnp_device_id"), str) and adapter["pnp_device_id"].strip()]
+
+
 def _validate_vulkan_attestation(receipt_path: Path, adapter: dict[str, Any], attestation_path: Path | None) -> dict[str, Any]:
     if attestation_path is None:
         raise BackendPlanError("Vulkan requires a separate integrated-GPU attestation")
@@ -179,10 +186,17 @@ def build_plan(
         return plan
 
     if backend == "intel-vulkan-conservative":
-        adapters = _intel_integrated_adapters(receipt)
-        if len(adapters) != 1:
-            raise BackendPlanError("Vulkan requires exactly one explicitly integrated Intel adapter")
-        adapter = adapters[0]
+        adapters = _intel_adapters_with_identity(receipt)
+        if not adapters:
+            raise BackendPlanError("Vulkan requires an Intel adapter with exact PNP identity")
+        if attestation_path is None:
+            raise BackendPlanError("Vulkan requires a separate integrated-GPU attestation")
+        attestation_preview = _load_json(attestation_path)
+        attested_pnp = attestation_preview.get("pnp_device_id")
+        matching = [adapter for adapter in adapters if adapter.get("pnp_device_id") == attested_pnp]
+        if len(matching) != 1:
+            raise BackendPlanError("Vulkan attestation must select one exact Intel adapter PNP identity")
+        adapter = matching[0]
         if not isinstance(adapter.get("pnp_device_id"), str) or not adapter["pnp_device_id"].strip() or not isinstance(adapter.get("driver_version"), str) or not adapter["driver_version"].strip():
             raise BackendPlanError("Vulkan adapter lacks exact PNP or driver identity")
         attestation = _validate_vulkan_attestation(receipt_path, adapter, attestation_path)

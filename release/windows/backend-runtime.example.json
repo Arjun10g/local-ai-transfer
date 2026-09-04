@@ -19,6 +19,14 @@
     "maximum_context_requires_measurement": true,
     "integrated_gpu_memory_is_shared_system_memory": true
   },
+  "vulkan": {
+    "status": "implemented-not-promoted",
+    "runtime_profile": "intel-vulkan",
+    "device_name": "EXACT_NAME_FROM_BOUND_ATTESTATION",
+    "gpu_layers": 20,
+    "gpu_layers_max": 99,
+    "cmake_flags": ["-DLAE_ENABLE_LLAMA_CPP=ON", "-DLAE_ENABLE_LLAMA_VULKAN=ON"]
+  },
   "sycl": {
     "status": "experimental-diagnostic-only",
     "requires_receipt_fields": [

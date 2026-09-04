@@ -13,13 +13,13 @@ planner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(planner)
 
 
-def receipt(*, sycl=False, adapter_count=1):
+def receipt(*, sycl=False, adapter_count=1, integrated=True):
     adapters = []
     for index in range(adapter_count):
         adapters.append({
             "name": f"Intel Graphics {index}",
             "is_intel": True,
-            "integrated": True,
+            "integrated": integrated,
             "pnp_device_id": f"PCI\\VEN_8086&DEV_7D55&INDEX_{index}",
             "driver_version": "32.0.101.8247",
         })
@@ -66,7 +66,7 @@ class WindowsBackendPlanTests(unittest.TestCase):
         return path
 
     def test_cpu_requires_explicit_selection_and_reports_conservative_memory(self):
-        path = self.write_receipt(receipt())
+        path = self.write_receipt(receipt(integrated=None))
         plan = planner.build_plan("cpu-safe", path)
         self.assertEqual(plan["backend"], "cpu-safe")
         self.assertEqual(plan["selection"], "operator-explicit-no-fallback")
@@ -80,12 +80,12 @@ class WindowsBackendPlanTests(unittest.TestCase):
         self.assertTrue(plan["memory"]["shared_memory_is_not_dedicated_vram"])
 
     def test_sycl_is_not_inferred_from_intel_name_or_loader(self):
-        path = self.write_receipt(receipt())
+        path = self.write_receipt(receipt(integrated=None))
         with self.assertRaisesRegex(planner.BackendPlanError, "GGML_VULKAN"):
             planner.build_plan("intel-sycl-experimental", path)
 
     def test_vulkan_product_profile_requires_receipt_and_has_bounded_offload(self):
-        path = self.write_receipt(receipt())
+        path = self.write_receipt(receipt(integrated=None))
         attestation = self.write_vulkan_attestation(path)
         plan = planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
         self.assertEqual(plan["status"], "planned")
@@ -93,6 +93,14 @@ class WindowsBackendPlanTests(unittest.TestCase):
         self.assertTrue(plan["runtime"]["gpu_offload"])
         self.assertEqual(plan["runtime"]["gpu_layers_default"], 20)
         self.assertEqual(plan["runtime"]["gpu_layers_max"], 99)
+
+    def test_probe_shaped_unknown_integrated_field_needs_matching_attestation(self):
+        path = self.write_receipt(receipt(integrated=None))
+        with self.assertRaisesRegex(planner.BackendPlanError, "attestation"):
+            planner.build_plan("intel-vulkan-conservative", path)
+        attestation = self.write_vulkan_attestation(path)
+        plan = planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
+        self.assertEqual(plan["runtime"]["device"]["pnp_device_id"], "PCI\\VEN_8086&DEV_7D55&INDEX_0")
 
     def test_vulkan_rejects_missing_loader_or_enumeration(self):
         value = receipt()
