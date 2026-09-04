@@ -1,0 +1,54 @@
+{
+  "schema": "local_bmo.windows-backend-runtime.v1",
+  "selection": "operator-explicit-no-fallback",
+  "hardware_receipt": "hardware-receipt.json",
+  "vulkan_attestation": "windows-gpu-attestation.json",
+  "backend_profile": "cpu-safe",
+  "model": {
+    "path": "D:/ApprovedModels/Qwen3.5-9B-Q4_K_M.gguf",
+    "size_bytes": 5629109088,
+    "sha256": "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b"
+  },
+  "memory": {
+    "installed_gib_expected": 32,
+    "os_and_apps_reserve_gib": 8,
+    "model_resident_estimate_gib": 5.25,
+    "runtime_headroom_gib": 2,
+    "default_context_tokens": 8192,
+    "maximum_context_tokens": 16384,
+    "maximum_context_requires_measurement": true,
+    "integrated_gpu_memory_is_shared_system_memory": true
+  },
+  "vulkan": {
+    "status": "blocked",
+    "blocked_reason": "missing_pinned_ggml_vulkan_source_closure",
+    "runtime_profile": "intel-vulkan",
+    "device_name": "EXACT_NAME_FROM_BOUND_ATTESTATION",
+    "gpu_layers": 20,
+    "gpu_layers_max": 99,
+    "cmake_flags": ["-DLAE_ENABLE_LLAMA_CPP=ON", "-DLAE_ENABLE_LLAMA_VULKAN=ON"]
+  },
+  "sycl": {
+    "status": "experimental-diagnostic-only",
+    "requires_receipt_fields": [
+      "gpu_adapters[].integrated",
+      "gpu_adapters[].pnp_device_id",
+      "sycl_level_zero.checked",
+      "sycl_level_zero.available",
+      "sycl_level_zero.device_name",
+      "sycl_level_zero.device_id",
+      "sycl_level_zero.device_count",
+      "sycl_level_zero.driver_version",
+      "sycl_level_zero.runtime_version",
+      "sycl_level_zero.probe"
+    ],
+    "device_selector": "SYCL0",
+    "runtime": "bounded-upstream-llama-cli-diagnostic",
+    "cmake_flags": ["-DGGML_SYCL=ON", "-DGGML_SYCL_TARGET=INTEL", "-DGGML_SYCL_F16=ON"]
+  },
+  "provenance": {
+    "llama_cpp_revision": "3581ba0cf591b3f772fbb002de0f70e294bc0396",
+    "exact_target_sku_required": true,
+    "macos_validation_not_accepted": true
+  }
+}

@@ -120,13 +120,19 @@ int main() {
   const auto config_path = std::filesystem::temp_directory_path() / "lae-runtime-config.json";
   {
     std::ofstream config(config_path, std::ios::trunc);
-    config << "{\"model_path\":\"" << model_path.string() << "\",\"context_tokens\":8192}";
+    config << "{\"model_path\":\"" << model_path.string() << "\",\"context_tokens\":8192,\"gpu_layers\":20,\"vulkan_device_name\":\"Intel Graphics\"}";
   }
   RuntimeConfigFile runtime_config;
   std::string config_error;
   std::error_code cleanup_error;
   assert(load_runtime_config(config_path, runtime_config, config_error));
   assert(runtime_config.model_path == model_path.string() && runtime_config.backend_profile == "cpu" && runtime_config.context_tokens == 8192);
+  assert(runtime_config.gpu_layers == 20 && runtime_config.vulkan_device_name == "Intel Graphics");
+  {
+    std::ofstream invalid_config(config_path, std::ios::trunc);
+    invalid_config << "{\"model_path\":\"" << model_path.string() << "\",\"gpu_layers\":100}";
+  }
+  assert(!load_runtime_config(config_path, runtime_config, config_error));
   const auto relative_config = std::filesystem::path("runtime-config.json");
   assert(!load_runtime_config(relative_config, runtime_config, config_error));
   const auto symlink_path = std::filesystem::temp_directory_path() / "lae-runtime-model-link.gguf";

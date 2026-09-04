@@ -11,6 +11,7 @@ bool context_budget_fits(size_t prompt_tokens, unsigned max_tokens, unsigned con
 
 #ifdef LAE_ENABLE_LLAMA_CPP
 #include "llama.h"
+#include "ggml-backend.h"
 
 #include <algorithm>
 #include <cstring>
@@ -27,6 +28,8 @@ struct LlamaBackend::Impl {
   Cancellation cancellation;
   bool backend_initialized = false;
   PinnedChatTemplate chat_template;
+  ggml_backend_dev_t selected_device = nullptr;
+  std::string active_backend = "cpu";
 };
 
 namespace {
@@ -39,14 +42,50 @@ bool abort_callback(void* data) {
 
 LlamaBackend::LlamaBackend() : impl_(new Impl()) {}
 LlamaBackend::~LlamaBackend() { shutdown(); delete impl_; }
-std::string LlamaBackend::id() const { return "llama.cpp/3581ba0c/cpu"; }
+std::string LlamaBackend::id() const {
+  return std::string("llama.cpp/3581ba0c/") + impl_->active_backend;
+}
 
 void LlamaBackend::initialize(const BackendConfig& config) {
   if (config.model_path.empty()) throw std::invalid_argument("model path is required");
-  llama_backend_init();
-  impl_->backend_initialized = true;
+#ifdef LAE_ENABLE_LLAMA_VULKAN
+  if (config.backend_profile != "intel-vulkan" && config.backend_profile != "cpu") throw std::invalid_argument("unsupported compiled backend profile");
+#else
+  if (config.backend_profile == "intel-vulkan") throw std::runtime_error("intel-vulkan requested but product was not built with LAE_ENABLE_LLAMA_VULKAN");
+  if (config.backend_profile != "cpu") throw std::invalid_argument("unsupported compiled backend profile");
+#endif
+#ifdef LAE_ENABLE_LLAMA_VULKAN
+  if (config.backend_profile == "intel-vulkan" && (config.gpu_layers < 1 || config.gpu_layers > 99)) throw std::invalid_argument("intel-vulkan gpu_layers must be between 1 and 99");
+  if (config.backend_profile == "intel-vulkan") {
+    llama_backend_init();
+    impl_->backend_initialized = true;
+    ggml_backend_dev_t selected = nullptr;
+    for (size_t index = 0; index < ggml_backend_dev_count(); ++index) {
+      ggml_backend_dev_t device = ggml_backend_dev_get(index);
+      if (ggml_backend_dev_type(device) != GGML_BACKEND_DEVICE_TYPE_IGPU) continue;
+      const char* name = ggml_backend_dev_name(device);
+      const char* description = ggml_backend_dev_description(device);
+      const bool exact_name = name && config.vulkan_device_name == name;
+      const bool exact_description = description && config.vulkan_device_name == description;
+      if (!exact_name && !exact_description) continue;
+      if (selected) throw std::runtime_error("multiple Vulkan devices match the exact configured name");
+      selected = device;
+    }
+    if (!selected) throw std::runtime_error("exact configured Vulkan integrated device is unavailable");
+    impl_->selected_device = selected;
+    impl_->active_backend = "intel-vulkan";
+  }
+#endif
+  if (!impl_->backend_initialized) {
+    llama_backend_init();
+    impl_->backend_initialized = true;
+  }
   auto model_params = llama_model_default_params();
-  model_params.n_gpu_layers = 0;
+#ifdef LAE_ENABLE_LLAMA_VULKAN
+  ggml_backend_dev_t device_list[2] = {nullptr, nullptr};
+  if (impl_->selected_device) { device_list[0] = impl_->selected_device; model_params.devices = device_list; }
+#endif
+  model_params.n_gpu_layers = config.backend_profile == "intel-vulkan" ? static_cast<int32_t>(config.gpu_layers) : 0;
   model_params.check_tensors = true;
   model_params.load_mtp = false;
   impl_->model = llama_model_load_from_file(config.model_path.c_str(), model_params);
