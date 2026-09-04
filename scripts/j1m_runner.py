@@ -57,6 +57,8 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     eval_mode = payload.get("modes", {}).get("eval", {})
     if eval_mode.get("backend") != "cuda" or eval_mode.get("cuda_device_name") != "CUDA0" or eval_mode.get("cuda_architecture") != 80 or eval_mode.get("gpu_layers") != 99:
         raise ValueError("eval must use the explicit CUDA A100 evaluation profile")
+    if eval_mode.get("cuda_compiler") != "/usr/local/cuda/bin/nvcc":
+        raise ValueError("eval must bind the approved absolute CUDA compiler path")
     return payload
 
 

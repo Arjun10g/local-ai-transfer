@@ -187,13 +187,15 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any]) -> 
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError("toolchain_receipt_invalid") from exc
     versions = toolchain.get("versions") if isinstance(toolchain, dict) else None
-    minimums = {"python3": (3, 8), "git": (2, 30), "cmake": (3, 18), "g++": (9, 0), "nvcc": (11, 0)}
+    minimums = {"python3": (3, 8), "git": (2, 30), "cmake": (3, 18), "g++": (9, 0), "nvcc": (12, 0)}
     if (not isinstance(toolchain, dict) or toolchain.get("schema") != "local_bmo.j1m.remote-toolchain-receipt.v1" or toolchain.get("status") != "verified" or not isinstance(versions, dict)):
         raise ValueError("toolchain_receipt_invalid")
     for name, minimum in minimums.items():
         version = versions.get(name)
         if (not isinstance(version, dict) or isinstance(version.get("major"), bool) or not isinstance(version.get("major"), int) or isinstance(version.get("minor"), bool) or not isinstance(version.get("minor"), int) or (version["major"], version["minor"]) < minimum):
             raise ValueError("toolchain_receipt_invalid")
+    if versions["nvcc"].get("executable") != "/usr/local/cuda/bin/nvcc":
+        raise ValueError("toolchain_receipt_invalid")
     packages = toolchain.get("packages")
     expected_packages = {"ca-certificates", "cmake", "build-essential", "git", "python3", "python3-venv"}
     if not isinstance(packages, dict) or set(packages) != expected_packages or any(not isinstance(value, str) or not value or len(value) > 160 for value in packages.values()):

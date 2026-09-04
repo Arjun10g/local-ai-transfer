@@ -540,6 +540,15 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertEqual(receipt["exit_code"], 2)
         self.assertEqual(receipt["stdout_tail"], "remote toolchain refused: token=<redacted>\n")
 
+    def test_eval_stage_labels_distinguish_python_and_cmake_operations(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_stage_labels")
+        self.assertEqual(
+            orchestrator._eval_stage_label(["python3", "/scratch/j1m/remote_toolchain_probe.py"]),
+            "eval-stage:remote_toolchain_probe",
+        )
+        self.assertEqual(orchestrator._eval_stage_label(["cmake", "-S", "engine"]), "eval-stage:cmake-configure")
+        self.assertEqual(orchestrator._eval_stage_label(["cmake", "--build", "build"]), "eval-stage:cmake-build")
+
     def test_salvage_timeout_is_size_aware_and_deadline_bounded(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_timeout")
         info = {"phase_id": "j1m-test", "instance_info": {"ssh_user": "u", "ip": "127.0.0.1"}}
@@ -576,13 +585,14 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertEqual(plan["active_run_cost_usd"], 2.619)
         self.assertEqual(plan["provider_backstop_cost_usd"], 3.2738)
         self.assertGreater(config["modes"]["eval"]["provider_backstop_hours"], config["modes"]["eval"]["runtime_hours"])
-        self.assertEqual(config["artifacts"]["eval_fetch_allowlist"], ["eval-receipt.json"])
+        self.assertEqual(config["artifacts"]["eval_fetch_allowlist"], ["eval-receipt.json", "eval-artifact-receipt.json", "toolchain-receipt.json", "cuda-device-receipt.json"])
         commands = orchestrator._eval_remote_commands(config, "/scratch/j1m")
         flattened = [part for command in commands for part in command]
         self.assertIn(config["llama_cpp"]["revision"], flattened)
         self.assertIn("-DLAE_ENABLE_LLAMA_CPP=ON", flattened)
         self.assertIn("-DLAE_ENABLE_LLAMA_CUDA=ON", flattened)
         self.assertIn("-DCMAKE_CUDA_ARCHITECTURES=80", flattened)
+        self.assertIn("-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc", flattened)
         self.assertIn("cuda_device_probe.py", " ".join(flattened))
         self.assertIn("--backend", flattened)
         self.assertIn("cuda", flattened)
@@ -610,9 +620,11 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertEqual(commands[1][:2], ["sudo", "apt-get"])
         self.assertEqual(commands[2][:5], ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install"])
         j1m_index = next(index for index, command in enumerate(commands) if "j1m_runner.py" in command[1])
-        toolchain_index = next(index for index, command in enumerate(commands) if "remote_toolchain_probe.py" in command[1])
-        self.assertGreater(toolchain_index, j1m_index)
-        self.assertLess(toolchain_index, next(index for index, command in enumerate(commands) if command[0:2] == ["cmake", "-S"]))
+        toolchain_indices = [index for index, command in enumerate(commands) if "remote_toolchain_probe.py" in command[1]]
+        self.assertEqual(len(toolchain_indices), 2)
+        self.assertLess(toolchain_indices[0], j1m_index)
+        self.assertGreater(toolchain_indices[1], j1m_index)
+        self.assertLess(toolchain_indices[1], next(index for index, command in enumerate(commands) if command[0:2] == ["cmake", "-S"]))
         self.assertIn(["cp", "/scratch/j1m/ggml-cuda-source-lock.json", "/scratch/j1m/engine/vendor/llama.cpp/ggml-cuda-source-lock.json"], commands)
         self.assertIn(["cp", "-a", "/scratch/llama.cpp", "/scratch/j1m/engine/vendor/llama.cpp"], commands)
         self.assertIn(["python3", "/scratch/j1m/remote_eval_prepare.py", "--artifact", "/scratch/j1m/artifacts/Qwen3.5-9B-Q4_K_M.gguf", "--manifest", "/scratch/j1m/model-manifest.json", "--output", "/scratch/j1m/artifacts/eval-artifact-receipt.json"], commands)
@@ -734,7 +746,7 @@ class StaticSafetyTests(unittest.TestCase):
                 "schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "verified", "artifact": artifact,
                 "engine": {"llama_cpp_revision": config["llama_cpp"]["revision"], "compiled_backend": f"llama.cpp/{config['llama_cpp']['revision'][:8]}/cuda"},
                 "cuda_device": {"schema": "local_bmo.j1m.cuda-device-receipt.v1", "status": "verified", "selector": "CUDA0", "device_count": 1, "device": {"name": "NVIDIA A100 80GB", "memory_total_mib": 81920}},
-                "toolchain": {"schema": "local_bmo.j1m.remote-toolchain-receipt.v1", "status": "verified", "versions": {"python3": {"major": 3, "minor": 10}, "git": {"major": 2, "minor": 39}, "cmake": {"major": 3, "minor": 22}, "g++": {"major": 11, "minor": 4}, "nvcc": {"major": 12, "minor": 2}}, "packages": {"ca-certificates": "20240101", "cmake": "3.22.1", "build-essential": "12.9", "git": "1:2.39.2", "python3": "3.10.12", "python3-venv": "3.10.12"}},
+                "toolchain": {"schema": "local_bmo.j1m.remote-toolchain-receipt.v1", "status": "verified", "versions": {"python3": {"major": 3, "minor": 10}, "git": {"major": 2, "minor": 39}, "cmake": {"major": 3, "minor": 22}, "g++": {"major": 11, "minor": 4}, "nvcc": {"major": 12, "minor": 2, "executable": "/usr/local/cuda/bin/nvcc"}}, "packages": {"ca-certificates": "20240101", "cmake": "3.22.1", "build-essential": "12.9", "git": "1:2.39.2", "python3": "3.10.12", "python3-venv": "3.10.12"}},
                 "metrics": {"case_count": 8, "passed": 8, "failed": 0, "errors": 0, "peak_rss_kib": 123},
                 "prompt_response_logging": False, "token_logging": False,
             }), encoding="utf-8")
@@ -789,20 +801,29 @@ class StaticSafetyTests(unittest.TestCase):
             "git": "git version 2.39.2\n",
             "cmake": "cmake version 3.22.1\n",
             "g++": "g++ (Ubuntu 11.4.0) 11.4.0\n",
-            "nvcc": "Cuda compilation tools, release 12.2, V12.2.140\n",
+            "/usr/local/cuda/bin/nvcc": "Cuda compilation tools, release 12.2, V12.2.140\n",
         }
         def run(command, **_kwargs):
             if command[0] == "dpkg-query":
                 return types.SimpleNamespace(returncode=0, stdout="ca-certificates=20240101\ncmake=3.22.1\nbuild-essential=12.9\ngit=1:2.39.2\npython3=3.10.12\npython3-venv=3.10.12\n", stderr="")
             return types.SimpleNamespace(returncode=0, stdout=versions[command[0]], stderr="")
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(probe.subprocess, "run", side_effect=run):
-            receipt = probe.probe(Path(directory) / "toolchain-receipt.json")
+            receipt = probe.probe(Path(directory) / "toolchain-receipt.json", nvcc="/usr/local/cuda/bin/nvcc")
             self.assertEqual(receipt["status"], "verified")
             self.assertEqual(json.loads((Path(directory) / "toolchain-receipt.json").read_text())["versions"]["cmake"]["major"], 3)
             self.assertEqual(receipt["packages"]["cmake"], "3.22.1")
+            self.assertEqual(receipt["versions"]["nvcc"]["executable"], "/usr/local/cuda/bin/nvcc")
         with mock.patch.object(probe.subprocess, "run", side_effect=FileNotFoundError):
             with self.assertRaisesRegex(RuntimeError, "cmake_unavailable"):
                 probe._probe("cmake")
+        with tempfile.TemporaryDirectory() as directory:
+            refused = Path(directory) / "refused.json"
+            argv = ["remote_toolchain_probe.py", "--nvcc", "/usr/local/cuda/bin/nvcc", "--output", str(refused)]
+            with mock.patch("sys.argv", argv), mock.patch.object(probe.subprocess, "run", side_effect=FileNotFoundError):
+                self.assertEqual(probe.main(), 2)
+            refusal = json.loads(refused.read_text(encoding="utf-8"))
+            self.assertEqual(refusal["status"], "refused")
+            self.assertEqual(refusal["error_type"], "python3_unavailable")
 
     def test_eval_receipt_rejects_cpu_identity_for_cuda_lane(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_cuda_identity")

@@ -176,6 +176,7 @@ def _eval_remote_commands(config: dict[str, Any], remote_root: str) -> list[list
     llama = config["llama_cpp"]
     eval_mode = config["modes"]["eval"]
     device_name = eval_mode["cuda_device_name"]
+    cuda_compiler = eval_mode["cuda_compiler"]
     # J1M's command plan owns the checkout location; use that validated
     # config value rather than inventing a remote-root-relative path.
     checkout = llama["checkout"]
@@ -185,6 +186,9 @@ def _eval_remote_commands(config: dict[str, Any], remote_root: str) -> list[list
         ["mkdir", "-p", f"{remote_root}/model", f"{engine_root}/native", f"{engine_root}/vendor", f"{engine_root}/scripts", f"{remote_root}/artifacts"],
         ["sudo", "apt-get", "update"],
         ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "--no-install-recommends", "ca-certificates", "cmake", "build-essential", "git", "python3", "python3-venv"],
+        # Fail before the expensive HF checkout/conversion when the CUDA
+        # compiler is unavailable to a noninteractive SSH process.
+        ["python3", f"{remote_root}/remote_toolchain_probe.py", "--nvcc", cuda_compiler, "--output", f"{remote_root}/artifacts/toolchain-receipt.json"],
         # J1M performs the immutable HF download, source verification,
         # conversion and Q4 quantization remotely. This keeps the 5--6 GiB
         # model off the operator laptop and makes the accepted manifest the
@@ -195,9 +199,9 @@ def _eval_remote_commands(config: dict[str, Any], remote_root: str) -> list[list
         ["python3", f"{remote_root}/remote_eval_prepare.py", "--artifact", f"{remote_root}/artifacts/Qwen3.5-9B-Q4_K_M.gguf", "--manifest", f"{remote_root}/model-manifest.json", "--output", f"{remote_root}/artifacts/eval-artifact-receipt.json"],
         # This is intentionally after J1M's apt/pip/bootstrap work. The
         # receipt must describe the final environment used by CUDA build/eval.
-        ["python3", f"{remote_root}/remote_toolchain_probe.py", "--output", f"{remote_root}/artifacts/toolchain-receipt.json"],
+        ["python3", f"{remote_root}/remote_toolchain_probe.py", "--nvcc", cuda_compiler, "--output", f"{remote_root}/artifacts/toolchain-receipt.json"],
         ["python3", f"{remote_root}/cuda_device_probe.py", "--output", f"{remote_root}/artifacts/cuda-device-receipt.json"],
-        ["cmake", "-S", engine_root, "-B", build_root, "-DCMAKE_BUILD_TYPE=Release", "-DLAE_ENABLE_LLAMA_CPP=ON", "-DLAE_ENABLE_LLAMA_CUDA=ON", f"-DCMAKE_CUDA_ARCHITECTURES={eval_mode['cuda_architecture']}"],
+        ["cmake", "-S", engine_root, "-B", build_root, "-DCMAKE_BUILD_TYPE=Release", "-DLAE_ENABLE_LLAMA_CPP=ON", "-DLAE_ENABLE_LLAMA_CUDA=ON", f"-DCMAKE_CUDA_ARCHITECTURES={eval_mode['cuda_architecture']}", f"-DCMAKE_CUDA_COMPILER={cuda_compiler}"],
         ["cmake", "--build", build_root, "--target", "lae-engine", "--parallel", "2"],
         ["python3", f"{remote_root}/remote_model_eval.py", "--model", f"{remote_root}/artifacts/Qwen3.5-9B-Q4_K_M.gguf", "--model-manifest", f"{remote_root}/model-manifest.json", "--model-manifest-lock", f"{remote_root}/model-manifest.sha256", "--source-revision", config["source"]["revision"], "--llama-revision", llama["revision"], "--llama-checkout", checkout, "--engine", f"{build_root}/native/lae-engine", "--evaluator", f"{remote_root}/evaluate_tool_calls.py", "--fixture", f"{remote_root}/tool_call_eval.json", "--token-file", f"{remote_root}/engine-token", "--backend", eval_mode["backend"], "--cuda-device-name", device_name, "--cuda-device-receipt", f"{remote_root}/artifacts/cuda-device-receipt.json", "--toolchain-receipt", f"{remote_root}/artifacts/toolchain-receipt.json", "--receipt", f"{remote_root}/artifacts/eval-receipt.json", "--timeout", "600"],
     ]
@@ -235,6 +239,20 @@ def _eval_stage_timeout(config: dict[str, Any], command: list[str]) -> float:
     if command[0] == "python3" and any("cuda_device_probe.py" in part for part in command):
         return 120.0
     return float(budgets["evaluation"])
+
+
+def _eval_stage_label(command: list[str]) -> str:
+    """Return a bounded nonsecret label that distinguishes audited stages."""
+
+    if not command:
+        return "eval-stage:invalid"
+    if command[0] == "python3" and len(command) > 1:
+        return f"eval-stage:{Path(command[1]).stem}"
+    if command[0:2] == ["cmake", "-S"]:
+        return "eval-stage:cmake-configure"
+    if command[0:2] == ["cmake", "--build"]:
+        return "eval-stage:cmake-build"
+    return f"eval-stage:{command[0]}"
 
 
 def _eval_deadline_ceiling(config: dict[str, Any]) -> dict[str, float]:
@@ -310,13 +328,15 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
         raise ValueError("eval receipt CUDA placement attestation invalid")
     toolchain = payload.get("toolchain")
     versions = toolchain.get("versions") if isinstance(toolchain, dict) else None
-    minimums = {"python3": (3, 8), "git": (2, 30), "cmake": (3, 18), "g++": (9, 0), "nvcc": (11, 0)}
+    minimums = {"python3": (3, 8), "git": (2, 30), "cmake": (3, 18), "g++": (9, 0), "nvcc": (12, 0)}
     if not isinstance(toolchain, dict) or toolchain.get("schema") != "local_bmo.j1m.remote-toolchain-receipt.v1" or toolchain.get("status") != "verified" or not isinstance(versions, dict):
         raise ValueError("eval receipt toolchain evidence invalid")
     for name, minimum in minimums.items():
         version = versions.get(name)
         if not isinstance(version, dict) or isinstance(version.get("major"), bool) or not isinstance(version.get("major"), int) or isinstance(version.get("minor"), bool) or not isinstance(version.get("minor"), int) or (version["major"], version["minor"]) < minimum:
             raise ValueError("eval receipt toolchain version invalid")
+    if versions["nvcc"].get("executable") != "/usr/local/cuda/bin/nvcc":
+        raise ValueError("eval receipt CUDA compiler path invalid")
     packages = toolchain.get("packages")
     expected_packages = {"ca-certificates", "cmake", "build-essential", "git", "python3", "python3-venv"}
     if not isinstance(packages, dict) or set(packages) != expected_packages or any(not isinstance(value, str) or not value or len(value) > 160 for value in packages.values()):
@@ -352,7 +372,7 @@ def _salvage(
             # Receipts are small, but the sole deployable Q4 artifact is not.
             # Give its transfer a size-aware floor while still honoring the
             # provider deadline and retaining a cleanup reserve.
-            timeout = max(120.0, float(q4_expected_gib) * 60.0) if name.endswith("Q4_K_M.gguf") else 120.0
+            timeout = max(120.0, float(q4_expected_gib) * 60.0) if name.endswith("Q4_K_M.gguf") else 30.0
             if deadline is not None:
                 timeout = min(timeout, max(30.0, deadline - time.monotonic() - 30.0))
             receipt = _remote(command, timeout=timeout)
@@ -562,7 +582,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     if upload_receipt["status"] != "completed":
                         raise sf.ShadeformError("required eval upload failed")
                 for command in eval_commands[3:]:
-                    lifecycle["stage"] = f"eval-stage:{command[0]}"
+                    lifecycle["stage"] = _eval_stage_label(command)
                     _progress(progress_path, "eval-stage-starting", phase_id=phase_id, operation_stage=lifecycle["stage"])
                     stage = _remote(sf.ssh_base(info, identity, known_hosts) + command, timeout=_eval_timeout(provider_deadline, _eval_stage_timeout(config, command)))
                     lifecycle.setdefault("eval_stages", []).append(stage)
