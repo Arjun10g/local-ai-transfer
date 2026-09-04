@@ -37,3 +37,29 @@ python scripts/shadeform/readonly_preflight.py \
 
 The script deliberately does not invent rates. A catalogue profile must supply
 `hourly_usd`; missing/invalid rates are excluded from candidates.
+
+## Remote external-tools QA runner
+
+`remote_external_tools.py` is the dedicated, plan-first Shadeform wrapper for
+the hostile external-tools QA harness. It uploads only the explicit audited
+provider/tool/test closure, installs no packages, and downloads Node.js v24.20.0
+Linux x64 on the remote host from nodejs.org. The archive is checked against
+the pinned SHA-256 `2f2c0da162318f0de47665410c7c8c2ed3d36c8f3105de4bbc61176c70a7cbf2`;
+the local machine never downloads it.
+
+The default command is read-only and prints a secret-free plan:
+
+```text
+python3 scripts/shadeform/remote_external_tools.py --phase-id qa-remote-tools --run-id remote-tools-001
+```
+
+An execution additionally requires `SOL_SHADEFORM_REVIEWED=1`,
+`SOL_REMOTE_EXTERNAL_TOOLS_REVIEWED=1`, and explicit
+`SHADEFORM_QA_APPROVED_GPU`, `SHADEFORM_QA_APPROVED_CLOUD`,
+`SHADEFORM_QA_APPROVED_REGION`, and `SHADEFORM_QA_APPROVED_INSTANCE_TYPE`
+values in the configured environment file. The GPU must be an A100 family
+candidate. The runner reserves budget before key/instance mutation, verifies
+the exact owned key/instance and pinned host key, starts the external watchdog,
+arms a host shutdown backstop, salvages the bounded receipt, and tears down
+only the exact owned resource. No provider mutation is attempted without both
+review markers.
