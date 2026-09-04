@@ -416,7 +416,7 @@ def _eval_deadline_ceiling(config: dict[str, Any]) -> dict[str, float]:
     }
 
 
-def _verify_eval_diagnostics(value: Any, *, errors: int, categories: set[str]) -> dict[str, Any]:
+def _verify_eval_diagnostics(value: Any, *, errors: int, categories: set[str], category_errors: dict[str, int]) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {"schema", "total_errors", "overall", "by_category"} or value.get("schema") != "local_bmo.tool-call-eval-diagnostics.v1":
         raise ValueError("eval receipt diagnostics invalid")
     if isinstance(value.get("total_errors"), bool) or not isinstance(value.get("total_errors"), int) or value["total_errors"] != errors:
@@ -434,27 +434,64 @@ def _verify_eval_diagnostics(value: Any, *, errors: int, categories: set[str]) -
                 raise ValueError("eval receipt diagnostics code invalid")
             total += amount
         return total
-    if histogram(overall) != errors or sum(histogram(by_category[category]) for category in categories) != errors:
+    if histogram(overall) != errors:
+        raise ValueError("eval receipt diagnostics total invalid")
+    combined: dict[str, int] = {}
+    category_total = 0
+    for category in categories:
+        category_histogram = by_category[category]
+        count = histogram(category_histogram)
+        if count != category_errors[category]:
+            raise ValueError("eval receipt diagnostics total invalid")
+        category_total += count
+        for code, amount in category_histogram.items():
+            combined[code] = combined.get(code, 0) + amount
+    if category_total != errors or combined != overall:
         raise ValueError("eval receipt diagnostics total invalid")
     return {"schema": value["schema"], "total_errors": value["total_errors"], "overall": dict(overall), "by_category": {category: dict(by_category[category]) for category in sorted(categories)}}
 
 
 def _verify_eval_canary(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != {"attempted", "passed", "error_code", "tool_count", "message_chars"} or value.get("attempted") is not True:
+    if not isinstance(value, dict) or set(value) != {"attempted", "passed", "error_code", "tool_count", "message_chars", "prompt_tokens", "context_tokens", "output_reserve_tokens"} or value.get("attempted") is not True:
         raise ValueError("eval receipt canary invalid")
-    if not isinstance(value.get("passed"), bool) or isinstance(value.get("tool_count"), bool) or value.get("tool_count") != 11 or isinstance(value.get("message_chars"), bool) or value.get("message_chars") != 2400:
+    if not isinstance(value.get("passed"), bool) or value.get("tool_count") != 11 or value.get("message_chars") != 2400 or value.get("context_tokens") != 2048 or value.get("output_reserve_tokens") != 64:
         raise ValueError("eval receipt canary invalid")
     code = value.get("error_code")
-    if (value["passed"] and code is not None) or (not value["passed"] and code not in _EVAL_DIAGNOSTIC_CODES):
+    prompt_tokens = value.get("prompt_tokens")
+    if value["passed"] and (code is not None or isinstance(prompt_tokens, bool) or not isinstance(prompt_tokens, int) or not 513 <= prompt_tokens <= value["context_tokens"] - value["output_reserve_tokens"]):
+        raise ValueError("eval receipt canary invalid")
+    if not value["passed"] and (code not in _EVAL_DIAGNOSTIC_CODES or prompt_tokens is not None):
         raise ValueError("eval receipt canary invalid")
     return dict(value)
+
+
+def _verify_eval_child(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict) or set(value) not in ({"exit_code"}, {"signal"}):
+        raise ValueError("eval receipt child status invalid")
+    key = next(iter(value))
+    number = value[key]
+    if isinstance(number, bool) or not isinstance(number, int) or not 0 <= number <= 255 or (key == "signal" and number == 0):
+        raise ValueError("eval receipt child status invalid")
+    return {key: number}
+
+
+def _verify_eval_canary_coherence(canary: dict[str, Any], *, metrics: dict[str, Any], summary: dict[str, Any], diagnostics: dict[str, Any], expected_count: int, categories: set[str]) -> None:
+    if canary["passed"]:
+        return
+    code = canary["error_code"]
+    if metrics["passed"] != 0 or metrics["failed"] != 0 or metrics["errors"] != expected_count or diagnostics["overall"] != {code: expected_count}:
+        raise ValueError("eval receipt canary invalid")
+    for category in categories:
+        item = summary[category]
+        if item["passed"] != 0 or item["failed"] != 0 or item["errors"] != item["case_count"] or diagnostics["by_category"][category] != {code: item["errors"]}:
+            raise ValueError("eval receipt canary invalid")
 
 
 def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]:
     """Accept only the bounded aggregate receipt produced by remote eval."""
 
     payload = _bounded_json(path, _EVAL_RECEIPT_MAX_BYTES)
-    allowed_top_level = {"schema", "status", "artifact", "engine", "model_preflight", "cuda_device", "toolchain", "metrics", "duration_ms", "prompt_response_logging", "token_logging"}
+    allowed_top_level = {"schema", "status", "artifact", "engine", "model_preflight", "cuda_device", "toolchain", "metrics", "duration_ms", "prompt_response_logging", "token_logging", "child"}
     required_top_level = {"schema", "status", "artifact", "engine", "model_preflight", "toolchain", "metrics", "prompt_response_logging", "token_logging"}
     if not isinstance(payload, dict) or payload.get("schema") != "local_bmo.j1m.real-tool-eval-receipt.v1":
         raise ValueError("eval receipt schema mismatch")
@@ -484,7 +521,7 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     metric_keys = {"case_count", "passed", "failed", "errors", "peak_rss_kib", "category_summary"}
     optional_metric_keys = {"canary", "error_diagnostics"}
     if (not isinstance(metrics, dict) or not metric_keys <= set(metrics) or set(metrics) - metric_keys - optional_metric_keys or
-            payload.get("status") not in {"verified", "completed_with_failures"} or
+            payload.get("status") not in {"verified", "completed_with_failures", "failed"} or
             any(isinstance(metrics.get(key), bool) or not isinstance(metrics.get(key), int) or metrics[key] < 0 for key in ("case_count", "passed", "failed", "errors"))):
         raise ValueError("eval receipt metrics invalid")
     summary = metrics.get("category_summary")
@@ -507,12 +544,19 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
         raise ValueError("eval receipt metric totals invalid")
     if "error_diagnostics" not in metrics or "canary" not in metrics:
         raise ValueError("eval receipt diagnostics missing")
-    diagnostics = _verify_eval_diagnostics(metrics["error_diagnostics"], errors=metrics["errors"], categories=expected_categories)
+    diagnostics = _verify_eval_diagnostics(metrics["error_diagnostics"], errors=metrics["errors"], categories=expected_categories, category_errors={category: summary[category]["errors"] for category in expected_categories})
     canary = _verify_eval_canary(metrics["canary"])
+    _verify_eval_canary_coherence(canary, metrics=metrics, summary=summary, diagnostics=diagnostics, expected_count=expected_count, categories=expected_categories)
+    child = _verify_eval_child(payload.get("child")) if payload.get("status") == "failed" else None
+    if payload.get("status") != "failed" and "child" in payload:
+        raise ValueError("eval receipt child status invalid")
     status = payload["status"]
     all_passed = metrics["passed"] == expected_count and metrics["failed"] == 0 and metrics["errors"] == 0
     has_failure = metrics["failed"] > 0 or metrics["errors"] > 0
-    if (status == "verified") != all_passed or (status == "completed_with_failures") != has_failure:
+    if status == "failed":
+        if child is None:
+            raise ValueError("eval receipt child status invalid")
+    elif (status == "verified") != all_passed or (status == "completed_with_failures") != has_failure:
         raise ValueError("eval receipt status does not match metrics")
     engine = payload.get("engine")
     if (not isinstance(engine, dict) or set(engine) != {"engine_version", "api_version", "compiled_backend", "llama_cpp_revision", "model"} or
@@ -574,6 +618,7 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     selected_packages = {name: packages[name] for name in expected_packages}
     return {
         "status": status,
+        **({"child": child} if child is not None else {}),
         "artifact": dict(recorded),
         "engine": dict(engine),
         "model_preflight": dict(model_preflight),

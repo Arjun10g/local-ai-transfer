@@ -400,7 +400,7 @@ def evaluate_case(case: dict[str, Any], output: str, tools: list[dict[str, Any]]
     return call == wanted, "exact_call" if call == wanted else "call_mismatch"
 
 
-def _post(endpoint: str, token: str, payload: dict[str, Any], timeout: float) -> str:
+def _post(endpoint: str, token: str, payload: dict[str, Any], timeout: float, *, include_usage: bool = False) -> str | tuple[str, int]:
     validate_endpoint(endpoint)
     session_endpoint = endpoint.removesuffix("/v1/chat/completions") + "/v1/sessions"
     session_request = urllib.request.Request(
@@ -433,7 +433,15 @@ def _post(endpoint: str, token: str, payload: dict[str, Any], timeout: float) ->
         raise ValueError("native engine response_missing_content") from exc
     if len(content) > MODEL_OUTPUT_MAX_CHARS:
         raise ValueError("model_output_too_large")
-    return content
+    if not include_usage:
+        return content
+    usage = data.get("usage")
+    if (not isinstance(usage, dict) or set(usage) != {"prompt_tokens", "completion_tokens"} or
+            isinstance(usage.get("prompt_tokens"), bool) or not isinstance(usage.get("prompt_tokens"), int) or
+            usage["prompt_tokens"] < 0 or isinstance(usage.get("completion_tokens"), bool) or
+            not isinstance(usage.get("completion_tokens"), int) or usage["completion_tokens"] < 0):
+        raise ValueError("native engine usage_shape")
+    return content, usage["prompt_tokens"]
 
 
 def _error_diagnostic(error: BaseException, *, http_status: int | None = None) -> str:
@@ -452,7 +460,9 @@ def _error_diagnostic(error: BaseException, *, http_status: int | None = None) -
         exact = {
             "native engine returned no session id": "parse_session_shape",
             "native engine response_missing_content": "parse_response_shape",
+            "native engine usage_shape": "parse_response_shape",
             "context limit exceeded": "context_overflow",
+            "context_overflow": "context_overflow",
             "endpoint_must_be_loopback_http": "endpoint",
             "token_invalid": "token",
         }.get(str(error))
@@ -461,7 +471,7 @@ def _error_diagnostic(error: BaseException, *, http_status: int | None = None) -
     return "unknown"
 
 
-def _diagnostics(records: list[dict[str, Any]], categories: set[str]) -> dict[str, Any]:
+def _diagnostics(records: list[dict[str, Any]], categories: set[str], category_summary: dict[str, dict[str, int]]) -> dict[str, Any]:
     overall: dict[str, int] = {}
     by_category: dict[str, dict[str, int]] = {category: {} for category in sorted(categories)}
     for item in records:
@@ -471,6 +481,15 @@ def _diagnostics(records: list[dict[str, Any]], categories: set[str]) -> dict[st
         overall[code] = overall.get(code, 0) + 1
         category_counts = by_category[item["category"]]
         category_counts[code] = category_counts.get(code, 0) + 1
+    for category in categories:
+        if sum(by_category[category].values()) != category_summary[category]["errors"]:
+            raise ValueError("diagnostic category total mismatch")
+    combined: dict[str, int] = {}
+    for histogram in by_category.values():
+        for code, amount in histogram.items():
+            combined[code] = combined.get(code, 0) + amount
+    if combined != overall:
+        raise ValueError("diagnostic overall total mismatch")
     return {
         "schema": "local_bmo.tool-call-eval-diagnostics.v1",
         "total_errors": sum(overall.values()),
@@ -516,13 +535,20 @@ def run_local(
     cases = fixture["cases"][:max_cases]
     records: list[dict[str, Any]] = []
     peak_rss = _rss_kib(engine_pid) if engine_pid is not None else None
-    canary = {"attempted": True, "passed": False, "error_code": None, "tool_count": len(fixture["tools"]), "message_chars": CANARY_MESSAGE_CHARS}
+    canary = {"attempted": True, "passed": False, "error_code": None, "tool_count": len(fixture["tools"]), "message_chars": CANARY_MESSAGE_CHARS, "prompt_tokens": None, "context_tokens": int(fixture["limits"]["context_tokens"]), "output_reserve_tokens": int(fixture["limits"]["max_output_tokens"])}
     try:
-        _post(endpoint, token, _canary_payload(fixture), timeout)
+        canary_result = _post(endpoint, token, _canary_payload(fixture), timeout, include_usage=True)
+        if not isinstance(canary_result, tuple) or len(canary_result) != 2:
+            raise ValueError("native engine usage_shape")
+        canary["prompt_tokens"] = canary_result[1]
+        if isinstance(canary_result[1], bool) or not isinstance(canary_result[1], int) or not 513 <= canary_result[1] <= canary["context_tokens"] - canary["output_reserve_tokens"]:
+            raise ValueError("context_overflow")
         canary["passed"] = True
     except urllib.error.HTTPError as exc:
+        canary["prompt_tokens"] = None
         canary["error_code"] = _error_diagnostic(exc, http_status=exc.code)
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError) as exc:
+        canary["prompt_tokens"] = None
         canary["error_code"] = _error_diagnostic(exc)
     canary_failed = not canary["passed"]
     if canary_failed:
@@ -559,13 +585,17 @@ def run_local(
         summary["case_count"] += 1
         result_key = {"pass": "passed", "fail": "failed", "error": "errors"}[item["status"]]
         summary[result_key] += 1
+    if not canary["passed"]:
+        canary_code = canary["error_code"]
+        if any(item["status"] != "error" or item["reason"] != canary_code for item in records):
+            raise ValueError("canary result mismatch")
     return {
         "schema": "local_bmo.tool-call-eval-result.v1", "model": fixture["model"],
         "case_count": len(records), "passed": sum(item["status"] == "pass" for item in records),
         "failed": sum(item["status"] == "fail" for item in records), "errors": sum(item["status"] == "error" for item in records),
         "peak_rss_kib": peak_rss, "cases": records, "category_summary": category_summary,
         "canary": canary,
-        "error_diagnostics": _diagnostics(records, {case["category"] for case in cases}),
+        "error_diagnostics": _diagnostics(records, {case["category"] for case in cases}, category_summary),
     }
 
 

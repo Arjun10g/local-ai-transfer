@@ -48,6 +48,7 @@ struct GenerationRequest {
 struct GenerationResult {
   std::string finish_reason;
   unsigned generated_tokens = 0;
+  unsigned prompt_tokens = 0;
 };
 
 using Cancellation = std::shared_ptr<std::atomic<bool>>;

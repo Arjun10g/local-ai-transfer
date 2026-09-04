@@ -468,7 +468,7 @@ void HttpServer::handle(Socket client) {
           combined += token; return true;
         });
         if (response_bound_exceeded) fail(413, "response_too_large");
-        else respond(client, 200, "application/json", "{\"id\":\"" + json_escape(request_id) + "\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"" + json_escape(combined) + "\"},\"finish_reason\":\"" + json_escape(result.finish_reason) + "\"}],\"usage\":{\"completion_tokens\":" + std::to_string(result.generated_tokens) + "}}", request_id);
+        else respond(client, 200, "application/json", "{\"id\":\"" + json_escape(request_id) + "\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"" + json_escape(combined) + "\"},\"finish_reason\":\"" + json_escape(result.finish_reason) + "\"}],\"usage\":{\"prompt_tokens\":" + std::to_string(result.prompt_tokens) + ",\"completion_tokens\":" + std::to_string(result.generated_tokens) + "}}", request_id);
       } catch (const std::invalid_argument& error) { if (std::string(error.what()) == "context limit exceeded") fail(400, "invalid_request"); else fail(404, "not_found"); } catch (const std::logic_error&) { fail(409, "busy"); } catch (const std::exception&) { std::cerr << "generation failed\n"; fail(500, "internal_error"); } catch (...) { std::cerr << "generation failed\n"; fail(500, "internal_error"); }
     }
   } else {

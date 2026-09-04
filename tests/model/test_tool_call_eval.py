@@ -109,7 +109,10 @@ class ToolCallEvaluatorTests(unittest.TestCase):
 
     def test_runtime_payload_uses_native_tools_field_without_handwritten_prompt(self):
         fixture = load_fixture()
-        with patch("scripts.test.evaluate_tool_calls._post", return_value="<tool_call><function=system.get_info></function></tool_call>") as post:
+        def fake_post(*args, include_usage=False, **kwargs):
+            value = "<tool_call><function=system.get_info></function></tool_call>"
+            return (value, 700) if include_usage else value
+        with patch("scripts.test.evaluate_tool_calls._post", side_effect=fake_post) as post:
             result = run_local(fixture, "http://127.0.0.1:1/v1/chat/completions", "test-token-20260904", timeout=0.1, max_cases=1)
         self.assertEqual((result["passed"], result["errors"]), (1, 0))
         payload = post.call_args.args[2]
@@ -119,7 +122,22 @@ class ToolCallEvaluatorTests(unittest.TestCase):
         self.assertEqual(result["category_summary"]["tool_selection"]["passed"], 1)
         self.assertEqual(result["canary"]["passed"], True)
         self.assertEqual(result["canary"]["tool_count"], 11)
+        self.assertEqual(result["canary"]["prompt_tokens"], 700)
         self.assertEqual(result["error_diagnostics"]["total_errors"], 0)
+
+    def test_failed_canary_stops_scoring_and_binds_every_error(self):
+        fixture = load_fixture()
+        def fail(*args, **kwargs):
+            error = urllib.error.HTTPError("http://127.0.0.1", 503, "not_ready", {}, None)
+            error.close()
+            raise error
+        with patch("scripts.test.evaluate_tool_calls._post", side_effect=fail) as post:
+            result = run_local(fixture, "http://127.0.0.1:1/v1/chat/completions", "test-token-20260904", timeout=0.1, max_cases=34)
+        self.assertFalse(result["canary"]["passed"])
+        self.assertEqual(result["canary"]["error_code"], "http_503")
+        self.assertEqual((result["passed"], result["failed"], result["errors"]), (0, 0, 34))
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(result["error_diagnostics"]["overall"], {"http_503": 34})
 
     def test_endpoint_is_explicit_loopback_http_only(self):
         self.assertEqual(validate_endpoint("http://127.0.0.1:49912/v1/chat/completions"), "http://127.0.0.1:49912/v1/chat/completions")

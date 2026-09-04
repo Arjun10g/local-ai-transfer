@@ -185,6 +185,7 @@ GenerationResult LlamaBackend::generate(const GenerationRequest& request,
   if (llama_decode(impl_->context, batch) != 0) { llama_batch_free(batch); throw std::runtime_error("llama prefill failed"); }
   llama_batch_free(batch);
   GenerationResult result;
+  result.prompt_tokens = static_cast<unsigned>(prompt.size());
   for (unsigned generated = 0; generated < request.max_tokens; ++generated) {
     if (cancellation->load()) { result.finish_reason = "cancelled"; return result; }
     const llama_token token = llama_sampler_sample(impl_->sampler, impl_->context, -1);
