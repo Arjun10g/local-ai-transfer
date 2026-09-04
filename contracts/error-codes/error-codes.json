@@ -1,0 +1,11 @@
+{
+  "version":"0.1.0",
+  "errors":[
+    {"code":"unauthorized","http_status":401},{"code":"not_found","http_status":404},
+    {"code":"method_not_allowed","http_status":405},{"code":"invalid_json","http_status":400},
+    {"code":"invalid_request","http_status":400},{"code":"request_too_large","http_status":413},
+    {"code":"not_ready","http_status":503},{"code":"busy","http_status":409},
+    {"code":"request_cancelled","http_status":499},{"code":"shutdown","http_status":503},
+    {"code":"internal_error","http_status":500}
+  ]
+}
