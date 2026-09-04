@@ -261,7 +261,10 @@ def select_profiles(catalogue: dict, values: dict[str, str], hours: float, ledge
 
 
 def mutation_readiness(values: dict[str, str]) -> dict[str, object]:
-    required = ("SHADEFORM_API_KEY", "SHADEFORM_SSH", "SHADEFORM_SSH_KEY_ID", "SHADEFORM_INSTANCE_NAME", "SHADEFORM_AUTO_TERMINATE_HOURS")
+    # SHADEFORM_SSH is the operator-owned private key material/path from which
+    # the lifecycle creates a fresh, per-attempt provider key. A pre-existing
+    # SHADEFORM_SSH_KEY_ID is intentionally not required (and is never reused).
+    required = ("SHADEFORM_API_KEY", "SHADEFORM_SSH", "SHADEFORM_INSTANCE_NAME", "SHADEFORM_AUTO_TERMINATE_HOURS")
     missing = [key for key in required if not values.get(key)]
     invalid: list[str] = []
     key_id = values.get("SHADEFORM_SSH_KEY_ID", "")
@@ -281,7 +284,7 @@ def mutation_readiness(values: dict[str, str]) -> dict[str, object]:
         except ValueError:
             invalid.append("SHADEFORM_AUTO_TERMINATE_HOURS_numeric")
     missing_or_invalid = missing + invalid
-    return {"read_only_catalogue_ready": bool(values.get("SHADEFORM_API_KEY")), "mutation_ready": not missing_or_invalid, "missing_or_invalid_inputs": missing_or_invalid, "reason": "SSH ownership inputs and auto-terminate backstop are separate mutation gates"}
+    return {"read_only_catalogue_ready": bool(values.get("SHADEFORM_API_KEY")), "mutation_ready": not missing_or_invalid, "missing_or_invalid_inputs": missing_or_invalid, "ssh_key_mode": "ephemeral_from_SHADEFORM_SSH", "preexisting_ssh_key_id_required": False, "reason": "read-only GET may pass without SSH; future mutation requires validated API, ephemeral SSH material, instance name, and auto-terminate backstop"}
 
 
 def write_json(path: Path, value: dict) -> None:

@@ -1,0 +1,101 @@
+{
+  "schema": "local_bmo.j1m.v1",
+  "job_id": "J1M",
+  "source": {
+    "model_id": "Qwen/Qwen3.5-9B",
+    "revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+    "authentication": "public-unauthenticated",
+    "lock": "model/source-lock/qwen35-9b.source-lock.json",
+    "official_tree": "https://huggingface.co/Qwen/Qwen3.5-9B/tree/c202236235762e1c871ad0ccb60c8ee5ba337b9a"
+  },
+  "llama_cpp": {
+    "repository": "https://github.com/ggml-org/llama.cpp",
+    "revision": "3581ba0cf591b3f772fbb002de0f70e294bc0396",
+    "checkout": "/scratch/llama.cpp",
+    "quantizer": "/scratch/llama.cpp/build/bin/llama-quantize",
+    "revision_evidence": "GitHub commits API path=convert_hf_to_gguf.py; verify with git rev-parse before build",
+    "tested_revision_status": "conversion smoke pending Sol-approved J1M"
+  },
+  "python_dependencies": {
+    "requirements_file": "requirements/requirements-convert_hf_to_gguf.txt",
+    "local_gguf_package": "gguf-py",
+    "resolution_policy": "install only from pinned llama.cpp checkout requirements, then capture pip freeze",
+    "network_capture_boundary": "The first approved run may resolve wheels from the pinned checkout and records every wheel's exact filename, size, and SHA256 in wheelhouse-lock.json; all subsequent installation is offline from that verified wheelhouse and fails closed on any mismatch."
+  },
+  "text_only": true,
+  "shadeform_target": {
+    "cloud": "hyperstack",
+    "region": "montreal-canada-2",
+    "gpu": "A100_80G",
+    "gpu_count": 1,
+    "vram_gib": 80,
+    "hourly_usd": 1.35,
+    "proving_run_hours": 0.25,
+    "active_run_cost_usd": 0.3375,
+    "provider_backstop_hours": 0.3125,
+    "host_shutdown_backstop_hours": 0.30,
+    "external_watchdog_seconds": 1080
+  },
+  "modes": {
+    "prove": {
+      "runtime_hours": 0.25,
+      "external_watchdog_seconds": 1080,
+      "host_shutdown_delay_minutes": 18,
+      "provider_backstop_hours": 0.3125,
+      "transfer_reserve_seconds": 180,
+      "active_cost_usd": 0.3375
+    },
+    "build": {
+      "runtime_hours": 1.25,
+      "external_watchdog_seconds": 5400,
+      "host_shutdown_delay_minutes": 90,
+      "provider_backstop_hours": 1.5625,
+      "transfer_reserve_seconds": 360,
+      "active_cost_usd": 1.6875
+    }
+  },
+  "resources": {
+    "required_scratch_gib": 70,
+    "expected_peak_gib": 58,
+    "expected_q4_gib": 6,
+    "progress_path": "experiments/runtime/J1M.progress.json"
+  },
+  "artifacts": {
+    "allowlist": [
+      "Qwen3.5-9B-bf16.gguf",
+      "Qwen3.5-9B-Q8_0.gguf",
+      "Qwen3.5-9B-Q4_K_M.gguf",
+      "manifest.json",
+      "checksums.sha256",
+      "tensor-metadata.json",
+      "source-model-receipt.json",
+      "conversion-receipt.json",
+      "model-receipt.json",
+      "toolchain.json",
+      "command-receipt.json",
+      "scan-receipt.json",
+      "post-cleanup-receipt.json"
+    ],
+    "local_fetch_allowlist": [
+      "Qwen3.5-9B-Q4_K_M.gguf",
+      "manifest.json",
+      "checksums.sha256",
+      "tensor-metadata.json",
+      "source-model-receipt.json",
+      "conversion-receipt.json",
+      "model-receipt.json",
+      "toolchain.json",
+      "command-receipt.json",
+      "scan-receipt.json",
+      "post-cleanup-receipt.json"
+    ],
+    "prove_fetch_allowlist": ["proving-receipt.json"],
+    "vision_projection": "excluded"
+  },
+  "budget_policy": {
+    "project_total_usd": 50.0,
+    "pending_ledger_refuses_launch": true,
+    "active_cost_is_cap_projection": true,
+    "backstop_cost_is_reported_separately": true
+  }
+}

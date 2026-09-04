@@ -1,7 +1,7 @@
 # Shadeform read-only controls
 
-`readonly_preflight.py` adapts the Expert PreFetch operating practices for this
-repository. It reads the ignored `.env` only to validate uppercase controls and
+`readonly_preflight.py` implements this lane's audited catalogue controls. It
+reads the ignored `.env` only to validate uppercase controls and
 never prints credential values. It accepts a local redacted catalogue snapshot or
 an explicitly supplied HTTPS GET-only catalogue endpoint, then writes a plan and
 optionally an append-only usage ledger.
