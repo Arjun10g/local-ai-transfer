@@ -593,6 +593,7 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertIn("-DLAE_ENABLE_LLAMA_CUDA=ON", flattened)
         self.assertIn("-DCMAKE_CUDA_ARCHITECTURES=80", flattened)
         self.assertIn("-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc", flattened)
+        self.assertIn(["cmake", "--build", "/scratch/j1m/engine-build", "--target", "lae-engine", "--parallel", "8"], commands)
         self.assertIn("cuda_device_probe.py", " ".join(flattened))
         self.assertIn("--backend", flattened)
         self.assertIn("cuda", flattened)

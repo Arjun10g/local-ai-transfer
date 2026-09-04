@@ -59,6 +59,8 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
         raise ValueError("eval must use the explicit CUDA A100 evaluation profile")
     if eval_mode.get("cuda_compiler") != "/usr/local/cuda/bin/nvcc":
         raise ValueError("eval must bind the approved absolute CUDA compiler path")
+    if eval_mode.get("build_parallelism") != 8:
+        raise ValueError("eval must use the reviewed bounded CUDA build parallelism")
     return payload
 
 

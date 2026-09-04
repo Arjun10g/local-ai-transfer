@@ -55,6 +55,7 @@
     },
     "eval": {
       "backend": "cuda",
+      "build_parallelism": 8,
       "cuda_architecture": 80,
       "cuda_compiler": "/usr/local/cuda/bin/nvcc",
       "cuda_device_name": "CUDA0",
