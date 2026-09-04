@@ -41,6 +41,10 @@ def _closure_metadata() -> dict[str, Any] | None:
 # also refused.
 VULKAN_SOURCE_CLOSURE_READY = _closure_metadata() is not None
 PRODUCT_VULKAN_PROFILE_READY = VULKAN_SOURCE_CLOSURE_READY
+# Closure verification proves source integrity, not target acceptance or
+# promotion. Sol must separately promote the Vulkan profile before SYCL can be
+# planned as an experimental diagnostic.
+PRODUCT_VULKAN_PROFILE_PROMOTED = False
 SYCL_BUILD_FLAGS = [
     "-DGGML_SYCL=ON",
     "-DGGML_SYCL_TARGET=INTEL",
@@ -239,8 +243,8 @@ def build_plan(
         plan["provenance"]["vulkan_source_closure"] = closure
         return plan
 
-    if _closure_metadata() is None:
-        raise BackendPlanError("SYCL diagnostic is blocked until the product-engine GGML_VULKAN profile is closure-verified")
+    if not PRODUCT_VULKAN_PROFILE_PROMOTED:
+        raise BackendPlanError("SYCL diagnostic is blocked until the product-engine GGML_VULKAN profile is separately accepted and promoted")
 
     adapters = _intel_integrated_adapters(receipt)
     if len(adapters) != 1:

@@ -84,7 +84,7 @@ class WindowsBackendPlanTests(unittest.TestCase):
 
     def test_sycl_is_not_inferred_from_intel_name_or_loader(self):
         path = self.write_receipt(receipt(integrated=None))
-        with self.assertRaisesRegex(planner.BackendPlanError, "exactly one explicitly integrated"):
+        with self.assertRaisesRegex(planner.BackendPlanError, "separately accepted and promoted"):
             planner.build_plan("intel-sycl-experimental", path)
 
     def test_vulkan_product_profile_requires_receipt_and_has_bounded_offload(self):
@@ -132,23 +132,24 @@ class WindowsBackendPlanTests(unittest.TestCase):
                 with self.assertRaisesRegex(planner.BackendPlanError, "failed verification"):
                     planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
 
-    def test_sycl_requires_explicit_integrated_evidence_after_vulkan_closure(self):
+    def test_sycl_remains_blocked_until_vulkan_profile_promotion(self):
         path = self.write_receipt(receipt(sycl=True))
-        plan = planner.build_plan("intel-sycl-experimental", path)
-        self.assertEqual(plan["runtime"]["compiled_backend"], "sycl")
-        self.assertTrue(plan["runtime"]["diagnostic_only"])
+        with self.assertRaisesRegex(planner.BackendPlanError, "separately accepted and promoted"):
+            planner.build_plan("intel-sycl-experimental", path)
 
     def test_sycl_rejects_ambiguous_integrated_adapters(self):
         path = self.write_receipt(receipt(sycl=True, adapter_count=2))
-        with self.assertRaisesRegex(planner.BackendPlanError, "exactly one explicitly integrated"):
-            planner.build_plan("intel-sycl-experimental", path)
+        with mock.patch.object(planner, "PRODUCT_VULKAN_PROFILE_PROMOTED", True):
+            with self.assertRaisesRegex(planner.BackendPlanError, "exactly one explicitly integrated"):
+                planner.build_plan("intel-sycl-experimental", path)
 
     def test_sycl_rejects_adapter_without_explicit_integrated_evidence(self):
         value = receipt(sycl=True)
         value["gpu_adapters"][0]["integrated"] = None
         path = self.write_receipt(value)
-        with self.assertRaisesRegex(planner.BackendPlanError, "exactly one explicitly integrated"):
-            planner.build_plan("intel-sycl-experimental", path)
+        with mock.patch.object(planner, "PRODUCT_VULKAN_PROFILE_PROMOTED", True):
+            with self.assertRaisesRegex(planner.BackendPlanError, "exactly one explicitly integrated"):
+                planner.build_plan("intel-sycl-experimental", path)
 
     def test_neither_invalid_backend_nor_failed_sycl_falls_back(self):
         path = self.write_receipt(receipt())
