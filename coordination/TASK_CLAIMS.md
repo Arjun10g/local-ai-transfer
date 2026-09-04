@@ -17,9 +17,9 @@
 | TOOL-006 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | RUN-007, TOOL-004 | S0, S4 | `2b4df2b`; `host/agent/controller.mjs`, tests |
 | TOOL-007 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-001 | S0, S4 | `2b4df2b`; `host/agent/tool-envelope.mjs` |
 | TOOL-008 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-006, TOOL-007 | S0, S4 | `2b4df2b`; `host/tools/time-now.mjs`, tests |
-| TOOL-014 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-007, TOOL-013 | S0, S4 | `197649d`, `2e4c2fc`; `host/tools/local/workspace-policy.mjs`, `filesystem.mjs`, tests |
-| TOOL-015 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-013, TOOL-014 | S0, S4 | `197649d`, `2e4c2fc`; create-new/base-hash atomic patch + preview tests |
-| TOOL-016 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-013 | S0, S4 | `197649d`, `2e4c2fc`; typed Windows clipboard modules/offline tests |
-| TOOL-017 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-013 | S0, S4 | `197649d`, `2e4c2fc`; allowlisted app/browser argv modules/tests |
+| TOOL-014 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-007, TOOL-013 | S0, S4 | `197649d`, `2e4c2fc`, `c706a2b`; `host/tools/local/workspace-policy.mjs`, `filesystem.mjs`, strict schemas, nested-search/race tests |
+| TOOL-015 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-013, TOOL-014 | S0, S4 | `197649d`, `2e4c2fc`, `c706a2b`; create-new/base-hash atomic patch, final target recheck, preview tests |
+| TOOL-016 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-013 | S0, S4 | `197649d`, `2e4c2fc`, `c706a2b`; typed Windows clipboard modules/offline tests and strict args |
+| TOOL-017 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-013 | S0, S4 | `197649d`, `2e4c2fc`, `c706a2b`; allowlisted app/browser argv, external-egress gating/preview, strict args tests |
 | QA-001 | S4 | `luna/qa-release` | CLAIMED | SOL-001 | S0 | pending |
 | SEC-001 | S4 | `luna/qa-release` | CLAIMED | QA-001, SOL-003 | S0 | pending |
