@@ -1,0 +1,14 @@
+{
+  "forbidden_artifacts": [],
+  "intermediates_absent": true,
+  "inventory_scope": "post_cleanup_filesystem",
+  "q4": {
+    "sha256": "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b",
+    "size_bytes": 5629109088
+  },
+  "remaining_gguf": [
+    "Qwen3.5-9B-Q4_K_M.gguf"
+  ],
+  "schema": "local_bmo.j1m.post-cleanup-receipt.v1",
+  "status": "verified"
+}

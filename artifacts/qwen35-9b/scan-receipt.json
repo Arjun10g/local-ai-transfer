@@ -1,0 +1,24 @@
+{
+  "artifacts": [
+    {
+      "name": "Qwen3.5-9B-bf16.gguf",
+      "sha256": "3781359159dcec91e8f57820f63ffa6ec32b6f0c94b38bfb16c9fe0d50561316",
+      "size_bytes": 17920697184
+    },
+    {
+      "name": "Qwen3.5-9B-Q8_0.gguf",
+      "sha256": "516a12b01fda7a9a204b71a9917e3b5b0c4efbbd8f6e6f4f6b78e4ff699cf0db",
+      "size_bytes": 9527501664
+    },
+    {
+      "name": "Qwen3.5-9B-Q4_K_M.gguf",
+      "sha256": "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b",
+      "size_bytes": 5629109088
+    }
+  ],
+  "inventory_scope": "pre_cleanup_conversion_outputs",
+  "schema": "local_bmo.j1m.scan-receipt.v1",
+  "status": "verified",
+  "text_only": true,
+  "vision_projection_present": false
+}

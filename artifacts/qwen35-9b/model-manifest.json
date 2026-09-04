@@ -1,0 +1,70 @@
+{
+  "approvals": {
+    "artifact_scan_receipt": "scan-receipt.json@sha256:0857899bf86527702743dd12b62ae5740cbb27fae2005da7066d1070cb341066",
+    "source_approval": "source-model-receipt.json@sha256:aeba8abe5e965ad8ebcfb34f45e6c5997af8b71eeec3b84ba69a578b4ac559f4",
+    "transfer_receipt": "checksums.sha256@sha256:caa37e3060bdbc1ac89647906469b154ca6f6f86d71d1f0800a9bc36a8a72861"
+  },
+  "artifact": {
+    "architecture": "qwen35",
+    "expected_file_name": "Qwen3.5-9B-Q4_K_M.gguf",
+    "expected_size_bytes": 5629109088,
+    "format": "gguf",
+    "gguf_metadata_sha256": "bf17bf32d969e6d92eab7d9ef0e7c099efe452c91484701de6d9bf26e5f0f878",
+    "modality_profile": "text_only_no_mmproj",
+    "quantization_profile": "Q4_K_M",
+    "sha256": "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b",
+    "tensor_inventory_sha256": "42dcf883ef2b1cc1ed763343de476b5e24d93117b5851374b789213edd306643"
+  },
+  "conversion": {
+    "build_environment_receipt": "toolchain.json@sha256:2a396a232d632aa685c17c271f0b77285809e923c25dcae654ec094d4d40d646",
+    "conversion_command_receipt": "command-receipt.json@sha256:bda1629c160967b75958bc60b0c429b7d866b0f2a51b279c54dea37bae62abf9#convert_hf_to_gguf",
+    "created_at_utc": "2026-09-04T06:28:33.686519+00:00",
+    "llama_cpp_revision": "3581ba0cf591b3f772fbb002de0f70e294bc0396",
+    "quantization_command_receipt": "command-receipt.json@sha256:bda1629c160967b75958bc60b0c429b7d866b0f2a51b279c54dea37bae62abf9#Q4_K_M",
+    "reference_artifact_id": "scan-receipt.json@sha256:0857899bf86527702743dd12b62ae5740cbb27fae2005da7066d1070cb341066#Qwen3.5-9B-bf16.gguf"
+  },
+  "display_name": "Qwen3.5-9B Q4_K_M",
+  "expected_profile": {
+    "accepted_gguf_versions": [
+      3
+    ],
+    "attention_head_dimension": 256,
+    "full_attention_layers": 8,
+    "hidden_size": 4096,
+    "hybrid_pattern": "8x(3_gated_deltanet_then_1_gated_attention)",
+    "kv_heads_on_attention_layers": 4,
+    "layers": 32,
+    "metadata_allowlist_version": "qwen35-9b-v1",
+    "mtp_present": true,
+    "native_context_tokens": 262144,
+    "parameter_class": "9B",
+    "query_heads_on_attention_layers": 16,
+    "vision_projection_required_for_text_only": false
+  },
+  "model_id": "qwen35-9b-q4-k-m",
+  "runtime_policy": {
+    "accelerated_backend_policy": "approved_hardware_receipt_only",
+    "cpu_backend_required": true,
+    "default_active_generations": 1,
+    "default_context_tokens": 8192,
+    "default_thinking": false,
+    "maximum_mvp_context_tokens": 16384,
+    "minimum_engine_build": "lae-engine/0.1.0+llama.cpp.3581ba0c"
+  },
+  "schema_version": "1.1.0",
+  "source": {
+    "license_file_sha256": "bbedc3fda3305820b977265f01b8619d87570a6739de3a5582c3464840f1e57a",
+    "license_id": "Apache-2.0",
+    "model_card_sha256": "c5f5a8c2dddab69cfbf05279235aa5fddb137939a06539c4c7637aa900fef6d0",
+    "organization": "Qwen",
+    "repository": "Qwen3.5-9B",
+    "revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
+  },
+  "tokenizer_and_template": {
+    "chat_template_sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+    "special_token_fixture_version": "model/quality-eval/quality-fixture-spec.json#thinking-off-001",
+    "thinking_control": "chat_template_enable_thinking_boolean",
+    "tokenizer_metadata_sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+    "tool_call_fixture_version": "model/quality-eval/quality-fixture-spec.json#tool-xml-001"
+  }
+}

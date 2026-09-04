@@ -1,0 +1,68 @@
+{
+  "artifacts": [
+    {
+      "name": "Qwen3.5-9B-Q4_K_M.gguf",
+      "sha256": "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b",
+      "size_bytes": 5629109088
+    },
+    {
+      "name": "tensor-metadata.json",
+      "sha256": "68a4bd5ec4a13a4fbdead69d20398ea059806d90301e9e67e9d74e496d335173",
+      "size_bytes": 69029
+    },
+    {
+      "name": "source-model-receipt.json",
+      "sha256": "aeba8abe5e965ad8ebcfb34f45e6c5997af8b71eeec3b84ba69a578b4ac559f4",
+      "size_bytes": 2250
+    },
+    {
+      "name": "conversion-receipt.json",
+      "sha256": "66cfae234d2604b72ef28a519f363e17e9c00a8831020597c6654d709b9387f2",
+      "size_bytes": 8715
+    },
+    {
+      "name": "model-receipt.json",
+      "sha256": "133c185dd6ede07552bc96ecde7fd114aa29a7e252dadc1e605eedafbad9d952",
+      "size_bytes": 8917
+    },
+    {
+      "name": "toolchain.json",
+      "sha256": "2a396a232d632aa685c17c271f0b77285809e923c25dcae654ec094d4d40d646",
+      "size_bytes": 6784
+    },
+    {
+      "name": "post-cleanup-receipt.json",
+      "sha256": "c83768495880569c265e7e96394748814d5f8945f8d153f843ffa33b02febe05",
+      "size_bytes": 371
+    },
+    {
+      "name": "command-receipt.json",
+      "sha256": "bda1629c160967b75958bc60b0c429b7d866b0f2a51b279c54dea37bae62abf9",
+      "size_bytes": 11191
+    },
+    {
+      "name": "scan-receipt.json",
+      "sha256": "0857899bf86527702743dd12b62ae5740cbb27fae2005da7066d1070cb341066",
+      "size_bytes": 708
+    }
+  ],
+  "created_at_utc": "2026-09-04T06:28:33.686519+00:00",
+  "deployable_model_artifacts": [
+    "Qwen3.5-9B-Q4_K_M.gguf"
+  ],
+  "inventory_scope": "post_cleanup_deployable_allowlist",
+  "schema": "local_bmo.j1m.artifact-manifest.v1",
+  "tensor_metadata": {
+    "chat_template_sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+    "gguf_metadata": {
+      "general.architecture": "qwen35",
+      "general.file_type": 15,
+      "gguf.version": "unknown"
+    },
+    "status": "verified",
+    "tensor_count": 427,
+    "tensor_inventory_sha256": "68a4bd5ec4a13a4fbdead69d20398ea059806d90301e9e67e9d74e496d335173",
+    "vision_projection_present": false
+  },
+  "text_only": true
+}

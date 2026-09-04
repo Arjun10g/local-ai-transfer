@@ -1,0 +1,12 @@
+{
+  "conversion": "not-run",
+  "host": "shadecloud",
+  "python": "3.10.12",
+  "schema": "local_bmo.j1m.proving-receipt.v1",
+  "scratch": {
+    "available_gib": 81.93,
+    "path": "/scratch",
+    "required_gib": 70
+  },
+  "text_only": true
+}
