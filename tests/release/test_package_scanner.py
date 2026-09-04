@@ -33,6 +33,13 @@ class PackageScannerTests(unittest.TestCase):
         self.assertIn("Wait-PipeConnectionBounded", start)
         run = Path("release/windows/Run-WindowsBackend.ps1").read_text(encoding="utf-8")
         self.assertIn("FileAttributes]::ReparsePoint", run)
+        provenance = __import__("json").loads(Path("release/windows/node-provenance.json").read_text(encoding="utf-8"))
+        self.assertEqual("24.20.0", provenance["version"])
+        self.assertEqual("win-x64", provenance["platform"])
+        self.assertEqual("https://nodejs.org/download/release/v24.20.0/win-x64/node.exe", provenance["download_url"])
+        self.assertEqual("https://nodejs.org/en/blog/release/v24.20.0", provenance["release_page"])
+        self.assertEqual("https://nodejs.org/download/release/latest-v24.x/", provenance["release_index"])
+        self.assertEqual(NODE_EXE_SHA256, provenance["sha256"])
 
     def test_builder_closes_host_dependencies_without_target_python(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -55,6 +62,7 @@ class PackageScannerTests(unittest.TestCase):
             self.assertIn("runtime/node.exe", manifest["files"])
             self.assertIn("licenses/Node.js-LICENSE.txt", manifest["files"])
             self.assertIn("licenses/llama.cpp-LICENSE.txt", manifest["files"])
+            self.assertIn("node-provenance.json", manifest["files"])
             self.assertEqual(NODE_EXE_SHA256, manifest["bundled_node"]["sha256"])
 
     def test_weight_and_secret_files_are_rejected(self):

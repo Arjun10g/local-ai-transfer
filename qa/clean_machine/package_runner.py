@@ -18,7 +18,7 @@ from .package import HOST_RUNTIME_FILES, checksums, scan_tree
 
 RELEASE_FILES = frozenset({
     "Start-LocalAssistant.ps1", "Verify-Release.ps1", "host-config.example.json",
-    "THIRD_PARTY_NOTICES.md", "README-OPERATOR.md",
+    "THIRD_PARTY_NOTICES.md", "README-OPERATOR.md", "node-provenance.json",
 })
 NODE_VERSION = "24.20.0"
 NODE_EXE_SHA256 = "5c976096e04e5c2c1f091938926234cc9fbebfe9787ddd149351b3b0ecc707b5"

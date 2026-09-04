@@ -64,6 +64,7 @@ PACKAGE_ALLOWLIST = HOST_RUNTIME_FILES | frozenset({
     "RELEASE_MANIFEST.json",
     "CHECKSUMS.sha256",
     "README-OPERATOR.md",
+    "node-provenance.json",
 })
 REQUIRED_STATIC = frozenset({
     "Start-LocalAssistant.ps1", "Run-WindowsBackend.ps1",
@@ -76,6 +77,7 @@ PORTABLE_RUNTIME_REQUIRED = HOST_RUNTIME_FILES | frozenset({
     "THIRD_PARTY_NOTICES.md", "SBOM.spdx.json", "RELEASE_MANIFEST.json",
     "CHECKSUMS.sha256", "README-OPERATOR.md", "licenses/Node.js-LICENSE.txt",
     "licenses/llama.cpp-LICENSE.txt",
+    "node-provenance.json",
 })
 FORBIDDEN_SUFFIXES = (".gguf", ".safetensors", ".pt", ".pth", ".onnx", ".bin", ".pem", ".key", ".pfx")
 SECRET_RE = re.compile(r"(?i)(?:api[_-]?key|access[_-]?token|password|secret(?:[_-]?key)?)\s*[:=]\s*['\"]?([A-Za-z0-9_./+=-]{8,})")

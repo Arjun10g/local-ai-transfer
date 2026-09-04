@@ -11,6 +11,8 @@ python scripts/package/build_portable.py --source . --engine D:\build\lae-engine
 `node.exe` must be the official Node.js v24.20.0 Windows x64 executable with
 SHA-256 `5c976096e04e5c2c1f091938926234cc9fbebfe9787ddd149351b3b0ecc707b5`;
 the builder rejects any other bytes. Python is a packaging-machine tool only.
+`node-provenance.json` records the official release URLs, platform, version, and
+independently verified executable SHA-256 used by that gate.
 The matching Node v24.20.0 `LICENSE` file is also mandatory (SHA-256
 `5888dbb9a1d2b18f2c3e6c5f6af1b39de658372b402a0577b002777f14c62ace`),
 and the generated package carries both Node and llama.cpp license texts.

@@ -1,0 +1,11 @@
+{
+  "schema": "node-provenance.v1",
+  "artifact": "node.exe",
+  "version": "24.20.0",
+  "platform": "win-x64",
+  "download_url": "https://nodejs.org/download/release/v24.20.0/win-x64/node.exe",
+  "release_page": "https://nodejs.org/en/blog/release/v24.20.0",
+  "release_index": "https://nodejs.org/download/release/latest-v24.x/",
+  "sha256": "5c976096e04e5c2c1f091938926234cc9fbebfe9787ddd149351b3b0ecc707b5",
+  "verification": "independently-verified-against-official-node-release-evidence"
+}
