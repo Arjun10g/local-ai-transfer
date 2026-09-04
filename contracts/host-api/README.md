@@ -16,6 +16,8 @@ controller generation.
 | `POST /api/operator-grants/{capability}` | required `granted`; `duration_ms` required only when granting (1 minute–8 hours) |
 | `POST /api/operator-grants/revoke-all` | `{}` |
 | `POST /api/shutdown` | `{}` |
+| `GET /api/provider-auth/microsoft_graph` | status only; returns bounded state, prompt, and opaque fingerprint |
+| `POST /api/provider-auth/microsoft_graph/{start,cancel,clear}` | `{}`; `start` returns `409 provider_unconfigured` unless explicit device auth is configured |
 
 Authenticated `GET /api/operator-grants` lists only host-configured capability,
 provider, scope, label, profile, and expiry projections. It never returns account
@@ -28,6 +30,12 @@ controller turn.
 Failed authentication uses timing-safe token comparison and a bounded per-loopback
 rate limit. Header count/size limits use Node's `maxHeadersCount` and
 `maxHeaderSize` settings.
+
+The Graph auth status and control routes use the same bearer, loopback Host, and
+exact loopback Origin checks as other authenticated routes. `start` is operator
+initiated and concurrent starts share one device-code flow; `cancel` aborts it and
+`clear` also removes the memory-only token and revokes Graph grants. Neither the
+status response nor the UI contains an access token or account identifier.
 
 The native loopback transport accepts only numeric `127.0.0.1` client
 endpoints. It requires HTTP/1.1, a loopback `Host`, bounded unique headers,
