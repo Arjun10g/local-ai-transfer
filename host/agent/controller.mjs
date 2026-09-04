@@ -15,7 +15,7 @@ export class ConversationController {
     if (!Number.isInteger(maxHistoryMessages) || maxHistoryMessages < 1 || !Number.isInteger(maxHistoryBytes) || maxHistoryBytes < 1024) throw new TypeError('history limits are invalid');
     this.engine = engine; this.maxToolCalls = maxToolCalls; this.confirmationTimeoutMs = confirmationTimeoutMs; this.maxSessions = maxSessions; this.maxHistoryMessages = maxHistoryMessages; this.maxHistoryBytes = maxHistoryBytes; this.clock = 0;
     this.sessions = new Map(); this.active = null; this.pending = new Map();
-    this.tools = new Map([[timeNowDefinition.name, { ...timeNowDefinition, execute: ({ id }) => timeNowTool({ id }) }], ...(toolRegistry ? Object.entries(toolRegistry) : [])]);
+    this.tools = new Map([[timeNowDefinition.name, { ...timeNowDefinition, execute: ({ id, arguments: args }) => timeNowTool({ id, arguments: args }) }], ...(toolRegistry ? Object.entries(toolRegistry) : [])]);
   }
   createSession(sessionId = opaque('ses')) {
     if (!sessionIdPattern.test(sessionId)) throw new Error('invalid session id');
@@ -65,8 +65,11 @@ export class ConversationController {
         }
         if (!gotCall) { this._appendHistory(session, { role: 'assistant', content: text }); session.state = 'COMPLETED'; emit('message.completed', { text, finish_reason: 'stop', usage: usage ?? { prompt_tokens: 0, completion_tokens: text.length }, state: session.state }); emit('metrics.snapshot', { tool_calls: calls, history_messages: session.history.length, history_bytes: session.history_bytes }); return { requestId, sessionId: session.id, state: session.state, text }; }
         calls++; if (calls > this.maxToolCalls) throw Object.assign(new Error('tool_call_limit_exceeded'), { code: 'tool_call_limit_exceeded' });
-        const call = parseToolCall(callText); session.state = 'TOOL_PROPOSED'; emit('tool.proposed', { call });
+        const call = parseToolCall(callText); session.state = 'TOOL_PROPOSED';
         const tool = this.tools.get(call.name); if (!tool) throw Object.assign(new Error('unknown_tool'), { code: 'unknown_tool' });
+        let preview;
+        if (tool.preview) preview = await tool.preview(call);
+        emit('tool.proposed', { call, ...(preview === undefined ? {} : { preview }) });
         let approved = true;
         if (tool.requires_confirmation) {
           session.state = 'WAITING_CONFIRMATION'; const confirmationId = opaque('cnf');

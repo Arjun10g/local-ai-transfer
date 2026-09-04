@@ -22,7 +22,7 @@ export function validateConfig(input = {}) {
     if (own(e, 'endpoint') && (typeof e.endpoint !== 'string' || e.endpoint.length > 512)) throw new Error('engine.endpoint invalid');
   }
   if (own(input, 'workspace_roots')) {
-    if (!Array.isArray(input.workspace_roots) || input.workspace_roots.length > 16 || input.workspace_roots.some(x => typeof x !== 'string' || x.length < 1 || x.length > 1024)) throw new Error('workspace_roots invalid');
+    if (!Array.isArray(input.workspace_roots) || input.workspace_roots.length > 16 || input.workspace_roots.some(x => (typeof x === 'string' && (x.length < 1 || x.length > 1024)) || (x && typeof x === 'object' && !Array.isArray(x) && (Object.keys(x).some(key => !['id', 'path', 'read', 'write'].includes(key)) || typeof x.id !== 'string' || x.id.length < 1 || x.id.length > 64 || typeof x.path !== 'string' || x.path.length < 1 || x.path.length > 1024 || (x.read !== undefined && typeof x.read !== 'boolean') || (x.write !== undefined && typeof x.write !== 'boolean'))) || (typeof x !== 'string' && (!x || typeof x !== 'object' || Array.isArray(x))))) throw new Error('workspace_roots invalid');
   }
   if (own(input, 'network')) {
     const n = object(input.network, 'network'); keys(n, ['provider'], 'network');
