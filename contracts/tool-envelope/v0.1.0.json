@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "lae://contracts/tool-envelope/0.1.0",
+  "title": "Local Assistant Tool Envelope",
+  "version": "0.1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "name", "arguments"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,96}$"},
+    "name": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{1,95}$"},
+    "arguments": {"type": "object", "additionalProperties": true, "maxProperties": 32}
+  }
+}

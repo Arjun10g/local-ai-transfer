@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "lae://contracts/assistant-events/0.1.0",
+  "title": "Local Assistant Event Stream",
+  "version": "0.1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "event_id", "event", "request_id", "session_id", "sequence", "timestamp", "data"],
+  "properties": {
+    "version": {"const": "0.1.0"},
+    "event_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{8,96}$"},
+    "event": {"enum": ["message.started", "message.delta", "message.completed", "reasoning.started", "reasoning.completed", "tool.proposed", "tool.confirmation_required", "tool.started", "tool.output", "tool.completed", "tool.failed", "request.cancelled", "request.failed", "metrics.snapshot"]},
+    "request_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{8,96}$"},
+    "session_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{8,96}$"},
+    "sequence": {"type": "integer", "minimum": 0, "maximum": 10000},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "data": {"type": "object", "additionalProperties": true, "maxProperties": 32}
+  }
+}

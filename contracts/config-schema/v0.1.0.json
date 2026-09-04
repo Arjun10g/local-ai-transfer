@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "lae://contracts/config-schema/0.1.0",
+  "title": "Local Assistant Host Configuration",
+  "version": "0.1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "host": {"type": "object", "additionalProperties": false, "properties": {"bind": {"const": "127.0.0.1"}, "max_body_bytes": {"type": "integer", "minimum": 1024, "maximum": 1048576}, "request_timeout_ms": {"type": "integer", "minimum": 100, "maximum": 120000}, "max_connections": {"type": "integer", "minimum": 1, "maximum": 256}}},
+    "engine": {"type": "object", "additionalProperties": false, "properties": {"mode": {"enum": ["fixture", "native"]}, "endpoint": {"type": "string", "maxLength": 512}}},
+    "workspace_roots": {"type": "array", "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 1024}},
+    "network": {"type": "object", "additionalProperties": false, "properties": {"provider": {"enum": ["disabled", "approved_http_search", "approved_http_fetch", "browser_open"]}}}
+  }
+}
