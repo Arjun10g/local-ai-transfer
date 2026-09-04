@@ -684,6 +684,18 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     watchdog.wait(timeout=10)
                 except (OSError, subprocess.TimeoutExpired):
                     pass
+
+        def deletion_confirmed() -> bool:
+            """Return true only for the provider's explicit success receipt."""
+            deletion = lifecycle.get("deletion")
+            if not isinstance(deletion, dict):
+                return False
+            if deletion.get("status") == "already-cleaned":
+                return deletion.get("retry_required") is not True
+            nested = deletion.get("deletion")
+            if isinstance(nested, dict):
+                return nested.get("success") is True and deletion.get("retry_required") is not True
+            return deletion.get("success") is True and deletion.get("retry_required") is not True
         # Reserve the possible provider POST before uploading the key or
         # creating an instance. A failed append is a hard stop: no mutation is
         # allowed without a durable budget/ownership reservation.
@@ -925,13 +937,12 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             # best-effort and independent for each allowlisted artifact.
             if instance_id is not None:
                 if recorded:
-                    try:
-                        lifecycle["deletion"] = teardown_exact(phase_id, instance_id, env_file=env_file)
-                    finally:
-                        # Even a failed deletion attempt must not leave the
-                        # watchdog process unmanaged after its exact cleanup
-                        # call has returned or raised.
-                        stop_watchdog()
+                    # teardown_exact raises or returns an unsuccessful receipt
+                    # when ownership/deletion is not confirmed. In either
+                    # case retain the external watchdog so it can continue
+                    # the exact cleanup retry; stopping it here would orphan
+                    # the provider resource during the exception path.
+                    lifecycle["deletion"] = teardown_exact(phase_id, instance_id, env_file=env_file)
                 else:
                     # Ledger write failed: exact ID is still known, so delete
                     # it before attempting any key/bookkeeping cleanup.
@@ -964,9 +975,11 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     except Exception:
                         pass
             # Keep the watchdog alive through salvage and exact instance
-            # deletion. It is stopped only after the provider cleanup handle
-            # has completed, so a launcher failure cannot orphan the host.
-            stop_watchdog()
+            # deletion. It is stopped only after the provider explicitly
+            # confirms deletion; an unconfirmed/raised cleanup leaves it
+            # running for its own exact retry path.
+            if deletion_confirmed():
+                stop_watchdog()
             if attempt_reserved and settle_attempt_after_cleanup:
                 try:
                     sf.append_cost_event({"instance_id": attempt_id, "phase_id": phase_id, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})

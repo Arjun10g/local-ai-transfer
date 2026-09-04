@@ -508,6 +508,14 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertLess(envelope["ceiling_seconds"], envelope["watchdog_seconds"])
         self.assertLess(envelope["host_shutdown_from_create_seconds"], envelope["watchdog_seconds"])
 
+    def test_teardown_failure_keeps_watchdog_for_exact_retry(self):
+        source = (ROOT / "scripts" / "j1m_orchestrator.py").read_text(encoding="utf-8")
+        cleanup = source[source.index("if instance_id is not None:") : source.index("if attempt_reserved and settle_attempt_after_cleanup:")]
+        self.assertIn("lifecycle[\"deletion\"] = teardown_exact", cleanup)
+        self.assertNotIn("finally:\n                        #", cleanup)
+        self.assertIn("if deletion_confirmed():\n                stop_watchdog()", cleanup)
+        self.assertIn('deletion.get("retry_required") is not True', source)
+
     def test_eval_rejects_local_artifact_execution_path(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_reject_local_eval")
         with self.assertRaises(ValueError):
