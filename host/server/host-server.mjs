@@ -4,11 +4,14 @@ import { join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { sseFrame } from '../agent/assistant-events.mjs';
 import { mergeConfig } from '../agent/config.mjs';
+import { parseStrictJson } from '../agent/tool-envelope.mjs';
 
 const UI_ROOT = join(import.meta.dirname, '..', '..', 'ui');
 const ASSETS = new Map([['/', ['index.html', 'text/html; charset=utf-8']], ['/index.html', ['index.html', 'text/html; charset=utf-8']], ['/app.js', ['app.js', 'text/javascript; charset=utf-8']], ['/styles.css', ['styles.css', 'text/css; charset=utf-8']]]);
 const LOCAL_HOST = /^(?:127\.0\.0\.1|localhost)(?::\d{1,5})?$/i;
 const OPAQUE_ID = /^[A-Za-z0-9_-]{8,96}$/;
+const BOOTSTRAP_NONCE = /^[A-Za-z0-9_-]{43}$/;
+const BOOTSTRAP_TTL_MS = 60_000;
 
 /** Platform-neutral containment check; avoids assuming `/` on Windows. */
 export function isWithinDirectory(root, target) {
@@ -33,14 +36,14 @@ async function body(req, maxBytes, timeoutMs) {
   try {
     for await (const chunk of req) { total += chunk.length; if (total > maxBytes) throw Object.assign(new Error('body_too_large'), { code: 'body_too_large' }); chunks.push(chunk); }
     if (!total) return {};
-    try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw Object.assign(new Error('invalid_json'), { code: 'invalid_json' }); }
+    try { return parseStrictJson(Buffer.concat(chunks).toString('utf8'), { maxBytes, maxDepth: 16, maxString: 8192, maxArray: 64, maxObject: 64 }); } catch { throw Object.assign(new Error('invalid_json'), { code: 'invalid_json' }); }
   } finally { req.setTimeout(0); }
 }
 
 export class HostServer {
   constructor({ controller, engine, config = {}, providers, providerAuth, providerShutdown, operatorGrants } = {}) {
     if (!controller) throw new TypeError('controller is required');
-    this.controller = controller; this.engine = engine; this.config = mergeConfig(config); this.providers = providers; this.providerAuth = providerAuth; this.providerShutdown = providerShutdown; this.operatorGrants = operatorGrants; this.token = randomBytes(32).toString('base64url'); this.server = null; this.port = null; this.authFailures = new Map();
+    this.controller = controller; this.engine = engine; this.config = mergeConfig(config); this.providers = providers; this.providerAuth = providerAuth; this.providerShutdown = providerShutdown; this.operatorGrants = operatorGrants; this.token = randomBytes(32).toString('base64url'); this.bootstrapNonce = randomBytes(32).toString('base64url'); this.bootstrapExpiresAt = 0; this.bootstrapUsed = false; this.server = null; this.port = null; this.authFailures = new Map();
   }
   async listen(port = 0) {
     if (this.server) return this.address();
@@ -49,9 +52,9 @@ export class HostServer {
     this.server.maxConnections = this.config.host.max_connections;
     this.server.maxHeadersCount = this.config.host.max_header_count;
     await new Promise((resolve, reject) => { this.server.once('error', reject); this.server.listen(port, '127.0.0.1', resolve); });
-    this.port = this.server.address().port; return this.address();
+    this.port = this.server.address().port; this.bootstrapExpiresAt = Date.now() + BOOTSTRAP_TTL_MS; return this.address();
   }
-  address() { return { host: '127.0.0.1', port: this.port, token: this.token, url: `http://127.0.0.1:${this.port}` }; }
+  address() { const url = `http://127.0.0.1:${this.port}`; return { host: '127.0.0.1', port: this.port, token: this.token, url, bootstrap_url: this.bootstrapNonce ? `${url}/#bootstrap=${encodeURIComponent(this.bootstrapNonce)}` : null }; }
   async close() { this.operatorGrants?.revokeAll?.(); this.controller.cancelActive?.(); await this.providerShutdown?.(); if (!this.server) return; await new Promise(resolve => this.server.close(() => resolve())); this.server = null; await this.engine?.shutdown?.(); }
   allowedRequest(req) {
     if (req.socket.remoteAddress && !['127.0.0.1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) return false;
@@ -64,15 +67,28 @@ export class HostServer {
   authLimited(req) { const key = req.socket.remoteAddress ?? 'unknown'; const now = Date.now(); const previous = this.authFailures.get(key); if (!previous || previous.until <= now) return false; return previous.count >= 20; }
   recordAuthFailure(req) { const key = req.socket.remoteAddress ?? 'unknown'; const now = Date.now(); const item = this.authFailures.get(key); const next = !item || item.until <= now ? { count: 1, until: now + 60000 } : { count: item.count + 1, until: item.until }; this.authFailures.set(key, next); if (this.authFailures.size > 1024) { const oldest = [...this.authFailures.entries()].sort((a, b) => a[1].until - b[1].until)[0]; if (oldest) this.authFailures.delete(oldest[0]); } }
   clearAuthFailure(req) { this.authFailures.delete(req.socket.remoteAddress ?? 'unknown'); }
-  fail(res, error) { if (res.destroyed || res.writableEnded) return; if (res.headersSent) { res.end(); return; } const code = error?.code ?? 'request_failed'; const status = code === 'body_too_large' ? 413 : code === 'request_timeout' ? 408 : 500; json(res, status, { error: code }); }
+  async bootstrap(req, res) {
+    const expectedOrigin = `http://127.0.0.1:${this.port}`;
+    const expectedHost = `127.0.0.1:${this.port}`;
+    if (req.headers.host !== expectedHost || req.headers.origin !== expectedOrigin || req.headers.referer !== undefined || req.headers['sec-fetch-site'] !== 'same-origin') return json(res, 403, { error: 'forbidden' });
+    if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' });
+    const input = exactBody(await body(req, Math.min(this.config.host.max_body_bytes, 1024), this.config.host.request_timeout_ms), ['nonce'], ['nonce']);
+    if (this.bootstrapUsed || Date.now() > this.bootstrapExpiresAt || !this.bootstrapNonce) return json(res, 410, { error: 'bootstrap_unavailable' });
+    if (typeof input.nonce !== 'string' || !BOOTSTRAP_NONCE.test(input.nonce) || !tokenMatch(input.nonce, this.bootstrapNonce)) { this.recordAuthFailure(req); return json(res, this.authLimited(req) ? 429 : 401, { error: this.authLimited(req) ? 'auth_rate_limited' : 'invalid_bootstrap' }); }
+    this.bootstrapUsed = true; this.bootstrapNonce = null; this.clearAuthFailure(req);
+    return json(res, 200, { token: this.token });
+  }
+  fail(res, error) { if (res.destroyed || res.writableEnded) return; if (res.headersSent) { res.end(); return; } const code = error?.code ?? 'request_failed'; const status = code === 'body_too_large' ? 413 : code === 'request_timeout' ? 408 : code === 'invalid_json' ? 400 : 500; json(res, status, { error: code }); }
   async handle(req, res) {
     res.setHeader('x-content-type-options', 'nosniff');
     if (!this.allowedRequest(req)) return json(res, 403, { error: 'forbidden' });
-    const path = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
+    const requestUrl = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const path = requestUrl.pathname;
     if (req.method === 'GET' && path === '/healthz') return json(res, 200, { ok: true });
+    if (req.method === 'GET' && ASSETS.has(path) && !requestUrl.search) return this.asset(path, res);
+    if (req.method === 'POST' && path === '/bootstrap' && !requestUrl.search) return this.bootstrap(req, res);
     if (!this.authorized(req)) { this.recordAuthFailure(req); return json(res, this.authLimited(req) ? 429 : 401, { error: this.authLimited(req) ? 'auth_rate_limited' : 'unauthorized' }); }
     this.clearAuthFailure(req);
-    if (req.method === 'GET' && ASSETS.has(path)) return this.asset(path, res);
     if (req.method === 'GET' && path === '/api/status') return this.status(res);
     if (req.method === 'GET' && path === '/api/provider-auth/microsoft_graph') return this.providerAuthStatus(res);
     if (req.method === 'GET' && path === '/api/operator-grants') return json(res, 200, { capabilities: this.operatorGrants?.list?.() ?? [] });
@@ -101,7 +117,7 @@ export class HostServer {
   async asset(path, res) {
     const [file, type] = ASSETS.get(path); const candidate = resolve(join(UI_ROOT, file));
     if (!isWithinDirectory(UI_ROOT, candidate)) return json(res, 404, { error: 'not_found' });
-    try { let content = await readFile(candidate, 'utf8'); if (file === 'index.html') content = content.replaceAll('__LAE_BOOTSTRAP__', this.token); res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', ...securityHeaders() }); res.end(content); } catch { json(res, 404, { error: 'not_found' }); }
+    try { const content = await readFile(candidate, 'utf8'); res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', ...securityHeaders() }); res.end(content); } catch { json(res, 404, { error: 'not_found' }); }
   }
   async status(res) { let engine = { ready: false, backend: 'unknown' }; try { engine = await this.engine?.health?.() ?? engine; } catch { /* generic status only */ } const providers = typeof this.providers === 'function' ? this.providers() : this.providers ?? {}; json(res, 200, { host: { bind: '127.0.0.1', port: this.port }, engine, network: { provider: this.config.network.provider, enabled: this.config.network.provider !== 'disabled' }, providers, operator_grants: { available: this.operatorGrants?.list?.().length ?? 0, active: this.operatorGrants?.list?.().filter(value => value.granted).length ?? 0 }, limits: { max_body_bytes: this.config.host.max_body_bytes, max_connections: this.config.host.max_connections } }); }
   async chat(req, res) {

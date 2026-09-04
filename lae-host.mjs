@@ -33,6 +33,7 @@ const processEnvironment = Object.fromEntries(['SystemRoot', 'WINDIR'].filter(ke
 const controller = new ConversationController({ engine, toolRegistry: { ...createLocalToolRegistry({ workspaces: config.workspace_roots, applications: config.applications, process_actions: config.process_actions, processEnvironment, networkProvider: config.network.provider, grantControl: operatorGrants }), ...externalTools } });
 const host = new HostServer({ controller, engine, config, providers: externalTools.providerStatus, providerAuth: externalTools.providerAuthControl, providerShutdown: externalTools.shutdown, operatorGrants });
 const address = await host.listen(Number(process.env.LAE_PORT ?? 0));
-console.log(JSON.stringify({ ready: true, host: address.host, port: address.port, engine: mode, network: config.network.provider }));
+if (process.env.LAE_REVEAL_BOOTSTRAP_URL === '1') console.log(address.bootstrap_url);
+else console.log(JSON.stringify({ ready: true, host: address.host, port: address.port, bootstrap: 'hidden-use-approved-launcher', engine: mode, network: config.network.provider }));
 const shutdown = async () => { await host.close(); process.exit(0); };
 process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown);

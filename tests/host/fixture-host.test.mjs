@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { makeToolResult, parseStrictJson, parseToolCall, validateToolCall, validateToolResult, ToolCallStreamDecoder, EnvelopeError } from '../../host/agent/tool-envelope.mjs';
 import { validateEvent } from '../../host/agent/assistant-events.mjs';
@@ -10,6 +11,7 @@ import { mergeConfig } from '../../host/agent/config.mjs';
 import { OperatorGrantStore, OperatorGrantControl, buildOperatorGrantBindings } from '../../host/providers/operator-grants.mjs';
 
 const auth = token => ({ authorization: `Bearer ${token}` });
+const rawPost = ({ port, host, origin, body }) => new Promise((resolve, reject) => { const request = http.request({ hostname: '127.0.0.1', port, path: '/bootstrap', method: 'POST', headers: { host, origin, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } }, response => { response.resume(); response.once('end', () => resolve(response.statusCode)); }); request.once('error', reject); request.end(body); });
 
 test('strict parser rejects duplicate, trailing, deep, and oversized JSON', () => {
   assert.deepEqual(parseStrictJson('{"a":[true,null,2]}'), { a: [true, null, 2] });
@@ -164,11 +166,29 @@ test('host enforces loopback auth/origin, static allowlist, and streams fixture 
   const health = await fetch(`${address.url}/healthz`); assert.equal(health.status, 200);
   const unauthorized = await fetch(`${address.url}/api/status`); assert.equal(unauthorized.status, 401);
   const forbidden = await fetch(`${address.url}/api/status`, { headers: { ...auth(address.token), origin: 'https://attacker.invalid' } }); assert.equal(forbidden.status, 403);
-  const page = await fetch(`${address.url}/`, { headers: auth(address.token) }); assert.equal(page.status, 200); assert.match(await page.text(), /meta name="lae-token" content="[A-Za-z0-9_-]+"/);
+  const page = await fetch(`${address.url}/`); assert.equal(page.status, 200); const pageText = await page.text(); assert.equal(pageText.includes(address.token), false); assert.equal(pageText.includes('lae-token'), false); assert.equal(pageText.includes('__LAE_BOOTSTRAP__'), false);
   const sessionResponse = await fetch(`${address.url}/api/sessions`, { method: 'POST', headers: { ...auth(address.token), 'content-type': 'application/json' }, body: '{}' }); assert.equal(sessionResponse.status, 201); const session = await sessionResponse.json();
   const response = await fetch(`${address.url}/api/chat`, { method: 'POST', headers: { ...auth(address.token), 'content-type': 'application/json' }, body: JSON.stringify({ session_id: session.session_id, request_id: 'req_http01', message: 'What time is it?' }) });
   assert.equal(response.status, 200); const stream = await response.text(); assert.match(stream, /event: tool\.completed/); assert.match(stream, /event: message\.completed/);
   const traversal = await fetch(`${address.url}/../package.json`, { headers: auth(address.token) }); assert.equal(traversal.status, 404);
+});
+
+test('browser bootstrap is same-origin, one-time, replay-safe, and absent from served assets', async t => {
+  const engine = new FixtureEngineClient(); const controller = new ConversationController({ engine }); const host = new HostServer({ controller, engine });
+  const address = await host.listen(0); t.after(() => host.close());
+  const bootstrapUrl = new URL(address.bootstrap_url); const parameters = new URLSearchParams(bootstrapUrl.hash.slice(1)); const nonce = parameters.get('bootstrap');
+  assert.match(nonce, /^[A-Za-z0-9_-]{43}$/); assert.equal(address.bootstrap_url.includes(address.token), false); assert.equal(bootstrapUrl.search, '');
+  const app = await (await fetch(`${address.url}/app.js`)).text(); assert.equal(app.includes(nonce), false); assert.equal(app.includes(address.token), false); assert.ok(app.indexOf('history.replaceState') < app.indexOf("fetch('/bootstrap'"));
+  const serverSource = await readFile(new URL('../../host/server/host-server.mjs', import.meta.url), 'utf8'); assert.equal(serverSource.includes('console.log'), false); assert.equal(serverSource.includes('console.error'), false);
+  const hostile = await fetch(`${address.url}/bootstrap`, { method: 'POST', headers: { origin: 'http://127.0.0.1:9', 'content-type': 'application/json' }, body: JSON.stringify({ nonce }) }); assert.equal(hostile.status, 403);
+  const wrongHost = await rawPost({ port: address.port, host: `localhost:${address.port}`, origin: address.url, body: JSON.stringify({ nonce }) }); assert.equal(wrongHost, 403);
+  const leakedReferrer = await fetch(`${address.url}/bootstrap`, { method: 'POST', headers: { origin: address.url, referer: `${address.url}/#bootstrap=${nonce}`, 'content-type': 'application/json' }, body: JSON.stringify({ nonce }) }); assert.equal(leakedReferrer.status, 403);
+  const duplicate = await fetch(`${address.url}/bootstrap`, { method: 'POST', headers: { origin: address.url, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' }, body: `{"nonce":"${nonce}","nonce":"${nonce}"}` }); assert.equal(duplicate.status, 400);
+  const invalid = await fetch(`${address.url}/bootstrap`, { method: 'POST', headers: { origin: address.url, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' }, body: JSON.stringify({ nonce: 'A'.repeat(43) }) }); assert.equal(invalid.status, 401);
+  const exchanged = await fetch(`${address.url}/bootstrap`, { method: 'POST', headers: { origin: address.url, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' }, body: JSON.stringify({ nonce }) }); assert.equal(exchanged.status, 200); assert.equal(exchanged.headers.get('cache-control'), 'no-store'); assert.equal(exchanged.headers.get('referrer-policy'), 'no-referrer'); const issued = await exchanged.json(); assert.equal(issued.token, address.token);
+  const replay = await fetch(`${address.url}/bootstrap`, { method: 'POST', headers: { origin: address.url, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' }, body: JSON.stringify({ nonce }) }); assert.equal(replay.status, 410); assert.equal(host.address().bootstrap_url, null); assert.match(app, /referrerPolicy:'no-referrer'/); assert.match(app, /cache:'no-store'/);
+  const protectedApi = await fetch(`${address.url}/api/status`); assert.equal(protectedApi.status, 401);
+  const authorizedApi = await fetch(`${address.url}/api/status`, { headers: auth(issued.token) }); assert.equal(authorizedApi.status, 200);
 });
 
 test('config rejects unknown/non-loopback settings and host enforces body bound', async t => {

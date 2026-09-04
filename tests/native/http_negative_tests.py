@@ -52,7 +52,7 @@ def raw_request(port, payload, timeout=3):
 def main():
     executable = sys.argv[1]
     use_stdin_token = sys.platform.startswith("win")
-    launcher = Path(__file__).parents[2] / "release" / "windows" / "Start-LocalAssistant.ps1"
+    launcher = Path(__file__).parents[2] / "release" / "windows" / "Run-WindowsBackend.ps1"
     launcher_text = launcher.read_text(encoding="utf-8")
     if "--token-stdin" not in launcher_text or "Remove-Item Env:LAE_ENGINE_TOKEN" not in launcher_text or "'--token'" in launcher_text:
         raise AssertionError("Windows launcher must pipe the token and clear inherited secret environment")

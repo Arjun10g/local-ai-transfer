@@ -1,0 +1,14 @@
+{
+  "version": "0.1.0",
+  "host": {
+    "bind": "127.0.0.1",
+    "max_body_bytes": 65536,
+    "request_timeout_ms": 30000,
+    "max_connections": 32
+  },
+  "workspace_roots": [],
+  "applications": {},
+  "process_actions": { "enabled": false, "actions": {} },
+  "network": { "provider": "disabled" },
+  "providers": {}
+}
