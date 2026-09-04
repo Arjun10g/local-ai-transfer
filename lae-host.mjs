@@ -21,7 +21,7 @@ if (mode === 'fixture' && (endpoint || token)) throw new Error('native engine se
 const config = mergeConfig({ ...fileConfig, engine: { ...(fileConfig.engine ?? {}), mode } });
 const engine = mode === 'native' ? new NativeEngineClient({ endpoint, token }) : new FixtureEngineClient();
 if (mode === 'native') await engine.waitReady();
-const controller = new ConversationController({ engine, toolRegistry: createLocalToolRegistry({ workspaces: config.workspace_roots }) });
+const controller = new ConversationController({ engine, toolRegistry: createLocalToolRegistry({ workspaces: config.workspace_roots, networkProvider: config.network.provider }) });
 const host = new HostServer({ controller, engine, config });
 const address = await host.listen(Number(process.env.LAE_PORT ?? 0));
 console.log(JSON.stringify({ ready: true, host: address.host, port: address.port, engine: mode, network: config.network.provider }));

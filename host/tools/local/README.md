@@ -22,6 +22,11 @@ directory temporary file, flushes it, and replaces atomically where the host
 filesystem supports it. A Windows fallback preserves/restores a backup if
 replacement fails.
 
+Final `realpath`/metadata checks narrow TOCTOU and reparse-point races, but
+Node cannot provide a kernel-level no-swap guarantee between authorization and
+open/rename on every Windows filesystem; that residual is documented for S4
+acceptance.
+
 Mutating tools are T2 and `requires_confirmation: true`; the controller, not a
 tool or model, binds confirmation to request/call IDs.
 
@@ -31,9 +36,12 @@ tool or model, binds confirmation to request/call IDs.
 integration is explicitly Windows-only (`powershell.exe Get-Clipboard -Raw`
 for read and `clip.exe` for write), with no arbitrary command arguments.
 `app.open` accepts only a logical ID resolved through a trusted executable and
-argument allowlist. `browser.open_url` accepts HTTPS only, rejects credentials,
-literal IP/private/local names, and launches through a fixed executable plus
-argv with `shell: false`. Neither action retrieves web content.
+argument allowlist. `browser.open_url` is an external network action: it
+requires the explicit `browser_open` network provider, exposes the canonical
+destination in its confirmation preview/result, accepts HTTPS only, rejects
+credentials, literal IP/private/local names, and launches through a fixed
+executable plus argv with `shell: false`. Neither action retrieves web
+content.
 
 On non-Windows hosts clipboard calls return a typed `platform_unsupported`
 result; no provider or shell fallback is attempted.

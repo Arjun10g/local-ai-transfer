@@ -3,10 +3,10 @@ import { createFilesystemTools } from './filesystem.mjs';
 import { createSystemTools } from './system-tools.mjs';
 import { timeNowDefinition, timeNowTool } from '../time-now.mjs';
 
-export function createLocalToolRegistry({ workspaces = [], applications = {}, browserExecutable, platform } = {}) {
+export function createLocalToolRegistry({ workspaces = [], applications = {}, browserExecutable, platform, networkProvider = 'disabled' } = {}) {
   const policy = new WorkspacePolicy(workspaces); const filesystem = workspaces.length ? createFilesystemTools(policy) : {};
-  const system = createSystemTools({ applications, browserExecutable, platform });
-  return { 'time.now': { ...timeNowDefinition, execute: ({ id }) => timeNowTool({ id }) }, ...system, ...filesystem };
+  const system = createSystemTools({ applications, browserExecutable, platform, networkProvider });
+  return { 'time.now': { ...timeNowDefinition, execute: ({ id, arguments: args }) => timeNowTool({ id, arguments: args }) }, ...system, ...filesystem };
 }
 
 export { WorkspacePolicy } from './workspace-policy.mjs';

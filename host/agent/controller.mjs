@@ -15,7 +15,7 @@ export class ConversationController {
     if (!Number.isInteger(maxHistoryMessages) || maxHistoryMessages < 1 || !Number.isInteger(maxHistoryBytes) || maxHistoryBytes < 1024) throw new TypeError('history limits are invalid');
     this.engine = engine; this.maxToolCalls = maxToolCalls; this.confirmationTimeoutMs = confirmationTimeoutMs; this.maxSessions = maxSessions; this.maxHistoryMessages = maxHistoryMessages; this.maxHistoryBytes = maxHistoryBytes; this.clock = 0;
     this.sessions = new Map(); this.active = null; this.pending = new Map();
-    this.tools = new Map([[timeNowDefinition.name, { ...timeNowDefinition, execute: ({ id }) => timeNowTool({ id }) }], ...(toolRegistry ? Object.entries(toolRegistry) : [])]);
+    this.tools = new Map([[timeNowDefinition.name, { ...timeNowDefinition, execute: ({ id, arguments: args }) => timeNowTool({ id, arguments: args }) }], ...(toolRegistry ? Object.entries(toolRegistry) : [])]);
   }
   createSession(sessionId = opaque('ses')) {
     if (!sessionIdPattern.test(sessionId)) throw new Error('invalid session id');

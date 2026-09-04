@@ -1,4 +1,5 @@
 import { makeToolResult } from '../agent/tool-envelope.mjs';
+import { validateToolArguments } from './local/argument-validation.mjs';
 
 export const timeNowDefinition = Object.freeze({
   name: 'time.now', version: '1.0.0', risk_tier: 'T0', side_effect: 'none', network: false,
@@ -6,7 +7,8 @@ export const timeNowDefinition = Object.freeze({
   requires_confirmation: false, output_limit: 4096, timeout_ms: 1000
 });
 
-export function timeNowTool({ id, name = 'time.now' } = {}) {
+export function timeNowTool({ id, name = 'time.now', arguments: args = {} } = {}) {
+  validateToolArguments('time.now', args);
   const now = new Date();
   const offsetMinutes = -now.getTimezoneOffset();
   const sign = offsetMinutes >= 0 ? '+' : '-';

@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { WorkspacePolicy, validateRelativePath } from '../../host/tools/local/workspace-policy.mjs';
 import { createFilesystemTools } from '../../host/tools/local/filesystem.mjs';
 import { createSystemTools } from '../../host/tools/local/system-tools.mjs';
+import { timeNowTool } from '../../host/tools/time-now.mjs';
 import { mergeConfig } from '../../host/agent/config.mjs';
 
 const call = (name, arguments_, id = 'call_test01') => ({ id, name, arguments: arguments_ });
@@ -24,13 +25,14 @@ test('workspace policy rejects traversal, ADS, reserved names, absolute paths, a
 
 test('workspace config supports explicit read/write policy', () => {
   const config = mergeConfig({ workspace_roots: [{ id: 'project', path: '/tmp/project', read: true, write: false }] }); assert.equal(config.workspace_roots[0].write, false);
+  assert.throws(() => mergeConfig({ workspace_roots: [{ id: 'project', path: '/tmp/project', extra: true }] }), /workspace_roots invalid/);
 });
 
 test('filesystem read/list/search are bounded and literal', async () => {
   const root = await fixture(); const tools = createFilesystemTools(new WorkspacePolicy([{ id: 'project', path: root, read: true, write: true }]));
   const listed = text(await tools['fs.list'].execute(call('fs.list', { workspace_id: 'project', path: '' }))); assert.equal(listed.entry_count, 2); assert.ok(listed.entries.some(entry => entry.name === 'notes.txt'));
   const read = text(await tools['fs.read_text'].execute(call('fs.read_text', { workspace_id: 'project', path: 'notes.txt', max_bytes: 8 }))); assert.equal(read.text, 'deadline'); assert.equal(read.truncated, true); assert.equal(read.hash_scope, 'returned_bytes');
-  const searched = text(await tools['fs.search_text'].execute(call('fs.search_text', { workspace_id: 'project', path: '', query: 'deadline', max_files: 10 }))); assert.equal(searched.matches.length, 2); assert.equal(searched.matches[0].line, 1);
+  const searched = text(await tools['fs.search_text'].execute(call('fs.search_text', { workspace_id: 'project', path: '', query: 'deadline', max_files: 10 }))); assert.equal(searched.matches.length, 2); assert.equal(searched.matches[0].line, 1); const nested = text(await tools['fs.search_text'].execute(call('fs.search_text', { workspace_id: 'project', path: 'nested', query: 'deadline' }))); assert.equal(nested.matches[0].path, 'nested/other.txt');
 });
 
 test('write_new is create-only and apply_patch requires current base hash', async () => {
@@ -47,6 +49,17 @@ test('system information is bounded; clipboard is typed offline on non-Windows',
 
 test('app/browser tools use allowlisted executable+argv and reject unsafe URLs', async () => {
   const tools = createSystemTools({ platform: 'linux', applications: { probe: { executable_id: 'probe', executable: process.execPath, args: ['-e', ''] } }, browserExecutable: process.execPath });
-  const opened = text(await tools['app.open'].execute(call('app.open', { app_id: 'probe' }))); assert.equal(opened.opened, true); const browser = text(await tools['browser.open_url'].execute(call('browser.open_url', { url: 'https://example.com/docs' }))); assert.equal(browser.host, 'example.com');
+  const opened = text(await tools['app.open'].execute(call('app.open', { app_id: 'probe' }))); assert.equal(opened.opened, true); const browserCall = call('browser.open_url', { url: 'https://example.com/docs' }); const preview = await tools['browser.open_url'].preview(browserCall); assert.deepEqual(preview, { destination: 'https://example.com/docs', provider: 'disabled', data_egress: 'external_navigation' }); const browserDisabled = text(await tools['browser.open_url'].execute(browserCall)); assert.equal(browserDisabled.code, 'provider_disabled'); const enabled = createSystemTools({ platform: 'linux', browserExecutable: process.execPath, networkProvider: 'browser_open' }); const browser = text(await enabled['browser.open_url'].execute(call('browser.open_url', { url: 'https://example.com/docs' }))); assert.equal(browser.host, 'example.com');
   await assert.rejects(() => tools['browser.open_url'].execute(call('browser.open_url', { url: 'file:///etc/passwd' })), /invalid_url|unsafe_url/); await assert.rejects(() => tools['browser.open_url'].execute(call('browser.open_url', { url: 'https://127.0.0.1/' })), /private_url/);
+});
+
+test('every local tool rejects unknown fields and wrong argument types', async () => {
+  const root = await fixture(); const fs = createFilesystemTools(new WorkspacePolicy([{ id: 'project', path: root, read: true, write: true }])); const system = createSystemTools({ platform: 'linux' });
+  const tools = { ...fs, ...system, 'time.now': { execute: async value => timeNowTool({ id: value.id, arguments: value.arguments }) } }; for (const [name, tool] of Object.entries(tools)) await assert.rejects(() => tool.execute(call(name, { unknown: true })), error => error.code === 'invalid_tool_arguments');
+  await assert.rejects(() => fs['fs.read_text'].execute(call('fs.read_text', { workspace_id: 'project', path: 'notes.txt', max_bytes: 'large' })), error => error.code === 'invalid_tool_arguments');
+});
+
+test('filesystem patch rechecks canonical target before replacement', async () => {
+  const root = await fixture(); const realPolicy = new WorkspacePolicy([{ id: 'project', path: root, read: true, write: true }]); const original = realPolicy.regularFile.bind(realPolicy); let calls = 0; realPolicy.regularFile = async (...args) => { const file = await original(...args); if (++calls === 3) throw Object.assign(new Error('reparse target changed'), { code: 'path_changed' }); return file; };
+  const tools = createFilesystemTools(realPolicy); const old = Buffer.from(await readFile(join(root, 'notes.txt'))); const patch = call('fs.apply_patch', { workspace_id: 'project', path: 'notes.txt', base_sha256: hash(old), replacement: 'should not apply' }); await assert.rejects(() => tools['fs.apply_patch'].execute(patch), error => error.code === 'path_changed'); assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), 'deadline: Friday\nsecond line\n');
 });
