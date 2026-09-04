@@ -368,15 +368,17 @@ def append_cost_event(event: dict[str, Any]) -> None:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
 
-def reserve_create_attempt(phase_id: str, nonce: str, candidate: Candidate, *, backstop_hours: float, public_key_sha256: str) -> str:
+def reserve_create_attempt(phase_id: str, nonce: str, candidate: Candidate, *, backstop_hours: float, public_key_sha256: str, ssh_key_id: str | None = None) -> str:
     """Durably reserve one possible create POST before any provider mutation."""
 
     validate_phase_id(phase_id)
     validate_nonce(nonce)
     if backstop_hours <= 0 or not re.fullmatch(r"[0-9a-f]{64}", public_key_sha256):
         raise ValueError("invalid create-attempt reservation inputs")
+    if ssh_key_id is not None:
+        validate_resource_id(ssh_key_id, field="SSH key id")
     attempt_id = f"attempt-{nonce}"
-    append_cost_event({
+    event = {
         "instance_id": attempt_id,
         "phase_id": phase_id,
         "status": "pending",
@@ -386,7 +388,12 @@ def reserve_create_attempt(phase_id: str, nonce: str, candidate: Candidate, *, b
         "ssh_key_name": f"j1m-{nonce}",
         "ssh_public_key_sha256": public_key_sha256,
         "candidate": {"cloud": candidate.cloud, "region": candidate.region, "gpu": candidate.gpu, "instance_type": candidate.instance_type, "vram_gb": candidate.vram_gb, "hourly_usd": candidate.hourly_usd},
-    })
+    }
+    if ssh_key_id is not None:
+        # The latest event enriches the same reservation with the provider key
+        # ID, without rewriting its append-only history.
+        event["ssh_key_id"] = ssh_key_id
+    append_cost_event(event)
     return attempt_id
 
 

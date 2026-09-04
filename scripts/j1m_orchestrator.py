@@ -117,6 +117,9 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
         try:
             key_id = sf.add_ssh_key(api_key, phase_id, f"j1m-{nonce}", public_key)
             sf.verify_ssh_key_ownership(api_key, phase_id, key_id, expected_name=f"j1m-{nonce}", expected_public_key=public_key)
+            # Bind the exact provider key ID into the already-pending attempt
+            # reservation before allowing the instance create POST.
+            sf.reserve_create_attempt(phase_id, nonce, candidate, backstop_hours=float(config["modes"][mode]["provider_backstop_hours"]), public_key_sha256=hashlib.sha256(public_key.encode("utf-8")).hexdigest(), ssh_key_id=key_id)
             try:
                 instance_id = sf.create_instance(api_key, env, phase_id=phase_id, run_id=run_id, candidate=candidate, ssh_key_id=key_id, nonce=nonce, max_runtime_hours=runtime)
                 created_monotonic = time.monotonic()

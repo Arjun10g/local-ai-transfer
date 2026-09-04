@@ -110,6 +110,9 @@ class J1MConfigTests(unittest.TestCase):
             self.assertEqual(attempt_id, "attempt-" + "c" * 32)
             self.assertEqual(event["status"], "pending")
             self.assertEqual(event["estimated_cost_usd"], 0.421875)
+            sf.reserve_create_attempt("j1m-reservation-test", "c" * 32, candidate, backstop_hours=0.3125, public_key_sha256="d" * 64, ssh_key_id="key-123456")
+            enriched = json.loads(Path(directory, "cost-ledger.jsonl").read_text().splitlines()[-1])
+            self.assertEqual(enriched["ssh_key_id"], "key-123456")
             with mock.patch.object(sf, "append_cost_event", side_effect=OSError("ledger unavailable")):
                 with self.assertRaises(OSError):
                     sf.reserve_create_attempt("j1m-reservation-test", "e" * 32, candidate, backstop_hours=0.3125, public_key_sha256="d" * 64)
