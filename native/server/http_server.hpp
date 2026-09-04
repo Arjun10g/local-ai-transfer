@@ -7,8 +7,7 @@
 #include <map>
 #include <string>
 #include <thread>
-#include <vector>
-#include <mutex>
+#include <condition_variable>
 
 namespace lae {
 
@@ -35,12 +34,14 @@ class HttpServer final {
   Engine& engine_;
   std::string bearer_token_;
   std::atomic<bool> stopping_{false};
+  bool network_initialized_ = false;
   Socket listen_socket_ = -1;
   unsigned port_ = 0;
   std::thread accept_thread_;
-  std::mutex workers_mutex_;
-  std::vector<std::thread> workers_;
   std::atomic<unsigned> active_connections_{0};
+  std::atomic<unsigned> active_workers_{0};
+  std::mutex workers_wait_mutex_;
+  std::condition_variable workers_wait_cv_;
 };
 
 }  // namespace lae

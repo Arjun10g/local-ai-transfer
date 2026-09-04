@@ -20,7 +20,11 @@ def main():
     with tempfile.TemporaryDirectory() as directory:
         model = Path(directory) / "Qwen3.5-9B-Q4_K_M.gguf"
         model.write_bytes(fixture)
-        process = subprocess.run([sys.argv[1], "serve", "--backend", "cpu", "--model", str(model), "--size", str(len(fixture)), "--sha256", hashlib.sha256(fixture).hexdigest(), "--token", "init-guard"], capture_output=True, text=True, timeout=30)
+        token = Path(directory) / "token"
+        token.write_text("init-guard")
+        token.chmod(0o600)
+        token_args = ["--token-stdin"] if sys.platform.startswith("win") else ["--token-file", str(token)]
+        process = subprocess.run([sys.argv[1], "serve", "--backend", "cpu", "--model", str(model), "--size", str(len(fixture)), "--sha256", hashlib.sha256(fixture).hexdigest(), *token_args], input="init-guard\n" if sys.platform.startswith("win") else None, capture_output=True, text=True, timeout=30)
     if process.returncode != 1 or "llama model load failed" not in process.stderr:
         raise AssertionError(f"backend initialization was not reached: rc={process.returncode} stderr={process.stderr!r}")
     print("real backend initialization guard: PASS")

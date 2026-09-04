@@ -14,6 +14,13 @@
 #include <thread>
 #include <cstring>
 #include <stdexcept>
+#include <fstream>
+#include <filesystem>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace {
 lae::Engine* active_engine = nullptr;
@@ -21,7 +28,46 @@ lae::HttpServer* active_server = nullptr;
 volatile std::sig_atomic_t stop_requested = 0;
 void on_signal(int) { stop_requested = 1; }
 void usage() {
-  std::cout << "lae-engine 0.1.0\ncommands: serve verify-model version print-build-info probe\nserve options: --config <absolute-json> --backend cpu --model <absolute-gguf> --size <bytes> --sha256 <hex> --context <tokens> --token <bearer>\n";
+  std::cout << "lae-engine 0.1.0\ncommands: serve verify-model version print-build-info probe\nserve options: --config <absolute-json> --backend cpu --model <absolute-gguf> --size <bytes> --sha256 <hex> --context <tokens> (--token-file <protected-file> | --token-stdin)\n";
+}
+
+bool read_token_file(const std::string& path, std::string& token) {
+  if (path.empty() || path.size() > 4096 || !std::filesystem::path(path).is_absolute()) return false;
+#ifndef _WIN32
+  const int descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (descriptor < 0) return false;
+  struct stat file_stat{};
+  if (fstat(descriptor, &file_stat) != 0 || !S_ISREG(file_stat.st_mode) || (file_stat.st_mode & 0077) != 0 || file_stat.st_size > 512) {
+    close(descriptor); return false;
+  }
+  token.clear(); char buffer[128]; ssize_t count = 0;
+  while ((count = ::read(descriptor, buffer, sizeof(buffer))) > 0) token.append(buffer, static_cast<size_t>(count));
+  const bool read_ok = count == 0;
+  close(descriptor);
+  if (!read_ok || token.size() > 512) return false;
+#else
+  // Windows callers use the inherited stdin pipe. Without a platform-native
+  // handle/ACL check, accepting a pathname would make the token file
+  // protection unverifiable and raceable.
+  (void)path;
+  (void)token;
+  return false;
+#endif
+  while (!token.empty() && (token.back() == '\n' || token.back() == '\r')) token.pop_back();
+  if (token.empty() || token.find_first_of("\r\n") != std::string::npos) return false;
+  return true;
+}
+
+bool read_token_stdin(std::string& token) {
+  token.clear(); char buffer[128];
+  while (std::cin.good() && token.size() <= 512) {
+    std::cin.read(buffer, sizeof(buffer));
+    token.append(buffer, static_cast<size_t>(std::cin.gcount()));
+    if (token.find_first_of("\r\n") != std::string::npos) break;
+  }
+  if (token.size() > 512) return false;
+  while (!token.empty() && (token.back() == '\n' || token.back() == '\r')) token.pop_back();
+  return !token.empty() && token.find_first_of("\r\n") == std::string::npos;
 }
 }  // namespace
 
@@ -53,7 +99,7 @@ int main(int argc, char** argv) {
   if (command != "serve" && command != "verify-model") { usage(); return command == "help" ? 0 : 2; }
 
   unsigned port = 0; unsigned context_tokens = 8192; std::uint64_t model_size = 0;
-  std::string token; bool token_seen = false; std::string backend = "fixture-cpu";
+  std::string token; std::string token_file; bool token_file_seen = false; bool token_stdin = false; std::string backend = "fixture-cpu";
   std::string model_path; std::string model_sha256;
   std::string config_path; bool config_seen = false; bool backend_seen = false; bool model_seen = false;
   bool size_seen = false; bool hash_seen = false; bool context_seen = false;
@@ -61,7 +107,8 @@ int main(int argc, char** argv) {
   for (int i = 2; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--port" && i + 1 < argc) { size_t end = 0; const auto value = std::stoull(argv[++i], &end); if (end != std::strlen(argv[i]) || value > 65535) throw std::invalid_argument("invalid port"); port = static_cast<unsigned>(value); }
-    else if (arg == "--token" && i + 1 < argc) { token = argv[++i]; token_seen = true; }
+    else if (arg == "--token-file" && i + 1 < argc) { token_file = argv[++i]; token_file_seen = true; }
+    else if (arg == "--token-stdin") { token_stdin = true; }
     else if (arg == "--backend" && i + 1 < argc) { backend = argv[++i]; backend_seen = true; }
     else if (arg == "--model" && i + 1 < argc) { model_path = argv[++i]; model_seen = true; }
     else if (arg == "--size" && i + 1 < argc) { size_t end = 0; model_size = std::stoull(argv[++i], &end); if (end != std::strlen(argv[i])) throw std::invalid_argument("invalid model size"); size_seen = true; }
@@ -88,7 +135,8 @@ int main(int argc, char** argv) {
     std::cout << "{\"valid\":" << (result.valid ? "true" : "false") << ",\"code\":\"" << result.code << "\",\"size_bytes\":" << result.size_bytes << ",\"sha256\":\"" << result.sha256 << "\",\"gguf_version\":" << result.gguf_version << "}\n";
     return result.valid ? 0 : 2;
   }
-  if (!token_seen || token.empty()) { std::cerr << "serve requires a non-empty --token\n"; return 2; }
+  if (token_file_seen == token_stdin || (token_file_seen && !read_token_file(token_file, token)) ||
+      (token_stdin && !read_token_stdin(token))) { std::cerr << "serve requires exactly one readable non-empty --token-file or --token-stdin\n"; return 2; }
   if (context_tokens < 1 || context_tokens > 16384) { std::cerr << "context must be between 1 and 16384 tokens\n"; return 2; }
   std::unique_ptr<lae::EngineBackend> backend_instance;
   lae::BackendConfig backend_config; backend_config.backend_profile = backend; backend_config.context_tokens = context_tokens;

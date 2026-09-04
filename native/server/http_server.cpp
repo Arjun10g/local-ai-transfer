@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -25,6 +26,13 @@ namespace lae {
 namespace {
 
 constexpr size_t kMaxBody = 64 * 1024;
+constexpr size_t kMaxHeaderBytes = 16 * 1024;
+constexpr size_t kMaxHeaderCount = 64;
+constexpr size_t kMaxHeaderLine = 8 * 1024;
+constexpr size_t kMaxSseBytes = 4 * 1024 * 1024;
+constexpr size_t kMaxSseEvents = 4096;
+constexpr unsigned kSocketTimeoutMs = 5000;
+constexpr size_t kMaxResponseBytes = 4 * 1024 * 1024;
 std::atomic<unsigned> request_counter{1};
 
 #ifdef _WIN32
@@ -56,6 +64,31 @@ bool send_all(HttpServer::Socket socket, const std::string& text) {
     sent += static_cast<size_t>(n);
   }
   return true;
+}
+
+void set_socket_timeouts(HttpServer::Socket socket) {
+#ifdef _WIN32
+  const DWORD timeout = kSocketTimeoutMs;
+  setsockopt(native_socket(socket), SOL_SOCKET, SO_RCVTIMEO,
+             reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+  setsockopt(native_socket(socket), SOL_SOCKET, SO_SNDTIMEO,
+             reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+#else
+  timeval timeout{};
+  timeout.tv_sec = static_cast<long>(kSocketTimeoutMs / 1000);
+  timeout.tv_usec = static_cast<long>((kSocketTimeoutMs % 1000) * 1000);
+  setsockopt(native_socket(socket), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+  setsockopt(native_socket(socket), SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+#endif
+}
+
+bool socket_timed_out() {
+#ifdef _WIN32
+  const int error = WSAGetLastError();
+  return error == WSAETIMEDOUT || error == WSAEWOULDBLOCK;
+#else
+  return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
+#endif
 }
 
 std::string lower(std::string value) {
@@ -90,6 +123,39 @@ bool valid_loopback_origin(const std::string& origin) {
   return valid_loopback_authority(authority);
 }
 
+bool header_token(const std::string& value) {
+  if (value.empty()) return false;
+  for (const unsigned char c : value) {
+    if (!(std::isalnum(c) || c == '!' || c == '#' || c == '$' || c == '%' || c == '&' ||
+          c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' || c == '^' || c == '_' ||
+          c == '`' || c == '|' || c == '~')) return false;
+  }
+  return true;
+}
+
+bool valid_path_id(const std::string& id) {
+  if (id.size() < 1 || id.size() > 96) return false;
+  return std::all_of(id.begin(), id.end(), [](unsigned char c) {
+    return std::isalnum(c) || c == '-' || c == '_';
+  });
+}
+
+bool constant_time_equal(const std::string& actual, const std::string& expected) {
+  const size_t length = std::max(actual.size(), expected.size());
+  unsigned int difference = static_cast<unsigned int>(actual.size() ^ expected.size());
+  for (size_t i = 0; i < length; ++i) {
+    const unsigned char left = i < actual.size() ? static_cast<unsigned char>(actual[i]) : 0;
+    const unsigned char right = i < expected.size() ? static_cast<unsigned char>(expected[i]) : 0;
+    difference |= static_cast<unsigned int>(left ^ right);
+  }
+  return difference == 0;
+}
+
+bool valid_content_type(const std::string& value) {
+  const std::string normalized = lower(trim(value));
+  return normalized == "application/json" || normalized == "application/json; charset=utf-8";
+}
+
 std::string next_request_id() {
   std::ostringstream out;
   out << "req-" << request_counter.fetch_add(1);
@@ -100,7 +166,9 @@ const char* reason(int status) {
   switch (status) {
     case 200: return "OK"; case 201: return "Created"; case 400: return "Bad Request";
     case 401: return "Unauthorized"; case 404: return "Not Found"; case 405: return "Method Not Allowed";
-    case 409: return "Conflict"; case 413: return "Payload Too Large"; case 499: return "Client Closed Request";
+    case 408: return "Request Timeout"; case 409: return "Conflict"; case 413: return "Payload Too Large";
+    case 415: return "Unsupported Media Type"; case 431: return "Request Header Fields Too Large";
+    case 499: return "Client Closed Request";
     case 503: return "Service Unavailable"; default: return "Internal Server Error";
   }
 }
@@ -135,6 +203,7 @@ unsigned HttpServer::start(unsigned port) {
 #ifdef _WIN32
   WSADATA data{};
   if (WSAStartup(MAKEWORD(2, 2), &data) != 0) throw std::runtime_error("winsock initialization failed");
+  network_initialized_ = true;
 #endif
   listen_socket_ = static_cast<Socket>(::socket(AF_INET, SOCK_STREAM, 0));
 #ifdef _WIN32
@@ -162,17 +231,17 @@ unsigned HttpServer::start(unsigned port) {
 }
 
 void HttpServer::stop() {
-  if (listen_socket_ == -1) return;
-  stopping_ = true;
-  const Socket socket = listen_socket_;
-  close_socket(socket);
+  if (listen_socket_ != -1) {
+    stopping_ = true;
+    const Socket socket = listen_socket_;
+    close_socket(socket);
+  }
   if (accept_thread_.joinable()) accept_thread_.join();
   listen_socket_ = -1;
-  std::lock_guard<std::mutex> lock(workers_mutex_);
-  for (auto& worker : workers_) if (worker.joinable()) worker.join();
-  workers_.clear();
+  std::unique_lock<std::mutex> lock(workers_wait_mutex_);
+  workers_wait_cv_.wait(lock, [this] { return active_workers_.load() == 0; });
 #ifdef _WIN32
-  WSACleanup();
+  if (network_initialized_) { WSACleanup(); network_initialized_ = false; }
 #endif
 }
 
@@ -190,21 +259,32 @@ void HttpServer::accept_loop() {
       close_socket(client);
       continue;
     }
-    std::lock_guard<std::mutex> lock(workers_mutex_);
-    workers_.emplace_back(&HttpServer::handle, this, client);
+    set_socket_timeouts(client);
+    active_workers_.fetch_add(1);
+    try {
+      std::thread([this, client] {
+        try { handle(client); } catch (...) { close_socket(client); }
+        active_workers_.fetch_sub(1);
+        workers_wait_cv_.notify_all();
+      }).detach();
+    } catch (...) {
+      active_workers_.fetch_sub(1);
+      active_connections_.fetch_sub(1);
+      close_socket(client);
+    }
   }
 }
 
 bool HttpServer::authorized(const std::map<std::string, std::string>& headers) const {
   auto it = headers.find("authorization");
-  return it != headers.end() && it->second == "Bearer " + bearer_token_;
+  return it != headers.end() && constant_time_equal(it->second, "Bearer " + bearer_token_);
 }
 
 void HttpServer::respond(Socket client, int status, const std::string& type, const std::string& body,
                          const std::string& request_id) {
   std::ostringstream out;
   out << "HTTP/1.1 " << status << " " << reason(status) << "\r\nContent-Type: " << type
-      << "\r\nContent-Length: " << body.size() << "\r\nConnection: close\r\nX-Request-Id: "
+      << "\r\nContent-Length: " << body.size() << "\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Request-Id: "
       << (request_id.empty() ? next_request_id() : request_id) << "\r\n\r\n" << body;
   send_all(client, out.str());
 }
@@ -216,33 +296,68 @@ void HttpServer::handle(Socket client) {
   } connection_guard{active_connections_};
   const std::string request_id = next_request_id();
   std::string raw; char buffer[4096];
-  while (raw.find("\r\n\r\n") == std::string::npos && raw.size() <= kMaxBody + 8192) {
+  while (raw.find("\r\n\r\n") == std::string::npos && raw.size() <= kMaxHeaderBytes) {
 #ifdef _WIN32
     const int n = recv(native_socket(client), buffer, sizeof(buffer), 0);
 #else
     const ssize_t n = recv(native_socket(client), buffer, sizeof(buffer), 0);
 #endif
-    if (n <= 0) { close_socket(client); return; }
+    if (n == 0) { close_socket(client); return; }
+    if (n < 0) { if (socket_timed_out()) respond(client, 408, "application/json", "{\"error\":{\"code\":\"request_timeout\"}}", request_id); close_socket(client); return; }
     raw.append(buffer, static_cast<size_t>(n));
   }
   const size_t split = raw.find("\r\n\r\n");
-  if (split == std::string::npos) { respond(client, 413, "application/json", "{\"error\":{\"code\":\"request_too_large\"}}", request_id); close_socket(client); return; }
+  if (split == std::string::npos || split > kMaxHeaderBytes) { respond(client, 431, "application/json", "{\"error\":{\"code\":\"headers_too_large\"}}", request_id); close_socket(client); return; }
   std::istringstream headers_stream(raw.substr(0, split));
   std::string request_line; std::getline(headers_stream, request_line);
   if (!request_line.empty() && request_line.back() == '\r') request_line.pop_back();
-  std::istringstream request_parts(request_line); std::string method, path, protocol;
+  std::istringstream request_parts(request_line); std::string method, path, protocol, extra;
   request_parts >> method >> path >> protocol;
-  std::map<std::string, std::string> headers; std::string line;
+  if (request_parts >> extra || method.empty() || path.empty() || protocol.empty() ||
+      method.size() > 16 || path.size() > 2048 || protocol != "HTTP/1.1" ||
+      !header_token(method) || path.front() != '/' || path.find_first_of("\r\n") != std::string::npos) {
+    respond(client, 400, "application/json", "{\"error\":{\"code\":\"invalid_request_line\"}}", request_id);
+    close_socket(client); return;
+  }
+  std::map<std::string, std::string> headers; std::string line; size_t header_count = 0;
+  bool malformed_headers = false;
   while (std::getline(headers_stream, line)) {
     if (!line.empty() && line.back() == '\r') line.pop_back();
-    const size_t colon = line.find(':'); if (colon == std::string::npos) continue;
-    headers[lower(trim(line.substr(0, colon)))] = trim(line.substr(colon + 1));
+    if (line.empty() || line.size() > kMaxHeaderLine || (!line.empty() &&
+        (line.front() == ' ' || line.front() == '\t'))) { malformed_headers = true; break; }
+    const size_t colon = line.find(':');
+    if (colon == std::string::npos || colon == 0 || !header_token(line.substr(0, colon))) { malformed_headers = true; break; }
+    const std::string name = lower(line.substr(0, colon));
+    std::string value = line.substr(colon + 1);
+    if (value.find_first_of("\r\n") != std::string::npos ||
+        std::any_of(value.begin(), value.end(), [](unsigned char c) { return c < 0x20 && c != '\t'; })) { malformed_headers = true; break; }
+    value = trim(value);
+    if (++header_count > kMaxHeaderCount || headers.find(name) != headers.end()) { malformed_headers = true; break; }
+    headers.emplace(name, std::move(value));
   }
+  if (malformed_headers) { respond(client, 400, "application/json", "{\"error\":{\"code\":\"invalid_headers\"}}", request_id); close_socket(client); return; }
   size_t content_length = 0;
   if (headers.count("content-length")) {
-    try { content_length = std::stoul(headers["content-length"]); } catch (...) { content_length = kMaxBody + 1; }
+    const std::string& length_text = headers["content-length"];
+    if (length_text.empty() || length_text.size() > 10 ||
+        !std::all_of(length_text.begin(), length_text.end(), [](unsigned char c) { return std::isdigit(c); })) {
+      respond(client, 400, "application/json", "{\"error\":{\"code\":\"invalid_content_length\"}}", request_id); close_socket(client); return;
+    }
+    try { content_length = std::stoull(length_text); } catch (...) { content_length = kMaxBody + 1; }
   }
   if (content_length > kMaxBody) { respond(client, 413, "application/json", "{\"error\":{\"code\":\"request_too_large\"}}", request_id); close_socket(client); return; }
+  if (headers.count("transfer-encoding")) {
+    respond(client, 400, "application/json", "{\"error\":{\"code\":\"unsupported_transfer_encoding\"}}", request_id); close_socket(client); return;
+  }
+  if (method == "POST" && !headers.count("content-length")) {
+    respond(client, 400, "application/json", "{\"error\":{\"code\":\"missing_content_length\"}}", request_id); close_socket(client); return;
+  }
+  if (method == "POST" && (!headers.count("content-type") || !valid_content_type(headers["content-type"]))) {
+    respond(client, 415, "application/json", "{\"error\":{\"code\":\"invalid_content_type\"}}", request_id); close_socket(client); return;
+  }
+  if (method != "POST" && content_length != 0) {
+    respond(client, 400, "application/json", "{\"error\":{\"code\":\"unexpected_body\"}}", request_id); close_socket(client); return;
+  }
   std::string body = raw.substr(split + 4);
   while (body.size() < content_length) {
 #ifdef _WIN32
@@ -250,15 +365,18 @@ void HttpServer::handle(Socket client) {
 #else
     const ssize_t n = recv(native_socket(client), buffer, sizeof(buffer), 0);
 #endif
-    if (n <= 0) { close_socket(client); return; }
+    if (n == 0) { close_socket(client); return; }
+    if (n < 0) { if (socket_timed_out()) respond(client, 408, "application/json", "{\"error\":{\"code\":\"request_timeout\"}}", request_id); close_socket(client); return; }
     body.append(buffer, static_cast<size_t>(n));
   }
-  if (body.size() > content_length) body.resize(content_length);
+  if (body.size() > content_length) {
+    respond(client, 400, "application/json", "{\"error\":{\"code\":\"surplus_body\"}}", request_id); close_socket(client); return;
+  }
   auto fail = [&](int status, const std::string& code) {
     respond(client, status, "application/json", "{\"error\":{\"code\":\"" + code + "\",\"request_id\":\"" + request_id + "\"}}", request_id);
   };
   const auto host = headers.find("host");
-  if (protocol != "HTTP/1.1" || host == headers.end() || !valid_loopback_authority(host->second)) {
+  if (host == headers.end() || !valid_loopback_authority(host->second)) {
     fail(400, "invalid_request"); close_socket(client); return;
   }
   const auto origin = headers.find("origin");
@@ -289,10 +407,16 @@ void HttpServer::handle(Socket client) {
     catch (...) { fail(503, "not_ready"); }
   } else if (method == "DELETE" && path.rfind("/v1/sessions/", 0) == 0) {
     const std::string id = path.substr(std::string("/v1/sessions/").size());
-    if (id.empty() || !engine_.delete_session(id)) fail(404, "not_found"); else respond(client, 200, "application/json", "{\"deleted\":true}", request_id);
+    if (!valid_path_id(id)) fail(400, "invalid_session_id");
+    else if (!engine_.delete_session(id)) fail(404, "not_found");
+    else respond(client, 200, "application/json", "{\"deleted\":true}", request_id);
   } else if (method == "POST" && path.rfind("/v1/cancel/", 0) == 0) {
-    const bool cancelled = engine_.cancel(path.substr(std::string("/v1/cancel/").size()));
-    respond(client, 200, "application/json", std::string("{\"cancelled\":") + (cancelled ? "true" : "false") + "}", request_id);
+    const std::string id = path.substr(std::string("/v1/cancel/").size());
+    if (!valid_path_id(id)) fail(400, "invalid_request_id");
+    else {
+      const bool cancelled = engine_.cancel(id);
+      respond(client, 200, "application/json", std::string("{\"cancelled\":") + (cancelled ? "true" : "false") + "}", request_id);
+    }
   } else if (method == "POST" && path == "/v1/chat/completions") {
     if (engine_.state() != LifecycleState::READY) { fail(engine_.state() == LifecycleState::BUSY ? 409 : 503, engine_.state() == LifecycleState::BUSY ? "busy" : "not_ready"); close_socket(client); return; }
     ChatRequest chat_request;
@@ -303,22 +427,46 @@ void HttpServer::handle(Socket client) {
     const Cancellation cancellation = std::make_shared<std::atomic<bool>>(false);
     std::string combined;
     if (stream) {
-      std::ostringstream head; head << "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nX-Request-Id: " << request_id << "\r\n\r\n";
+      std::ostringstream head; head << "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache, no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\nX-Request-Id: " << request_id << "\r\n\r\n";
       if (!send_all(client, head.str())) { cancellation->store(true); close_socket(client); return; }
+      size_t sse_bytes = head.str().size(); size_t sse_events = 0;
+      bool stream_bound_exceeded = false;
       try {
         const auto result = engine_.generate(request_id, session_id, chat_request.generation, cancellation, [&](const std::string& token) {
+          const std::string frame = "data: {\"id\":\"" + json_escape(request_id) + "\",\"choices\":[{\"delta\":{\"content\":\"" + json_escape(token) + "\"}}]}\n\n";
+          if (frame.size() > kMaxHeaderLine || sse_events >= kMaxSseEvents || sse_bytes > kMaxSseBytes - frame.size()) {
+            stream_bound_exceeded = true; cancellation->store(true); return false;
+          }
+          if (combined.size() > kMaxResponseBytes - token.size()) {
+            stream_bound_exceeded = true; cancellation->store(true); return false;
+          }
           combined += token;
-          return send_all(client, "data: {\"id\":\"" + json_escape(request_id) + "\",\"choices\":[{\"delta\":{\"content\":\"" + json_escape(token) + "\"}}]}\n\n");
+          sse_bytes += frame.size(); ++sse_events;
+          return send_all(client, frame);
         });
-        send_all(client, "data: {\"id\":\"" + json_escape(request_id) + "\",\"choices\":[{\"delta\":{},\"finish_reason\":\"" + json_escape(result.finish_reason) + "\"}]}\n\ndata: [DONE]\n\n");
+        if (stream_bound_exceeded) {
+          send_all(client, "data: {\"error\":{\"code\":\"response_too_large\"}}\n\ndata: [DONE]\n\n");
+        } else {
+          const std::string tail = "data: {\"id\":\"" + json_escape(request_id) + "\",\"choices\":[{\"delta\":{},\"finish_reason\":\"" + json_escape(result.finish_reason) + "\"}]}\n\ndata: [DONE]\n\n";
+          if (tail.size() > kMaxHeaderLine || sse_events + 2 > kMaxSseEvents || sse_bytes > kMaxSseBytes - tail.size())
+            send_all(client, "data: {\"error\":{\"code\":\"response_too_large\"}}\n\ndata: [DONE]\n\n");
+          else send_all(client, tail);
+        }
       } catch (const std::invalid_argument& error) { const std::string code = std::string(error.what()) == "context limit exceeded" ? "invalid_request" : "not_found"; send_all(client, "data: {\"error\":{\"code\":\"" + code + "\"}}\n\ndata: [DONE]\n\n"); }
       catch (const std::logic_error&) { send_all(client, "data: {\"error\":{\"code\":\"busy\"}}\n\ndata: [DONE]\n\n"); }
       catch (const std::exception& error) { std::cerr << "generation " << request_id << " failed: " << error.what() << "\n"; send_all(client, "data: {\"error\":{\"code\":\"internal_error\"}}\n\ndata: [DONE]\n\n"); }
       catch (...) { std::cerr << "generation " << request_id << " failed: unknown exception\n"; send_all(client, "data: {\"error\":{\"code\":\"internal_error\"}}\n\ndata: [DONE]\n\n"); }
     } else {
+      bool response_bound_exceeded = false;
       try {
-        const auto result = engine_.generate(request_id, session_id, chat_request.generation, cancellation, [&](const std::string& token) { combined += token; return true; });
-        respond(client, 200, "application/json", "{\"id\":\"" + json_escape(request_id) + "\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"" + json_escape(combined) + "\"},\"finish_reason\":\"" + json_escape(result.finish_reason) + "\"}],\"usage\":{\"completion_tokens\":" + std::to_string(result.generated_tokens) + "}}", request_id);
+        const auto result = engine_.generate(request_id, session_id, chat_request.generation, cancellation, [&](const std::string& token) {
+          if (token.size() > kMaxResponseBytes || combined.size() > kMaxResponseBytes - token.size()) {
+            response_bound_exceeded = true; cancellation->store(true); return false;
+          }
+          combined += token; return true;
+        });
+        if (response_bound_exceeded) fail(413, "response_too_large");
+        else respond(client, 200, "application/json", "{\"id\":\"" + json_escape(request_id) + "\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"" + json_escape(combined) + "\"},\"finish_reason\":\"" + json_escape(result.finish_reason) + "\"}],\"usage\":{\"completion_tokens\":" + std::to_string(result.generated_tokens) + "}}", request_id);
       } catch (const std::invalid_argument& error) { if (std::string(error.what()) == "context limit exceeded") fail(400, "invalid_request"); else fail(404, "not_found"); } catch (const std::logic_error&) { fail(409, "busy"); } catch (const std::exception& error) { std::cerr << "generation " << request_id << " failed: " << error.what() << "\n"; fail(500, "internal_error"); } catch (...) { std::cerr << "generation " << request_id << " failed: unknown exception\n"; fail(500, "internal_error"); }
     }
   } else {
