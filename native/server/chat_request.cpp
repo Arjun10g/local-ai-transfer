@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <regex>
 #include <stdexcept>
 #include <vector>
 
@@ -12,7 +13,9 @@ namespace {
 
 constexpr size_t kMaxString = 32768;
 constexpr size_t kMaxMessages = 64;
+constexpr size_t kMaxObjectFields = 64;
 constexpr size_t kMaxMessageFields = 8;
+constexpr size_t kMaxTools = 32;
 
 struct JsonValue {
   enum class Type { Null, Bool, Number, String, Array, Object } type = Type::Null;
@@ -130,7 +133,7 @@ class Parser {
       if (position_ >= input_.size() || input_[position_] != '"') throw ParseFailure("object key must be a string");
       const std::string key = string_at();
       if (value.object.find(key) != value.object.end()) throw ParseFailure("duplicate object field", false);
-      if (value.object.size() >= kMaxMessageFields) throw ParseFailure("object field limit exceeded", false);
+      if (value.object.size() >= kMaxObjectFields) throw ParseFailure("object field limit exceeded", false);
       if (!consume(':')) throw ParseFailure("object key missing colon");
       auto inserted = value.object.emplace(key, value_at(depth));
       (void)inserted;
@@ -185,6 +188,24 @@ bool valid_text(const JsonValue* value, size_t max, std::string& output, bool al
   return true;
 }
 
+void append_json_string(const std::string& input, std::string& output) {
+  output.push_back('"');
+  for (const unsigned char c : input) {
+    switch (c) { case '"': output += "\\\""; break; case '\\': output += "\\\\"; break; case '\b': output += "\\b"; break; case '\f': output += "\\f"; break; case '\n': output += "\\n"; break; case '\r': output += "\\r"; break; case '\t': output += "\\t"; break; default: if (c < 0x20) { const char hex[] = "0123456789abcdef"; output += "\\u00"; output.push_back(hex[c >> 4]); output.push_back(hex[c & 15]); } else output.push_back(static_cast<char>(c)); }
+  }
+  output.push_back('"');
+}
+void append_json(const JsonValue& value, std::string& output) {
+  switch (value.type) {
+    case JsonValue::Type::Null: output += "null"; break;
+    case JsonValue::Type::Bool: output += value.boolean ? "true" : "false"; break;
+    case JsonValue::Type::Number: output += std::to_string(value.number); break;
+    case JsonValue::Type::String: append_json_string(value.string, output); break;
+    case JsonValue::Type::Array: output.push_back('['); for (size_t i = 0; i < value.array.size(); ++i) { if (i) output.push_back(','); append_json(value.array[i], output); } output.push_back(']'); break;
+    case JsonValue::Type::Object: output.push_back('{'); { size_t i = 0; for (const auto& item : value.object) { if (i++) output.push_back(','); append_json_string(item.first, output); output.push_back(':'); append_json(item.second, output); } } output.push_back('}'); break;
+  }
+}
+
 }  // namespace
 
 bool parse_chat_request(const std::string& body, ChatRequest& request, std::string& error_code) {
@@ -194,7 +215,7 @@ bool parse_chat_request(const std::string& body, ChatRequest& request, std::stri
     const JsonValue root = parser.parse();
     if (root.type != JsonValue::Type::Object || root.object.size() > 8) throw ParseFailure("request must be an object", false);
     for (const auto& item : root.object) {
-      if (item.first != "model" && item.first != "session_id" && item.first != "messages" && item.first != "stream" && item.first != "max_tokens" && item.first != "mode") throw ParseFailure("unknown request field", false);
+      if (item.first != "model" && item.first != "session_id" && item.first != "messages" && item.first != "tools" && item.first != "stream" && item.first != "max_tokens" && item.first != "mode") throw ParseFailure("unknown request field", false);
     }
     if (!valid_text(field(root, "model"), 128, request.model, false)) throw ParseFailure("model is required", false);
     if (const JsonValue* session = field(root, "session_id")) if (!valid_text(session, 128, request.session_id)) throw ParseFailure("invalid session_id", false);
@@ -220,6 +241,26 @@ bool parse_chat_request(const std::string& body, ChatRequest& request, std::stri
       request.generation.messages.push_back(std::move(parsed));
     }
     if (!has_user_message) throw ParseFailure("at least one user message is required", false);
+    request.generation.tools.clear();
+    if (const JsonValue* tools = field(root, "tools")) {
+      if (!is_type(tools, JsonValue::Type::Array) || tools->array.size() > kMaxTools) throw ParseFailure("tools are invalid or too large", false);
+      for (const auto& tool : tools->array) {
+        if (tool.type != JsonValue::Type::Object || tool.object.size() != 2) throw ParseFailure("tool definition is invalid", false);
+        for (const auto& item : tool.object) if (item.first != "type" && item.first != "function") throw ParseFailure("unknown tool field", false);
+        std::string type; if (!valid_text(field(tool, "type"), 16, type, false) || type != "function") throw ParseFailure("tool type is invalid", false);
+        const JsonValue* function = field(tool, "function");
+        if (!function || function->type != JsonValue::Type::Object || function->object.size() != 3) throw ParseFailure("function definition is invalid", false);
+        for (const auto& item : function->object) if (item.first != "name" && item.first != "description" && item.first != "parameters") throw ParseFailure("unknown function field", false);
+        GenerationRequest::ToolDefinition parsed;
+        if (!valid_text(field(*function, "name"), 96, parsed.name, false) || !std::regex_match(parsed.name, std::regex("[a-z][a-z0-9_.-]{1,95}")) || !valid_text(field(*function, "description"), 4096, parsed.description)) throw ParseFailure("invalid tool name or description", false);
+        const JsonValue* parameters = field(*function, "parameters");
+        if (!parameters || parameters->type != JsonValue::Type::Object) throw ParseFailure("tool parameters must be an object", false);
+        append_json(*parameters, parsed.parameters_json);
+        if (parsed.parameters_json.size() > 16384) throw ParseFailure("tool parameters are too large", false);
+        for (const auto& existing : request.generation.tools) if (existing.name == parsed.name) throw ParseFailure("duplicate tool name", false);
+        request.generation.tools.push_back(std::move(parsed));
+      }
+    }
     if (const JsonValue* stream = field(root, "stream")) {
       if (!is_type(stream, JsonValue::Type::Bool)) throw ParseFailure("stream must be boolean", false);
       request.stream = stream->boolean;

@@ -79,7 +79,7 @@ GenerationResult LlamaBackend::generate(const GenerationRequest& request,
   impl_->cancellation = cancellation;
   reset();
   const auto* vocab = llama_model_get_vocab(impl_->model);
-  const std::string rendered = impl_->chat_template.render(request.messages, request.enable_thinking);
+  const std::string rendered = impl_->chat_template.render(request.messages, request.tools, request.enable_thinking);
   std::vector<llama_token> prompt(4096);
   int32_t count = llama_tokenize(vocab, rendered.c_str(), static_cast<int32_t>(rendered.size()), prompt.data(), static_cast<int32_t>(prompt.size()), true, false);
   if (count < 0) { prompt.resize(static_cast<size_t>(-count)); count = llama_tokenize(vocab, rendered.c_str(), static_cast<int32_t>(rendered.size()), prompt.data(), -count, true, false); }

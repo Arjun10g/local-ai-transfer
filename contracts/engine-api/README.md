@@ -41,7 +41,7 @@ unknown sessions return the typed error envelope in `../error-codes`.
 ## Chat request
 
 ```json
-{"model":"fixture","session_id":"optional","messages":[{"role":"user","content":"hello"}],"stream":true,"max_tokens":8}
+{"model":"fixture","session_id":"optional","messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function","function":{"name":"time.now","description":"Return local time","parameters":{"type":"object","properties":{}}}}],"stream":true,"max_tokens":8}
 ```
 
 `stream` defaults to false. `max_tokens` is an integer from 1 through 64.
@@ -55,6 +55,13 @@ message text but retains the complete ordered history and session boundary. A st
 response is `text/event-stream`, one JSON chunk per line (`data: ...\n\n`), and
 response is `text/event-stream`, one JSON chunk per line (`data: ...\n\n`), and
 terminates with `data: [DONE]\n\n`. Every response includes `X-Request-Id`.
+`tools` is optional and bounded to 32 OpenAI-compatible function definitions. Each
+definition has exactly `type:function` and a function `name`, `description`, and
+object-valued JSON-schema `parameters`; malformed or oversized schemas are rejected.
+The native real backend passes these definitions to the model-embedded, pinned
+chat-template evaluator. Qwen tool output is expected as a bounded
+`<tool_call>{...strict JSON tool envelope...}</tool_call>` stream; incomplete,
+malformed, or mixed calls fail closed and are never executed.
 
 ## Cancellation and atomic state
 

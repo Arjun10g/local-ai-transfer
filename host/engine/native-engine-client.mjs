@@ -1,4 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises';
+import { ToolCallStreamDecoder } from '../agent/tool-envelope.mjs';
 
 const LOOPBACK = new Set(['127.0.0.1', 'localhost']);
 const REQUEST_ID = /^[A-Za-z0-9_-]{1,96}$/;
@@ -85,22 +86,26 @@ export class NativeEngineClient {
     const active = this.active.get(requestId); if (!active) return false; active.cancelled = true; if (active.nativeRequestId) void this.postCancel(active.nativeRequestId); active.abort.abort(); return true;
   }
   async postCancel(nativeRequestId) { if (!REQUEST_ID.test(nativeRequestId)) return false; try { await this.request(`/v1/cancel/${encodeURIComponent(nativeRequestId)}`, { method: 'POST', body: '{}' }, { timeoutMs: 2000 }); return true; } catch { return false; } }
-  async *generate({ requestId, sessionId, messages = [], mode = 'normal', signal }) {
+  async *generate({ requestId, sessionId, messages = [], mode = 'normal', tools = [], signal }) {
     if (!REQUEST_ID.test(requestId)) throw new NativeEngineError('invalid_request_id', 'host request id is invalid');
     if (!Array.isArray(messages) || messages.length < 1 || messages.length > 64) throw new NativeEngineError('invalid_messages', 'native message history is invalid');
+    if (!Array.isArray(tools) || tools.length > 32) throw new NativeEngineError('invalid_tools', 'native tool definitions are invalid');
     if (!['normal', 'deep'].includes(mode)) throw new NativeEngineError('invalid_mode', 'native mode is invalid');
     const localAbort = new AbortController(); const relay = () => { localAbort.abort(); }; let timedOut = false;
     signal?.addEventListener('abort', relay, { once: true }); const active = { abort: localAbort, nativeRequestId: null, cancelled: false }; this.active.set(requestId, active);
     const generationTimer = setTimeout(() => { timedOut = true; localAbort.abort(); if (active.nativeRequestId) void this.postCancel(active.nativeRequestId); }, this.timeoutMs);
     try {
       const nativeSessionId = await this.ensureSession(sessionId ?? 'ses_native_default', localAbort.signal);
-      const payload = { model: this.model, session_id: nativeSessionId, messages, stream: true, max_tokens: this.maxTokens, mode };
+      const payload = { model: this.model, session_id: nativeSessionId, messages, tools, stream: true, max_tokens: this.maxTokens, mode };
       const response = await this.request('/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) }, { signal: localAbort.signal });
       active.nativeRequestId = response.headers.get('x-request-id'); if (active.cancelled && active.nativeRequestId) void this.postCancel(active.nativeRequestId);
+      const decoder = new ToolCallStreamDecoder();
       for await (const chunk of sseEvents(response, localAbort.signal)) {
-        const choice = chunk.choices?.[0]; const delta = choice?.delta?.content; if (typeof delta === 'string' && delta) yield { kind: 'text_delta', text: delta };
+        const choice = chunk.choices?.[0]; const delta = choice?.delta?.content;
+        if (typeof delta === 'string' && delta) for (const event of decoder.push(delta)) yield event;
         const finish = choice?.finish_reason; if (finish) { if (finish === 'cancelled' || active.cancelled) throw Object.assign(new NativeEngineError('cancelled', 'native generation cancelled'), { code: 'cancelled' }); yield { kind: 'done', finish_reason: finish, usage: { completion_tokens: 0 } }; }
       }
+      for (const event of decoder.finish()) yield event;
     } catch (error) {
       if (timedOut || error?.name === 'TimeoutError' || (error?.name === 'AbortError' && !active.cancelled && !signal?.aborted)) throw Object.assign(new NativeEngineError('engine_timeout', 'native generation timed out'), { code: 'engine_timeout' });
       if (active.cancelled || signal?.aborted || error?.code === 'cancelled') throw Object.assign(new NativeEngineError('cancelled', 'native generation cancelled'), { code: 'cancelled' });

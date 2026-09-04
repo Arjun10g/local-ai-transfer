@@ -8,6 +8,16 @@ const opaque = prefix => `${prefix}_${randomUUID().replaceAll('-', '')}`;
 const CANCELLED_CONFIRMATION = Symbol('cancelled-confirmation');
 const sessionIdPattern = /^[A-Za-z0-9_-]{8,96}$/;
 
+// The model sees only the OpenAI-compatible function schema. Execution and
+// confirmation policy remain host-owned and never cross the native boundary.
+const parameterSchema = name => {
+  const required = { 'fs.list': ['workspace_id'], 'fs.read_text': ['workspace_id', 'path'], 'fs.search_text': ['workspace_id', 'query'], 'fs.write_new': ['workspace_id', 'path', 'content'], 'fs.apply_patch': ['workspace_id', 'path'], 'clipboard.write': ['text'], 'app.open': ['app_id'], 'browser.open_url': ['url'] }[name] ?? [];
+  return { type: 'object', properties: {}, required, additionalProperties: true };
+};
+const modelToolDefinitions = tools => [...tools.values()].map(tool => ({
+  type: 'function', function: { name: tool.name, description: tool.description ?? '', parameters: tool.parameters ?? parameterSchema(tool.name) }
+}));
+
 export class ConversationController {
   constructor({ engine, maxToolCalls = 8, confirmationTimeoutMs = 30000, maxSessions = 4, maxHistoryMessages = 64, maxHistoryBytes = 262144, toolRegistry } = {}) {
     if (!engine?.generate) throw new TypeError('engine.generate is required');
@@ -52,18 +62,20 @@ export class ConversationController {
     const emit = this.emitFactory(requestId, session.id, onEvent);
     session.last_request_id = requestId; this._appendHistory(session, { role: 'user', content: message }); session.state = 'BUILDING_PROMPT';
     let text = ''; let calls = 0;
+    const tools = modelToolDefinitions(this.tools);
     try {
       emit('message.started', { mode, state: session.state });
       while (true) {
         if (controller.signal.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' });
         session.state = calls ? 'CONTINUING_MODEL' : 'INFERENCING'; emit('message.started', { mode, state: session.state, continuation: calls > 0 });
         let callText = ''; let gotCall = false; let usage;
-        for await (const frame of this.engine.generate({ requestId, sessionId: session.id, messages: session.history, mode, signal: controller.signal })) {
+        for await (const frame of this.engine.generate({ requestId, sessionId: session.id, messages: session.history, tools, mode, signal: controller.signal })) {
           if (frame.kind === 'text_delta') { text += frame.text; emit('message.delta', { text: frame.text }); }
           else if (frame.kind === 'tool_call_chunk') { gotCall = true; callText += frame.text; if (Buffer.byteLength(callText) > 32768) throw new EnvelopeError('tool_call_too_large', 'tool call exceeds limit'); }
           else if (frame.kind === 'done') usage = frame.usage;
         }
         if (!gotCall) { this._appendHistory(session, { role: 'assistant', content: text }); session.state = 'COMPLETED'; emit('message.completed', { text, finish_reason: 'stop', usage: usage ?? { prompt_tokens: 0, completion_tokens: text.length }, state: session.state }); emit('metrics.snapshot', { tool_calls: calls, history_messages: session.history.length, history_bytes: session.history_bytes }); return { requestId, sessionId: session.id, state: session.state, text }; }
+        if (text.trim()) throw new EnvelopeError('mixed_tool_call_output', 'tool call output cannot contain assistant text');
         calls++; if (calls > this.maxToolCalls) throw Object.assign(new Error('tool_call_limit_exceeded'), { code: 'tool_call_limit_exceeded' });
         const call = parseToolCall(callText); session.state = 'TOOL_PROPOSED';
         const tool = this.tools.get(call.name); if (!tool) throw Object.assign(new Error('unknown_tool'), { code: 'unknown_tool' });

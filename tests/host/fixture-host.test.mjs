@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseStrictJson, parseToolCall, validateToolResult, EnvelopeError } from '../../host/agent/tool-envelope.mjs';
+import { parseStrictJson, parseToolCall, validateToolResult, ToolCallStreamDecoder, EnvelopeError } from '../../host/agent/tool-envelope.mjs';
 import { validateEvent } from '../../host/agent/assistant-events.mjs';
 import { ConversationController } from '../../host/agent/controller.mjs';
 import { FixtureEngineClient } from '../../host/engine/fixture-engine.mjs';
@@ -20,6 +20,39 @@ test('tool envelope is exact and result is bounded', () => {
   assert.throws(() => parseToolCall('{"id":"call_1","name":"time.now","arguments":{},"extra":true}'), /unknown field/);
   assert.throws(() => parseToolCall('{"id":"call_1","name":"time.now","arguments":[]}'), /arguments/);
   assert.deepEqual(validateToolResult({ id: 'call_1', name: 'time.now', status: 'ok', content: [{ type: 'text', text: 'ok' }], metadata: { truncated: false, duration_ms: 1 } }).status, 'ok');
+});
+
+test('Qwen XML tool calls remain safe across split chunks', () => {
+  const decoder = new ToolCallStreamDecoder(); const events = [];
+  for (const chunk of ['prefix ', '<tool_', 'call>{"id":"call_xml1","name":"time.now","arguments":{}}', '</tool_call>']) events.push(...decoder.push(chunk));
+  events.push(...decoder.finish());
+  assert.equal(events.filter(e => e.kind === 'text_delta').map(e => e.text).join(''), 'prefix ');
+  assert.equal(events.filter(e => e.kind === 'tool_call_chunk').length, 1);
+  const callEvent = events.find(e => e.kind === 'tool_call_chunk');
+  assert.equal(parseToolCall(callEvent.text).id, 'call_xml1');
+  assert.throws(() => parseToolCall('<tool_call>{"id":"c","name":"time.now","arguments":{}}</tool_call> trailing'), EnvelopeError);
+  const incomplete = new ToolCallStreamDecoder(); incomplete.push('<tool_call>{'); assert.throws(() => incomplete.finish(), /unterminated/);
+});
+
+test('controller propagates complete tool schema and ordered tool result correlation', async () => {
+  const seen = [];
+  const engine = { async *generate({ messages, tools }) {
+    seen.push({ messages: structuredClone(messages), tools: structuredClone(tools) });
+    if (!messages.some(m => m.role === 'tool')) {
+      const decoder = new ToolCallStreamDecoder();
+      for (const chunk of ['<tool_', 'call>{"id":"call_order1","name":"test.echo","arguments":{"value":"ok"}}</tool_call>']) for (const event of decoder.push(chunk)) yield event;
+      for (const event of decoder.finish()) yield event;
+      return;
+    }
+    yield { kind: 'text_delta', text: 'done' }; yield { kind: 'done', finish_reason: 'stop' };
+  } };
+  const controller = new ConversationController({ engine, toolRegistry: {
+    'test.echo': { name: 'test.echo', description: 'Echo a value.', execute: async ({ id, name, arguments: args }) => ({ id, name, status: 'ok', content: [{ type: 'text', text: args.value }], metadata: { truncated: false, duration_ms: 0 } }) }
+  } });
+  const result = await controller.runTurn({ sessionId: 'ses_xml01', requestId: 'req_xml01', message: 'use echo' });
+  assert.equal(result.state, 'COMPLETED'); assert.equal(result.text, 'done'); assert.equal(seen.length, 2);
+  assert.equal(seen[0].tools.find(t => t.function.name === 'test.echo').type, 'function');
+  assert.equal(seen[1].messages.at(-1).tool_call_id, 'call_order1'); assert.equal(seen[1].messages.at(-1).content, 'ok');
 });
 
 test('controller executes deterministic time.now loop and preserves event order', async () => {

@@ -115,7 +115,58 @@ export function validateToolCall(value) {
   return { id: value.id, name: value.name, arguments: structuredClone(value.arguments) };
 }
 
-export function parseToolCall(text, limits) { return validateToolCall(parseStrictJson(text, limits)); }
+export function parseToolCall(text, limits) {
+  if (typeof text !== 'string') throw new EnvelopeError('invalid_tool_call', 'tool call must be text');
+  const trimmed = text.trim();
+  if (trimmed.startsWith('<tool_call>') || trimmed.includes('</tool_call>')) {
+    if (!trimmed.startsWith('<tool_call>') || !trimmed.endsWith('</tool_call>')) throw new EnvelopeError('malformed_tool_call', 'tool call XML wrapper is malformed');
+    const inner = trimmed.slice('<tool_call>'.length, -'</tool_call>'.length).trim();
+    if (!inner) throw new EnvelopeError('malformed_tool_call', 'tool call XML payload is empty');
+    return validateToolCall(parseStrictJson(inner, limits));
+  }
+  return validateToolCall(parseStrictJson(text, limits));
+}
+
+// Qwen tool output is wrapped in an XML sentinel, while the payload remains
+// the strict JSON envelope above. Keep detection incremental so HTTP/SSE chunk
+// boundaries cannot turn a valid call into ordinary assistant text.
+const TOOL_OPEN = '<tool_call>';
+const TOOL_CLOSE = '</tool_call>';
+export class ToolCallStreamDecoder {
+  constructor({ maxBytes = MAX_ENVELOPE_BYTES } = {}) {
+    this.maxBytes = maxBytes; this.pending = ''; this.inCall = false; this.finished = false;
+  }
+  push(text) {
+    if (this.finished || typeof text !== 'string') throw new EnvelopeError('invalid_tool_stream', 'invalid tool stream chunk');
+    this.pending += text;
+    if (Buffer.byteLength(this.pending, 'utf8') > this.maxBytes + TOOL_OPEN.length + TOOL_CLOSE.length) throw new EnvelopeError('tool_call_too_large', 'tool call exceeds limit');
+    const output = [];
+    while (true) {
+      if (this.inCall) {
+        const end = this.pending.indexOf(TOOL_CLOSE);
+        if (end < 0) break;
+        const call = this.pending.slice(0, end + TOOL_CLOSE.length); this.pending = this.pending.slice(end + TOOL_CLOSE.length); this.inCall = false;
+        output.push({ kind: 'tool_call_chunk', text: call });
+      } else {
+        const start = this.pending.indexOf(TOOL_OPEN);
+        if (start >= 0) {
+          if (start) output.push({ kind: 'text_delta', text: this.pending.slice(0, start) });
+          this.pending = this.pending.slice(start); this.inCall = true; continue;
+        }
+        const keep = Math.min(this.pending.length, TOOL_OPEN.length - 1);
+        if (this.pending.length > keep) output.push({ kind: 'text_delta', text: this.pending.slice(0, this.pending.length - keep) });
+        this.pending = this.pending.slice(-keep); break;
+      }
+    }
+    return output;
+  }
+  finish() {
+    if (this.finished) return [];
+    this.finished = true;
+    if (this.inCall) throw new EnvelopeError('malformed_tool_call', 'unterminated tool call');
+    return this.pending ? [{ kind: 'text_delta', text: this.pending }] : [];
+  }
+}
 
 export function validateToolResult(value) {
   exactObject(value, ['id', 'name', 'status', 'content', 'metadata']);
