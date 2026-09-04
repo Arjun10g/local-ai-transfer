@@ -1,0 +1,93 @@
+import { setTimeout as delay } from 'node:timers/promises';
+
+const LOOPBACK = new Set(['127.0.0.1', 'localhost']);
+const REQUEST_ID = /^[A-Za-z0-9_-]{1,96}$/;
+
+export class NativeEngineError extends Error {
+  constructor(code, message, status = 0) { super(message); this.name = 'NativeEngineError'; this.code = code; this.status = status; }
+}
+
+function endpointUrl(endpoint) {
+  if (typeof endpoint !== 'string' || endpoint.length < 1 || endpoint.length > 512) throw new NativeEngineError('invalid_engine_endpoint', 'engine endpoint is invalid');
+  let url; try { url = new URL(endpoint); } catch { throw new NativeEngineError('invalid_engine_endpoint', 'engine endpoint is not a URL'); }
+  if (url.protocol !== 'http:' || !LOOPBACK.has(url.hostname) || url.username || url.password || url.pathname !== '/' || url.search || url.hash || !url.port) throw new NativeEngineError('invalid_engine_endpoint', 'engine endpoint must be an authenticated loopback HTTP URL');
+  const port = Number(url.port); if (!Number.isInteger(port) || port < 1 || port > 65535) throw new NativeEngineError('invalid_engine_endpoint', 'engine endpoint port is invalid');
+  return url.origin;
+}
+
+async function readJson(response) {
+  const text = await response.text(); try { return JSON.parse(text); } catch { return {}; }
+}
+
+async function* sseEvents(response, signal) {
+  if (!response.body) throw new NativeEngineError('engine_empty_stream', 'engine returned no response stream');
+  const decoder = new TextDecoder(); let buffer = '';
+  for await (const chunk of response.body) {
+    if (signal?.aborted) throw Object.assign(new NativeEngineError('cancelled', 'native generation cancelled'), { code: 'cancelled' });
+    buffer += decoder.decode(chunk, { stream: true });
+    const lines = buffer.split(/\r?\n/); buffer = lines.pop() ?? '';
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      const data = line.slice(6); if (data === '[DONE]') return;
+      let value; try { value = JSON.parse(data); } catch { throw new NativeEngineError('invalid_engine_stream', 'engine emitted malformed SSE JSON'); }
+      if (value.error) throw new NativeEngineError(value.error.code ?? 'engine_error', 'engine returned an error event');
+      yield value;
+    }
+  }
+  if (buffer.trim()) throw new NativeEngineError('invalid_engine_stream', 'engine stream ended mid-frame');
+}
+
+export class NativeEngineClient {
+  constructor({ endpoint, token, timeoutMs = 30000, maxTokens = 64 } = {}) {
+    this.baseUrl = endpointUrl(endpoint); if (typeof token !== 'string' || token.length < 16 || token.length > 512) throw new NativeEngineError('invalid_engine_token', 'engine bearer token is invalid');
+    this.token = token; this.timeoutMs = timeoutMs; this.maxTokens = maxTokens; this.sessions = new Map(); this.active = new Map(); this.closed = false;
+  }
+  headers(extra = {}) { return { authorization: `Bearer ${this.token}`, ...extra }; }
+  async request(path, options = {}, { signal, timeoutMs = this.timeoutMs } = {}) {
+    if (this.closed) throw new NativeEngineError('engine_client_closed', 'native engine client is closed');
+    const abort = new AbortController(); const timer = setTimeout(() => abort.abort(), timeoutMs); const relay = () => abort.abort(); signal?.addEventListener('abort', relay, { once: true });
+    try {
+      const response = await fetch(`${this.baseUrl}${path}`, { ...options, signal: abort.signal, headers: this.headers(options.headers) });
+      if (!response.ok) { const payload = await readJson(response); throw new NativeEngineError(payload.error?.code ?? `http_${response.status}`, 'native engine request failed', response.status); }
+      return response;
+    } catch (error) {
+      if (error?.name === 'AbortError') throw Object.assign(new NativeEngineError(signal?.aborted ? 'cancelled' : 'engine_timeout', signal?.aborted ? 'native request cancelled' : 'native request timed out'), { code: signal?.aborted ? 'cancelled' : 'engine_timeout' });
+      throw error;
+    } finally { clearTimeout(timer); signal?.removeEventListener('abort', relay); }
+  }
+  async health() { const response = await this.request('/healthz'); const data = await readJson(response); return { ready: data.lifecycle === 'READY' || data.lifecycle === 'BUSY', engine: 'native-0.1.0', backend: 'fixture-cpu', lifecycle: data.lifecycle ?? 'UNKNOWN' }; }
+  async ready() { const response = await this.request('/readyz'); const data = await readJson(response); return { ready: data.ready === true, lifecycle: data.lifecycle ?? 'UNKNOWN' }; }
+  async waitReady({ timeoutMs = this.timeoutMs, intervalMs = 25 } = {}) { const deadline = Date.now() + timeoutMs; while (Date.now() < deadline) { try { const status = await this.ready(); if (status.ready) return status; } catch (error) { if (!(error instanceof NativeEngineError) || !['engine_timeout', 'http_503', 'not_ready'].includes(error.code)) throw error; } await delay(intervalMs); } throw new NativeEngineError('engine_not_ready', 'native engine readiness timed out'); }
+  async ensureSession(hostSessionId, signal) {
+    if (!REQUEST_ID.test(hostSessionId)) throw new NativeEngineError('invalid_session_id', 'host session id is invalid');
+    const existing = this.sessions.get(hostSessionId); if (existing) return existing;
+    const response = await this.request('/v1/sessions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }, { signal }); const data = await readJson(response);
+    if (typeof data.id !== 'string' || !REQUEST_ID.test(data.id)) throw new NativeEngineError('invalid_engine_response', 'engine returned invalid session id');
+    this.sessions.set(hostSessionId, data.id); return data.id;
+  }
+  async deleteSession(hostSessionId) { const nativeId = this.sessions.get(hostSessionId); if (!nativeId) return false; try { await this.request(`/v1/sessions/${encodeURIComponent(nativeId)}`, { method: 'DELETE' }); } finally { this.sessions.delete(hostSessionId); } return true; }
+  async resetSession(hostSessionId) { return this.deleteSession(hostSessionId); }
+  cancel(requestId) {
+    const active = this.active.get(requestId); if (!active) return false; active.cancelled = true; if (active.nativeRequestId) void this.postCancel(active.nativeRequestId); active.abort.abort(); return true;
+  }
+  async postCancel(nativeRequestId) { if (!REQUEST_ID.test(nativeRequestId)) return false; try { await this.request(`/v1/cancel/${encodeURIComponent(nativeRequestId)}`, { method: 'POST', body: '{}' }, { timeoutMs: 2000 }); return true; } catch { return false; } }
+  async *generate({ requestId, sessionId, messages = [], mode = 'normal', signal }) {
+    if (!REQUEST_ID.test(requestId)) throw new NativeEngineError('invalid_request_id', 'host request id is invalid');
+    const localAbort = new AbortController(); const relay = () => { localAbort.abort(); };
+    signal?.addEventListener('abort', relay, { once: true }); const active = { abort: localAbort, nativeRequestId: null, cancelled: false }; this.active.set(requestId, active);
+    try {
+      const nativeSessionId = await this.ensureSession(sessionId ?? 'ses_native_default', localAbort.signal);
+      const payload = { model: 'fixture', session_id: nativeSessionId, messages, stream: true, max_tokens: Math.min(this.maxTokens, 64), mode };
+      const response = await this.request('/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) }, { signal: localAbort.signal });
+      active.nativeRequestId = response.headers.get('x-request-id'); if (active.cancelled && active.nativeRequestId) void this.postCancel(active.nativeRequestId);
+      for await (const chunk of sseEvents(response, localAbort.signal)) {
+        const choice = chunk.choices?.[0]; const delta = choice?.delta?.content; if (typeof delta === 'string' && delta) yield { kind: 'text_delta', text: delta };
+        const finish = choice?.finish_reason; if (finish) { if (finish === 'cancelled' || active.cancelled) throw Object.assign(new NativeEngineError('cancelled', 'native generation cancelled'), { code: 'cancelled' }); yield { kind: 'done', finish_reason: finish, usage: { completion_tokens: 0 } }; }
+      }
+    } catch (error) {
+      if (active.cancelled || signal?.aborted || error?.code === 'cancelled') throw Object.assign(new NativeEngineError('cancelled', 'native generation cancelled'), { code: 'cancelled' });
+      throw error;
+    } finally { signal?.removeEventListener('abort', relay); this.active.delete(requestId); }
+  }
+  async shutdown() { for (const active of this.active.values()) active.abort.abort(); this.active.clear(); const sessions = [...this.sessions.keys()]; await Promise.allSettled(sessions.map(id => this.deleteSession(id))); this.closed = true; }
+}
