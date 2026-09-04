@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, realpath } from 'node:fs/promises';
+import { mkdtemp, realpath, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ProcessRunProvider, createProcessRunTools, terminateProcessTree } from '../../host/tools/local/process-run.mjs';
@@ -19,8 +19,8 @@ class FakeChild extends EventEmitter {
   kill() { this.emit('close', null); }
 }
 
-async function setup({ spawn, killProcess, taskkillSpawn, grantControl, actions = { probe: action({}) }, workspace = {} } = {}) {
-  const root = await mkdtemp(join(tmpdir(), 'lae-process-')); const policy = new WorkspacePolicy([{ id: 'project', path: root, read: workspace.read ?? true, write: workspace.write ?? true }]); const provider = new ProcessRunProvider({ enabled: true, actions, workspacePolicy: policy, grantControl, spawn, killProcess, taskkillSpawn, environment: { PATH: '/secret', SystemRoot: '/windows' } }); return { provider, root, tools: createProcessRunTools(provider) };
+async function setup({ spawn, killProcess, taskkillSpawn, resolveExecutable, statExecutable, statResolvedExecutable, grantControl, actions = { probe: action({}) }, workspace = {} } = {}) {
+  const root = await mkdtemp(join(tmpdir(), 'lae-process-')); const policy = new WorkspacePolicy([{ id: 'project', path: root, read: workspace.read ?? true, write: workspace.write ?? true }]); const provider = new ProcessRunProvider({ enabled: true, actions, workspacePolicy: policy, grantControl, spawn, killProcess, taskkillSpawn, resolveExecutable: resolveExecutable ?? (async value => value), statExecutable: statExecutable ?? (async () => ({ isSymbolicLink: () => false })), statResolvedExecutable: statResolvedExecutable ?? (async () => ({ isFile: () => true, mode: 0o755 })), environment: { PATH: '/secret', SystemRoot: '/windows' } }); return { provider, root, tools: createProcessRunTools(provider) };
 }
 
 test('process.run_allowlisted uses fixed argv, workspace cwd, minimal env, bounded UTF-8, and stdin only when declared', async () => {
@@ -38,6 +38,8 @@ test('process action validates scalar argv kinds and rejects unsafe config befor
   let launched;
   const configured = await setup({ actions: { scalar: scalarAction }, spawn: (executable, args) => { launched = { executable, args }; return new FakeChild(); } });
   const request = call({ action_id: 'scalar', parameters: { count: 3, enabled: true } }, 'scalar_call'); await configured.tools.preview(request); const output = value(await configured.tools.execute({ ...request, authorization: { kind: 'user_confirmation' } })); assert.equal(output.stdout, '😀'); assert.deepEqual(launched.args, ['--count', '3', '--enabled', 'true']);
+  assert.equal(configured.tools.parameters.oneOf[0].properties.parameters.properties.count.minimum, 0);
+  await assert.rejects(() => configured.tools.preview(call({ action_id: 'scalar', parameters: { count: -1, enabled: true } }, 'negative_scalar_call')), error => error.code === 'invalid_tool_arguments');
   for (const executable of ['/bin/sh', '/usr/bin/powershell_ise', '/usr/bin/rundll32', '/tmp/helper.cmd', '/tmp/helper.ps1', '/tmp/helper.js']) assert.throws(() => mergeConfig({ process_actions: { enabled: true, actions: { bad: action({ executable }) } } }), /executable invalid|not permitted/);
   assert.throws(() => mergeConfig({ process_actions: { enabled: true, actions: { bad: action({ parameters: { count: { type: 'integer', argv_kind: 'identifier' } }, args: ['{count}'] }) } } }), /argv|parameter/);
   assert.throws(() => mergeConfig({ process_actions: { enabled: true, actions: { constructor: action({}) } } }), /process action/);
@@ -72,4 +74,47 @@ test('process cancellation, timeout, spawn failure, child failure, and stderr ov
 
 test('operator grant revocation aborts an in-flight process and prevents success', async () => {
   const store = new OperatorGrantStore(); const control = new OperatorGrantControl({ store, bindings: [{ capability: 'local.process:probe', provider: 'local_process', accountFingerprint: 'local_host', scope: 'probe', label: 'Probe' }] }); control.grant('local.process:probe', 60000); let killed = 0; const configured = await setup({ grantControl: control, spawn: () => new FakeChild({ output: false }), killProcess: async child => { killed += 1; child.kill(); } }); const request = call({ action_id: 'probe', parameters: { name: 'safe', input: '' } }, 'revoke_process_call'); await configured.tools.preview(request); const authorization = await configured.tools.authorize(request); const pending = configured.tools.execute({ ...request, authorization }); await new Promise(resolve => setTimeout(resolve, 25)); control.revoke('local.process:probe'); assert.equal(value(await pending).code, 'provider_permission_revoked'); assert.equal(killed, 1);
+});
+
+test('process executable preview requires a regular non-symlink and binds its canonical path before dispatch', async () => {
+  const symlink = await setup({ statExecutable: async () => ({ isSymbolicLink: () => true }) });
+  await assert.rejects(() => symlink.tools.preview(call({ action_id: 'probe', parameters: { name: 'safe', input: '' } }, 'symlink_executable')), error => error.code === 'provider_executable_invalid');
+  const directory = await setup({ statResolvedExecutable: async () => ({ isFile: () => false }) });
+  await assert.rejects(() => directory.tools.preview(call({ action_id: 'probe', parameters: { name: 'safe', input: '' } }, 'directory_executable')), error => error.code === 'provider_executable_invalid');
+  const missing = await setup({ resolveExecutable: async () => { throw new Error('missing'); } });
+  await assert.rejects(() => missing.tools.preview(call({ action_id: 'probe', parameters: { name: 'safe', input: '' } }, 'missing_executable')), error => error.code === 'provider_executable_invalid');
+
+  let launched;
+  const canonical = await setup({ resolveExecutable: async () => '/canonical/probe', spawn: (executable, args) => { launched = { executable, args }; return new FakeChild(); } });
+  const canonicalCall = call({ action_id: 'probe', parameters: { name: 'safe', input: '' } }, 'canonical_executable');
+  const preview = await canonical.tools.preview(canonicalCall);
+  assert.equal(preview.executable, '/canonical/probe');
+  assert.equal(value(await canonical.tools.execute({ ...canonicalCall, authorization: { kind: 'user_confirmation' } })).stdout, '😀');
+  assert.equal(launched.executable, '/canonical/probe');
+
+  let resolutions = 0; let dispatches = 0;
+  const changed = await setup({ resolveExecutable: async () => (++resolutions === 1 ? '/canonical/probe' : '/replaced/probe'), spawn: () => { dispatches += 1; return new FakeChild(); } });
+  const changedCall = call({ action_id: 'probe', parameters: { name: 'safe', input: '' } }, 'changed_executable');
+  await changed.tools.preview(changedCall);
+  assert.equal(value(await changed.tools.execute({ ...changedCall, authorization: { kind: 'user_confirmation' } })).code, 'provider_permission_insufficient');
+  assert.equal(dispatches, 0);
+});
+
+test('process executable authorization is an exact, typed object', async () => {
+  const invalid = [null, {}, { kind: 'policy' }, { kind: 'user_confirmation', extra: true }, { kind: 'operator_grant' }, { kind: 'operator_grant', generation: 'ABCDEF0123456789ABCDEF0123456789' }, { kind: 'operator_grant', generation: '00000000000000000000000000000000', extra: true }];
+  const configured = await setup({ spawn: () => new FakeChild() });
+  for (const [index, authorization] of invalid.entries()) {
+    const request = call({ action_id: 'probe', parameters: { name: 'safe', input: '' } }, `invalid_authorization_${index}`);
+    await configured.tools.preview(request);
+    assert.equal(value(await configured.tools.execute({ ...request, authorization })).code, 'provider_permission_insufficient');
+  }
+});
+
+test('process timeout limits stay in parity across runtime config and JSON schema', async () => {
+  const schema = JSON.parse(await readFile(new URL('../../contracts/config-schema/v0.1.0.json', import.meta.url), 'utf8'));
+  const timeoutSchema = schema.properties.process_actions.properties.actions.additionalProperties.properties.timeout_ms;
+  assert.equal(timeoutSchema.minimum, 100);
+  assert.equal(timeoutSchema.maximum, 110000);
+  assert.throws(() => mergeConfig({ process_actions: { enabled: true, actions: { probe: action({ timeout_ms: 110001 }) } } }), /timeout/);
+  assert.doesNotThrow(() => mergeConfig({ process_actions: { enabled: true, actions: { probe: action({ timeout_ms: 110000 }) } } }));
 });

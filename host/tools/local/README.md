@@ -65,6 +65,11 @@ overflow await bounded process-tree cleanup. Dispatches are at-most-once and
 the bounded ledger rejects new actions after its safety limit; stderr content
 is never returned.
 
+Executable identity is checked as a regular, non-symlink file at preview and
+again immediately before spawn. Node path APIs cannot provide a kernel-level
+no-swap guarantee if a trusted parent directory is replaced between that final
+check and process creation; that residual remains a platform acceptance item.
+
 This is allowlisting and lifecycle control, not an OS sandbox. Windows
 process-tree behavior requires platform-specific acceptance evidence; the
 fake process tests exercise the injectable termination boundary.
