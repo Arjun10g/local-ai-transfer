@@ -1,0 +1,38 @@
+{
+  "schema": "local_bmo.windows-target-profile.v1",
+  "status": "reported-values-awaiting-exact-receipt",
+  "computer": {
+    "manufacturer_regex": "(?i)^Dell(?: Inc\\.)?$",
+    "board_product": "039NNG",
+    "board_revision": "A00",
+    "installed_memory_bytes": 34359738368,
+    "memory_speed_mts": 5600
+  },
+  "cpu": {
+    "name_regex": "(?i)Intel.*Core.*Ultra 7",
+    "reported_platform_tier": "vPro Enterprise",
+    "exact_sku_status": "must-be-captured-on-target"
+  },
+  "gpu": {
+    "name_regex": "(?i)Intel.*Graphics",
+    "vendor_pci_id": "VEN_8086",
+    "driver_version": "32.0.101.8247",
+    "memory_class": "integrated-or-UMA-must-be-attested"
+  },
+  "backends": {
+    "mandatory": "cpu-safe",
+    "candidate": "intel-vulkan-conservative",
+    "candidate_is_promoted": false
+  },
+  "required_live_checks_for_full_access": [
+    "mail.read_message",
+    "teams.list_messages",
+    "mail.create_draft",
+    "mail.send_draft",
+    "teams.send_message",
+    "app.open.outlook",
+    "browser.open_url",
+    "browser.fill_field",
+    "coding.copilot_ask"
+  ]
+}

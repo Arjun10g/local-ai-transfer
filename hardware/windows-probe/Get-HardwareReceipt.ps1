@@ -2,6 +2,9 @@
 param(
     [Parameter(Position = 0)]
     [string] $OutputPath = (Join-Path (Get-Location) 'hardware-receipt.json'),
+    [string] $VulkanInfoPath,
+    [ValidatePattern('^[a-fA-F0-9]{64}$')]
+    [string] $ExpectedVulkanInfoSha256,
     [switch] $NoSummary
 )
 
@@ -36,9 +39,13 @@ if ($env:OS -ne 'Windows_NT') { throw 'This probe must run on Windows.' }
 
 $os = @(Get-OptionalCim 'Win32_OperatingSystem')[0]
 $computer = @(Get-OptionalCim 'Win32_ComputerSystem')[0]
+$baseboards = Get-OptionalCim 'Win32_BaseBoard'
+$biosRecords = Get-OptionalCim 'Win32_BIOS'
+$memoryModules = Get-OptionalCim 'Win32_PhysicalMemory'
 $cpus = Get-OptionalCim 'Win32_Processor'
 $adapters = Get-OptionalCim 'Win32_VideoController'
 $drivers = Get-OptionalCim 'Win32_PnPSignedDriver' 'DeviceClass = ''DISPLAY'''
+$displayPnpEntities = Get-OptionalCim 'Win32_PnPEntity' 'PNPClass = ''Display'''
 
 $gpuReceipts = @(
     foreach ($gpu in $adapters) {
@@ -82,6 +89,21 @@ $displayDrivers = @(
     }
 )
 
+$displayPnpReceipts = @(
+    foreach ($device in $displayPnpEntities) {
+        [ordered]@{
+            name = $device.Name
+            manufacturer = $device.Manufacturer
+            pnp_device_id = $device.PNPDeviceID
+            hardware_ids = @($device.HardwareID)
+            class_guid = $device.ClassGuid
+            service = $device.Service
+            status = $device.Status
+            config_manager_error_code = $device.ConfigManagerErrorCode
+        }
+    }
+)
+
 $dllPaths = @(
     (Join-Path $env:windir 'System32\vulkan-1.dll'),
     (Join-Path $env:windir 'System32\d3d12.dll'),
@@ -92,7 +114,20 @@ $runtimeDlls = [ordered]@{}
 foreach ($dll in $dllPaths) { $runtimeDlls[[IO.Path]::GetFileName($dll)] = Get-FileReceipt $dll }
 
 $vulkanInfo = $null
-$vulkanCommand = Get-Command vulkaninfo -ErrorAction SilentlyContinue
+$vulkanCommand = $null
+if (-not [string]::IsNullOrWhiteSpace($VulkanInfoPath)) {
+    if ([string]::IsNullOrWhiteSpace($ExpectedVulkanInfoSha256)) { throw 'An explicit Vulkan probe requires -ExpectedVulkanInfoSha256.' }
+    $candidate = Get-Item -LiteralPath $VulkanInfoPath -ErrorAction Stop
+    if ($candidate.PSIsContainer -or $candidate.LinkType -or (($candidate.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { throw 'The Vulkan probe must be a regular non-link file.' }
+    $observedProbeHash = (Get-FileHash -LiteralPath $candidate.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($observedProbeHash -ne $ExpectedVulkanInfoSha256.ToLowerInvariant()) { throw 'The Vulkan probe SHA-256 does not match the approved identity.' }
+    $vulkanCommand = [pscustomobject]@{ Source = $candidate.FullName; ExplicitlyPinned = $true; Sha256 = $observedProbeHash }
+} else {
+    $discovered = Get-Command vulkaninfo -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($discovered) {
+        $vulkanCommand = [pscustomobject]@{ Source = $discovered.Source; ExplicitlyPinned = $false; Sha256 = (Get-FileHash -LiteralPath $discovered.Source -Algorithm SHA256).Hash.ToLowerInvariant() }
+    }
+}
 if ($vulkanCommand) {
     # Explicit executable and fixed argument; bounded output and timeout. This
     # is enumeration only and never changes a driver/runtime or contacts a hub.
@@ -106,14 +141,45 @@ if ($vulkanCommand) {
     $process.StartInfo = $psi
     try {
         [void]$process.Start()
+        # Begin both reads before waiting so even a noisy but hash-approved
+        # probe cannot deadlock on a full redirected pipe.
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
         if ($process.WaitForExit(10000)) {
-            $text = ($process.StandardOutput.ReadToEnd() + "`n" + $process.StandardError.ReadToEnd())
-            $vulkanInfo = [ordered]@{ command = $vulkanCommand.Source; exit_code = $process.ExitCode; summary = $text.Substring(0, [Math]::Min(32768, $text.Length)) }
+            $text = ($stdoutTask.GetAwaiter().GetResult() + "`n" + $stderrTask.GetAwaiter().GetResult())
+            $boundedSummary = $text.Substring(0, [Math]::Min(32768, $text.Length))
+            $summaryBytes = [Text.Encoding]::UTF8.GetBytes($boundedSummary)
+            $summaryHasher = [Security.Cryptography.SHA256]::Create()
+            try { $summaryHash = [BitConverter]::ToString($summaryHasher.ComputeHash($summaryBytes)).Replace('-', '').ToLowerInvariant() }
+            finally { $summaryHasher.Dispose() }
+            $field = @{}
+            foreach ($name in @('apiVersion', 'driverVersion', 'vendorID', 'deviceID', 'deviceType', 'deviceName')) {
+                $match = [regex]::Match($boundedSummary, "(?im)^\s*$name\s*=\s*(.+?)\s*$")
+                if ($match.Success) { $field[$name] = $match.Groups[1].Value.Trim() }
+            }
+            $vulkanInfo = [ordered]@{
+                command_name = [IO.Path]::GetFileName($vulkanCommand.Source)
+                command_sha256 = $vulkanCommand.Sha256
+                explicitly_pinned = $vulkanCommand.ExplicitlyPinned
+                exit_code = $process.ExitCode
+                timed_out = $false
+                output_truncated = ($text.Length -gt 32768)
+                summary_sha256 = $summaryHash
+                summary = $boundedSummary
+                primary_device = [ordered]@{
+                    name = $field['deviceName']
+                    vendor_id = $field['vendorID']
+                    device_id = $field['deviceID']
+                    device_type = $field['deviceType']
+                    api_version = $field['apiVersion']
+                    driver_version = $field['driverVersion']
+                }
+            }
         } else {
             $process.Kill()
-            $vulkanInfo = [ordered]@{ command = $vulkanCommand.Source; timed_out = $true }
+            $vulkanInfo = [ordered]@{ command_name = [IO.Path]::GetFileName($vulkanCommand.Source); command_sha256 = $vulkanCommand.Sha256; explicitly_pinned = $vulkanCommand.ExplicitlyPinned; timed_out = $true }
         }
-    } catch { $vulkanInfo = [ordered]@{ command = $vulkanCommand.Source; error = 'enumeration_failed' } }
+    } catch { $vulkanInfo = [ordered]@{ command_name = [IO.Path]::GetFileName($vulkanCommand.Source); command_sha256 = $vulkanCommand.Sha256; explicitly_pinned = $vulkanCommand.ExplicitlyPinned; error = 'enumeration_failed' } }
     finally { $process.Dispose() }
 }
 
@@ -124,19 +190,29 @@ $drives = @(
 )
 
 $receipt = [ordered]@{
-    schema_version = '1.0.0'
+    schema_version = '1.1.0'
     receipt_kind = 'windows-hardware-receipt'
     generated_at_utc = (Get-Date).ToUniversalTime().ToString('o')
     collection = [ordered]@{ read_only = $true; admin_required = $false; network_changed = $false; secrets_collected = $false }
-    os = [ordered]@{ caption = $os.Caption; version = $os.Version; build = $os.BuildNumber; architecture = $os.OSArchitecture; service_pack = $os.CSDVersion }
-    computer = [ordered]@{ manufacturer = $computer.Manufacturer; model = $computer.Model; system_family = $computer.SystemFamily; total_memory_bytes = $computer.TotalPhysicalMemory; available_memory_bytes = $os.FreePhysicalMemory * 1024 }
+    os = [ordered]@{ caption = $os.Caption; version = $os.Version; build = $os.BuildNumber; architecture = $os.OSArchitecture; service_pack = $os.CSDVersion; sku = $os.OperatingSystemSKU; product_type = $os.ProductType; build_type = $os.BuildType }
+    computer = [ordered]@{ manufacturer = $computer.Manufacturer; model = $computer.Model; system_family = $computer.SystemFamily; system_type = $computer.SystemType; total_memory_bytes = $computer.TotalPhysicalMemory; available_memory_bytes = $os.FreePhysicalMemory * 1024 }
+    baseboards = @(
+        foreach ($board in $baseboards) { [ordered]@{ manufacturer = $board.Manufacturer; product = $board.Product; version = $board.Version; status = $board.Status } }
+    )
+    bios = @(
+        foreach ($bios in $biosRecords) { [ordered]@{ manufacturer = $bios.Manufacturer; smbios_bios_version = $bios.SMBIOSBIOSVersion; version = $bios.Version; release_date = $bios.ReleaseDate } }
+    )
+    memory_modules = @(
+        foreach ($memory in $memoryModules) { [ordered]@{ device_locator = $memory.DeviceLocator; capacity_bytes = $memory.Capacity; speed_mts = $memory.Speed; configured_speed_mts = $memory.ConfiguredClockSpeed; smbios_memory_type = $memory.SMBIOSMemoryType; form_factor = $memory.FormFactor } }
+    )
     cpu = @(
         foreach ($cpu in $cpus) {
-            [ordered]@{ name = $cpu.Name; manufacturer = $cpu.Manufacturer; description = $cpu.Description; physical_cores = $cpu.NumberOfCores; logical_processors = $cpu.NumberOfLogicalProcessors; max_clock_mhz = $cpu.MaxClockSpeed; address_width = $cpu.AddressWidth; data_width = $cpu.DataWidth; family = $cpu.Family; stepping = $cpu.Stepping; revision = $cpu.Revision }
+            [ordered]@{ name = $cpu.Name; manufacturer = $cpu.Manufacturer; description = $cpu.Description; device_id = $cpu.DeviceID; processor_id = $cpu.ProcessorId; physical_cores = $cpu.NumberOfCores; logical_processors = $cpu.NumberOfLogicalProcessors; max_clock_mhz = $cpu.MaxClockSpeed; address_width = $cpu.AddressWidth; data_width = $cpu.DataWidth; architecture = $cpu.Architecture; family = $cpu.Family; stepping = $cpu.Stepping; revision = $cpu.Revision; second_level_address_translation = $cpu.SecondLevelAddressTranslationExtensions; virtualization_firmware_enabled = $cpu.VirtualizationFirmwareEnabled }
         }
     )
     gpu_adapters = $gpuReceipts
     display_drivers = $displayDrivers
+    display_pnp_entities = $displayPnpReceipts
     vulkan = [ordered]@{ loader_present = ($runtimeDlls['vulkan-1.dll'].present); enumeration = $vulkanInfo; capabilities_note = 'Capture queue families, memory heaps, extensions, and cooperative matrix support from vulkaninfo summary when present; absent data is unknown, not unsupported.' }
     approved_runtime_dlls = $runtimeDlls
     storage = $drives
@@ -162,6 +238,7 @@ if (-not $NoSummary) {
         "OS: $($os.Caption) build $($os.BuildNumber) / $($os.OSArchitecture)",
         "CPU: $((($cpus | Select-Object -First 1).Name))",
         "Memory: total=$($computer.TotalPhysicalMemory) available=$($receipt.computer.available_memory_bytes) bytes",
+        "Baseboard records: $(@($baseboards).Count); memory modules: $(@($memoryModules).Count)",
         "Intel adapters: $((@($gpuReceipts | Where-Object { $_.is_intel }).Count))",
         "Receipt SHA-256: $hash",
         'No secrets, environment dump, model bytes, or network changes were collected.'
