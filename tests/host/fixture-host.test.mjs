@@ -48,6 +48,7 @@ test('controller bounds sessions with deterministic LRU eviction and history', a
   await controller.runTurn({ sessionId: 'ses_hist01', requestId: 'req_hist01', message: 'hello', onEvent: () => {} });
   await controller.runTurn({ sessionId: 'ses_hist01', requestId: 'req_hist02', message: 'second bounded turn', onEvent: () => {} });
   const session = controller.sessions.get('ses_hist01'); assert.ok(session); assert.ok(session.history.length <= 3); assert.ok(session.history_bytes <= 2048);
+  assert.equal(controller.resetSession('ses_hist01'), true); assert.equal(session.history.length, 0); assert.equal(session.history_bytes, 0);
 });
 
 test('host enforces loopback auth/origin, static allowlist, and streams fixture events', async t => {

@@ -35,7 +35,7 @@ export class ConversationController {
     session.history.push(message); session.history_bytes += Buffer.byteLength(JSON.stringify(message), 'utf8');
     while (session.history.length > this.maxHistoryMessages || session.history_bytes > this.maxHistoryBytes) { const removed = session.history.shift(); session.history_bytes -= Buffer.byteLength(JSON.stringify(removed), 'utf8'); }
   }
-  resetSession(sessionId) { const session = this.sessions.get(sessionId); if (!session) return false; if (session.state !== 'IDLE' && session.state !== 'COMPLETED' && session.state !== 'FAILED' && session.state !== 'CANCELLED') throw new Error('session_busy'); session.history = []; session.state = 'IDLE'; return true; }
+  resetSession(sessionId) { const session = this.sessions.get(sessionId); if (!session) return false; if (session.state !== 'IDLE' && session.state !== 'COMPLETED' && session.state !== 'FAILED' && session.state !== 'CANCELLED') throw new Error('session_busy'); session.history = []; session.history_bytes = 0; session.state = 'IDLE'; return true; }
   state(sessionId) { return this.getSession(sessionId).state; }
   _cancelPending(requestId) { const active = this.active; if (!active || active.requestId !== requestId || !active.confirmationId) return false; const item = this.pending.get(active.confirmationId); if (!item) return false; this.pending.delete(active.confirmationId); active.confirmationId = null; item.resolve(CANCELLED_CONFIRMATION); return true; }
   cancel(requestId) { if (this.active?.requestId !== requestId) return false; this.active.controller.abort(); this._cancelPending(requestId); this.engine.cancel?.(requestId); return true; }
