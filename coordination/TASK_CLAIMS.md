@@ -35,5 +35,5 @@
 | QA-010 | S4 | `main` | IN_PROGRESS | TOOL-018, MODEL-006 | S0 | heavy autonomous tool tests pending |
 | SEC-006 | S4 | `main` | IN_PROGRESS | RUN-020, TOOL-019 | S0 | parser/schema adversarial evidence pending |
 | SOL-G4 | S0 | `main` | IN_PROGRESS | RUN-020, MODEL-007, QA-010 | S4 | release-hardening review in progress |
-| RUN-025 | S1 | `luna/native-release-hardening` | READY_FOR_REVIEW | independent native/release audit findings | S0, S4 | `bfd2e11`, `f39469f`; immutable model identity, strict runtime config, validation lease, exact Windows plan launch |
-| REL-004 | S1 | `luna/native-release-hardening` | READY_FOR_REVIEW | RUN-025, QA-001 | S0, S4 | `2b1f8c2`, `abeb6a9`; canonical QA skip semantics, pinned portable Node/host closure, one-shot bootstrap and Job supervisor; native Windows acceptance unproven |
+| RUN-025 | S1 | `luna/native-release-hardening` | READY_FOR_REVIEW | independent native/release audit findings | S0, S4 | `4d98354`, `37da175`; immutable model identity, strict runtime config, validation lease, exact Windows plan launch |
+| REL-004 | S1 | `luna/native-release-hardening` | READY_FOR_REVIEW | RUN-025, QA-001 | S0, S4 | `65e990c`, `305ec99`, `983c340`, `843d179`; canonical QA skip semantics, pinned portable Node/host closure, one-shot bootstrap and Job supervisor; native Windows acceptance unproven |
