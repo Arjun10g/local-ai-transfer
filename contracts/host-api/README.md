@@ -28,3 +28,13 @@ controller turn.
 Failed authentication uses timing-safe token comparison and a bounded per-loopback
 rate limit. Header count/size limits use Node's `maxHeadersCount` and
 `maxHeaderSize` settings.
+
+The native loopback transport accepts only numeric `127.0.0.1` client
+endpoints. It requires HTTP/1.1, a loopback `Host`, bounded unique headers,
+`Content-Length` on JSON POSTs, and rejects transfer encoding. Native request
+headers are limited to 16 KiB/64 fields and bodies to 64 KiB; socket reads and
+writes time out after five seconds. Native outbound JSON is bounded to 64 KiB,
+non-stream JSON responses to 4 MiB, and SSE responses to 4 MiB, 4096 events,
+and 256 KiB per line. The native bearer is supplied through a
+protected token file (`--token-file`) and is never accepted on the command
+line.

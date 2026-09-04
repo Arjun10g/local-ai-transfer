@@ -1,8 +1,13 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { ToolCallStreamDecoder } from '../agent/tool-envelope.mjs';
 
-const LOOPBACK = new Set(['127.0.0.1', 'localhost']);
+const LOOPBACK = '127.0.0.1';
 const REQUEST_ID = /^[A-Za-z0-9_-]{1,96}$/;
+const MAX_REQUEST_JSON_BYTES = 64 * 1024;
+const MAX_RESPONSE_JSON_BYTES = 4 * 1024 * 1024;
+const MAX_SSE_BYTES = 4 * 1024 * 1024;
+const MAX_SSE_EVENTS = 4096;
+const MAX_SSE_LINE = 256 * 1024;
 
 export class NativeEngineError extends Error {
   constructor(code, message, status = 0) { super(message); this.name = 'NativeEngineError'; this.code = code; this.status = status; }
@@ -11,31 +16,45 @@ export class NativeEngineError extends Error {
 function endpointUrl(endpoint) {
   if (typeof endpoint !== 'string' || endpoint.length < 1 || endpoint.length > 512) throw new NativeEngineError('invalid_engine_endpoint', 'engine endpoint is invalid');
   let url; try { url = new URL(endpoint); } catch { throw new NativeEngineError('invalid_engine_endpoint', 'engine endpoint is not a URL'); }
-  if (url.protocol !== 'http:' || !LOOPBACK.has(url.hostname) || url.username || url.password || url.pathname !== '/' || url.search || url.hash || !url.port) throw new NativeEngineError('invalid_engine_endpoint', 'engine endpoint must be an authenticated loopback HTTP URL');
+  if (url.protocol !== 'http:' || url.hostname !== LOOPBACK || url.username || url.password || url.pathname !== '/' || url.search || url.hash || !url.port) throw new NativeEngineError('invalid_engine_endpoint', 'engine endpoint must be an authenticated numeric loopback HTTP URL');
   const port = Number(url.port); if (!Number.isInteger(port) || port < 1 || port > 65535) throw new NativeEngineError('invalid_engine_endpoint', 'engine endpoint port is invalid');
   return url.origin;
 }
 
 async function readJson(response) {
-  const text = await response.text(); try { return JSON.parse(text); } catch { return {}; }
+  if (!response.body) throw new NativeEngineError('engine_empty_response', 'native JSON response had no body');
+  const chunks = []; let bytes = 0;
+  for await (const chunk of response.body) {
+    bytes += chunk.byteLength ?? 0;
+    if (bytes > MAX_RESPONSE_JSON_BYTES) throw new NativeEngineError('engine_response_too_large', 'native JSON response exceeded the size limit');
+    chunks.push(chunk);
+  }
+  const text = new TextDecoder().decode(Buffer.concat(chunks.map(chunk => Buffer.from(chunk))));
+  try { return JSON.parse(text); } catch { return {}; }
 }
 
 async function* sseEvents(response, signal) {
   if (!response.body) throw new NativeEngineError('engine_empty_stream', 'engine returned no response stream');
-  const decoder = new TextDecoder(); let buffer = '';
+  const decoder = new TextDecoder(); const encoder = new TextEncoder(); let buffer = ''; let totalBytes = 0; let events = 0;
   for await (const chunk of response.body) {
     if (signal?.aborted) throw Object.assign(new NativeEngineError('cancelled', 'native generation cancelled'), { code: 'cancelled' });
+    totalBytes += chunk.byteLength ?? 0;
+    if (totalBytes > MAX_SSE_BYTES) throw new NativeEngineError('engine_stream_too_large', 'native SSE response exceeded the size limit');
     buffer += decoder.decode(chunk, { stream: true });
     const lines = buffer.split(/\r?\n/); buffer = lines.pop() ?? '';
+    if (encoder.encode(buffer).byteLength > MAX_SSE_LINE) throw new NativeEngineError('engine_stream_line_too_large', 'native SSE line exceeded the size limit');
     for (const line of lines) {
+      if (encoder.encode(line).byteLength > MAX_SSE_LINE) throw new NativeEngineError('engine_stream_line_too_large', 'native SSE line exceeded the size limit');
       if (!line.startsWith('data: ')) continue;
       const data = line.slice(6); if (data === '[DONE]') return;
+      if (++events > MAX_SSE_EVENTS) throw new NativeEngineError('engine_stream_event_limit', 'native SSE event limit exceeded');
       let value; try { value = JSON.parse(data); } catch { throw new NativeEngineError('invalid_engine_stream', 'engine emitted malformed SSE JSON'); }
       if (value.error) throw new NativeEngineError(value.error.code ?? 'engine_error', 'engine returned an error event');
       yield value;
     }
   }
-  if (buffer.trim()) throw new NativeEngineError('invalid_engine_stream', 'engine stream ended mid-frame');
+  buffer += decoder.decode();
+  if (encoder.encode(buffer).byteLength > MAX_SSE_LINE || buffer.trim()) throw new NativeEngineError('invalid_engine_stream', 'engine stream ended mid-frame');
 }
 
 export class NativeEngineClient {
@@ -50,6 +69,8 @@ export class NativeEngineClient {
   headers(extra = {}) { return { authorization: `Bearer ${this.token}`, ...extra }; }
   async request(path, options = {}, { signal, timeoutMs = this.timeoutMs } = {}) {
     if (this.closed) throw new NativeEngineError('engine_client_closed', 'native engine client is closed');
+    if (typeof options.body === 'string' && new TextEncoder().encode(options.body).byteLength > MAX_REQUEST_JSON_BYTES)
+      throw new NativeEngineError('engine_request_too_large', 'native JSON request exceeded the size limit');
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
     const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
     try {
@@ -85,7 +106,7 @@ export class NativeEngineClient {
   cancel(requestId) {
     const active = this.active.get(requestId); if (!active) return false; active.cancelled = true; if (active.nativeRequestId) void this.postCancel(active.nativeRequestId); active.abort.abort(); return true;
   }
-  async postCancel(nativeRequestId) { if (!REQUEST_ID.test(nativeRequestId)) return false; try { await this.request(`/v1/cancel/${encodeURIComponent(nativeRequestId)}`, { method: 'POST', body: '{}' }, { timeoutMs: 2000 }); return true; } catch { return false; } }
+  async postCancel(nativeRequestId) { if (!REQUEST_ID.test(nativeRequestId)) return false; try { const response = await this.request(`/v1/cancel/${encodeURIComponent(nativeRequestId)}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }, { timeoutMs: 2000 }); const result = await readJson(response); return result.cancelled === true; } catch { return false; } }
   async *generate({ requestId, sessionId, messages = [], mode = 'normal', tools = [], signal }) {
     if (!REQUEST_ID.test(requestId)) throw new NativeEngineError('invalid_request_id', 'host request id is invalid');
     if (!Array.isArray(messages) || messages.length < 1 || messages.length > 64) throw new NativeEngineError('invalid_messages', 'native message history is invalid');

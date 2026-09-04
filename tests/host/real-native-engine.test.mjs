@@ -25,7 +25,7 @@ function stop(child) {
 }
 
 async function startReal(token) {
-  const child = spawn(executable, ['serve', '--port', '0', '--backend', 'cpu', '--model', resolve(model), '--size', size, '--sha256', sha256, '--context', '512', '--token', token], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(executable, ['serve', '--port', '0', '--backend', 'cpu', '--model', resolve(model), '--size', size, '--sha256', sha256, '--context', '512', '--token-stdin'], { stdio: ['pipe', 'pipe', 'pipe'] }); child.stdin.end(`${token}\n`);
   let stdout = ''; let stderr = '';
   child.stderr.on('data', chunk => { stderr = `${stderr}${chunk}`.slice(-8192); });
   const ready = await new Promise((resolveReady, reject) => {

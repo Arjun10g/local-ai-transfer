@@ -3,6 +3,7 @@
 
 import http.client
 import json
+import socket
 import signal
 import subprocess
 import sys
@@ -13,7 +14,8 @@ from pathlib import Path
 
 def request(port, method, path, headers=None, body=None, omit_host=False):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
-    conn.putrequest(method, path, skip_host=omit_host)
+    supplied_host = any(key.lower() == "host" for key in (headers or {}))
+    conn.putrequest(method, path, skip_host=omit_host or supplied_host)
     for key, value in (headers or {}).items():
         conn.putheader(key, value)
     if body is not None:
@@ -31,23 +33,84 @@ def assert_status(actual, expected, label):
         raise AssertionError(f"{label}: expected {expected}, got {actual[0]} body={actual[2]!r}")
 
 
+def raw_request(port, payload, timeout=3):
+    sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+    sock.settimeout(timeout)
+    try:
+        sock.sendall(payload)
+        chunks = []
+        while True:
+            part = sock.recv(4096)
+            if not part:
+                break
+            chunks.append(part)
+        return b"".join(chunks)
+    finally:
+        sock.close()
+
+
 def main():
     executable = sys.argv[1]
-    for args in ([executable, "serve", "--port", "0"], [executable, "serve", "--port", "0", "--token", ""]):
+    use_stdin_token = sys.platform.startswith("win")
+    launcher = Path(__file__).parents[2] / "release" / "windows" / "Start-LocalAssistant.ps1"
+    launcher_text = launcher.read_text(encoding="utf-8")
+    if "--token-stdin" not in launcher_text or "Remove-Item Env:LAE_ENGINE_TOKEN" not in launcher_text or "'--token'" in launcher_text:
+        raise AssertionError("Windows launcher must pipe the token and clear inherited secret environment")
+    for args in ([executable, "serve", "--port", "0"], [executable, "serve", "--port", "0", "--token-file", ""]):
         result = subprocess.run(args, capture_output=True, text=True, timeout=2)
-        if result.returncode != 2 or "non-empty --token" not in result.stderr:
+        if result.returncode != 2 or "bearer token source" not in result.stderr:
             raise AssertionError(f"missing/empty token was accepted: {args!r} rc={result.returncode} stderr={result.stderr!r}")
+    if not use_stdin_token:
+        with tempfile.TemporaryDirectory() as directory:
+            insecure = Path(directory) / "insecure-token"
+            insecure.write_text("insecure-token")
+            insecure.chmod(0o644)
+            result = subprocess.run([executable, "serve", "--port", "0", "--token-file", str(insecure)], capture_output=True, text=True, timeout=2)
+            if result.returncode != 2:
+                raise AssertionError("group/world-readable token file was accepted")
+            alias = Path(directory) / "token-alias"
+            alias.symlink_to(insecure)
+            result = subprocess.run([executable, "serve", "--port", "0", "--token-file", str(alias)], capture_output=True, text=True, timeout=2)
+            if result.returncode != 2:
+                raise AssertionError("token symlink was accepted")
+            short = Path(directory) / "short-token"
+            short.write_text("too-short")
+            short.chmod(0o600)
+            result = subprocess.run([executable, "serve", "--port", "0", "--token-file", str(short)], capture_output=True, text=True, timeout=2)
+            if result.returncode != 2:
+                raise AssertionError("short bearer token was accepted")
+            oversized = Path(directory) / "oversized-token"
+            oversized.write_text("x" * 513)
+            oversized.chmod(0o600)
+            result = subprocess.run([executable, "serve", "--port", "0", "--token-file", str(oversized)], capture_output=True, text=True, timeout=2)
+            if result.returncode != 2:
+                raise AssertionError("oversized bearer token was accepted")
+        result = subprocess.run([executable, "serve", "--port", "0", "--token", "legacy-token"], capture_output=True, text=True, timeout=2)
+        if result.returncode != 2 or "unknown argument" not in result.stderr:
+            raise AssertionError("legacy token argv was accepted")
     with tempfile.TemporaryDirectory() as directory:
+        token_file = Path(directory) / "token"
+        token_file.write_text("config-test-token")
+        token_file.chmod(0o600)
         config = Path(directory) / "config.local.json"
         config.write_text(json.dumps({"model_path": str(Path(directory).resolve() / "Qwen3.5-9B-Q4_K_M.gguf")}))
-        result = subprocess.run([executable, "serve", "--config", str(config), "--token", "config-test-token"], capture_output=True, text=True, timeout=2)
+        token_args = ["--token-stdin"] if use_stdin_token else ["--token-file", str(token_file)]
+        result = subprocess.run([executable, "serve", "--config", str(config), *token_args], input="config-test-token\n" if use_stdin_token else None, capture_output=True, text=True, timeout=2)
         if result.returncode == 2 and "unknown argument" in result.stderr:
             raise AssertionError(f"native CLI rejected launcher's --config: {result.stderr!r}")
         if "model validation failed:" not in result.stderr:
             raise AssertionError(f"--config did not reach explicit model validation: rc={result.returncode} stderr={result.stderr!r}")
 
-    process = subprocess.Popen([executable, "serve", "--port", "0", "--token", "negative-test-token"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    try:
+    with tempfile.TemporaryDirectory() as directory:
+      token_file = Path(directory) / "token"
+      token_file.write_text("negative-test-token")
+      token_file.chmod(0o600)
+      token_args = ["--token-stdin"] if use_stdin_token else ["--token-file", str(token_file)]
+      process = subprocess.Popen([executable, "serve", "--port", "0", *token_args], stdin=subprocess.PIPE if use_stdin_token else subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+      if use_stdin_token:
+          process.stdin.write("negative-test-token\n")
+          process.stdin.close()
+      try:
         ready_line = process.stdout.readline()
         ready = json.loads(ready_line)
         port = ready["port"]
@@ -59,6 +122,30 @@ def main():
         assert_status(request(port, "GET", "/readyz", auth, omit_host=True), 400, "missing host")
         assert_status(request(port, "GET", "/readyz", {**auth, "Origin": "http://127.0.0.1.evil"}), 400, "crafted origin")
         assert_status(request(port, "GET", "/readyz", {**auth, "Origin": "http://localhost.evil:1234"}), 400, "crafted origin port")
+        duplicate = raw_request(port, f"GET /readyz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer negative-test-token\r\n\r\n".encode())
+        if b" 400 " not in duplicate or b"invalid_headers" not in duplicate:
+            raise AssertionError(f"duplicate security header was accepted: {duplicate!r}")
+        malformed = raw_request(port, f"GET /readyz extra HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer negative-test-token\r\n\r\n".encode())
+        if b" 400 " not in malformed or b"invalid_request_line" not in malformed:
+            raise AssertionError(f"malformed request line was accepted: {malformed!r}")
+        slow = socket.create_connection(("127.0.0.1", port), timeout=3)
+        slow.settimeout(8)
+        try:
+            slow.sendall(f"GET /readyz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer negative-test-token\r\n".encode())
+            timed = slow.recv(4096)
+            if b" 408 " not in timed or b"request_timeout" not in timed:
+                raise AssertionError(f"slowloris did not receive typed timeout: {timed!r}")
+        finally:
+            slow.close()
+        for _ in range(100):
+            assert_status(request(port, "GET", "/healthz", {"Host": f"127.0.0.1:{port}"}), 200, "worker churn health")
+        invalid_type = request(port, "POST", "/v1/sessions", {**auth, "Host": f"127.0.0.1:{port}", "Content-Type": "text/plain"}, "{}")
+        assert_status(invalid_type, 415, "non-JSON content type")
+        invalid_path = request(port, "POST", "/v1/cancel/../etc", {**auth, "Host": f"127.0.0.1:{port}", "Content-Type": "application/json"}, "{}")
+        assert_status(invalid_path, 400, "invalid cancellation path id")
+        surplus = raw_request(port, f"POST /v1/sessions HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer negative-test-token\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}x".encode())
+        if b" 400 " not in surplus or b"surplus_body" not in surplus:
+            raise AssertionError(f"surplus body was accepted: {surplus!r}")
         valid = request(port, "GET", "/readyz", {**auth, "Host": f"localhost:{port}", "Origin": f"http://localhost:{port}"})
         assert_status(valid, 200, "valid loopback host/origin")
         build_info = request(port, "GET", "/build-info", {**auth, "Host": f"127.0.0.1:{port}"})
@@ -81,13 +168,13 @@ def main():
         ]
         for body, label in negative_bodies:
             assert_status(request(port, "POST", "/v1/chat/completions", chat_headers, body), 400, label)
-    finally:
-        process.send_signal(signal.SIGTERM)
-        try:
-            process.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=2)
+      finally:
+          process.send_signal(signal.SIGTERM)
+          try:
+              process.wait(timeout=3)
+          except subprocess.TimeoutExpired:
+              process.kill()
+              process.wait(timeout=2)
     print("HTTP negative loopback/auth tests: PASS")
 
 
