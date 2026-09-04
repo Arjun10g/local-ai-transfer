@@ -6,6 +6,10 @@ import { ProviderToolError } from './provider-common.mjs';
 
 const MAX_BYTES = 57344;
 const MAX_FILE_BYTES = 32768;
+// Keep trust in module state rather than an object property that callers could
+// copy onto an arbitrary function. The registry can therefore provide the
+// production reader while direct dependency injection remains test-only.
+const trustedReaders = new WeakSet();
 
 function hash(value) { return createHash('sha256').update(value).digest('hex'); }
 function utf8(value) { return Buffer.byteLength(value, 'utf8'); }
@@ -50,5 +54,11 @@ export async function readWorkspaceContext(policy, workspaceId, paths) {
 
 export function createWorkspaceContextReader(workspaces) {
   const policy = workspaces instanceof WorkspacePolicy ? workspaces : new WorkspacePolicy(workspaces ?? []);
-  return (workspaceId, paths) => readWorkspaceContext(policy, workspaceId, paths);
+  const reader = (workspaceId, paths) => readWorkspaceContext(policy, workspaceId, paths);
+  trustedReaders.add(reader);
+  return reader;
+}
+
+export function isTrustedWorkspaceContextReader(value) {
+  return typeof value === 'function' && trustedReaders.has(value);
 }

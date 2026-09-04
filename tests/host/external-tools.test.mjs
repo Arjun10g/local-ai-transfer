@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdtemp, readFile, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, mkdir, rm, writeFile } from 'node:fs/promises';
 import { createExternalToolRegistry } from '../../host/providers/index.mjs';
 import { BrowserActionProvider, CdpClient, createBrowserActionTools, hostIsPrivate, publicAddress, publicUrl } from '../../host/providers/browser-actions.mjs';
 import { MicrosoftGraphProvider, MicrosoftDeviceCodeCredential, MicrosoftGraphHttpsTransport, createMicrosoftGraphTools } from '../../host/providers/microsoft-graph.mjs';
@@ -280,6 +280,22 @@ test('production Copilot context reader binds exact selected file labels and rej
   const root = await mkdtemp(join(tmpdir(), 'lae-context-')); await writeFile(join(root, 'note.txt'), 'hello\n😀', 'utf8'); await mkdir(join(root, 'nested')); const reader = createWorkspaceContextReader([{ id: 'project', path: root, read: true, write: false }]); const details = await reader('project', ['note.txt']); assert.match(details.text, /--- project\/note\.txt ---/u); assert.equal(details.files[0].path, 'project/note.txt'); assert.equal(details.files[0].bytes, Buffer.byteLength('hello\n😀', 'utf8')); await assert.rejects(() => reader('project', ['missing.txt']), error => error.code === 'not_found');
 });
 
+test('production registry accepts its trusted workspace context reader', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'lae-registry-context-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'note.txt'), 'safe', 'utf8');
+  const registry = createExternalToolRegistry({
+    workspaceRoots: [{ id: 'project', path: root, read: true, write: false }],
+    config: { copilot: { enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], version: '1.2.3' } },
+  });
+  assert.equal(registry.providerStatus().copilot, 'ready');
+  const request = call('coding.copilot_ask', { prompt: 'summarize', workspace_id: 'project', context_paths: ['note.txt'] }, 'registry_context');
+  const preview = await registry['coding.copilot_ask'].preview(request);
+  assert.deepEqual(preview.context_files, [{ path: 'project/note.txt', bytes: 4, digest: preview.context_files[0].digest }]);
+  assert.equal(preview.context_files[0].path, 'project/note.txt');
+  assert.equal(preview.context_files[0].bytes, 4);
+});
+
 test('browser action provider rejects private DNS, malformed arguments, and timeout with cleanup', async () => {
   let spawned = 0; const provider = new BrowserActionProvider({ enabled: true, executable: '/approved/chrome', allowlist: ['/approved/chrome'], resolve: async () => ['::1'], spawn: () => { spawned += 1; return new EventEmitter(); }, mkdtempImpl: async () => join(tmpdir(), 'lae-browser-rejected'), rmImpl: async () => {} }); const tools = createBrowserActionTools(provider); await assert.rejects(() => tools['browser.session_start'].preview(call('browser.session_start', { url: 'https://private.example/' })), error => error.code === 'provider_destination_rejected'); assert.equal(spawned, 0); await assert.rejects(() => tools['browser.inspect_links'].execute(call('browser.inspect_links', { browser_session_id: 'x', unknown: true })), error => error.code === 'invalid_tool_arguments');
   const timeoutProvider = new BrowserActionProvider({ enabled: true, executable: '/approved/chrome', allowlist: ['/approved/chrome'], resolve: async () => ['93.184.216.34'], requestTimeoutMs: 100, spawn: () => { const child = new EventEmitter(); child.kill = () => {}; return child; }, mkdtempImpl: async () => join(tmpdir(), 'lae-browser-timeout'), rmImpl: async () => {}, proxyFactory: async () => ({ port: 43125, close: async () => {} }), waitDevtoolsPortImpl: async () => ({ port: 43126 }), cdpFactory: async () => ({ connect: async () => new Promise(() => {}), close() {} }) }); const timeoutTools = createBrowserActionTools(timeoutProvider); const timeoutCall = call('browser.session_start', { url: 'https://example.com/' }, 'browser_timeout'); await timeoutTools['browser.session_start'].preview(timeoutCall); const timedOut = value(await timeoutTools['browser.session_start'].execute({ ...timeoutCall, authorization: { kind: 'user_confirmation' } })); assert.equal(timedOut.code, 'provider_timeout'); const replay = value(await timeoutTools['browser.session_start'].execute({ ...timeoutCall, authorization: { kind: 'user_confirmation' } })); assert.equal(replay.code, 'provider_permission_insufficient'); const controller = new AbortController(); const cancelCall = call('browser.session_start', { url: 'https://example.com/' }, 'browser_cancel'); await timeoutTools['browser.session_start'].preview(cancelCall); const pending = timeoutTools['browser.session_start'].execute({ ...cancelCall, signal: controller.signal, authorization: { kind: 'user_confirmation' } }); setTimeout(() => controller.abort(), 10); assert.equal((value(await pending)).code, 'provider_cancelled');
@@ -330,6 +346,20 @@ test('Copilot production ACP framing never puts prompt in argv and cancels permi
   const provider = new CopilotCliProvider({ protocol: 'acp', enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], version: '1.2.3', versionCheck: async () => true, readContext: async () => ({ text: '', files: [] }), environment: { PATH: '/safe', SECRET_TOKEN: 'nope' }, spawn: (...args) => { launched = args; return child; } }); const tool = createCopilotTool(provider); const request = call('coding.copilot_ask', { prompt: 'do not leak', workspace_id: 'project', context_paths: [] }, 'call_acp'); await tool.preview(request); const output = value(await tool.execute({ ...request, authorization: { kind: 'user_confirmation' } })); assert.equal(output.stdout, 'ACP answer'); assert.deepEqual(launched[1].slice(0, 2), ['--acp', '--stdio']); assert.equal(launched[1].includes('--prompt'), false); assert.equal(JSON.stringify(launched[1]).includes('do not leak'), false); assert.equal(launched[2].env.PATH, '/safe'); assert.equal(launched[2].env.SECRET_TOKEN, undefined); assert.deepEqual(acpRequests[0].params.clientCapabilities, {}); assert.equal(acpRequests[1].params.cwd.startsWith('/'), true); assert.deepEqual(acpRequests[1].params.mcpServers, []);
 });
 
+test('Copilot ACP rejects empty or control-character session IDs', async () => {
+  for (const [index, invalidSessionId] of ['', 'bad\nid', 'bad\u0000id'].entries()) {
+    const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null;
+    child.stdin = { write(line) { const request = JSON.parse(line); queueMicrotask(() => {
+      const result = request.method === 'initialize' ? { protocolVersion: 1 } : { sessionId: invalidSessionId };
+      child.stdout.emit('data', Buffer.from(`${JSON.stringify({ jsonrpc: '2.0', id: request.id, result })}\n`));
+    }); return true; }, end() {} }; child.kill = () => {};
+    const provider = new CopilotCliProvider({ protocol: 'acp', enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], versionCheck: async () => true, spawn: () => child });
+    const tool = createCopilotTool(provider); const request = call('coding.copilot_ask', { prompt: 'x', workspace_id: 'project', context_paths: [] }, `call_bad_session_${index}`);
+    await tool.preview(request);
+    assert.equal(value(await tool.execute({ ...request, authorization: { kind: 'user_confirmation' } })).code, 'provider_failed');
+  }
+});
+
 test('Copilot cancellation does not wait for orphans', async () => {
   let killed = 0; const provider = new CopilotCliProvider({ enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], versionCheck: async () => true, readContext: async () => '', killProcess: () => { killed += 1; }, spawn: () => new FakeChild({ finish: false }) }); const tool = createCopilotTool(provider); const c = new AbortController(); const request = call('coding.copilot_ask', { prompt: 'cancel', workspace_id: 'project', context_paths: [] }, 'call_cancel'); await tool.preview(request); const pending = tool.execute({ ...request, authorization: { kind: 'user_confirmation' }, signal: c.signal }); await new Promise(resolve => setImmediate(resolve)); c.abort(); const output = value(await pending); assert.equal(output.code, 'provider_cancelled'); assert.equal(killed, 1);
 });
@@ -374,6 +404,7 @@ test('Copilot Windows tree termination uses fixed taskkill argv without a shell'
 
 test('Copilot provider rejects unsafe lifecycle bounds', () => {
   assert.throws(() => new ProductionCopilotCliProvider({ protocol: 'legacy_stdin' }), /test gate/);
+  assert.throws(() => new ProductionCopilotCliProvider({ protocol: 'acp', readContext: async () => '' }), /test gate/);
   assert.throws(() => new CopilotCliProvider({ timeoutMs: NaN }), /invalid Copilot timeout/);
   assert.throws(() => new CopilotCliProvider({ timeoutMs: 99 }), /invalid Copilot timeout/);
   assert.throws(() => new CopilotCliProvider({ maxOutput: 1023 }), /invalid Copilot output limit/);
