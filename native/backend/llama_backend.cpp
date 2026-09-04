@@ -57,12 +57,17 @@ void LlamaBackend::initialize(const BackendConfig& config) {
 #ifdef LAE_ENABLE_LLAMA_VULKAN
   if (config.backend_profile == "intel-vulkan" && (config.gpu_layers < 1 || config.gpu_layers > 99)) throw std::invalid_argument("intel-vulkan gpu_layers must be between 1 and 99");
   if (config.backend_profile == "intel-vulkan") {
+    llama_backend_init();
+    impl_->backend_initialized = true;
     ggml_backend_dev_t selected = nullptr;
     for (size_t index = 0; index < ggml_backend_dev_count(); ++index) {
       ggml_backend_dev_t device = ggml_backend_dev_get(index);
       if (ggml_backend_dev_type(device) != GGML_BACKEND_DEVICE_TYPE_IGPU) continue;
       const char* name = ggml_backend_dev_name(device);
-      if (!name || config.vulkan_device_name != name) continue;
+      const char* description = ggml_backend_dev_description(device);
+      const bool exact_name = name && config.vulkan_device_name == name;
+      const bool exact_description = description && config.vulkan_device_name == description;
+      if (!exact_name && !exact_description) continue;
       if (selected) throw std::runtime_error("multiple Vulkan devices match the exact configured name");
       selected = device;
     }
@@ -71,8 +76,10 @@ void LlamaBackend::initialize(const BackendConfig& config) {
     impl_->active_backend = "intel-vulkan";
   }
 #endif
-  llama_backend_init();
-  impl_->backend_initialized = true;
+  if (!impl_->backend_initialized) {
+    llama_backend_init();
+    impl_->backend_initialized = true;
+  }
   auto model_params = llama_model_default_params();
 #ifdef LAE_ENABLE_LLAMA_VULKAN
   ggml_backend_dev_t device_list[2] = {nullptr, nullptr};

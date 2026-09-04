@@ -87,27 +87,23 @@ class WindowsBackendPlanTests(unittest.TestCase):
     def test_vulkan_product_profile_requires_receipt_and_has_bounded_offload(self):
         path = self.write_receipt(receipt(integrated=None))
         attestation = self.write_vulkan_attestation(path)
-        plan = planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
-        self.assertEqual(plan["status"], "planned")
-        self.assertEqual(plan["runtime"]["compiled_backend"], "vulkan")
-        self.assertTrue(plan["runtime"]["gpu_offload"])
-        self.assertEqual(plan["runtime"]["gpu_layers_default"], 20)
-        self.assertEqual(plan["runtime"]["gpu_layers_max"], 99)
+        with self.assertRaisesRegex(planner.BackendPlanError, "source/shader closure"):
+            planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
 
     def test_probe_shaped_unknown_integrated_field_needs_matching_attestation(self):
         path = self.write_receipt(receipt(integrated=None))
-        with self.assertRaisesRegex(planner.BackendPlanError, "attestation"):
+        with self.assertRaisesRegex(planner.BackendPlanError, "source/shader closure"):
             planner.build_plan("intel-vulkan-conservative", path)
         attestation = self.write_vulkan_attestation(path)
-        plan = planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
-        self.assertEqual(plan["runtime"]["device"]["pnp_device_id"], "PCI\\VEN_8086&DEV_7D55&INDEX_0")
+        with self.assertRaisesRegex(planner.BackendPlanError, "source/shader closure"):
+            planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
 
     def test_vulkan_rejects_missing_loader_or_enumeration(self):
         value = receipt()
         value["vulkan"] = {"loader_present": False, "enumeration": None}
         path = self.write_receipt(value)
         attestation = self.write_vulkan_attestation(path)
-        with self.assertRaisesRegex(planner.BackendPlanError, "Vulkan loader"):
+        with self.assertRaisesRegex(planner.BackendPlanError, "source/shader closure"):
             planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
 
     def test_vulkan_rejects_unbound_or_mismatched_attestation(self):
@@ -116,7 +112,7 @@ class WindowsBackendPlanTests(unittest.TestCase):
         value = json.loads(attestation.read_text(encoding="utf-8"))
         value["vulkan"]["driver_version"] = "wrong-driver"
         attestation.write_text(json.dumps(value), encoding="utf-8")
-        with self.assertRaisesRegex(planner.BackendPlanError, "correlated"):
+        with self.assertRaisesRegex(planner.BackendPlanError, "source/shader closure"):
             planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
 
     def test_sycl_is_blocked_until_product_vulkan_profile(self):
@@ -187,6 +183,7 @@ class WindowsBackendPlanTests(unittest.TestCase):
         self.assertIn("no fallback", docs.lower())
         self.assertIn("Vulkan (primary accelerated", docs)
         self.assertIn("GGML_VULKAN", docs)
+        self.assertIn("not buildable", docs)
 
     def test_native_vulkan_profile_is_authenticated_and_never_cpu_fallback(self):
         cmake = (ROOT / "native/CMakeLists.txt").read_text(encoding="utf-8")
@@ -200,6 +197,7 @@ class WindowsBackendPlanTests(unittest.TestCase):
         self.assertIn("ggml_backend_dev_count", backend)
         self.assertIn("model_params.devices", backend)
         self.assertIn("exact configured Vulkan integrated device is unavailable", backend)
+        self.assertIn("ggml_backend_dev_description", backend)
         self.assertNotIn("intel-vulkan.*cpu", backend)
 
 

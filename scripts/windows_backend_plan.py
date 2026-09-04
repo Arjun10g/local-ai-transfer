@@ -23,6 +23,10 @@ LLAMA_CPP_REVISION = "3581ba0cf591b3f772fbb002de0f70e294bc0396"
 # Keep this false until that profile and runtime offload path land together;
 # an upstream SYCL binary must not become a backdoor product runtime.
 PRODUCT_VULKAN_PROFILE_READY = False
+# The pinned vendor snapshot intentionally pruned ggml-vulkan sources. Do not
+# advertise a profile that cannot configure until the complete source/shader
+# closure is vendored and hash-locked.
+VULKAN_SOURCE_CLOSURE_READY = False
 SYCL_BUILD_FLAGS = [
     "-DGGML_SYCL=ON",
     "-DGGML_SYCL_TARGET=INTEL",
@@ -186,6 +190,8 @@ def build_plan(
         return plan
 
     if backend == "intel-vulkan-conservative":
+        if not VULKAN_SOURCE_CLOSURE_READY:
+            raise BackendPlanError("Vulkan profile blocked: pinned ggml-vulkan source/shader closure is not vendored")
         adapters = _intel_adapters_with_identity(receipt)
         if not adapters:
             raise BackendPlanError("Vulkan requires an Intel adapter with exact PNP identity")

@@ -22,13 +22,15 @@ runtime selects `SYCL0` and emits bounded one-token output through
 promoted product backend until a separate review approves its compatibility.
 
 The profile order is CPU (mandatory baseline), Vulkan (primary accelerated
-candidate, implemented but not promoted), then SYCL (experimental diagnostic,
-currently blocked). This
+candidate, currently blocked because the pinned vendor snapshot lacks the
+complete ggml-vulkan source/shader closure), then SYCL (experimental
+diagnostic, currently blocked). This
 package does not claim that Vulkan features or SYCL support are present on the
 target until the receipt proves them. Vulkan additionally requires a separate
 operator GPU attestation bound by receipt SHA-256, exact PNP ID, adapter name,
 driver, and Vulkan enumeration identity; the WMI probe cannot infer integrated
-status from an Intel product name.
+status from an Intel product name. The dormant native profile is not buildable
+until that pinned closure is vendored and independently verified.
 
 The SYCL build requires an already-installed Visual Studio C++ toolchain,
 Intel oneAPI DPC++/C++ compiler and runtime, CMake, Ninja, and an existing
