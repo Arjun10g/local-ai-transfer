@@ -1,0 +1,1 @@
+{"positive":{"model_path":"D:/ApprovedModels/model.gguf","context_tokens":8192,"backend_profile":"cpu-safe"},"negative":{"model_path":"D:/model.gguf","context_tokens":8192,"unexpected_secret":"do-not-accept"}}

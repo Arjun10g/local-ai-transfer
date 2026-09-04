@@ -1,0 +1,8 @@
+{
+  "schema_version": "shadeform-job.v1",
+  "job_id": "fixture-job-invalid",
+  "profile_id": "unknown",
+  "budget": {"estimated_usd": 5, "ceiling_usd": 4, "warnings": [50]},
+  "lifecycle": {"state": "terminated", "cleanup_owner": "unknown", "cleanup_verified": false, "ephemeral_credentials_removed": false, "max_duration_minutes": 30, "provider_backstop_minutes": 30},
+  "machine": {"profile_id": "unknown"}
+}

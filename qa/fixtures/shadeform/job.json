@@ -1,0 +1,8 @@
+{
+  "schema_version": "shadeform-job.v1",
+  "job_id": "fixture-job-001",
+  "profile_id": "cpu-correctness-analog",
+  "budget": {"estimated_usd": 1.25, "ceiling_usd": 4.0, "warnings": [50, 80, 100]},
+  "lifecycle": {"state": "terminated", "cleanup_owner": "S4", "cleanup_verified": true, "ephemeral_credentials_removed": true, "max_duration_minutes": 30, "provider_backstop_minutes": 45},
+  "machine": {"profile_id": "cpu-correctness-analog", "os": "linux", "ram_gib": 32, "target_match": "directional-analog"}
+}

@@ -1,0 +1,14 @@
+{
+  "schema_version": "release-manifest.v1",
+  "kind": "fixture-skeleton",
+  "model_included": false,
+  "files": [
+    "lae-host.mjs", "Start-LocalAssistant.ps1", "Verify-Release.ps1", "config.example.json",
+    "backend-profiles.json", "ui/index.html", "ui/app.js", "ui/app.css", "schemas/README.md",
+    "licenses/README.md", "THIRD_PARTY_NOTICES.md", "SBOM.spdx.json", "RELEASE_MANIFEST.json",
+    "CHECKSUMS.sha256", "README-OPERATOR.md"
+  ],
+  "native_windows_launch": "UNPROVEN",
+  "real_engine": "UNPROVEN",
+  "model_artifact": "EXTERNAL_AND_UNPROVEN"
+}

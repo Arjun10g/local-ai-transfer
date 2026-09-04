@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "local-assistant-engine/qa/evidence.v1",
+  "title": "QA evidence manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "created_at_utc", "status", "build", "machine", "environment", "tests"],
+  "properties": {
+    "schema_version": {"const": "evidence.v1"},
+    "kind": {"const": "qa.evidence"},
+    "created_at_utc": {"type": "string", "format": "date-time"},
+    "status": {"enum": ["fixture", "pass", "fail", "skipped"]},
+    "build": {"$ref": "#/$defs/build"},
+    "machine": {"$ref": "#/$defs/machine"},
+    "environment": {"$ref": "#/$defs/environment"},
+    "tests": {"type": "array", "items": {"type": "object"}},
+    "skipped": {"type": "array", "items": {"type": "string"}},
+    "limitations": {"type": "array", "items": {"type": "string"}}
+  },
+  "$defs": {
+    "build": {
+      "type": "object",
+      "required": ["build_id", "dirty_tree", "source_root_present"],
+      "properties": {
+        "build_id": {"type": "string", "minLength": 1},
+        "source_commit": {"type": ["string", "null"]},
+        "dirty_tree": {"type": "boolean"},
+        "source_root_present": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "machine": {
+      "type": "object",
+      "required": ["os", "architecture", "python"],
+      "properties": {"os": {"type": "string"}, "os_release": {"type": "string"}, "architecture": {"type": "string"}, "python": {"type": "string"}},
+      "additionalProperties": false
+    },
+    "environment": {
+      "type": "object",
+      "required": ["allowlist_version", "keys"],
+      "properties": {
+        "allowlist_version": {"const": 1},
+        "keys": {"type": "object", "additionalProperties": {"type": "object", "required": ["present"], "additionalProperties": false, "properties": {"present": {"type": "boolean"}}}}
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,1 @@
+{"positive":{"files":["lae-engine-cpu.exe","lae-host.mjs","ui/index.html","RELEASE_MANIFEST.json"]},"negative":{"files":["lae-engine-cpu.exe","models/Qwen3.5-9B-Q4_K_M.gguf"]}}

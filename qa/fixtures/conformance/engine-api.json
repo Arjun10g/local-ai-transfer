@@ -1,0 +1,1 @@
+{"positive":{"bind":"127.0.0.1","authenticated":true},"negative":{"bind":"0.0.0.0","authenticated":true}}

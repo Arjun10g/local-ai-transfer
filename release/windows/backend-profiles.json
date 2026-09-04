@@ -1,0 +1,8 @@
+{
+  "schema_version": "backend-profiles.v1",
+  "profiles": [
+    {"id": "cpu-safe", "kind": "cpu", "promoted": true},
+    {"id": "intel-vulkan-conservative", "kind": "vulkan", "promoted": false, "requires_receipt": true},
+    {"id": "intel-sycl-experimental", "kind": "sycl", "promoted": false, "diagnostic_only": true}
+  ]
+}
