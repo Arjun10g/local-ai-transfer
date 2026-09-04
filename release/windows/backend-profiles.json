@@ -1,8 +1,57 @@
 {
-  "schema_version": "backend-profiles.v1",
+  "schema_version": "backend-profiles.v2",
+  "selection_policy": "operator-must-select-one-profile; never-fallback",
+  "model": {
+    "name": "Qwen3.5-9B-Q4_K_M.gguf",
+    "size_bytes": 5629109088,
+    "sha256": "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b",
+    "llama_cpp_revision": "3581ba0cf591b3f772fbb002de0f70e294bc0396"
+  },
+  "memory_policy": {
+    "target_installed_gib": 32,
+    "os_and_apps_reserve_gib": 8,
+    "model_resident_estimate_gib": 5.25,
+    "runtime_headroom_gib": 2,
+    "default_context_tokens": 8192,
+    "maximum_context_tokens": 16384,
+    "maximum_context_requires_target_measurement": true,
+    "shared_memory_is_not_dedicated_vram": true
+  },
   "profiles": [
-    {"id": "cpu-safe", "kind": "cpu", "promoted": true},
-    {"id": "intel-vulkan-conservative", "kind": "vulkan", "promoted": false, "requires_receipt": true},
-    {"id": "intel-sycl-experimental", "kind": "sycl", "promoted": false, "diagnostic_only": true}
+    {
+      "id": "cpu-safe",
+      "kind": "cpu",
+      "promoted": true,
+      "operator_selectable": true,
+      "requires_hardware_receipt": true,
+      "gpu_offload": false,
+      "runtime": "local-assistant-native",
+      "promotion_rank": 0
+    },
+    {
+      "id": "intel-vulkan-conservative",
+      "kind": "vulkan",
+      "promoted": false,
+      "operator_selectable": false,
+      "requires_receipt": true,
+      "promotion_rank": 1,
+      "reason": "reserved until the product engine has an approved Vulkan backend"
+    },
+    {
+      "id": "intel-sycl-experimental",
+      "kind": "sycl",
+      "promoted": false,
+      "diagnostic_only": true,
+      "operator_selectable": true,
+      "requires_hardware_receipt": true,
+      "requires_explicit_sycl_probe": true,
+      "requires_exact_integrated_gpu_identity": true,
+      "requires_oneapi_and_visual_studio": true,
+      "gpu_offload": true,
+      "runtime": "upstream-llama.cpp",
+      "device_selector": "SYCL0",
+      "build_flags": ["-DGGML_SYCL=ON", "-DGGML_SYCL_TARGET=INTEL", "-DGGML_SYCL_F16=ON"],
+      "promotion_rank": 2
+    }
   ]
 }

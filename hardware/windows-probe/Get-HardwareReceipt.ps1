@@ -57,6 +57,10 @@ $gpuReceipts = @(
             active_mode = $gpu.VideoModeDescription
             current_bits_per_pixel = $gpu.CurrentBitsPerPixel
             dedicated_memory_bytes_reported = if ($gpu.AdapterRAM) { [int64]$gpu.AdapterRAM } else { $null }
+            # WMI does not prove whether an adapter is integrated/UMA.  Keep
+            # this explicit unknown so the SYCL planner cannot infer it from
+            # an Intel product name.
+            integrated = $null
             driver_version = $gpu.DriverVersion
             driver_date = $gpu.DriverDate
             uma_or_shared_memory = $null
@@ -136,7 +140,7 @@ $receipt = [ordered]@{
     vulkan = [ordered]@{ loader_present = ($runtimeDlls['vulkan-1.dll'].present); enumeration = $vulkanInfo; capabilities_note = 'Capture queue families, memory heaps, extensions, and cooperative matrix support from vulkaninfo summary when present; absent data is unknown, not unsupported.' }
     approved_runtime_dlls = $runtimeDlls
     storage = $drives
-    sycl_level_zero = [ordered]@{ checked = $false; reason = 'Do not probe or install experimental runtimes until separately approved.' }
+    sycl_level_zero = [ordered]@{ checked = $false; available = $false; device_count = 0; device_name = $null; device_id = $null; driver_version = $null; runtime_version = $null; probe = $null; reason = 'Do not probe or install experimental runtimes until separately approved.' }
     safety = [ordered]@{ no_environment_dump = $true; no_credentials = $true; no_network_changes = $true; no_driver_install = $true; no_model_access = $true }
 }
 
