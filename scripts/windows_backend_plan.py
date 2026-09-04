@@ -15,18 +15,36 @@ import re
 from pathlib import Path
 from typing import Any
 
+try:
+    from scripts.vulkan_source_closure import DEFAULT_MANIFEST, DEFAULT_ROOT, VulkanClosureError, verify_closure
+except ModuleNotFoundError:  # direct execution as ``python scripts/windows_backend_plan.py``
+    from vulkan_source_closure import DEFAULT_MANIFEST, DEFAULT_ROOT, VulkanClosureError, verify_closure
+
 MODEL_NAME = "Qwen3.5-9B-Q4_K_M.gguf"
 MODEL_SHA256 = "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b"
 MODEL_SIZE_BYTES = 5629109088
 LLAMA_CPP_REVISION = "3581ba0cf591b3f772fbb002de0f70e294bc0396"
-# The product engine currently has no reviewed GGML_VULKAN CMake profile.
-# Keep this false until that profile and runtime offload path land together;
-# an upstream SYCL binary must not become a backdoor product runtime.
-PRODUCT_VULKAN_PROFILE_READY = False
-# The pinned vendor snapshot intentionally pruned ggml-vulkan sources. Do not
-# advertise a profile that cannot configure until the complete source/shader
-# closure is vendored and hash-locked.
-VULKAN_SOURCE_CLOSURE_READY = False
+VULKAN_SOURCE_ROOT = DEFAULT_ROOT
+VULKAN_SOURCE_MANIFEST = DEFAULT_MANIFEST
+
+
+def _closure_metadata() -> dict[str, Any] | None:
+    """Return verified closure evidence; absence keeps every GPU plan closed."""
+    try:
+        return verify_closure(VULKAN_SOURCE_ROOT, VULKAN_SOURCE_MANIFEST)
+    except (OSError, VulkanClosureError, ValueError):
+        return None
+
+
+# These are evidence-derived compatibility flags, not operator-controlled
+# switches.  The plan path re-verifies the closure so a post-import tamper is
+# also refused.
+VULKAN_SOURCE_CLOSURE_READY = _closure_metadata() is not None
+PRODUCT_VULKAN_PROFILE_READY = VULKAN_SOURCE_CLOSURE_READY
+# Closure verification proves source integrity, not target acceptance or
+# promotion. Sol must separately promote the Vulkan profile before SYCL can be
+# planned as an experimental diagnostic.
+PRODUCT_VULKAN_PROFILE_PROMOTED = False
 SYCL_BUILD_FLAGS = [
     "-DGGML_SYCL=ON",
     "-DGGML_SYCL_TARGET=INTEL",
@@ -190,8 +208,9 @@ def build_plan(
         return plan
 
     if backend == "intel-vulkan-conservative":
-        if not VULKAN_SOURCE_CLOSURE_READY:
-            raise BackendPlanError("Vulkan profile blocked: pinned ggml-vulkan source/shader closure is not vendored")
+        closure = _closure_metadata()
+        if closure is None:
+            raise BackendPlanError("Vulkan profile blocked: pinned ggml-vulkan source/shader closure failed verification")
         adapters = _intel_adapters_with_identity(receipt)
         if not adapters:
             raise BackendPlanError("Vulkan requires an Intel adapter with exact PNP identity")
@@ -221,10 +240,11 @@ def build_plan(
             "device": {"name": adapter.get("name"), "pnp_device_id": adapter["pnp_device_id"], "driver_version": adapter["driver_version"]},
             "attestation": attestation,
         }
+        plan["provenance"]["vulkan_source_closure"] = closure
         return plan
 
-    if not PRODUCT_VULKAN_PROFILE_READY:
-        raise BackendPlanError("SYCL diagnostic is blocked until the product-engine GGML_VULKAN profile is reviewed")
+    if not PRODUCT_VULKAN_PROFILE_PROMOTED:
+        raise BackendPlanError("SYCL diagnostic is blocked until the product-engine GGML_VULKAN profile is separately accepted and promoted")
 
     adapters = _intel_integrated_adapters(receipt)
     if len(adapters) != 1:

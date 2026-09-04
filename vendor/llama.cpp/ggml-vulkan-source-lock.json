@@ -1,0 +1,707 @@
+{
+  "schema": "local_bmo.llama-vulkan-source-lock.v1",
+  "repository": "https://github.com/ggml-org/llama.cpp",
+  "revision": "3581ba0cf591b3f772fbb002de0f70e294bc0396",
+  "files": [
+    {
+      "path": "LICENSE",
+      "sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d"
+    },
+    {
+      "path": "ggml/include/ggml-vulkan.h",
+      "sha256": "7eae5dad2cc7bb4d3eca828539f441816d5fd59fdc7b224d49aa229fc7b7248c"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/CMakeLists.txt",
+      "sha256": "95b77526cbede60b669abf1bc13657956284d0b20835096e64f24682a5a1a0e2"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/cmake/host-toolchain.cmake.in",
+      "sha256": "1c333fc25586feb395aa6eecc1ffac4ff66fd79968a117904c1259b47ded25d4"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/ggml-vulkan.cpp",
+      "sha256": "c894c08a483ebccb70a07d1fc45c65fab9a26e949de4578353bd84d32d94ebe3"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/CMakeLists.txt",
+      "sha256": "0cb2c1fd49730793094cbaca4a46d0e0fc56c8f279aa9712a4e7a53535400d64"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/acc.comp",
+      "sha256": "d44527127ac75e056cf22086c63dfb4f559a673dbf47775f666ceb1b077088c2"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/add.comp",
+      "sha256": "99fb28c4e7651dcb02e5755592e5ed73fc8153adedce09847ef751b01a090d1d"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/add1.comp",
+      "sha256": "0b980a9a461a9ff3a1fb2ddc1b81f771a54a86bf531840d5fe93850c10c33efd"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/add_id.comp",
+      "sha256": "9cb609f88d7da55dfbcf030fe4a782f1cb2076a0bb3408ca1258661a28cabd33"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/arange.comp",
+      "sha256": "295352f140d3e2f550f5877868b6a5131d7671274a85f9b4e93a80e72e07e551"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/argmax.comp",
+      "sha256": "d4bfc883b5f3606796b65a340ff15f646184cff3e0e35336b11959b458fc39e8"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/argsort.comp",
+      "sha256": "f8b7d3f6add22331010680aa09f4fad2f5eb928c25393e3ac3e8417ba1e5ff96"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/argsort_large.comp",
+      "sha256": "026540ca49e2543b73b2b308c8760a1664b2b2a37f21d4a491fb66b4da09d8be"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/col2im_1d.comp",
+      "sha256": "c8387e955dea246b12664a9379f62cef48b726779e4062f757bce36b8ccf3876"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/concat.comp",
+      "sha256": "9057791bd37df001b3a859f4510dfe456e09abd0b2820b6a1c4d616fd4696388"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/contig_copy.comp",
+      "sha256": "fa6a2de153fc780c890c8b937ca787dc5dd65b74bfec78357a023b239934b2c8"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/conv2d_dw.comp",
+      "sha256": "993919df7caf99e4e688c302c9b4ea4c01fb66482718b013e2f37c0a62605cec"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/conv2d_mm.comp",
+      "sha256": "c4bc127ba0168e267ae32acc16f994289dd927fdb8e59f7a3777d196f7a47078"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/conv3d_mm.comp",
+      "sha256": "051e50361b1c62de99cfbe13a93d8ae0e81f971cd043d26bb2e40c652d9e0e1c"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/conv_transpose_1d.comp",
+      "sha256": "5073e78de8c6ae1a0fae8f82e83dfc6e15852f140c6f7a735f3bc569d436a085"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/copy.comp",
+      "sha256": "5c81290b4d3656816b2398e22a1f8ab8a097ca45e468ced5a870ef31ef89f712"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/copy_from_quant.comp",
+      "sha256": "155ae8e3ff0491e8955316df8996e20911908c830876fbf9357c09cda019d8a3"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/copy_to_quant.comp",
+      "sha256": "4d7c9207f8635fc2a777569fda4576d48c58804604e4ba270e097705df362021"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/copy_transpose.comp",
+      "sha256": "bac158fe4358cac3429b8163ee7228a7586519ebc3148b47a599f6ebcaedf7d6"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/count_equal.comp",
+      "sha256": "278b8c06c3ac3e65a80400fdb99f91421df67981d636fdb3b578a791149364b1"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/count_experts.comp",
+      "sha256": "35c5940c90ad811cb7468644323c9ea55d060c687f0c332bee5f320a332e3d30"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/cumsum.comp",
+      "sha256": "623dfc7d4e5d5f67a687ba22bf85510e612c01e8bca8be3244da9ade6f5e0428"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/cumsum_multipass1.comp",
+      "sha256": "e867702646b3f332d0050a7b848ae40b601c33a6024d0a93033ddf515cad0e74"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/cumsum_multipass2.comp",
+      "sha256": "823ac3d7c1298bfd6fe1b8f525b8ee8f4e6cc65149596473660e4bf148b4cd67"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_f32.comp",
+      "sha256": "2f04946ae35d5dc13dca5125442e0c7c89ca86a5e7e0240a783a7e646d5664de"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_funcs.glsl",
+      "sha256": "d70cf26d67104b333fdd2dedefdb060ea1409091465cfc81829c1f6d1b14683a"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_funcs_cm2.glsl",
+      "sha256": "466df8d138dd101ce0e1015a82f5a566f11206dda582261834f32215254298b3"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_head.glsl",
+      "sha256": "0f02440f3754e1512c5181225f2ea96a0f113f07931116c1c53c486e8f7e185e"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_iq1_m.comp",
+      "sha256": "1cd790feb61466fbf52d8eef9a1551b73f40dbaeb68f2f033c33084fc9c127d7"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_iq1_s.comp",
+      "sha256": "2f16ee7beede27133a33be54c31bd90c1ecc0f785d00d066c6be412a695a5e9e"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_iq2_s.comp",
+      "sha256": "112c0ceb0a0c1a34cc3626083095d145f98af15309e1d06ccfed472399f2c242"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_iq2_xs.comp",
+      "sha256": "8175daf100e474b85b53b914da9c6b7b412c21b9570b5134ae2979c2a73775a6"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_iq2_xxs.comp",
+      "sha256": "828964c06ecff408f461a992776412719c68a20bfa16324494e5c2837a3fe545"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_iq3_s.comp",
+      "sha256": "12c13142021f68cb98eece3754aa56bd870389bc766f000748921f3f4ec000e8"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_iq3_xxs.comp",
+      "sha256": "020c9d5deff03687d0a2e4788231733db50596849881bbaa4d7f9606a5f31847"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_iq4_nl.comp",
+      "sha256": "e5be7bc9be2792ae6b76e671a05193b2c65f22c03aa6e24110d3eb286503fd26"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_iq4_xs.comp",
+      "sha256": "a3427ab54d55cb0c5e20478c92bd30d14c6be6a679b6ea8f247b81b9b63c5fc9"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_mxfp4.comp",
+      "sha256": "ad4f8bff7aff51dbe7acd41be40f23c3b8512b07d51b1095a0df81bf981d6620"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_nvfp4.comp",
+      "sha256": "cc0b8086f5dc070eac1203b33486d89e3551d89e99c4718efd887c8b8c6c77a9"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_q1_0.comp",
+      "sha256": "b61d3a2f3b4588a9725055615d96086ba00107148b14ae19f2471c9f89be53c4"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_q2_0.comp",
+      "sha256": "23938151eb3b177c7f8ca40b837cd0bb9b4e9f586c01350884274c1da4e9d4df"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_q2_k.comp",
+      "sha256": "e954e4a882c29548b6e6d5796c84e8393937c3864158bfbda1c36b2efe6e7d99"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_q3_k.comp",
+      "sha256": "f31b4a39acffcacbda430edf06e67141771b1d388848e3578c08af1451d1b161"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_q4_0.comp",
+      "sha256": "951af7fd4285dc6fc039f07f63f1894dbcfbe553c3b81bb17020e8cdc5c5a1cb"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_q4_1.comp",
+      "sha256": "7d4a5b9fd1c8698bfabb77f432db1bf0e2cb30cf9d8a9a11a4dc28a68706b57b"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_q4_k.comp",
+      "sha256": "0b90f25b79c59c9870b3421a9a60de78ef88d1a8ee97e831f3c0784513812e08"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_q5_0.comp",
+      "sha256": "e5d5320a760eaffb507851ae874faa98e32d6b42e301282f136c195712e892d5"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_q5_1.comp",
+      "sha256": "0e4478fcdab6475604e7244643a26573ec9ee0be918372978dab99ac660f5fd4"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_q5_k.comp",
+      "sha256": "b9b2d28d531a4779dd85e922a6a596860bffd27d12d7b950e6c2f0aed18be4d0"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_q6_k.comp",
+      "sha256": "824986441e475be785b623ea705d63e15f8b9051d037a1cdf45ccca632998c54"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dequant_q8_0.comp",
+      "sha256": "612e5df72bfc546be91d3921a3570c1d718399f34956c4ac58a73e2b2b9accb2"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/diag.comp",
+      "sha256": "644cdf399ba67106aa44215e81df1496722a8e8ec275cc87ac37907bc1225a15"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/diag_mask_inf.comp",
+      "sha256": "6af85325e3dca095b851398f08d16d168b31dd78f0ff0b5adf6f4b9b3ddbc2d1"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/div.comp",
+      "sha256": "f9bcf7eabd16b36c63072d02253aed78be099b4cdda62872b7870129ed61beb0"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/dot_product_funcs.glsl",
+      "sha256": "79678679e01db7932fb81a15e5a7cbe45d66acc532681291206f9cb108002ce4"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/feature-tests/bfloat16.comp",
+      "sha256": "ca85c0e211098c9a1cf169750f2589ade4f84c56ec10e3b17d93661bf3191fe3"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/feature-tests/coopmat.comp",
+      "sha256": "b884498f13d34b47f126812f4ac9f899ff5b16dccd2b9634d7a953fa70f43989"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/feature-tests/coopmat2.comp",
+      "sha256": "ca5500437f3baa48d9095102a604907080279a7481d08637286aad82b7088a19"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/feature-tests/coopmat2_decode_vector.comp",
+      "sha256": "5a721c9778de046da28589db843ec23c3d28f87d62a39810d5404950c5b152de"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/feature-tests/float_e2m1.comp",
+      "sha256": "d4d96cfd2e2f7417e7ba5e370f6ac5b5dc5bb27bbe8a0eb0a838c919244c3c09"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/feature-tests/float_e4m3.comp",
+      "sha256": "43bc484b2c5d978c5f466e59b6548ba0063c84a04637f5e8334af07ee364b085"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/feature-tests/integer_dot.comp",
+      "sha256": "18022cc94f70d741ac21590b4656d11098f12cdb4dc732e07362ddb25e60468f"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/fill.comp",
+      "sha256": "a91ffc21b357acc23f7f4eef8cfaa7b23001060e94a2b40cad30ff7185aefb48"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/flash_attn.comp",
+      "sha256": "79bcd0eafe2a5dbcf86a0864f61e7be0e632dd91099de91786006d8bb01143e1"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/flash_attn_base.glsl",
+      "sha256": "e3415426190374f193747b2374905fb4fc9001b7653b05d61a536f02e9a1658b"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/flash_attn_cm1.comp",
+      "sha256": "51924cc805bc89b6d82a9817893fe7baeb7d4b5082510729f7a01fe4024f56d2"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/flash_attn_cm2.comp",
+      "sha256": "2dbc537bb5d2aaf2b96c5839ba1b19795077e19e995b8a55b3dfbb8c92e71f03"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/flash_attn_dequant.glsl",
+      "sha256": "adcefcf7a84e461ff2d8e0fb779256a0d8121bc560f2bdd240c86ba511a4a4f9"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/flash_attn_mask_opt.comp",
+      "sha256": "ea8e055b4b7d09a7f3c2cb68ecec2caeb85231031305387e28856650ccd956d2"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/flash_attn_mmq_funcs.glsl",
+      "sha256": "ed448731b59fb6c16f1470896ce725c4b5a06f5c775105f18995dccacf00c17d"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/flash_attn_split_k_reduce.comp",
+      "sha256": "d2cadeb70d4f412ed4be102f81ba6056969469c5defcbeeba376e2ff98e8c731"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/fwht.comp",
+      "sha256": "7334692671849eb96ae8b3149211e6b4f1f9cbc892088c7847968a4be7fd3a27"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/gated_delta_net.comp",
+      "sha256": "2f4ccdd5a862e79d9076deb6c60799b16acbb2666923ae9773d2613cf310307f"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/geglu.comp",
+      "sha256": "dad585eb673c6e8bb7f712739e775d8fa787dac4e202df46654ba9c66c17473e"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/geglu_erf.comp",
+      "sha256": "fc0e12108a2d7bab25bef61a2e3e70a5e17c7f1f8ceece4bdc2e129c2f6c8dba"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/geglu_quick.comp",
+      "sha256": "9c20594977b598c3768f2e6978d8728825b7d15fb20b780d23fe67eaab42f9e2"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/generic_binary_head.glsl",
+      "sha256": "83503ffea9d60d69ac5e6497c5596a02fafd51984e939dc13005e4d5be53160f"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/generic_head.glsl",
+      "sha256": "3be1bb94f2c3952a9354df281120b1aeeef308075a6c9ad90b7a18bfc1cbeab8"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/generic_unary_head.glsl",
+      "sha256": "6e47874c1b5a523c1912fca267fa2602126c20780a4920c30fe4d2a56a4e6a98"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/get_rows.comp",
+      "sha256": "25184262ac64ecfed8d478accffd1a09cf5d673cbfd6d7c75cc20d6971e8226d"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/get_rows_back.comp",
+      "sha256": "d82b7aeefacae93b702d42dc06840d179e01fe5e2d85fe00519044fcf3de31df"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/get_rows_quant.comp",
+      "sha256": "54e9d9401c2b30441387406f74a51270e8571bcd8bf8f7a017053805b1657e29"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/glu_head.glsl",
+      "sha256": "707e47741ff86186a44fe247ab03c42019588f44fae528cbddddfc698c605371"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/glu_main.glsl",
+      "sha256": "dde88c77c7aef6b09060a10f02f64ceed53bd1c7fc16ab3eb20918d03e7c2098"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/group_norm.comp",
+      "sha256": "0aad37cca193bf38db1df5aaa8fe53e6fb7a839554b41e04f2fc06f5de74f605"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/im2col.comp",
+      "sha256": "0c5cd4602b42275ebb46a89202225d533722532f79a99bfbd586e3e3ec997905"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/im2col_3d.comp",
+      "sha256": "a701da3a31eaac2f7c182c386d8d24d18614d94f4105d1090aef643590bff35c"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/l2_norm.comp",
+      "sha256": "b71a99ec3ef97c0ab6d6a37ac41aba0a8bc87b9cbc32ca475363ba0d9c482860"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/log.comp",
+      "sha256": "0c34bdbaa11a37c51b5a3c81ff7ece3adafb8ef42e2f36c3f53a82e603b17b37"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul.comp",
+      "sha256": "a4b6acc468f3d9c0ec8b41fbf641c113c5c11970b4b2cf01d9eacc5e27385abb"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_split_k_reduce.comp",
+      "sha256": "bb6cbc04d3e19a8a61629ba940a7787241a354bcf02d3eff9588c931f99b5531"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec.comp",
+      "sha256": "d1375d407004ac5e2f7c590340be9aa7edcb203dd966ec3af29f807e5d866865"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_base.glsl",
+      "sha256": "fc7bb5cc47bd9761f8a3484466e10b61d7866df41a150cdd47cfa1f389110323"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_iface.glsl",
+      "sha256": "e5b825d83c6250e4b75459c2584e6530bb443e08252df7069e107ec1eb6bd001"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_iq1_m.comp",
+      "sha256": "3423dc9efae4739e5d7b87c72044bd64dfeaa290ad4751fc1e2eed09317212bc"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_iq1_s.comp",
+      "sha256": "89a60b97bcda3c62c7fbe85232ede5e6a251314c07d7e8dc6ced5a98e43bc2e9"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_iq2_s.comp",
+      "sha256": "f7be4297162bf6a4296db96a30a2d9ed28c58c80a9db275c26661b764a5341ca"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_iq2_xs.comp",
+      "sha256": "e38970365e614ef8869a4ad1b4b6d0bb7585a8dc3e94b0bc6f41c2b99702ad19"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_iq2_xxs.comp",
+      "sha256": "cdf13409bb7ab05ea55e2ae2ad7cca2a42f44af9c696aed0044b986a7d902310"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_iq3_s.comp",
+      "sha256": "57375fdf87f28d71284b6a4834c672a1d8746e718e52a6aef632739dd563c11c"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_iq3_xxs.comp",
+      "sha256": "a877019b00eb13aab2da3571187b3a487624380e53b81b045d56da49d30e807f"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_nc.comp",
+      "sha256": "456f8460d298da08eb9693b5c31c52356e6f87cbddd32e0de6c4f1a9bb0d34bf"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_p021.comp",
+      "sha256": "bf8b345df7db618201683f134d4684d68b259297e696d53aeb05cec6d5919c1d"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_q2_k.comp",
+      "sha256": "cc1bddff24e875009d8ebc39109e7f4f6b6cca27da81def248e2664ef2497b5f"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_q3_k.comp",
+      "sha256": "e1092c5d28c21500c618064774afffd50ef9ce061a95db69498152e03820013b"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_q4_k.comp",
+      "sha256": "02f84c2fc3ca217773bc281e34704965517728b8acb38c2bbd1163b8e0df54a8"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_q5_k.comp",
+      "sha256": "175bd27fc8281f8ec72087f9c36ed51266c74f8bfca0f01719ec66d899324c70"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec_q6_k.comp",
+      "sha256": "bc785a2457aa5b04d416e18f5ae2304da267e35cea7b54ac67b5d20987e450af"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq.comp",
+      "sha256": "5c7078feed144c6b4706e25390be63a18666f27382119b11d8361fb9a7559260"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq_funcs.glsl",
+      "sha256": "d6394df8252736a9f4c430722646c94ed9bd45f0c3a619d8ca3ea324abfcf4f6"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp",
+      "sha256": "2be329a4eca5e3d3b8da674f4b333fbc57c202b761213d09de16a3c2c0ad7f65"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mm_cm2.comp",
+      "sha256": "414a31ca12621165cd68628b591cadaa9c42000455929971d116ad17d55be122"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mm_funcs.glsl",
+      "sha256": "b48523e624ca55a8e4441c38e580b7109813a146265f2866f1238549caceebbe"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mm_id_funcs.glsl",
+      "sha256": "cdd9d0ac888e1e86390c326b648fee985b5b4b8f0e98ca303489c7d9bfa5d7ec"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq.comp",
+      "sha256": "2960075234b8b1ac20f79a0e9ff689dd32d8c493cb02540dd7d84868e836a487"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq_funcs.glsl",
+      "sha256": "5be74d2c4dd4dd213c100a0adbb1ecae1f7d72260da0a970c7d176b006d6c5f0"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq_shmem_types.glsl",
+      "sha256": "06df962db1904a994d303f12481f84fab5fe699ad02f12efcf3102335a743e07"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/multi_add.comp",
+      "sha256": "dcd794f9843e14e46a6bec5738a30f0cae0ac5bbd2f2051efa6ddfee2745fd2e"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/norm.comp",
+      "sha256": "ca26cdf00c148c7b2c9b2be821402c83dfe70552fbbb038580b89805fbd3ead2"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/opt_step_adamw.comp",
+      "sha256": "6f9983995d7820cc8b414e2b1aeb0a2c5d38584b6e36ccbd454c4eb0ab4f8459"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/opt_step_sgd.comp",
+      "sha256": "b5856f38b395f0907af31860ac858c30bed802d0883b6e81f691c8ed05c1accd"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/out_prod.comp",
+      "sha256": "321a6d6838b3818f3279fe561efda967bf3e2d617757bbd58383f0e9b382ab7c"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/pad.comp",
+      "sha256": "b3fa835992c9245c3d78b22bb4d2dadeaf101159fb643e434c93dc03df833cde"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/pool1d.comp",
+      "sha256": "35fcbebad3571db66041155cef94e95580e763adfaa3682e186f13a91a5228fa"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/pool2d.comp",
+      "sha256": "a53c8f65cc9227016a382b44b267b2eff1e7bc86ba30df2fcda19f3e64dd472b"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/quantize_q8_1.comp",
+      "sha256": "9f16a5781b7c2ffebec4d18debbeb03ba86be6b473b69dd658aa42d1188825cd"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/reglu.comp",
+      "sha256": "05eda6f2726990b0aff42bdb24584b221bf985a957e1579662ceeb67b15cd105"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/repeat.comp",
+      "sha256": "e9eb605bfc8ed7c5ffa66514446ae3ff88acbdb876a36f4cdedba37676887b41"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/repeat_back.comp",
+      "sha256": "76d9b114b4403fd352ff5b2093217cf442c4f6b518bf838741a7062788d99a08"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/rms_norm.comp",
+      "sha256": "30ff26652974cc561393c38556b3f9d59ba9c8423dd10bd6f9c7f6fce95ab586"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/rms_norm_back.comp",
+      "sha256": "1c175061b4b8da85747873bad484189221c73657ed76dcf504891dc63393c7bc"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/rms_norm_partials.comp",
+      "sha256": "ebb9774faad51332793643bdaf38c962fa74e46ed467d84e06b9b273447564aa"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/roll.comp",
+      "sha256": "68cde3f1176ddbab02110f8ec6875472360e6e129ec63d11886205b8055ba348"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/rope_funcs.glsl",
+      "sha256": "b1d26af3d97cb4e67ccbcbead2c62fd902398709538990f56fa656092962edfa"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/rope_head.glsl",
+      "sha256": "2752f8806aadd21c32c30f125e09f10da11f82cdaf805a16522cfec66fdfee10"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/rope_multi.comp",
+      "sha256": "dfe279527c1782fcc0349842b1cda4ac5fcab063ef54489ebdd465abbfbfcec9"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/rope_neox.comp",
+      "sha256": "cb770da4f2360e781188a34e3111d482793e87d702899f7c71580debfd26cbee"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/rope_norm.comp",
+      "sha256": "17f55fd37ce7f63ef151a553c75eb9fd29a61181796498c2422436b25257919a"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/rope_params.glsl",
+      "sha256": "e9cb7fe1a9e5d62d419a02cfcc318b24707b439730eaad5c80aafac29b1bb701"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/rope_vision.comp",
+      "sha256": "bb3b52d73d80bd12b40e5483d66b9f1e5a2a4670193f15107f5d48ad28f52222"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/scale.comp",
+      "sha256": "2ca1e89923ac656dfeb07bd0fb50f14b4295b1c10743cd8d8425563cf8e51030"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/silu_back.comp",
+      "sha256": "3afef9da43f7764c5af08da082b7639399630bde1cc2f5fa88c53f06cbde8c47"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/snake.comp",
+      "sha256": "73da63bf19411989a9ca81dfdcfea0b8a4d54cf0598041a1ecc4fcef84daafae"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/soft_max.comp",
+      "sha256": "55eee4d0d55e203cc53f54367d61bb1b89850d40d8107b60c2d883eb929ba39e"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/soft_max_back.comp",
+      "sha256": "66098ce8bd47df00995d2387a08f4668fbea1794ae71ffbee366f7615e5ed249"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/soft_max_large1.comp",
+      "sha256": "ef3097d3c5bfdd94c090414a71cc0dd4d0153b4ef36551974e141603191c803d"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/soft_max_large2.comp",
+      "sha256": "70a6f6c5ec1b767064bfab29559079b4d9c1f2d2a399654f2f3483ddd4249908"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/soft_max_large3.comp",
+      "sha256": "38538fe375794ecdbc5b968675c4c554a0db950eb1b12540bdb39a99d3d24cdb"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/soft_max_large_common.glsl",
+      "sha256": "2af4157dd53e42c32f41f4d1b3986be816573d59ac231b96c335889dd7e94158"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/solve_tri.comp",
+      "sha256": "298295321be452229a62b59b894e2436b67745a36675f14139a30129c1bd8dd0"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/ssm_conv.comp",
+      "sha256": "4fdfcbab054fa1cd2c70f612cc5f1781b23671b55890c6f6586952a3357ad059"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/ssm_scan.comp",
+      "sha256": "e42ca1c04bb8896a9aaffd273d430915f9fa7902c3feba353d9a08102ff825cb"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/sub.comp",
+      "sha256": "38911912b2dd84befadcd243ede1e3e72bdda88a5ec8112fefb34294c9e94df4"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/sum_rows.comp",
+      "sha256": "80911f108ce1d370c80b5f4d6c9afa2dc34716ad7ab3db84270c728ecd580a46"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/sum_rows.glsl",
+      "sha256": "ad97f4f35cc891920810a2540ea07c4419c59ab1e468a39c577f9853305ff0fa"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/swiglu.comp",
+      "sha256": "cd10f81a22d2a1d2435a5d229656a5b187cdaf664b45867da894452586b1943a"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/swiglu_oai.comp",
+      "sha256": "55011d3525511d91c40ff18cacbbd4ad9323bca9a295daf40d72f67a1735f2e5"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/timestep_embedding.comp",
+      "sha256": "eec3b559ed90ae3cecef1d05ebd3936d8271e9fc7c3128e908687851ef5582cb"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/topk_argsort.comp",
+      "sha256": "d409049e2477a6359568e86a886e3a0c101cffcfc53df8e39ef92c782c883ad6"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/topk_moe.comp",
+      "sha256": "abb69547d88291a6fef2ef2d4637515a78b6ceed74c15624f983aed97fa015e8"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/topk_nary_search.comp",
+      "sha256": "da487edf5b5332c710403e59e674edd5eed014f58803c7e574c8c7f573e0a5a7"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/tri.comp",
+      "sha256": "d6a159dee17942418133028d25e6f327c97478e539f4dc9e01587b89dd5f9a73"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/types.glsl",
+      "sha256": "770122344546ec9b8ee443c38093df76ed3287fffc4e643e08f3150ffef5d03e"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/unary.comp",
+      "sha256": "5c569c2fd7704e0fd47a683f34003c937982ff83b484a8719c79705dbd892c6e"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/upscale.comp",
+      "sha256": "1e35ad9b86690a3a3514819fdcf78b20554bb8aba11d7a24df287717b438d410"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/utils.glsl",
+      "sha256": "c996ce2b22047ed6f0d5fcbbeebc12206651e3f0a83cc9830caf7daf2a0ffb45"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp",
+      "sha256": "cf98bc7b80e4ca3e11953192d1c6b19385239b912e8381bd877a136fc4ffaa36"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/wkv6.comp",
+      "sha256": "980576d781008cdcf6bcb5d3a3824e2ea0d73bc133b1d9a8baf93813d941cfe6"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/vulkan-shaders/wkv7.comp",
+      "sha256": "184ad4a22b750b45c45e5e42dc04f9ad37f83a6c23b62a5d5c2b447d4099b496"
+    }
+  ]
+}
