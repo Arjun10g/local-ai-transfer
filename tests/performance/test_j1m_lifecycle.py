@@ -585,7 +585,7 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertEqual(plan["active_run_cost_usd"], 2.619)
         self.assertEqual(plan["provider_backstop_cost_usd"], 3.2738)
         self.assertGreater(config["modes"]["eval"]["provider_backstop_hours"], config["modes"]["eval"]["runtime_hours"])
-        self.assertEqual(config["artifacts"]["eval_fetch_allowlist"], ["eval-receipt.json", "eval-artifact-receipt.json", "toolchain-receipt.json", "cuda-device-receipt.json"])
+        self.assertEqual(config["artifacts"]["eval_fetch_allowlist"], ["eval-receipt.json", "startup-preflight-receipt.json", "eval-artifact-receipt.json", "toolchain-receipt.json", "cuda-device-receipt.json"])
         commands = orchestrator._eval_remote_commands(config, "/scratch/j1m")
         flattened = [part for command in commands for part in command]
         self.assertIn(config["llama_cpp"]["revision"], flattened)
@@ -599,6 +599,8 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertIn("cuda", flattened)
         self.assertIn("--token-file", flattened)
         self.assertIn("--toolchain-receipt", flattened)
+        self.assertIn("--preflight-receipt", flattened)
+        self.assertTrue(any(part.endswith("startup-preflight-receipt.json") for part in flattened))
         self.assertIn("remote_model_eval.py", " ".join(flattened))
         self.assertNotIn("--token", flattened)
         self.assertTrue(all(";" not in part and "&&" not in part for part in flattened))
@@ -756,6 +758,62 @@ class StaticSafetyTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "engine_model_preflight_invalid"):
                     remote._engine_model_preflight(args, artifact)
 
+        invalid_model = {"valid": False, "code": "model_hash_mismatch", "size_bytes": 42, "sha256": "", "gguf_version": 0}
+        with mock.patch.object(remote, "_run_bounded", return_value={"status": "failed", "exit_code": 2, "stdout": json.dumps(invalid_model)}):
+            with self.assertRaisesRegex(ValueError, "engine_model_preflight_invalid"):
+                remote._engine_model_preflight(args, artifact)
+        for result, expected in (
+            ({"status": "timeout", "exit_code": None}, "engine_model_preflight_timeout"),
+            ({"status": "failed", "exit_code": -9}, "engine_model_preflight_terminated_by_signal"),
+            ({"status": "failed", "exit_code": 7}, "engine_model_preflight_exit"),
+            ({"status": "output_too_large", "exit_code": 0}, "engine_model_preflight_output_too_large"),
+            ({"status": "failed", "exit_code": 0, "stdout": json.dumps(payload)}, "engine_model_preflight_failed"),
+        ):
+            with mock.patch.object(remote, "_run_bounded", return_value=result):
+                with self.assertRaisesRegex(ValueError, expected):
+                    remote._engine_model_preflight(args, artifact)
+        wrong_version = {**payload, "gguf_version": 2}
+        with mock.patch.object(remote, "_run_bounded", return_value={"status": "completed", "exit_code": 0, "stdout": json.dumps(wrong_version)}):
+            with self.assertRaisesRegex(ValueError, "engine_model_preflight_invalid"):
+                remote._engine_model_preflight(args, artifact)
+
+    def test_remote_eval_preflight_receipt_is_atomic_small_and_secret_free(self):
+        remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_preflight_receipt")
+        preflight = {"valid": True, "code": "ok", "size_bytes": 42, "sha256": "a" * 64, "gguf_version": 3}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "startup-preflight-receipt.json"
+            summary = remote._write_preflight_receipt(path, preflight)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(summary["status"], "verified")
+            self.assertEqual(saved["schema"], remote.MODEL_PREFLIGHT_RECEIPT_SCHEMA)
+            self.assertEqual(saved["sha256"], "a" * 64)
+            self.assertLess(path.stat().st_size, 1024)
+            self.assertNotIn("secret", path.read_text(encoding="utf-8"))
+            with self.assertRaisesRegex(ValueError, "engine_model_preflight_invalid"):
+                remote._write_preflight_receipt(path, {**preflight, "path": "/secret/token"})
+
+    def test_remote_eval_ready_reader_bounds_partial_lines(self):
+        remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_ready_reader")
+        read_fd, write_fd = os.pipe()
+        reader = os.fdopen(read_fd, "rb", buffering=0)
+        try:
+            os.write(write_fd, b'{"port":1}')
+            with self.assertRaisesRegex(ValueError, "engine_ready_timeout"):
+                remote._read_ready_line(reader, time.monotonic() + 0.02)
+        finally:
+            reader.close()
+            os.close(write_fd)
+
+    def test_remote_eval_stages_share_outer_deadline_and_cleanup_reserve(self):
+        remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_deadline")
+        with mock.patch.object(remote.time, "monotonic", return_value=100.0):
+            self.assertEqual(remote._stage_timeout(600.0, 120.0, "expired"), 120.0)
+            self.assertEqual(remote._stage_timeout(200.0, 300.0, "expired"), 70.0)
+            with self.assertRaisesRegex(ValueError, "expired"):
+                remote._stage_timeout(130.5, 30.0, "expired")
+        self.assertEqual(remote.EVAL_TOTAL_TIMEOUT, 480.0)
+        self.assertEqual(remote.CLEANUP_RESERVE_SECONDS, 30.0)
+
     def test_remote_eval_serve_eof_is_finite_and_secret_free(self):
         remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_eof")
 
@@ -774,6 +832,9 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertEqual(str(signalled), "engine_terminated_by_signal")
         self.assertEqual(signalled.child_status, {"signal": 9})
         self.assertEqual(str(remote._classify_serve_eof(Child(None))), "engine_ready_eof")
+        self.assertEqual(str(remote._classify_serve_eof(Child(1), "context must be between 1 and 16384 tokens\n")), "engine_not_ready")
+        self.assertEqual(str(remote._classify_serve_eof(Child(1), "token=super-secret /private/model\n")), "engine_not_ready")
+        self.assertIsNone(remote._exact_serve_stderr_code("unknown native path /private/model"))
 
     def test_remote_eval_jinja_parse_errors_are_redacted(self):
         source = (ROOT / "native/backend/llama_chat_template.cpp").read_text(encoding="utf-8")
@@ -1001,6 +1062,16 @@ class StaticSafetyTests(unittest.TestCase):
             startup_receipt = json.loads(receipt.read_text())
             self.assertEqual(startup_receipt["error_code"], "engine_not_ready")
             self.assertEqual(startup_receipt["child"], {"exit_code": 2})
+
+            def fail_after_preflight(call_args, _artifact):
+                call_args._preflight_summary = {"status": "verified", "size_bytes": 42, "sha256": "a" * 64, "gguf_version": 3}
+                raise ValueError("engine_ready_timeout:/private/token")
+
+            with mock.patch.object(remote, "verify_artifact", return_value=artifact), mock.patch.object(remote, "_launch_and_evaluate", side_effect=fail_after_preflight):
+                self.assertEqual(remote.main(args), 1)
+            safe_receipt = json.loads(receipt.read_text())
+            self.assertEqual(safe_receipt["preflight"]["status"], "verified")
+            self.assertNotIn("private", json.dumps(safe_receipt))
 
 
 class LoopbackLifecycleTests(unittest.TestCase):

@@ -116,7 +116,7 @@
       "post-cleanup-receipt.json"
     ],
     "prove_fetch_allowlist": ["proving-receipt.json"],
-    "eval_fetch_allowlist": ["eval-receipt.json", "eval-artifact-receipt.json", "toolchain-receipt.json", "cuda-device-receipt.json"],
+    "eval_fetch_allowlist": ["eval-receipt.json", "startup-preflight-receipt.json", "eval-artifact-receipt.json", "toolchain-receipt.json", "cuda-device-receipt.json"],
     "vision_projection": "excluded"
   },
   "budget_policy": {
