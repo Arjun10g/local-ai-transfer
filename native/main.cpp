@@ -37,14 +37,14 @@ bool read_token_file(const std::string& path, std::string& token) {
   const int descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
   if (descriptor < 0) return false;
   struct stat file_stat{};
-  if (fstat(descriptor, &file_stat) != 0 || !S_ISREG(file_stat.st_mode) || (file_stat.st_mode & 0077) != 0 || file_stat.st_size > 512) {
+  if (fstat(descriptor, &file_stat) != 0 || !S_ISREG(file_stat.st_mode) || (file_stat.st_mode & 0077) != 0 || file_stat.st_size > 513) {
     close(descriptor); return false;
   }
   token.clear(); char buffer[128]; ssize_t count = 0;
   while ((count = ::read(descriptor, buffer, sizeof(buffer))) > 0) token.append(buffer, static_cast<size_t>(count));
   const bool read_ok = count == 0;
   close(descriptor);
-  if (!read_ok || token.size() > 512) return false;
+  if (!read_ok || token.size() > 513) return false;
 #else
   // Windows callers use the inherited stdin pipe. Without a platform-native
   // handle/ACL check, accepting a pathname would make the token file
@@ -53,21 +53,29 @@ bool read_token_file(const std::string& path, std::string& token) {
   (void)token;
   return false;
 #endif
-  while (!token.empty() && (token.back() == '\n' || token.back() == '\r')) token.pop_back();
+  if (!token.empty() && token.back() == '\n') token.pop_back();
+  if (!token.empty() && token.back() == '\r') token.pop_back();
   if (token.empty() || token.find_first_of("\r\n") != std::string::npos) return false;
   return true;
 }
 
 bool read_token_stdin(std::string& token) {
   token.clear(); char buffer[128];
-  while (std::cin.good() && token.size() <= 512) {
+  while (std::cin.good() && token.size() <= 513) {
     std::cin.read(buffer, sizeof(buffer));
     token.append(buffer, static_cast<size_t>(std::cin.gcount()));
-    if (token.find_first_of("\r\n") != std::string::npos) break;
   }
-  if (token.size() > 512) return false;
-  while (!token.empty() && (token.back() == '\n' || token.back() == '\r')) token.pop_back();
+  if (token.size() > 513) return false;
+  if (!token.empty() && token.back() == '\n') token.pop_back();
+  if (!token.empty() && token.back() == '\r') token.pop_back();
   return !token.empty() && token.find_first_of("\r\n") == std::string::npos;
+}
+
+bool valid_bearer_token(const std::string& token) {
+  if (token.size() < 16 || token.size() > 512) return false;
+  return std::all_of(token.begin(), token.end(), [](unsigned char c) {
+    return c >= 0x20 && c != 0x7f;
+  });
 }
 }  // namespace
 
@@ -136,7 +144,9 @@ int main(int argc, char** argv) {
     return result.valid ? 0 : 2;
   }
   if (token_file_seen == token_stdin || (token_file_seen && !read_token_file(token_file, token)) ||
-      (token_stdin && !read_token_stdin(token))) { std::cerr << "serve requires exactly one readable non-empty --token-file or --token-stdin\n"; return 2; }
+      (token_stdin && !read_token_stdin(token)) || !valid_bearer_token(token)) {
+    std::cerr << "serve requires exactly one readable bearer token source (16-512 printable bytes)\n"; return 2;
+  }
   if (context_tokens < 1 || context_tokens > 16384) { std::cerr << "context must be between 1 and 16384 tokens\n"; return 2; }
   std::unique_ptr<lae::EngineBackend> backend_instance;
   lae::BackendConfig backend_config; backend_config.backend_profile = backend; backend_config.context_tokens = context_tokens;

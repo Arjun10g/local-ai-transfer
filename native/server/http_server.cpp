@@ -29,6 +29,7 @@ constexpr size_t kMaxBody = 64 * 1024;
 constexpr size_t kMaxHeaderBytes = 16 * 1024;
 constexpr size_t kMaxHeaderCount = 64;
 constexpr size_t kMaxHeaderLine = 8 * 1024;
+constexpr size_t kMaxSseLine = 256 * 1024;
 constexpr size_t kMaxSseBytes = 4 * 1024 * 1024;
 constexpr size_t kMaxSseEvents = 4096;
 constexpr unsigned kSocketTimeoutMs = 5000;
@@ -434,7 +435,7 @@ void HttpServer::handle(Socket client) {
       try {
         const auto result = engine_.generate(request_id, session_id, chat_request.generation, cancellation, [&](const std::string& token) {
           const std::string frame = "data: {\"id\":\"" + json_escape(request_id) + "\",\"choices\":[{\"delta\":{\"content\":\"" + json_escape(token) + "\"}}]}\n\n";
-          if (frame.size() > kMaxHeaderLine || sse_events >= kMaxSseEvents || sse_bytes > kMaxSseBytes - frame.size()) {
+          if (frame.size() > kMaxSseLine || sse_events >= kMaxSseEvents || sse_bytes > kMaxSseBytes - frame.size()) {
             stream_bound_exceeded = true; cancellation->store(true); return false;
           }
           if (combined.size() > kMaxResponseBytes - token.size()) {
@@ -448,7 +449,7 @@ void HttpServer::handle(Socket client) {
           send_all(client, "data: {\"error\":{\"code\":\"response_too_large\"}}\n\ndata: [DONE]\n\n");
         } else {
           const std::string tail = "data: {\"id\":\"" + json_escape(request_id) + "\",\"choices\":[{\"delta\":{},\"finish_reason\":\"" + json_escape(result.finish_reason) + "\"}]}\n\ndata: [DONE]\n\n";
-          if (tail.size() > kMaxHeaderLine || sse_events + 2 > kMaxSseEvents || sse_bytes > kMaxSseBytes - tail.size())
+          if (tail.size() > kMaxSseLine || sse_events + 2 > kMaxSseEvents || sse_bytes > kMaxSseBytes - tail.size())
             send_all(client, "data: {\"error\":{\"code\":\"response_too_large\"}}\n\ndata: [DONE]\n\n");
           else send_all(client, tail);
         }

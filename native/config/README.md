@@ -12,5 +12,5 @@ provider path. CLI options override config values when supplied.
 The launcher token is deliberately not stored in this file. Windows launchers
 write the environment secret to the inherited stdin pipe for the foreground
 process; POSIX callers may use an owner-only token file. The bearer value is
-never an argv argument. CPU is the
+never an argv argument and must contain 16–512 printable bytes. CPU is the
 only accepted runtime profile in this slice; no Intel promotion is implied.

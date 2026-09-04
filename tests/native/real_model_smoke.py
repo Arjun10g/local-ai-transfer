@@ -32,14 +32,11 @@ def main():
     if request_timeout < 1 or request_timeout > 600:
         raise ValueError("LAE_REAL_MODEL_TIMEOUT_SECONDS must be between 1 and 600")
     with tempfile.TemporaryFile(mode="w+t") as stderr_log:
-        token_file = Path(path).with_name(".lae-token")
-        token_file.write_text("real-model-smoke")
-        token_file.chmod(0o600)
-        token_args = ["--token-stdin"] if sys.platform.startswith("win") else ["--token-file", str(token_file)]
-        process = subprocess.Popen([sys.argv[1], "serve", "--backend", "cpu", "--model", path, "--size", size, "--sha256", sha256, "--context", "512", *token_args], stdin=subprocess.PIPE if sys.platform.startswith("win") else subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=stderr_log, text=True)
-        if sys.platform.startswith("win"):
-            process.stdin.write("real-model-smoke\n")
-            process.stdin.close()
+        # Keep token material out of the approved artifact directory on every
+        # platform; the native process consumes an inherited stdin pipe.
+        process = subprocess.Popen([sys.argv[1], "serve", "--backend", "cpu", "--model", path, "--size", size, "--sha256", sha256, "--context", "512", "--token-stdin"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr_log, text=True)
+        process.stdin.write("real-model-smoke\n")
+        process.stdin.close()
         try:
             ready_line = process.stdout.readline()
             if not ready_line:

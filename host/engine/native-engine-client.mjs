@@ -3,7 +3,8 @@ import { ToolCallStreamDecoder } from '../agent/tool-envelope.mjs';
 
 const LOOPBACK = '127.0.0.1';
 const REQUEST_ID = /^[A-Za-z0-9_-]{1,96}$/;
-const MAX_JSON_BYTES = 1024 * 1024;
+const MAX_REQUEST_JSON_BYTES = 64 * 1024;
+const MAX_RESPONSE_JSON_BYTES = 4 * 1024 * 1024;
 const MAX_SSE_BYTES = 4 * 1024 * 1024;
 const MAX_SSE_EVENTS = 4096;
 const MAX_SSE_LINE = 256 * 1024;
@@ -25,7 +26,7 @@ async function readJson(response) {
   const chunks = []; let bytes = 0;
   for await (const chunk of response.body) {
     bytes += chunk.byteLength ?? 0;
-    if (bytes > MAX_JSON_BYTES) throw new NativeEngineError('engine_response_too_large', 'native JSON response exceeded the size limit');
+    if (bytes > MAX_RESPONSE_JSON_BYTES) throw new NativeEngineError('engine_response_too_large', 'native JSON response exceeded the size limit');
     chunks.push(chunk);
   }
   const text = new TextDecoder().decode(Buffer.concat(chunks.map(chunk => Buffer.from(chunk))));
@@ -68,7 +69,7 @@ export class NativeEngineClient {
   headers(extra = {}) { return { authorization: `Bearer ${this.token}`, ...extra }; }
   async request(path, options = {}, { signal, timeoutMs = this.timeoutMs } = {}) {
     if (this.closed) throw new NativeEngineError('engine_client_closed', 'native engine client is closed');
-    if (typeof options.body === 'string' && new TextEncoder().encode(options.body).byteLength > MAX_JSON_BYTES)
+    if (typeof options.body === 'string' && new TextEncoder().encode(options.body).byteLength > MAX_REQUEST_JSON_BYTES)
       throw new NativeEngineError('engine_request_too_large', 'native JSON request exceeded the size limit');
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
     const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
@@ -105,7 +106,7 @@ export class NativeEngineClient {
   cancel(requestId) {
     const active = this.active.get(requestId); if (!active) return false; active.cancelled = true; if (active.nativeRequestId) void this.postCancel(active.nativeRequestId); active.abort.abort(); return true;
   }
-  async postCancel(nativeRequestId) { if (!REQUEST_ID.test(nativeRequestId)) return false; try { await this.request(`/v1/cancel/${encodeURIComponent(nativeRequestId)}`, { method: 'POST', body: '{}' }, { timeoutMs: 2000 }); return true; } catch { return false; } }
+  async postCancel(nativeRequestId) { if (!REQUEST_ID.test(nativeRequestId)) return false; try { const response = await this.request(`/v1/cancel/${encodeURIComponent(nativeRequestId)}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }, { timeoutMs: 2000 }); const result = await readJson(response); return result.cancelled === true; } catch { return false; } }
   async *generate({ requestId, sessionId, messages = [], mode = 'normal', tools = [], signal }) {
     if (!REQUEST_ID.test(requestId)) throw new NativeEngineError('invalid_request_id', 'host request id is invalid');
     if (!Array.isArray(messages) || messages.length < 1 || messages.length > 64) throw new NativeEngineError('invalid_messages', 'native message history is invalid');

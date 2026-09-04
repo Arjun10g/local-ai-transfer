@@ -40,6 +40,10 @@ test('NativeEngineClient integrates authenticated native fixture streaming, sess
   const controller = new ConversationController({ engine: client }); const session = controller.createSession('ses_native01'); const events = [];
   const result = await controller.runTurn({ sessionId: session.id, requestId: 'req_native01', message: 'hello', onEvent: event => events.push(event) });
   assert.equal(result.state, 'COMPLETED'); assert.match(result.text, /fixture response/); assert.ok(client.sessions.has(session.id)); assert.ok(events.some(event => event.event === 'message.completed'));
+  const nativeResponse = await fetch(`${client.baseUrl}/v1/chat/completions`, { method: 'POST', headers: client.headers({ 'content-type': 'application/json' }), body: JSON.stringify({ model: 'fixture', session_id: client.sessions.get(session.id), messages: [{ role: 'user', content: 'cancel this native request' }], stream: true, max_tokens: 64 }) });
+  assert.equal(nativeResponse.ok, true); const nativeRequestId = nativeResponse.headers.get('x-request-id'); assert.match(nativeRequestId ?? '', /^[A-Za-z0-9_-]+$/);
+  assert.equal(await client.postCancel(nativeRequestId), true);
+  const nativeBody = await nativeResponse.text(); assert.match(nativeBody, /finish_reason":"cancelled/);
   const cancelled = controller.runTurn({ sessionId: session.id, requestId: 'req_native02', message: 'hello', onEvent: () => {} }); setTimeout(() => controller.cancel('req_native02'), 20); const cancelledResult = await cancelled;
   assert.equal(cancelledResult.state, 'CANCELLED'); assert.equal(controller.state(session.id), 'CANCELLED');
   assert.equal(await client.deleteSession(session.id), true); assert.equal(client.sessions.has(session.id), false);

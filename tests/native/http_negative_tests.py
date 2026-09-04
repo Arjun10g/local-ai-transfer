@@ -58,7 +58,7 @@ def main():
         raise AssertionError("Windows launcher must pipe the token and clear inherited secret environment")
     for args in ([executable, "serve", "--port", "0"], [executable, "serve", "--port", "0", "--token-file", ""]):
         result = subprocess.run(args, capture_output=True, text=True, timeout=2)
-        if result.returncode != 2 or "token-file" not in result.stderr:
+        if result.returncode != 2 or "bearer token source" not in result.stderr:
             raise AssertionError(f"missing/empty token was accepted: {args!r} rc={result.returncode} stderr={result.stderr!r}")
     if not use_stdin_token:
         with tempfile.TemporaryDirectory() as directory:
@@ -73,6 +73,18 @@ def main():
             result = subprocess.run([executable, "serve", "--port", "0", "--token-file", str(alias)], capture_output=True, text=True, timeout=2)
             if result.returncode != 2:
                 raise AssertionError("token symlink was accepted")
+            short = Path(directory) / "short-token"
+            short.write_text("too-short")
+            short.chmod(0o600)
+            result = subprocess.run([executable, "serve", "--port", "0", "--token-file", str(short)], capture_output=True, text=True, timeout=2)
+            if result.returncode != 2:
+                raise AssertionError("short bearer token was accepted")
+            oversized = Path(directory) / "oversized-token"
+            oversized.write_text("x" * 513)
+            oversized.chmod(0o600)
+            result = subprocess.run([executable, "serve", "--port", "0", "--token-file", str(oversized)], capture_output=True, text=True, timeout=2)
+            if result.returncode != 2:
+                raise AssertionError("oversized bearer token was accepted")
         result = subprocess.run([executable, "serve", "--port", "0", "--token", "legacy-token"], capture_output=True, text=True, timeout=2)
         if result.returncode != 2 or "unknown argument" not in result.stderr:
             raise AssertionError("legacy token argv was accepted")
