@@ -449,6 +449,18 @@ class StaticSafetyTests(unittest.TestCase):
                 orchestrator._salvage(info, identity, known_hosts, destination, ["Qwen3.5-9B-Q4_K_M.gguf"], q4_expected_gib=6, deadline=time.monotonic() + 100)
             self.assertLessEqual(remote.call_args.kwargs["timeout"], 70)
 
+    def test_remote_prove_uses_the_uploaded_config(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_prove_argv")
+        command = orchestrator._remote_job_command("prove", "/scratch/j1m", 70)
+        self.assertEqual(command[command.index("--config") + 1], "/scratch/j1m/j1m-config.json")
+        self.assertEqual(command[command.index("--output") + 1], "/scratch/j1m/artifacts/proving-receipt.json")
+        self.assertEqual(command[command.index("--min-scratch-gib") + 1], "70")
+
+    def test_remote_build_uses_the_uploaded_config(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_build_argv")
+        command = orchestrator._remote_job_command("build", "/scratch/j1m", 70)
+        self.assertEqual(command, ["python3", "/scratch/j1m/j1m_runner.py", "--run", "--config", "/scratch/j1m/j1m-config.json"])
+
 
 class LoopbackLifecycleTests(unittest.TestCase):
     """Exercise exact deletion and killed-launcher recovery without a provider."""

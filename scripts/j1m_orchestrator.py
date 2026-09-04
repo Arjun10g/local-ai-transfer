@@ -65,6 +65,25 @@ def _remote(command: list[str], *, timeout: float) -> dict[str, Any]:
     return receipt
 
 
+def _remote_job_command(mode: str, remote_root: str, required_scratch_gib: int) -> list[str]:
+    """Build the exact remote argv against files uploaded to ``remote_root``."""
+
+    runner = f"{remote_root}/j1m_runner.py"
+    config = f"{remote_root}/j1m-config.json"
+    if mode == "prove":
+        return [
+            "python3", runner,
+            "--config", config,
+            "--prove",
+            "--scratch", "/scratch",
+            "--min-scratch-gib", str(required_scratch_gib),
+            "--output", f"{remote_root}/artifacts/proving-receipt.json",
+        ]
+    if mode == "build":
+        return ["python3", runner, "--run", "--config", config]
+    raise ValueError(f"unsupported J1M mode: {mode}")
+
+
 def _salvage(
     info: dict[str, Any],
     identity: Path,
@@ -231,12 +250,18 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 if upload_receipt["status"] != "completed":
                     raise sf.ShadeformError("required J1M upload failed")
             if mode == "prove":
-                lifecycle["job"] = _remote(sf.ssh_base(info, identity, known_hosts) + ["python3", f"{remote_root}/j1m_runner.py", "--prove", "--scratch", "/scratch", "--min-scratch-gib", str(config["resources"]["required_scratch_gib"]), "--output", f"{remote_root}/artifacts/proving-receipt.json"], timeout=120)
+                lifecycle["job"] = _remote(
+                    sf.ssh_base(info, identity, known_hosts)
+                    + _remote_job_command(mode, remote_root, int(config["resources"]["required_scratch_gib"])),
+                    timeout=120,
+                )
             else:
                 # Qwen3.5-9B is public at the pinned revision. Do not place
                 # HF_TOKEN on the ephemeral host; the runner downloads it
                 # unauthenticated and child environments remain sanitized.
-                remote_job = sf.ssh_base(info, identity, known_hosts) + ["python3", f"{remote_root}/j1m_runner.py", "--run", "--config", f"{remote_root}/j1m-config.json"]
+                remote_job = sf.ssh_base(info, identity, known_hosts) + _remote_job_command(
+                    mode, remote_root, int(config["resources"]["required_scratch_gib"])
+                )
                 j1m_runner.write_progress(progress_path, "remote-build-starting", phase_id=phase_id)
                 transfer_reserve = float(config["modes"][mode].get("transfer_reserve_seconds", 0))
                 lifecycle["job"] = _remote(remote_job, timeout=max(30, provider_deadline - time.monotonic() - transfer_reserve - 120))
