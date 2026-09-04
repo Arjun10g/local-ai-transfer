@@ -41,3 +41,7 @@ python3 scripts/test/evaluate_tool_calls.py \
 
 Result JSON contains case IDs, pass/fail/error reasons, latency, and optional
 RSS only; prompts and generated text are intentionally excluded.
+
+The parser contract and value-framing vectors are shared with the host parser
+in `tests/model/qwen_xml_vectors.json`; quoted values remain text, while only
+exact JSON primitives/containers are normalized.

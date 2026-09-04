@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { makeToolResult, parseStrictJson, parseToolCall, validateToolCall, validateToolResult, ToolCallStreamDecoder, EnvelopeError } from '../../host/agent/tool-envelope.mjs';
 import { validateEvent } from '../../host/agent/assistant-events.mjs';
 import { ConversationController } from '../../host/agent/controller.mjs';
@@ -75,6 +76,18 @@ test('receipt Qwen XML parameters normalize safely and controller bounds tool re
   const indented = parseToolCall('<tool_call><function=fs.write_new><parameter=content>\n  first line  \n  second line\n</parameter></function></tool_call>');
   assert.equal(indented.arguments.content, '  first line  \n  second line');
   for (const attack of ['<tool_call><function=fs.write_new><parameter=content><parameter=x>bad</parameter></parameter></function></tool_call>', '<tool_call><function=fs.write_new><parameter=content>bad</function></parameter></function></tool_call>']) assert.throws(() => parseToolCall(attack), EnvelopeError);
+});
+
+test('shared Qwen XML value vectors remain aligned with the host parser', async () => {
+  const vectors = JSON.parse(await readFile(new URL('../model/qwen_xml_vectors.json', import.meta.url), 'utf8'));
+  assert.equal(vectors.schema, 'local_bmo.qwen-xml-vectors.v1');
+  for (const vector of vectors.vectors) {
+    if (vector.reject) assert.throws(() => parseToolCall(vector.xml), EnvelopeError);
+    else {
+      const parsed = parseToolCall(vector.xml);
+      assert.deepEqual({ name: parsed.name, arguments: parsed.arguments }, vector.expected, vector.id);
+    }
+  }
 });
 
 test('controller propagates complete tool schema and ordered tool result correlation', async () => {

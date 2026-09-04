@@ -1,0 +1,16 @@
+{
+  "schema": "local_bmo.qwen-xml-vectors.v1",
+  "vectors": [
+    {"id": "quoted-text", "xml": "<tool_call><function=test.echo><parameter=value>\"quoted\"</parameter></function></tool_call>", "expected": {"name": "test.echo", "arguments": {"value": "\"quoted\""}}},
+    {"id": "entity-looking-text", "xml": "<tool_call><function=test.echo><parameter=value>&lt;literal&gt;</parameter></function></tool_call>", "expected": {"name": "test.echo", "arguments": {"value": "&lt;literal&gt;"}}},
+    {"id": "raw-ampersand", "xml": "<tool_call><function=test.echo><parameter=value>a & b</parameter></function></tool_call>", "expected": {"name": "test.echo", "arguments": {"value": "a & b"}}},
+    {"id": "literal-tag", "xml": "<tool_call><function=test.echo><parameter=value><tag>text</tag></parameter></function></tool_call>", "expected": {"name": "test.echo", "arguments": {"value": "<tag>text</tag>"}}},
+    {"id": "structural-injection", "xml": "<tool_call><function=test.echo><parameter=value><parameter=other>bad</parameter></parameter></function></tool_call>", "reject": true},
+    {"id": "bool", "xml": "<tool_call><function=test.echo><parameter=value>true</parameter></function></tool_call>", "expected": {"name": "test.echo", "arguments": {"value": true}}},
+    {"id": "null", "xml": "<tool_call><function=test.echo><parameter=value>null</parameter></function></tool_call>", "expected": {"name": "test.echo", "arguments": {"value": null}}},
+    {"id": "number", "xml": "<tool_call><function=test.echo><parameter=value>42</parameter></function></tool_call>", "expected": {"name": "test.echo", "arguments": {"value": 42}}},
+    {"id": "object", "xml": "<tool_call><function=test.echo><parameter=value>{\"x\":1}</parameter></function></tool_call>", "expected": {"name": "test.echo", "arguments": {"value": {"x": 1}}}},
+    {"id": "array", "xml": "<tool_call><function=test.echo><parameter=value>[1,2]</parameter></function></tool_call>", "expected": {"name": "test.echo", "arguments": {"value": [1, 2]}}},
+    {"id": "indentation", "xml": "<tool_call><function=test.echo><parameter=value>\n  first line  \n  second line  \n</parameter></function></tool_call>", "expected": {"name": "test.echo", "arguments": {"value": "  first line  \n  second line  "}}}
+  ]
+}

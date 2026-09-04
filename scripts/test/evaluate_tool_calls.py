@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import stat
@@ -40,8 +41,8 @@ TOOL_CALL = re.compile(
 PARAMETER = re.compile(
     r"<parameter=([a-z][a-z0-9_.-]{0,95})>(.*?)</parameter>", re.DOTALL
 )
-STRUCTURAL_TAG = re.compile(r"</?(?:tool_call|function|parameter)(?:\s|=|>|/)", re.IGNORECASE)
-ENTITY = re.compile(r"&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]+);", re.IGNORECASE)
+STRUCTURAL_TAG = re.compile(r"</?(?:tool_call|function(?:[=>\s]|$)|parameter(?:[=>\s]|$))")
+JSON_VALUE = re.compile(r"^(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)$")
 
 
 class RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -187,16 +188,25 @@ def parse_tool_call(text: str, tools: list[dict[str, Any]] | None = None) -> dic
         if parameter is None:
             raise ValueError("malformed_parameter")
         key, raw = parameter.groups()
-        # Literal operators are valid argument data. Only XML control tags or
-        # entity syntax are rejected, so nested protocol structure cannot hide
-        # a second parameter/function while URLs and code remain representable.
-        if key in arguments or STRUCTURAL_TAG.search(raw) or ENTITY.search(raw):
+        # Literal operators and entity-looking text are opaque argument data.
+        # Only protocol-shaped tags are structural, matching the runtime.
+        if key in arguments or STRUCTURAL_TAG.search(raw):
             raise ValueError("malformed_parameter")
-        value = raw.strip()
-        try:
-            value = json.loads(value)
-        except json.JSONDecodeError:
-            pass
+        if raw.startswith("\r\n"):
+            raw = raw[2:]
+        elif raw.startswith("\n"):
+            raw = raw[1:]
+        if raw.endswith("\r\n"):
+            raw = raw[:-2]
+        elif raw.endswith("\n"):
+            raw = raw[:-1]
+        candidate = raw.strip()
+        value: Any = raw
+        if JSON_VALUE.fullmatch(candidate) or candidate.startswith(("{", "[")):
+            try:
+                value = json.loads(candidate)
+            except json.JSONDecodeError as exc:
+                raise ValueError("invalid_json_argument") from exc
         arguments[key] = value
         position = parameter.end()
     if known_tools is not None:
@@ -341,6 +351,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--engine-pid", type=int, help="optional local engine PID for bounded RSS sampling")
     parser.add_argument("--dry-run", action="store_true", help="validate fixture and print case IDs only")
     args = parser.parse_args(argv)
+    if not 1 <= args.max_cases <= 8:
+        parser.error("--max-cases must be between 1 and 8")
+    if not math.isfinite(args.timeout) or not 0 < args.timeout <= 600:
+        parser.error("--timeout must be finite and between 0 and 600 seconds")
+    if args.engine_pid is not None and args.engine_pid <= 0:
+        parser.error("--engine-pid must be positive")
     fixture = load_fixture(args.fixture)
     if args.dry_run:
         print(json.dumps({"schema": "local_bmo.tool-call-eval-dry-run.v1", "model": fixture["model"], "case_ids": [case["id"] for case in fixture["cases"][:args.max_cases]], "limits": fixture["limits"]}, sort_keys=True))

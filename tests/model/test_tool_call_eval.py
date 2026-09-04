@@ -2,6 +2,7 @@ import unittest
 import os
 import io
 import json
+import contextlib
 import tempfile
 import urllib.error
 import urllib.request
@@ -19,6 +20,7 @@ from scripts.test.evaluate_tool_calls import (
     evaluate_case,
     load_bearer_token,
     load_fixture,
+    main,
     parse_tool_call,
     run_local,
     validate_endpoint,
@@ -32,9 +34,9 @@ class ToolCallEvaluatorTests(unittest.TestCase):
         categories = {case["category"] for case in fixture["cases"]}
         self.assertTrue({"tool_selection", "argument_fidelity", "no_tool", "malformed_prompt", "prompt_injection"}.issubset(categories))
 
-    def test_qwen_xml_parser_normalizes_json_parameter_values(self):
+    def test_qwen_xml_parser_preserves_quoted_text_and_normalizes_plain_text(self):
         output = "<tool_call>\n<function=weather.get>\n<parameter=city>\n\"Toronto\"\n</parameter>\n<parameter=units>\ncelsius\n</parameter>\n</function>\n</tool_call>"
-        self.assertEqual(parse_tool_call(output, load_fixture()["tools"]), {"name": "weather.get", "arguments": {"city": "Toronto", "units": "celsius"}})
+        self.assertEqual(parse_tool_call(output, load_fixture()["tools"]), {"name": "weather.get", "arguments": {"city": "\"Toronto\"", "units": "celsius"}})
 
     def test_no_tool_and_unknown_tool_are_fail_closed(self):
         fixture = load_fixture()
@@ -50,7 +52,6 @@ class ToolCallEvaluatorTests(unittest.TestCase):
             valid + " trailing",
             valid.replace("</function>", "<parameter=city>again</parameter></function>"),
             valid.replace("Toronto", "<parameter=evil>Toronto</parameter>"),
-            valid.replace("Toronto", "&lt;Toronto&gt;"),
             valid.replace("weather.get", "shell.run"),
             valid.replace("<parameter=units>celsius</parameter>", ""),
         ):
@@ -161,6 +162,18 @@ class ToolCallEvaluatorTests(unittest.TestCase):
         output = "<tool_call><function=weather.get><parameter=city>Toronto <downtown> & west</parameter><parameter=units>celsius</parameter></function></tool_call>"
         self.assertEqual(parse_tool_call(output, tools)["arguments"]["city"], "Toronto <downtown> & west")
 
+    def test_shared_runtime_value_vectors(self):
+        vectors = json.loads((Path(__file__).with_name("qwen_xml_vectors.json")).read_text(encoding="utf-8"))
+        self.assertEqual(vectors["schema"], "local_bmo.qwen-xml-vectors.v1")
+        self.assertLessEqual(len(vectors["vectors"]), 16)
+        for vector in vectors["vectors"]:
+            with self.subTest(vector=vector["id"]):
+                if "reject" in vector:
+                    with self.assertRaises(ValueError):
+                        parse_tool_call(vector["xml"])
+                else:
+                    self.assertEqual(parse_tool_call(vector["xml"]), vector["expected"])
+
     def test_proxy_environment_is_ignored_and_redirects_fail_for_both_requests(self):
         with patch.dict(os.environ, {"http_proxy": "http://attacker.invalid:8080", "HTTPS_PROXY": "http://attacker.invalid:8080"}):
             with patch("scripts.test.evaluate_tool_calls.urllib.request.getproxies", side_effect=AssertionError("proxy lookup")):
@@ -187,6 +200,11 @@ class ToolCallEvaluatorTests(unittest.TestCase):
             path.write_text(json.dumps(fixture), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "message is unbounded"):
                 load_fixture(path)
+
+    def test_cli_bounds_are_fail_closed(self):
+        for argument in (("--max-cases", "0"), ("--max-cases", "9"), ("--timeout", "0"), ("--timeout", "601"), ("--timeout", "nan"), ("--engine-pid", "0")):
+            with self.subTest(argument=argument), self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                main(["--dry-run", *argument])
 
 
 if __name__ == "__main__":
