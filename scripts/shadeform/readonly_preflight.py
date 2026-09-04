@@ -209,6 +209,11 @@ def profile_reasons(profile: dict, rules: dict[str, object], *, include_rate: bo
     return reasons
 
 
+def _valid_cost(value: object) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool) and
+            math.isfinite(float(value)) and value >= 0)
+
+
 def read_ledger(path: Path | None) -> tuple[float, list[dict], bool]:
     if not path or not path.exists():
         return 0.0, [], False
@@ -233,15 +238,18 @@ def read_ledger(path: Path | None) -> tuple[float, list[dict], bool]:
     total = 0.0
     pending: list[dict] = []
     for number, event in latest.values():
-        status = str(event.get("status", event.get("cost_status", ""))).lower()
-        if status == "pending" or event.get("pending") is True:
+        status = event.get("status", event.get("cost_status"))
+        if status not in {"pending", "settled"}:
+            raise ValueError(f"ledger line {number} has an unknown status")
+        if status == "pending":
+            if "actual_cost_usd" in event or not _valid_cost(event.get("estimated_cost_usd")):
+                raise ValueError(f"ledger line {number} has an invalid pending cost")
             pending.append({"line": number, "run_id": event.get("run_id"), "status": "pending"})
             continue
         # Never replace a malformed settled event with an estimate: the latest
         # event is authoritative and an absent actual would understate spend.
         value = event.get("actual_cost_usd")
-        if (isinstance(value, bool) or not isinstance(value, (int, float)) or
-                not math.isfinite(float(value)) or value < 0):
+        if "estimated_cost_usd" in event or not _valid_cost(value):
             raise ValueError(f"ledger line {number} has invalid settled actual cost")
         total += float(value)
     return total, pending, bool(pending)

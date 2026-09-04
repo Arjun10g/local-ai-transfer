@@ -102,7 +102,7 @@ class ShadeformPreflightTests(unittest.TestCase):
     def test_pending_ledger_refuses_selection(self):
         with tempfile.TemporaryDirectory() as directory:
             ledger = Path(directory) / "ledger.jsonl"
-            ledger.write_text(json.dumps({"run_id": "old", "status": "pending"}) + "\n", encoding="utf-8")
+            ledger.write_text(json.dumps({"run_id": "old", "status": "pending", "estimated_cost_usd": 1.0}) + "\n", encoding="utf-8")
             values = {"SHADEFORM_API_KEY": "secret", "SHADEFORM_MAX_HOURLY_COST_USD": "1", "SHADEFORM_MAX_TOTAL_COST_USD": "2"}
             selected, report = self.module.select_profiles({"profiles": [{"id": "x", "hourly_usd": 0.35, "available": True}]}, values, 1, ledger)
             self.assertEqual(selected, [])
@@ -150,6 +150,27 @@ class ShadeformPreflightTests(unittest.TestCase):
             for value in (None, True, -1, float("nan"), float("inf")):
                 ledger.write_text(json.dumps({"instance_id": "attempt-1", "status": "settled", "actual_cost_usd": value}) + "\n", encoding="utf-8")
                 with self.subTest(value=value), self.assertRaises(ValueError):
+                    self.module.read_ledger(ledger)
+
+    def test_unknown_latest_status_cannot_replace_pending(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Path(directory) / "ledger.jsonl"
+            ledger.write_text("\n".join([
+                json.dumps({"instance_id": "attempt-1", "status": "pending", "estimated_cost_usd": 1.0}),
+                json.dumps({"instance_id": "attempt-1", "status": "bogus", "actual_cost_usd": 0.0}),
+            ]) + "\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                self.module.read_ledger(ledger)
+
+    def test_pending_ledger_requires_estimate_and_no_actual(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Path(directory) / "ledger.jsonl"
+            for event in (
+                {"instance_id": "attempt-1", "status": "pending"},
+                {"instance_id": "attempt-1", "status": "pending", "estimated_cost_usd": 1.0, "actual_cost_usd": 0.0},
+            ):
+                ledger.write_text(json.dumps(event) + "\n", encoding="utf-8")
+                with self.subTest(event=event), self.assertRaises(ValueError):
                     self.module.read_ledger(ledger)
 
 

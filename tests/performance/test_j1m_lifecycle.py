@@ -571,6 +571,35 @@ class StaticSafetyTests(unittest.TestCase):
             finally:
                 sf.COST_LEDGER = original
 
+    def test_cost_ledger_rejects_unknown_latest_status_instead_of_erasing_pending(self):
+        from scripts import shadeform_lifecycle as sf
+        with tempfile.TemporaryDirectory() as directory:
+            original = sf.COST_LEDGER
+            sf.COST_LEDGER = Path(directory) / "cost-ledger.jsonl"
+            try:
+                sf.COST_LEDGER.write_text("\n".join([
+                    json.dumps({"instance_id": "pending-attempt", "status": "pending", "estimated_cost_usd": 1.0}),
+                    json.dumps({"instance_id": "pending-attempt", "status": "bogus", "actual_cost_usd": 0.0}),
+                ]) + "\n", encoding="utf-8")
+                with self.assertRaises(sf.ShadeformError):
+                    sf.ledger_spend()
+            finally:
+                sf.COST_LEDGER = original
+
+    def test_append_cost_event_requires_coherent_pending_or_settled_shape(self):
+        from scripts import shadeform_lifecycle as sf
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(sf, "COST_LEDGER", Path(directory) / "cost-ledger.jsonl"):
+            invalid = [
+                {"instance_id": "cost-shape", "status": "unknown", "actual_cost_usd": 0.0},
+                {"instance_id": "cost-shape", "status": "pending", "estimated_cost_usd": 1.0, "actual_cost_usd": 0.0},
+                {"instance_id": "cost-shape", "status": "pending", "estimated_cost_usd": float("nan")},
+                {"instance_id": "cost-shape", "status": "settled", "estimated_cost_usd": 1.0, "actual_cost_usd": 0.0},
+                {"instance_id": "cost-shape", "status": "settled", "actual_cost_usd": False},
+            ]
+            for event in invalid:
+                with self.subTest(event=event), self.assertRaises(ValueError):
+                    sf.append_cost_event(event)
+
     def test_candidate_budget_includes_backstop_margin(self):
         from scripts import shadeform_lifecycle as sf
         raw = [{"gpu_type": "A100", "num_gpus": 1, "cloud": "cloud-a", "hourly_price": 90, "configuration": {"vram_per_gpu_in_gb": 80}, "availability": [{"region": "r1", "available": True}], "shade_instance_type": "a100-80"}]
@@ -818,6 +847,21 @@ class StaticSafetyTests(unittest.TestCase):
         config = load(ROOT / "scripts/j1m_runner.py", "j1m_jitter_config").load_config()
         envelope = orchestrator._eval_deadline_ceiling(config)
         self.assertGreaterEqual(envelope["watchdog_seconds"] - envelope["host_shutdown_from_create_seconds"], 120)
+
+    def test_insufficient_backstop_is_rejected_before_catalogue_or_key_mutation(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_backstop_gate")
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(orchestrator.sf, "load_env", return_value={"SHADEFORM_API_KEY": "api", "SHADEFORM_AUTO_TERMINATE_HOURS": "0.1"}), \
+                    mock.patch.object(orchestrator.sf, "require_env", return_value="api"), \
+                    mock.patch.object(orchestrator.sf, "list_candidates") as list_candidates, \
+                    mock.patch.object(orchestrator.sf, "create_ephemeral_ssh_key") as create_key:
+                with self.assertRaises(orchestrator.sf.BackstopError):
+                    orchestrator.execute(
+                        Path(directory) / "env", config_path=ROOT / "model/conversion/j1m-config.json",
+                        phase_id="backstop-gate", run_id="test", artifact_destination=Path(directory) / "artifacts", mode="prove",
+                    )
+            list_candidates.assert_not_called()
+            create_key.assert_not_called()
 
     def test_orchestrator_failed_remote_receipt_does_not_retain_stdout(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_no_stdout")

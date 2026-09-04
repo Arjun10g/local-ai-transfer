@@ -327,6 +327,13 @@ def _parse_ledger_row(line: str) -> dict[str, str] | None:
     return dict(zip(names, cells))
 
 
+def _valid_cost(value: object) -> bool:
+    """Accept only JSON-number-like, finite, nonnegative cost values."""
+
+    return (isinstance(value, (int, float)) and not isinstance(value, bool) and
+            math.isfinite(float(value)) and value >= 0)
+
+
 def ledger_spend() -> tuple[float, list[str]]:
     """Return (dollars already committed, instance IDs whose cost is still unrecorded).
 
@@ -345,6 +352,14 @@ def ledger_spend() -> tuple[float, list[str]]:
                 raise ShadeformError(f"cost ledger line {number} is invalid JSON") from exc
             if not isinstance(event, dict):
                 raise ShadeformError(f"cost ledger line {number} is not an object")
+            status = event.get("status")
+            if status not in {"pending", "settled"}:
+                raise ShadeformError(f"cost ledger line {number} has an unknown status")
+            if status == "pending":
+                if "actual_cost_usd" in event or not _valid_cost(event.get("estimated_cost_usd")):
+                    raise ShadeformError(f"cost ledger line {number} has an invalid pending cost")
+            elif "estimated_cost_usd" in event or not _valid_cost(event.get("actual_cost_usd")):
+                raise ShadeformError(f"cost ledger line {number} has an invalid settled cost")
             instance_id = event.get("instance_id")
             if not isinstance(instance_id, str) or not instance_id or len(instance_id) > 256:
                 raise ShadeformError(f"cost ledger line {number} has no bounded instance identity")
@@ -356,9 +371,6 @@ def ledger_spend() -> tuple[float, list[str]]:
                 pending.append(instance_id)
             else:
                 actual = event.get("actual_cost_usd")
-                if (isinstance(actual, bool) or not isinstance(actual, (int, float)) or
-                        not math.isfinite(float(actual)) or actual < 0):
-                    raise ShadeformError(f"cost ledger entry {instance_id} has invalid settled cost")
                 spent += float(actual)
         return round(spent, 6), pending
     if not MARKDOWN_LEDGER.is_file():
@@ -384,8 +396,17 @@ def ledger_spend() -> tuple[float, list[str]]:
 def append_cost_event(event: dict[str, Any]) -> None:
     """Append one immutable settled/pending cost event; never rewrite history."""
 
-    if not isinstance(event, dict) or not event.get("instance_id") or not event.get("status"):
+    if not isinstance(event, dict) or not event.get("instance_id") or event.get("status") not in {"pending", "settled"}:
         raise ValueError("cost event requires instance_id and status")
+    instance_id = event["instance_id"]
+    if not isinstance(instance_id, str) or len(instance_id) > 256:
+        raise ValueError("cost event instance_id must be bounded text")
+    status = event["status"]
+    if status == "pending":
+        if "actual_cost_usd" in event or not _valid_cost(event.get("estimated_cost_usd")):
+            raise ValueError("pending cost event requires a finite nonnegative estimate only")
+    elif "estimated_cost_usd" in event or not _valid_cost(event.get("actual_cost_usd")):
+        raise ValueError("settled cost event requires a finite nonnegative actual only")
     COST_LEDGER.parent.mkdir(parents=True, exist_ok=True)
     lock_path = COST_LEDGER.with_suffix(".lock")
     with lock_path.open("a+b") as lock_handle:
@@ -1002,7 +1023,15 @@ def _auto_delete(env: dict[str, str], runtime_hours: float) -> dict[str, str]:
     # Keep the packaged default above the 1.25x provider backstop for the
     # longest supported model-evaluation run (2.425h). Operators may set a
     # stricter ceiling explicitly, in which case the guard below refuses it.
-    ceiling = float(env.get("SHADEFORM_AUTO_TERMINATE_HOURS", "2.5") or "2.5")
+    if (isinstance(runtime_hours, bool) or not isinstance(runtime_hours, (int, float)) or
+            not math.isfinite(float(runtime_hours)) or runtime_hours <= 0):
+        raise BackstopError("runtime must be finite and positive before provider mutation")
+    try:
+        ceiling = float(env.get("SHADEFORM_AUTO_TERMINATE_HOURS", "2.5") or "2.5")
+    except (TypeError, ValueError) as exc:
+        raise BackstopError("SHADEFORM_AUTO_TERMINATE_HOURS must be finite and positive") from exc
+    if not math.isfinite(ceiling) or ceiling <= 0:
+        raise BackstopError("SHADEFORM_AUTO_TERMINATE_HOURS must be finite and positive")
     hours = min(max(0.25, runtime_hours * 1.25), max(0.25, ceiling))
     # Assert the EFFECTIVE backstop against the run, not the ceiling against the
     # run. Those differ exactly where it matters: at runtime == ceiling the
@@ -1024,7 +1053,12 @@ def _auto_delete(env: dict[str, str], runtime_hours: float) -> dict[str, str]:
             f"(it is a standing safety limit, so this is a decision, not a knob to "
             f"turn to make a run fit), or shorten the run."
         )
-    max_total = float(env.get("SHADEFORM_MAX_TOTAL_COST_USD", "50") or "50")
+    try:
+        max_total = float(env.get("SHADEFORM_MAX_TOTAL_COST_USD", "50") or "50")
+    except (TypeError, ValueError) as exc:
+        raise BackstopError("SHADEFORM_MAX_TOTAL_COST_USD must be finite and positive") from exc
+    if not math.isfinite(max_total) or max_total <= 0:
+        raise BackstopError("SHADEFORM_MAX_TOTAL_COST_USD must be finite and positive")
     return {
         "date_threshold": (utc_now() + timedelta(hours=hours)).isoformat(),
         "spend_threshold": f"{max(1.0, max_total):.2f}",

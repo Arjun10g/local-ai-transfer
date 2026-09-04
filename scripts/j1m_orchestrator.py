@@ -699,6 +699,10 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
     env = sf.load_env(env_file)
     api_key = sf.require_env(env, "SHADEFORM_API_KEY")
     runtime = float(config["modes"][mode]["runtime_hours"])
+    # Validate the effective provider backstop before even reading the live
+    # candidate catalogue. A too-short ceiling must not reach key generation,
+    # key upload, or instance creation.
+    sf._auto_delete(env, runtime)
     # Candidate selection is policy- and budget-bound; identity is checked
     # again before create so a catalogue reorder cannot change the target.
     candidates = sf.list_candidates(api_key, env, phase_id=phase_id, min_vram_gb=80, max_runtime_hours=runtime)
