@@ -11,6 +11,8 @@
     {"id": "number", "xml": "<tool_call><function=test.echo><parameter=value>42</parameter></function></tool_call>", "expected": {"name": "test.echo", "arguments": {"value": 42}}},
     {"id": "object", "xml": "<tool_call><function=test.echo><parameter=value>{\"x\":1}</parameter></function></tool_call>", "expected": {"name": "test.echo", "arguments": {"value": {"x": 1}}}},
     {"id": "array", "xml": "<tool_call><function=test.echo><parameter=value>[1,2]</parameter></function></tool_call>", "expected": {"name": "test.echo", "arguments": {"value": [1, 2]}}},
-    {"id": "indentation", "xml": "<tool_call><function=test.echo><parameter=value>\n  first line  \n  second line  \n</parameter></function></tool_call>", "expected": {"name": "test.echo", "arguments": {"value": "  first line  \n  second line  "}}}
+    {"id": "indentation", "xml": "<tool_call><function=test.echo><parameter=value>\n  first line  \n  second line  \n</parameter></function></tool_call>", "expected": {"name": "test.echo", "arguments": {"value": "  first line  \n  second line  "}}},
+    {"id": "duplicate-json-key", "xml": "<tool_call><function=test.echo><parameter=value>{\"x\":1,\"x\":2}</parameter></function></tool_call>", "reject": true},
+    {"id": "json-depth-overflow", "xml": "<tool_call><function=test.echo><parameter=value>{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":0}}}}}}}}}</parameter></function></tool_call>", "reject": true}
   ]
 }

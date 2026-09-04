@@ -108,10 +108,10 @@ class ToolCallEvaluatorTests(unittest.TestCase):
 
     def test_endpoint_is_explicit_loopback_http_only(self):
         self.assertEqual(validate_endpoint("http://127.0.0.1:49912/v1/chat/completions"), "http://127.0.0.1:49912/v1/chat/completions")
-        self.assertEqual(validate_endpoint("http://localhost:49912/v1/chat/completions"), "http://localhost:49912/v1/chat/completions")
         invalid = (
             "https://127.0.0.1:49912/v1/chat/completions",
             "http://192.0.2.1:49912/v1/chat/completions",
+            "http://localhost:49912/v1/chat/completions",
             "http://[::1]:49912/v1/chat/completions",
             "http://user:password@localhost:49912/v1/chat/completions",
             "http://localhost/v1/chat/completions",
@@ -162,6 +162,23 @@ class ToolCallEvaluatorTests(unittest.TestCase):
         tools = load_fixture()["tools"]
         output = "<tool_call><function=weather.get><parameter=city>Toronto <downtown> & west</parameter><parameter=units>celsius</parameter></function></tool_call>"
         self.assertEqual(parse_tool_call(output, tools)["arguments"]["city"], "Toronto <downtown> & west")
+
+    def test_parameter_bytes_json_depth_and_duplicate_keys_are_bounded(self):
+        with self.assertRaisesRegex(ValueError, "parameter_too_large"):
+            parse_tool_call("<tool_call><function=test.echo><parameter=value>" + ("x" * 4097) + "</parameter></function></tool_call>")
+        with self.assertRaises(ValueError):
+            parse_tool_call("<tool_call><function=test.echo><parameter=value>{\"x\":1,\"x\":2}</parameter></function></tool_call>")
+        nested = "{" * 10 + "\"x\":" * 10 + "0" + "}" * 10
+        with self.assertRaises(ValueError):
+            parse_tool_call(f"<tool_call><function=test.echo><parameter=value>{nested}</parameter></function></tool_call>")
+
+    def test_object_array_argument_types_are_checked(self):
+        tools = [{"type": "function", "function": {"name": "test.types", "description": "typed", "parameters": {"type": "object", "properties": {"obj": {"type": "object"}, "items": {"type": "array"}}, "required": ["obj", "items"], "additionalProperties": False}}}]
+        valid = "<tool_call><function=test.types><parameter=obj>{\"x\":1}</parameter><parameter=items>[1,2]</parameter></function></tool_call>"
+        self.assertEqual(parse_tool_call(valid, tools)["arguments"], {"obj": {"x": 1}, "items": [1, 2]})
+        for output in (valid.replace('{\"x\":1}', '"wrong"'), valid.replace('[1,2]', 'false')):
+            with self.assertRaisesRegex(ValueError, "invalid_arguments"):
+                parse_tool_call(output, tools)
 
     def test_shared_runtime_value_vectors(self):
         vectors = json.loads((Path(__file__).with_name("qwen_xml_vectors.json")).read_text(encoding="utf-8"))

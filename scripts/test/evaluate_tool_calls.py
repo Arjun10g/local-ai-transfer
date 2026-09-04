@@ -79,7 +79,7 @@ def validate_endpoint(endpoint: str) -> str:
         raise ValueError("endpoint_must_be_loopback_http") from exc
     if (
         parts.scheme.lower() != "http"
-        or hostname not in {"127.0.0.1", "localhost"}
+        or hostname != "127.0.0.1"
         or parts.username is not None
         or parts.password is not None
         or port is None
@@ -128,6 +128,24 @@ def _bounded_json(value: Any, depth: int = 0) -> None:
         raise ValueError("fixture_number_invalid")
     elif value is not None and not isinstance(value, (bool, int, float)):
         raise ValueError("fixture_value_invalid")
+
+
+def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate_json_key")
+        result[key] = value
+    return result
+
+
+def _parse_json_value(text: str) -> Any:
+    try:
+        value = json.loads(text, object_pairs_hook=_reject_duplicate_pairs, parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite_json_number")))
+    except (json.JSONDecodeError, RecursionError, ValueError) as exc:
+        raise ValueError("invalid_json_argument") from exc
+    _bounded_json(value)
+    return value
 
 
 def _bounded_int(value: Any, low: int, high: int) -> None:
@@ -252,8 +270,8 @@ def load_fixture(path: Path = FIXTURE) -> dict[str, Any]:
     if len(raw) > FIXTURE_MAX_BYTES:
         raise ValueError("fixture_too_large")
     try:
-        fixture = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        fixture = json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_pairs)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
         raise ValueError("invalid_tool-call_fixture") from exc
     return validate_fixture(fixture)
 
@@ -292,9 +310,15 @@ def _validate_arguments(function: dict[str, Any], arguments: dict[str, Any]) -> 
             raise ValueError("invalid_arguments")
         if expected_type == "number" and (not isinstance(value, (int, float)) or isinstance(value, bool)):
             raise ValueError("invalid_arguments")
+        if expected_type == "number" and isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("invalid_arguments")
         if expected_type == "integer" and (not isinstance(value, int) or isinstance(value, bool)):
             raise ValueError("invalid_arguments")
         if expected_type == "boolean" and not isinstance(value, bool):
+            raise ValueError("invalid_arguments")
+        if expected_type == "object" and not isinstance(value, dict):
+            raise ValueError("invalid_arguments")
+        if expected_type == "array" and not isinstance(value, list):
             raise ValueError("invalid_arguments")
         enum = schema.get("enum")
         if enum is not None and value not in enum:
@@ -339,12 +363,11 @@ def parse_tool_call(text: str, tools: list[dict[str, Any]] | None = None) -> dic
         elif raw.endswith("\n"):
             raw = raw[:-1]
         candidate = raw.strip()
+        if len(raw.encode("utf-8")) > 4096:
+            raise ValueError("parameter_too_large")
         value: Any = raw
         if JSON_VALUE.fullmatch(candidate) or candidate.startswith(("{", "[")):
-            try:
-                value = json.loads(candidate)
-            except json.JSONDecodeError as exc:
-                raise ValueError("invalid_json_argument") from exc
+            value = _parse_json_value(candidate)
         arguments[key] = value
         position = parameter.end()
     if known_tools is not None:
