@@ -23,3 +23,10 @@
 | TOOL-017 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-013 | S0, S4 | `197649d`, `2e4c2fc`, `c706a2b`; allowlisted app/browser argv, external-egress gating/preview, strict args tests |
 | QA-001 | S4 | `luna/qa-release` | CLAIMED | SOL-001 | S0 | pending |
 | SEC-001 | S4 | `luna/qa-release` | CLAIMED | QA-001, SOL-003 | S0 | pending |
+| RUN-019 | S1 | `main` | IN_PROGRESS | RUN-010, MODEL-004 | S0, S4 | real tool-role/template pipeline and tests pending |
+| RUN-020 | S1 | `main` | IN_PROGRESS | RUN-019, TOOL-001 | S0, S4 | structured Qwen call normalization evidence pending |
+| MODEL-006 | S2 | `main` | IN_PROGRESS | MODEL-002, TOOL-014 | S0, S4 | bounded local GGUF evaluation pending |
+| MODEL-007 | S2 | `main` | IN_PROGRESS | MODEL-006, RUN-020 | S0, S4 | tool prompt/bundle evaluation pending |
+| QA-010 | S4 | `main` | IN_PROGRESS | TOOL-018, MODEL-006 | S0 | heavy autonomous tool tests pending |
+| SEC-006 | S4 | `main` | IN_PROGRESS | RUN-020, TOOL-019 | S0 | parser/schema adversarial evidence pending |
+| SOL-G4 | S0 | `main` | IN_PROGRESS | RUN-020, MODEL-007, QA-010 | S4 | release-hardening review in progress |
