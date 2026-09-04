@@ -21,9 +21,9 @@
 | TOOL-015 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-013, TOOL-014 | S0, S4 | `197649d`, `2e4c2fc`, `c706a2b`, `acca535`; create-new/base-hash atomic patch, final target recheck, preview tests |
 | TOOL-016 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-013 | S0, S4 | `197649d`, `2e4c2fc`, `c706a2b`; typed Windows clipboard modules/offline tests and strict args |
 | TOOL-017 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-013 | S0, S4 | `197649d`, `2e4c2fc`, `c706a2b`; allowlisted app/browser argv, external-egress gating/preview, strict args tests |
-| TOOL-022 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-003, SOL-003 | S0, S4 | `e4c326d`; strict provider contract/controller schema wiring; disabled/fake-only evidence; focused 16/16 |
-| TOOL-023 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-022, SOL-003 | S0, S4 | `e4c326d`; Graph Outlook/Teams endpoints, host revisions, at-most-once writes, profile/grant tests |
-| TOOL-024 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-022, SOL-003 | S0, S4 | `e4c326d`; prompt-only Copilot stdin bridge with supported flags, minimal env, redaction/version/cancel tests |
+| TOOL-022 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-003, SOL-003 | S0, S4 | `e4c326d`, `da75b7c`; strict provider contract/controller schema wiring; explicit config mapping; disabled/unconfigured/fake-only status evidence; focused 17/17 |
+| TOOL-023 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-022, SOL-003 | S0, S4 | `e4c326d`, `da75b7c`; Graph Outlook/Teams endpoints, host revisions, at-most-once writes, profile/grant tests, explicit account/profile/scope mapping |
+| TOOL-024 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-022, SOL-003 | S0, S4 | `e4c326d`, `da75b7c`; prompt-only Copilot stdin bridge with supported flags, minimal env, redaction/version/cancel tests, isolated provider status |
 | QA-001 | S4 | `luna/qa-release` | CLAIMED | SOL-001 | S0 | pending |
 | SEC-001 | S4 | `luna/qa-release` | CLAIMED | QA-001, SOL-003 | S0 | pending |
 | RUN-019 | S1 | `main` | IN_PROGRESS | RUN-010, MODEL-004 | S0, S4 | real tool-role/template pipeline and tests pending |
