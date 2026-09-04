@@ -8,7 +8,7 @@ const MAX_AUTH_RETRIES = 2;
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const GRAPH_PATH = /^\/v1\.0\/(?:me(?:\/mailFolders\/[^/]+\/messages|\/messages(?:\/[^/]+(?:\/send)?)?|\/chats)?|chats\/[^/]+\/messages)$/u;
 const GRAPH_SCOPES = new Set(['User.Read', 'Mail.Read', 'Mail.ReadWrite', 'Mail.Send', 'Chat.Read', 'Chat.ReadWrite', 'ChatMessage.Send']);
-const AUTH_HEADERS = new Set(['accept', 'authorization', 'content-type', 'prefer', 'idempotency-key']);
+const AUTH_HEADERS = new Set(['accept', 'authorization', 'content-type', 'prefer', 'idempotency-key', 'if-match']);
 
 const safeTenant = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$/u.test(value) && !value.includes('..') && !/[.-]$/u.test(value);
 const safeClientId = value => typeof value === 'string' && GUID.test(value);
@@ -73,7 +73,7 @@ export class MicrosoftDeviceCodeCredential {
     this.tenant = tenant; this.clientId = clientId; this.scopes = [...scopes]; this.transport = transport; this.now = now; this.sleep = sleep; this.requestTimeoutMs = requestTimeoutMs; this.onUserCode = onUserCode; this.cached = null; this.inFlight = null; this.authAbort = null; this.authState = 'idle'; this.authPrompt = null; this.authEnabled = false;
   }
   async getAccessToken(signal) {
-    checkAborted(signal); if (this.cached && this.cached.expiresAt > this.now() + 60000) return this.cached.value; if (!this.authEnabled) throw new ProviderToolError('provider_unauthorized', 'explicit authentication is required');
+    checkAborted(signal); if (this.cached && this.cached.expiresAt > this.now() + 60000) { this.authEnabled = false; this.authState = 'authenticated'; return this.cached.value; } if (this.cached) { this.cached = null; this.authState = 'expired'; this.authPrompt = null; } if (!this.authEnabled) throw new ProviderToolError('provider_unauthorized', 'explicit authentication is required');
     if (!this.inFlight) { this.authAbort = new AbortController(); this.inFlight = this.authenticate(this.authAbort.signal).catch(error => { if (error?.code !== 'provider_cancelled') { this.authEnabled = false; this.authPrompt = null; if (this.authState !== 'expired') this.authState = 'failed'; } throw error; }).finally(() => { this.inFlight = null; this.authAbort = null; }); }
     return raceAbort(this.inFlight, signal);
   }
@@ -101,8 +101,8 @@ export class MicrosoftDeviceCodeCredential {
     }
     this.authState = 'expired'; throw new ProviderToolError('provider_unauthorized');
   }
-  authStatus() { return { state: this.authState, prompt: this.authPrompt ? { ...this.authPrompt } : null }; }
-  cancel() { this.authEnabled = false; this.authAbort?.abort(); this.authPrompt = null; this.authState = 'idle'; }
+  authStatus() { if (this.cached && this.cached.expiresAt <= this.now() + 60000) { this.cached = null; this.authEnabled = false; this.authPrompt = null; this.authState = 'expired'; } return { state: this.authState, prompt: this.authPrompt ? { ...this.authPrompt } : null }; }
+  cancel() { this.authEnabled = false; this.authAbort?.abort(); this.cached = null; this.authPrompt = null; this.authState = 'idle'; }
   clear() { this.cached = null; this.cancel(); }
 }
 

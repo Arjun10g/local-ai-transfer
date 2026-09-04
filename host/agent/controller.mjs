@@ -65,6 +65,7 @@ function validateToolArgumentShape(tool, call) {
   const schema = tool.parameters ?? parameterSchema(call.name);
   if (!schemaMatches(call.arguments, schema)) throw Object.assign(new Error('tool arguments do not match schema'), { code: 'invalid_tool_arguments' });
 }
+function publicToolCall(call) { return { id: call.id, name: call.name }; }
 
 async function invokeWithTimeout(tool, operation, call, signal) {
   // Tools must honor the supplied AbortSignal; the race bounds the controller
@@ -146,23 +147,35 @@ export class ConversationController {
         validateToolArgumentShape(tool, call);
         let preview;
         if (tool.preview) preview = await invokeWithTimeout(tool, tool.preview, call, controller.signal);
-        emit('tool.proposed', { call, ...(preview === undefined ? {} : { preview }) });
-        let approved = true; let authorization = { kind: 'policy' };
-        const requiresConfirmation = typeof tool.confirmationRequired === 'function' ? await tool.confirmationRequired(call, { preview }) : Boolean(tool.requires_confirmation);
+        emit('tool.proposed', { call: publicToolCall(call), ...(preview === undefined ? {} : { preview }) });
+        let approved = true; let previewAccessDenied = false; let authorization = { kind: 'policy' };
+        if (preview?.preview_authorization_required === true) {
+          session.state = 'WAITING_CONFIRMATION'; const confirmationId = opaque('cnf'); this.active.confirmationId = confirmationId;
+          emit('tool.confirmation_required', { confirmation_id: confirmationId, call: publicToolCall(call), preview, phase: 'preview_access', risk_tier: 'T1', expires_in_ms: this.confirmationTimeoutMs });
+          approved = await new Promise(resolve => { const timer = setTimeout(() => { this.pending.delete(confirmationId); resolve(false); }, this.confirmationTimeoutMs); this.pending.set(confirmationId, { resolve: answer => { clearTimeout(timer); resolve(answer); }, requestId, sessionId: session.id, callId: call.id }); });
+          this.active.confirmationId = null;
+          if (approved === CANCELLED_CONFIRMATION) throw Object.assign(new Error('cancelled'), { code: 'cancelled' });
+          if (!approved) { authorization = { kind: 'policy' }; previewAccessDenied = true; }
+          else { preview = await invokeWithTimeout(tool, tool.preview, { ...call, authorization: { kind: 'user_confirmation' }, preview_authorized: true }, controller.signal); emit('tool.proposed', { call: publicToolCall(call), preview }); }
+        }
+        const requiresConfirmation = !previewAccessDenied && (typeof tool.confirmationRequired === 'function' ? await tool.confirmationRequired(call, { preview }) : Boolean(tool.requires_confirmation));
         if (requiresConfirmation) {
           session.state = 'WAITING_CONFIRMATION'; const confirmationId = opaque('cnf');
-          this.active.confirmationId = confirmationId; emit('tool.confirmation_required', { confirmation_id: confirmationId, call, risk_tier: tool.risk_tier, expires_in_ms: this.confirmationTimeoutMs });
+          this.active.confirmationId = confirmationId; emit('tool.confirmation_required', { confirmation_id: confirmationId, call: publicToolCall(call), preview, risk_tier: tool.risk_tier, expires_in_ms: this.confirmationTimeoutMs });
           approved = await new Promise(resolve => { const timer = setTimeout(() => { this.pending.delete(confirmationId); resolve(false); }, this.confirmationTimeoutMs); this.pending.set(confirmationId, { resolve: answer => { clearTimeout(timer); resolve(answer); }, requestId, sessionId: session.id, callId: call.id }); });
           this.active.confirmationId = null;
           if (approved === CANCELLED_CONFIRMATION) throw Object.assign(new Error('cancelled'), { code: 'cancelled' });
           if (approved) authorization = { kind: 'user_confirmation' };
         } else { const autoAuthorization = tool.authorize ? await invokeWithTimeout(tool, tool.authorize, { ...call, preview }, controller.signal) : null; if (autoAuthorization && typeof autoAuthorization === 'object') authorization = autoAuthorization; }
-        session.state = 'TOOL_RUNNING'; emit('tool.started', { call, approved, authorization: authorization.kind });
+        session.state = 'TOOL_RUNNING'; emit('tool.started', { call: publicToolCall(call), approved, authorization: authorization.kind });
         let result;
         if (!approved) result = makeToolResult({ id: call.id, name: call.name, status: 'denied', text: 'User denied this action.' });
         else {
           if (controller.signal.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' });
-          result = await invokeWithTimeout(tool, tool.execute, { ...call, authorization }, controller.signal);
+          // `policy` is host-internal bookkeeping, not a model/provider
+          // authorization object. Only pass concrete user/grant proof across
+          // the provider boundary.
+          result = await invokeWithTimeout(tool, tool.execute, { ...call, ...(authorization.kind === 'policy' ? {} : { authorization }) }, controller.signal);
         }
         try { result = validateToolResult(result); } catch { throw Object.assign(new Error('invalid_tool_result'), { code: 'invalid_tool_result' }); }
         if (result.id !== call.id || result.name !== call.name) throw Object.assign(new Error('tool_result_mismatch'), { code: 'tool_result_mismatch' });

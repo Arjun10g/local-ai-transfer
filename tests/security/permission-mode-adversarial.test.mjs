@@ -58,6 +58,7 @@ test('FULL-ACCESS contract: only an explicit operator grant auto-authorizes an i
     grantStore: grants,
     accountFingerprint: 'acct-1',
     scope: 'mailbox-1',
+    testOnly: true,
     credentialSource: { getAccessToken: async () => 'synthetic-token' },
     transport: { request: async () => ({ status: 201, body: { id: 'draft-1' } }) }
   });
@@ -145,7 +146,7 @@ test('FULL-ACCESS contract: credentials never enter model history, results, or a
   const secret = 'synthetic-secret-token-never-log';
   const grants = new OperatorGrantStore();
   grants.grant({ capability: 'microsoft.graph.mail', provider: 'microsoft_graph', accountFingerprint: 'acct-redact' });
-  const tools = createMicrosoftGraphTools({ enabled: true, permissionProfile: 'full_access', grantStore: grants, accountFingerprint: 'acct-redact', credentialSource: { getAccessToken: async () => secret }, transport: { request: async request => { assert.equal(request.headers.authorization, `Bearer ${secret}`); return { status: 200, body: { value: [] } }; } } });
+  const tools = createMicrosoftGraphTools({ enabled: true, permissionProfile: 'full_access', grantStore: grants, accountFingerprint: 'acct-redact', credentialSource: { getAccessToken: async () => secret }, transport: { request: async request => { assert.equal(request.headers.authorization, `Bearer ${secret}`); return { status: 200, body: { value: [] } }; } }, testOnly: true });
   const observed = []; let turn = 0;
   const engine = { async *generate(input) { observed.push(structuredClone(input.messages)); if (turn++ === 0) { yield { kind: 'tool_call_chunk', text: JSON.stringify(call('mail.list_messages', { limit: 1 }, 'call_redact01')) }; return; } yield { kind: 'text_delta', text: 'done' }; yield { kind: 'done' }; } };
   const events = [];
@@ -165,7 +166,7 @@ test('FULL-ACCESS contract: unallowlisted executables and OS elevation stay unav
 test('FULL-ACCESS contract: replacement makes an old grant generation replay-invalid', async () => {
   const grants = new OperatorGrantStore();
   grants.grant({ capability: 'microsoft.graph.mail', provider: 'microsoft_graph', accountFingerprint: 'acct-replay' });
-  const tools = createMicrosoftGraphTools({ enabled: true, permissionProfile: 'full_access', grantStore: grants, accountFingerprint: 'acct-replay', credentialSource: { getAccessToken: async () => 'synthetic-token' }, transport: { request: async () => ({ status: 201, body: { id: 'draft-replay' } }) } });
+  const tools = createMicrosoftGraphTools({ enabled: true, permissionProfile: 'full_access', grantStore: grants, accountFingerprint: 'acct-replay', credentialSource: { getAccessToken: async () => 'synthetic-token' }, transport: { request: async () => ({ status: 201, body: { id: 'draft-replay' } }) }, testOnly: true });
   const request = call('mail.create_draft', { to: ['alice@example.com'], subject: 'x', body: 'x' }, 'call_replay01');
   await tools['mail.create_draft'].preview(request);
   const oldAuthorization = await tools['mail.create_draft'].authorize(request);
