@@ -1430,9 +1430,21 @@ class StaticSafetyTests(unittest.TestCase):
             {**metrics, "error_diagnostics": {**metrics["error_diagnostics"], "extra": False}},
             {**metrics, "error_diagnostics": {**metrics["error_diagnostics"], "overall": {"http_503": 1}, "by_category": {"tool_selection": {}}}},
             {**metrics, "canary": {**metrics["canary"], "passed": False, "error_code": "http_503", "prompt_tokens": None}},
+            {**metrics, "category_summary": {"tool_selection": {"case_count": 2, "passed": 0, "failed": 2, "errors": 0}}},
         ):
             with self.assertRaises(ValueError):
                 remote._validate_metrics(bad, expected_case_count=2, expected_categories=categories, require_diagnostics=True)
+
+    def test_remote_eval_fixture_category_distribution_is_bound(self):
+        remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_category_distribution")
+        categories = {"tool_selection", "abstention"}
+        summary = {
+            "tool_selection": {"case_count": 2, "passed": 2, "failed": 0, "errors": 0},
+            "abstention": {"case_count": 0, "passed": 0, "failed": 0, "errors": 0},
+        }
+        metrics = {"case_count": 2, "passed": 2, "failed": 0, "errors": 0, "peak_rss_kib": None, "category_summary": summary}
+        with self.assertRaises(ValueError):
+            remote._validate_metrics(metrics, expected_case_count=2, expected_categories=categories, expected_category_counts={"tool_selection": 1, "abstention": 1})
 
     def test_remote_eval_verifies_same_model_manifest_identity(self):
         remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_identity")
@@ -1501,6 +1513,17 @@ class StaticSafetyTests(unittest.TestCase):
             self.assertEqual(selected["artifact"]["modality"], "text_only_no_mmproj")
             self.assertEqual(selected["artifact"]["quantization"], "Q4_K_M")
             self.assertEqual(set(selected["toolchain"]["versions"]), {"python3", "git", "cmake", "g++", "nvcc"})
+            valid_payload = json.loads(receipt.read_text(encoding="utf-8"))
+            redistributed = json.loads(json.dumps(valid_payload))
+            categories = list(redistributed["metrics"]["category_summary"])
+            redistributed["metrics"]["category_summary"][categories[0]]["case_count"] += 1
+            redistributed["metrics"]["category_summary"][categories[0]]["passed"] += 1
+            redistributed["metrics"]["category_summary"][categories[1]]["case_count"] -= 1
+            redistributed["metrics"]["category_summary"][categories[1]]["passed"] -= 1
+            receipt.write_text(json.dumps(redistributed), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                orchestrator._verify_eval_receipt(receipt, artifact)
+            receipt.write_text(json.dumps(valid_payload), encoding="utf-8")
             child_failed = json.loads(receipt.read_text(encoding="utf-8"))
             child_failed["status"] = "failed"
             child_failed["child"] = {"exit_code": 1}

@@ -625,7 +625,7 @@ def _engine_launch_argv(args: argparse.Namespace, token_file: Path, backend: str
     return launch
 
 
-def _fixture_contract(path: Path, *, deadline: float | None = None) -> tuple[int, set[str]]:
+def _fixture_contract(path: Path, *, deadline: float | None = None) -> tuple[int, set[str], dict[str, int]]:
     """Read only the bounded fixture contract; never echo its prompts."""
 
     try:
@@ -655,7 +655,8 @@ def _fixture_contract(path: Path, *, deadline: float | None = None) -> tuple[int
     categories = {case["category"] for case in cases}
     if len(categories) == 0 or any(not category.isascii() for category in categories):
         raise ValueError("evaluator_fixture_categories_invalid")
-    return count, categories
+    category_counts = {category: sum(case["category"] == category for case in cases) for category in categories}
+    return count, categories, category_counts
 
 
 def _validate_diagnostics(value: Any, *, expected_errors: int, expected_categories: set[str], category_errors: dict[str, int]) -> dict[str, Any]:
@@ -724,7 +725,7 @@ def _validate_canary_coherence(canary: dict[str, Any], *, metrics: dict[str, Any
         raise ValueError("evaluator_canary_invalid")
 
 
-def _validate_metrics(metrics: Any, *, expected_case_count: int = 8, expected_categories: set[str] | None = None, require_diagnostics: bool = False) -> dict[str, Any]:
+def _validate_metrics(metrics: Any, *, expected_case_count: int = 8, expected_categories: set[str] | None = None, expected_category_counts: dict[str, int] | None = None, require_diagnostics: bool = False) -> dict[str, Any]:
     if not isinstance(metrics, dict):
         raise ValueError("evaluator_metrics_invalid")
     counts = ("case_count", "passed", "failed", "errors")
@@ -750,11 +751,15 @@ def _validate_metrics(metrics: Any, *, expected_case_count: int = 8, expected_ca
                 raise ValueError("evaluator_category_summary_invalid")
             if any(isinstance(item.get(key), bool) or not isinstance(item.get(key), int) or item[key] < 0 for key in ("case_count", "passed", "failed", "errors")):
                 raise ValueError("evaluator_category_summary_invalid")
+            if expected_category_counts is not None and (set(expected_category_counts) != expected_categories or item["case_count"] != expected_category_counts.get(category)):
+                raise ValueError("evaluator_category_summary_invalid")
             if item["passed"] + item["failed"] + item["errors"] != item["case_count"]:
                 raise ValueError("evaluator_category_summary_invalid")
             category_total += item["case_count"]
         if category_total != expected_case_count:
             raise ValueError("evaluator_category_summary_total_invalid")
+        if any(sum(summary[category][field] for category in expected_categories) != metrics[field] for field in ("case_count", "passed", "failed", "errors")):
+            raise ValueError("evaluator_metrics_total_invalid")
     result = {key: metrics.get(key) for key in (*counts, "peak_rss_kib")} | ({"category_summary": summary} if summary is not None else {})
     if require_diagnostics:
         if "error_diagnostics" not in metrics or "canary" not in metrics:
@@ -770,7 +775,7 @@ def _validate_metrics(metrics: Any, *, expected_case_count: int = 8, expected_ca
     return result
 
 
-def _parse_evaluator_result(result: dict[str, Any], *, expected_case_count: int, expected_categories: set[str], require_diagnostics: bool = False) -> tuple[dict[str, Any], bool, bool]:
+def _parse_evaluator_result(result: dict[str, Any], *, expected_case_count: int, expected_categories: set[str], expected_category_counts: dict[str, int] | None = None, require_diagnostics: bool = False) -> tuple[dict[str, Any], bool, bool]:
     exit_code = result.get("exit_code")
     if result.get("status") not in {"completed", "failed"} or isinstance(exit_code, bool) or exit_code not in {0, 1}:
         raise ValueError("evaluator_process_failed")
@@ -778,7 +783,7 @@ def _parse_evaluator_result(result: dict[str, Any], *, expected_case_count: int,
         metrics = _strict_json_object(result.get("stdout", ""))
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("evaluator_receipt_invalid") from exc
-    metrics = _validate_metrics(metrics, expected_case_count=expected_case_count, expected_categories=expected_categories, require_diagnostics=require_diagnostics)
+    metrics = _validate_metrics(metrics, expected_case_count=expected_case_count, expected_categories=expected_categories, expected_category_counts=expected_category_counts, require_diagnostics=require_diagnostics)
     all_passed = metrics["passed"] == expected_case_count and metrics["failed"] == 0 and metrics["errors"] == 0
     has_failure = metrics["failed"] > 0 or metrics["errors"] > 0
     if (exit_code == 0) != all_passed or (exit_code == 1) != has_failure:
@@ -799,7 +804,7 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any], dea
     backend = getattr(args, "backend", "cpu")
     if backend not in {"cpu", "cuda"}:
         raise ValueError("evaluation_backend_invalid")
-    expected_case_count, expected_categories = _fixture_contract(Path(args.fixture), deadline=deadline)
+    expected_case_count, expected_categories, expected_category_counts = _fixture_contract(Path(args.fixture), deadline=deadline)
     cuda_receipt = None
     if backend == "cuda":
         receipt_path = Path(getattr(args, "cuda_device_receipt", ""))
@@ -890,6 +895,7 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any], dea
             result,
             expected_case_count=expected_case_count,
             expected_categories=expected_categories,
+            expected_category_counts=expected_category_counts,
             require_diagnostics=True,
         )
         child_status = _bounded_child_status(process)

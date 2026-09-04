@@ -585,6 +585,15 @@ def run_local(
         summary["case_count"] += 1
         result_key = {"pass": "passed", "fail": "failed", "error": "errors"}[item["status"]]
         summary[result_key] += 1
+    top_counts = {
+        "case_count": len(records),
+        "passed": sum(item["status"] == "pass" for item in records),
+        "failed": sum(item["status"] == "fail" for item in records),
+        "errors": sum(item["status"] == "error" for item in records),
+    }
+    for field in ("case_count", "passed", "failed", "errors"):
+        if sum(item[field] for item in category_summary.values()) != top_counts[field]:
+            raise ValueError("category summary component mismatch")
     if not canary["passed"]:
         canary_code = canary["error_code"]
         if any(item["status"] != "error" or item["reason"] != canary_code for item in records):

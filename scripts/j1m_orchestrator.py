@@ -113,7 +113,7 @@ def _progress(path: Path, event: str, **details: Any) -> None:
         pass
 
 
-def _tool_eval_contract() -> tuple[int, set[str]]:
+def _tool_eval_contract() -> tuple[int, set[str], dict[str, int]]:
     """Return the bounded case/category contract shipped with the evaluator."""
 
     fixture_path = ROOT / "tests" / "model" / "tool_call_eval.json"
@@ -134,7 +134,7 @@ def _tool_eval_contract() -> tuple[int, set[str]]:
     categories = {case["category"] for case in cases}
     if not categories or not all(isinstance(category, str) and category.isascii() for category in categories):
         raise ValueError("eval fixture categories invalid")
-    return count, categories
+    return count, categories, {category: sum(case["category"] == category for case in cases) for category in categories}
 
 
 def _remote(command: list[str], *, timeout: float) -> dict[str, Any]:
@@ -525,7 +525,7 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
             any(isinstance(metrics.get(key), bool) or not isinstance(metrics.get(key), int) or metrics[key] < 0 for key in ("case_count", "passed", "failed", "errors"))):
         raise ValueError("eval receipt metrics invalid")
     summary = metrics.get("category_summary")
-    expected_count, expected_categories = _tool_eval_contract()
+    expected_count, expected_categories, expected_category_counts = _tool_eval_contract()
     if metrics["case_count"] != expected_count or not isinstance(summary, dict) or set(summary) != expected_categories:
         raise ValueError("eval receipt metrics invalid")
     category_total = 0
@@ -535,12 +535,16 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
             raise ValueError("eval receipt category summary invalid")
         if any(isinstance(item.get(key), bool) or not isinstance(item.get(key), int) or item[key] < 0 for key in ("case_count", "passed", "failed", "errors")):
             raise ValueError("eval receipt category summary invalid")
+        if item["case_count"] != expected_category_counts[category]:
+            raise ValueError("eval receipt category summary invalid")
         if item["passed"] + item["failed"] + item["errors"] != item["case_count"]:
             raise ValueError("eval receipt category summary invalid")
         category_total += item["case_count"]
     if category_total != expected_count:
         raise ValueError("eval receipt category summary total invalid")
     if metrics["case_count"] != expected_count or sum(metrics[key] for key in ("passed", "failed", "errors")) != expected_count:
+        raise ValueError("eval receipt metric totals invalid")
+    if any(sum(summary[category][field] for category in expected_categories) != metrics[field] for field in ("case_count", "passed", "failed", "errors")):
         raise ValueError("eval receipt metric totals invalid")
     if "error_diagnostics" not in metrics or "canary" not in metrics:
         raise ValueError("eval receipt diagnostics missing")
