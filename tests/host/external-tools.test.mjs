@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
 import { createExternalToolRegistry } from '../../host/providers/index.mjs';
 import { MicrosoftGraphProvider, createMicrosoftGraphTools } from '../../host/providers/microsoft-graph.mjs';
-import { CopilotCliProvider, createCopilotTool } from '../../host/providers/copilot-cli.mjs';
+import { CopilotCliProvider, createCopilotTool, createCopilotVersionCheck, killCopilotProcessTree } from '../../host/providers/copilot-cli.mjs';
 import { OperatorGrantStore } from '../../host/providers/operator-grants.mjs';
 import { ConversationController } from '../../host/agent/controller.mjs';
 import { mergeConfig, validateConfig } from '../../host/agent/config.mjs';
@@ -99,7 +99,7 @@ test('permission profiles apply confirmation floors to reads, writes, and T3 act
 });
 
 test('provider configuration is strict, secret-free, and preserves injected runtime wiring', () => {
-  const config = mergeConfig({ providers: { microsoft_graph: { enabled: true, permission_profile: 'ask_before_writes', account_fingerprint: 'acct', scope: 'account' }, copilot: { enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], version: '1.2.3' } } }); assert.equal(config.providers.microsoft_graph.enabled, true); assert.throws(() => validateConfig({ providers: { microsoft_graph: { token: 'must-not-be-configured' } } }), /unknown key/); assert.throws(() => validateConfig({ providers: { unknown: {} } }), /unknown key/); const registry = createExternalToolRegistry({ config: config.providers }); assert.equal(registry['mail.list_messages'].execute !== undefined, true); assert.equal(registry['mail.list_messages'].parameters.additionalProperties, false);
+  const config = mergeConfig({ providers: { microsoft_graph: { enabled: true, permission_profile: 'ask_before_writes', account_fingerprint: 'acct', scope: 'account' }, copilot: { enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], version: '1.2.3' } } }); assert.equal(config.providers.microsoft_graph.enabled, true); assert.throws(() => validateConfig({ providers: { microsoft_graph: { token: 'must-not-be-configured' } } }), /unknown key/); assert.throws(() => validateConfig({ providers: { unknown: {} } }), /unknown key/); assert.throws(() => validateConfig({ providers: { copilot: { enabled: true, executable: 'copilot', allowlist: ['copilot'], version: 'latest' } } }), /executable invalid/); assert.throws(() => validateConfig({ providers: { copilot: { version: '1.2' } } }), /version invalid/); const registry = createExternalToolRegistry({ config: config.providers }); assert.equal(registry['mail.list_messages'].execute !== undefined, true); assert.equal(registry['mail.list_messages'].parameters.additionalProperties, false); assert.equal(registry.providerStatus().copilot, 'ready'); const injectedSpawn = createExternalToolRegistry({ config: config.providers, copilot: { spawn: () => new FakeChild() } }); assert.equal(injectedSpawn.providerStatus().copilot, 'unconfigured');
 });
 
 test('registry maps protected config keys explicitly and exposes provider state separately', async () => {
@@ -113,7 +113,7 @@ class FakeChild extends EventEmitter {
 }
 
 test('Copilot bridge uses stdin/minimal environment and exposes explicit cloud-egress preview', async () => {
-  const children = []; const provider = new CopilotCliProvider({ enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], version: '1.2.3', versionCheck: async () => true, environment: { PATH: '/approved', SECRET_TOKEN: 'must-not-pass' }, readContext: Object.assign(async () => 'const x = 1;', { estimate: async () => 12 }), spawn: (executable, args, options) => { const child = new FakeChild(); children.push({ executable, args, options, child }); return child; } }); const tool = createCopilotTool(provider); assert.equal(tool.input_schema.additionalProperties, false); const copilotCall = call('coding.copilot_ask', { prompt: 'Explain this', workspace_id: 'project', context_paths: ['src/index.js'] }, 'call_copilot'); const preview = await tool.preview(copilotCall); assert.equal(preview.destination, 'GitHub Copilot cloud'); assert.equal(preview.egress_bytes, 44); const output = value(await tool.execute({ ...copilotCall, authorization: { kind: 'user_confirmation' } })); assert.equal(output.stdout, 'copilot response'); assert.equal(output.cli_version, '1.2.3'); assert.equal(children[0].executable, '/approved/copilot'); assert.deepEqual(children[0].args, ['-s', '--no-auto-update', '--no-custom-instructions', '--no-remote', '--no-remote-export', '--no-ask-user', '--disable-builtin-mcps', '--available-tools=']); assert.equal(children[0].options.shell, false); assert.deepEqual(children[0].options.env, { PATH: '/approved' }); assert.match(children[0].child.input, /const x = 1/);
+  const children = []; const provider = new CopilotCliProvider({ enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], version: '1.2.3', versionCheck: async () => true, environment: { PATH: '/approved', SECRET_TOKEN: 'must-not-pass' }, readContext: Object.assign(async () => 'const x = 1;', { estimate: async () => 12 }), spawn: (executable, args, options) => { const child = new FakeChild(); children.push({ executable, args, options, child }); return child; } }); const tool = createCopilotTool(provider); assert.equal(tool.input_schema.additionalProperties, false); const copilotCall = call('coding.copilot_ask', { prompt: 'Explain this', workspace_id: 'project', context_paths: ['src/index.js'] }, 'call_copilot'); const preview = await tool.preview(copilotCall); assert.equal(preview.destination, 'GitHub Copilot cloud'); assert.equal(preview.egress_bytes, 44); const output = value(await tool.execute({ ...copilotCall, authorization: { kind: 'user_confirmation' } })); assert.equal(output.stdout, 'copilot response'); assert.equal(output.cli_version, '1.2.3'); assert.equal(children[0].executable, '/approved/copilot'); assert.deepEqual(children[0].args, ['-s', '--no-auto-update', '--no-color', '--no-custom-instructions', '--no-experimental', '--no-remote', '--no-remote-export', '--no-ask-user', '--disable-builtin-mcps', '--disallow-temp-dir', '--log-level=none', '--available-tools=']); assert.equal(children[0].options.shell, false); assert.equal(children[0].options.detached, true); assert.deepEqual(children[0].options.env, { PATH: '/approved' }); assert.match(children[0].child.input, /const x = 1/);
   await assert.rejects(() => tool.preview(call('coding.copilot_ask', { prompt: 'x', workspace_id: 'project', context_paths: ['..\\secret'] }, 'call_path')), error => error.code === 'invalid_tool_arguments');
   const disabled = createCopilotTool(); const disabledCall = call('coding.copilot_ask', { prompt: 'x', workspace_id: 'project', context_paths: [] }, 'call_disabled'); await disabled.preview(disabledCall); const failure = value(await disabled.execute({ ...disabledCall, authorization: { kind: 'user_confirmation' } })); assert.equal(failure.code, 'copilot_cli_unavailable');
 });
@@ -130,4 +130,39 @@ test('Copilot rejects version mismatch and never returns stderr or broad flags',
 test('Copilot binds context at preview and decodes split UTF-8 output safely', async () => {
   let context = 'stable'; let child; const provider = new CopilotCliProvider({ enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], versionCheck: async () => true, readContext: async () => context, spawn: () => { child = new FakeChild({ finish: false }); queueMicrotask(() => { child.stdout.emit('data', Buffer.from([0xf0])); child.stdout.emit('data', Buffer.from([0x9f, 0x98, 0x80])); child.emit('close', 0); }); return child; } }); const tool = createCopilotTool(provider); const request = call('coding.copilot_ask', { prompt: 'x', workspace_id: 'project', context_paths: ['src/index.js'] }, 'call_utf8'); await tool.preview(request); context = 'changed'; assert.equal(value(await tool.execute({ ...request, authorization: { kind: 'user_confirmation' } })).code, 'copilot_policy_denied');
   context = 'stable'; const next = call('coding.copilot_ask', { prompt: 'x', workspace_id: 'project', context_paths: ['src/index.js'] }, 'call_utf8_next'); await tool.preview(next); assert.equal(value(await tool.execute({ ...next, authorization: { kind: 'user_confirmation' } })).stdout, '😀');
+});
+
+test('Copilot version probe is exact, bounded, cancellable, and minimally scoped', async () => {
+  const launches = [];
+  const check = createCopilotVersionCheck({ expectedVersion: '1.2.3', environment: { PATH: '/safe', SystemRoot: 'C:\\Windows', SECRET_TOKEN: 'no' }, spawn: (executable, args, options) => { const child = new FakeChild({ finish: false }); child.pid = 41; launches.push({ executable, args, options, child }); queueMicrotask(() => { child.stdout.emit('data', Buffer.from('GitHub Copilot CLI v1.2.3\n')); child.exitCode = 0; child.emit('close', 0); }); return child; } });
+  assert.equal(await check('C:\\Tools\\copilot.exe'), true);
+  assert.deepEqual(launches[0].args, ['--no-auto-update', '--no-color', 'version']);
+  assert.deepEqual(launches[0].options.env, { PATH: '/safe', SystemRoot: 'C:\\Windows' });
+  assert.throws(() => createCopilotVersionCheck({ expectedVersion: 'latest' }), /exact semantic version/);
+  const mismatch = createCopilotVersionCheck({ expectedVersion: '1.2.3', spawn: () => { const child = new FakeChild({ finish: false }); queueMicrotask(() => { child.stdout.emit('data', Buffer.from('10.1.2.30')); child.exitCode = 0; child.emit('close', 0); }); return child; } });
+  assert.equal(await mismatch('/copilot'), false);
+  const controller = new AbortController(); controller.abort(); await assert.rejects(() => check('/copilot', controller.signal), error => error.code === 'provider_cancelled');
+});
+
+test('Copilot dispatch is at-most-once across concurrent and timed-out retries', async () => {
+  let launches = 0; let killed = 0;
+  const provider = new CopilotCliProvider({ enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], versionCheck: async () => true, readContext: async () => '', timeoutMs: 100, killProcess: async () => { killed += 1; }, spawn: () => { launches += 1; return new FakeChild({ finish: false }); } });
+  const tool = createCopilotTool(provider); const request = call('coding.copilot_ask', { prompt: 'bounded', workspace_id: 'project', context_paths: [] }, 'call_once_copilot'); await tool.preview(request); const authorized = { ...request, authorization: { kind: 'user_confirmation' } }; const first = tool.execute(authorized); await new Promise(resolve => setImmediate(resolve)); const concurrent = value(await tool.execute(authorized)); assert.equal(concurrent.code, 'provider_request_already_attempted'); const timedOut = value(await first); assert.equal(timedOut.code, 'provider_timeout'); const replay = value(await tool.execute(authorized)); assert.equal(replay.code, 'provider_timeout'); assert.equal(launches, 1); assert.equal(killed, 1);
+});
+
+test('Copilot output overflow terminates the process and fails closed', async () => {
+  let child; let killed = 0; const provider = new CopilotCliProvider({ enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], versionCheck: async () => true, readContext: async () => '', maxOutput: 1024, killProcess: async () => { killed += 1; }, spawn: () => { child = new FakeChild({ finish: false }); queueMicrotask(() => child.stdout.emit('data', Buffer.alloc(1025, 65))); return child; } }); const tool = createCopilotTool(provider); const request = call('coding.copilot_ask', { prompt: 'x', workspace_id: 'project', context_paths: [] }, 'call_overflow'); await tool.preview(request); const output = value(await tool.execute({ ...request, authorization: { kind: 'user_confirmation' } })); assert.equal(output.code, 'provider_response_too_large'); assert.equal(killed, 1);
+});
+
+test('Copilot Windows tree termination uses fixed taskkill argv without a shell', async () => {
+  const calls = []; const child = new FakeChild({ finish: false }); child.pid = 4321; child.exitCode = null; child.signalCode = null;
+  await killCopilotProcessTree(child, { platform: 'win32', graceMs: 100, spawn: (executable, args, options) => { calls.push({ executable, args, options }); const killer = new FakeChild({ finish: false }); killer.exitCode = 0; queueMicrotask(() => { child.exitCode = 1; child.emit('close', 1); killer.emit('close', 0); }); return killer; } });
+  assert.deepEqual(calls[0].args, ['/PID', '4321', '/T', '/F']); assert.equal(calls[0].executable, 'taskkill.exe'); assert.equal(calls[0].options.shell, false);
+});
+
+test('Copilot provider rejects unsafe lifecycle bounds', () => {
+  assert.throws(() => new CopilotCliProvider({ timeoutMs: NaN }), /invalid Copilot timeout/);
+  assert.throws(() => new CopilotCliProvider({ timeoutMs: 99 }), /invalid Copilot timeout/);
+  assert.throws(() => new CopilotCliProvider({ maxOutput: 1023 }), /invalid Copilot output limit/);
+  assert.throws(() => new CopilotCliProvider({ maxOutput: 65537 }), /invalid Copilot output limit/);
 });
