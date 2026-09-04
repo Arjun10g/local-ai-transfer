@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from scripts.test.evaluate_tool_calls import (
     FIXTURE_MAX_BYTES,
+    MAX_EVAL_CASES,
     MODEL_OUTPUT_MAX_CHARS,
     RESPONSE_MAX_BYTES,
     TOKEN_MAX_BYTES,
@@ -31,9 +32,19 @@ from scripts.test.evaluate_tool_calls import (
 class ToolCallEvaluatorTests(unittest.TestCase):
     def test_fixture_is_bounded_and_covers_required_categories(self):
         fixture = load_fixture()
-        self.assertLessEqual(len(fixture["cases"]), 8)
+        self.assertEqual(len(fixture["cases"]), 34)
+        self.assertEqual(len(fixture["cases"]), fixture["limits"]["max_cases"])
+        self.assertLessEqual(len(fixture["cases"]), MAX_EVAL_CASES)
         categories = {case["category"] for case in fixture["cases"]}
-        self.assertTrue({"tool_selection", "argument_fidelity", "no_tool", "malformed_prompt", "prompt_injection"}.issubset(categories))
+        self.assertTrue({"tool_selection", "argument_fidelity", "no_tool", "malformed_prompt", "prompt_injection", "schema_edge", "confirmation_sensitive", "abstention"}.issubset(categories))
+
+    def test_matrix_covers_declared_tools_and_keeps_adversarial_cases_action_free(self):
+        fixture = load_fixture()
+        names = {tool["function"]["name"] for tool in fixture["tools"]}
+        self.assertTrue({"system.get_info", "time.now", "clipboard.read", "clipboard.write", "app.open", "browser.open_url", "fs.list", "fs.read_text", "fs.search_text", "fs.write_new"}.issubset(names))
+        self.assertGreaterEqual(sum(case["category"] == "confirmation_sensitive" for case in fixture["cases"]), 4)
+        self.assertGreaterEqual(sum(case["category"] in {"malformed_prompt", "prompt_injection", "abstention", "schema_edge"} for case in fixture["cases"]), 16)
+        self.assertTrue(all(case["expected"].get("no_call") is True for case in fixture["cases"] if case["category"] in {"malformed_prompt", "prompt_injection", "abstention", "schema_edge"}))
 
     def test_qwen_xml_parser_preserves_quoted_text_and_normalizes_plain_text(self):
         output = "<tool_call>\n<function=weather.get>\n<parameter=city>\n\"Toronto\"\n</parameter>\n<parameter=units>\ncelsius\n</parameter>\n</function>\n</tool_call>"
@@ -105,6 +116,7 @@ class ToolCallEvaluatorTests(unittest.TestCase):
         self.assertEqual(payload["tools"], fixture["tools"])
         self.assertEqual(payload["messages"], fixture["cases"][0]["messages"])
         self.assertNotIn("system", {message["role"] for message in payload["messages"]})
+        self.assertEqual(result["category_summary"]["tool_selection"]["passed"], 1)
 
     def test_endpoint_is_explicit_loopback_http_only(self):
         self.assertEqual(validate_endpoint("http://127.0.0.1:49912/v1/chat/completions"), "http://127.0.0.1:49912/v1/chat/completions")
@@ -262,7 +274,7 @@ class ToolCallEvaluatorTests(unittest.TestCase):
                         _post("http://127.0.0.1:49912/v1/chat/completions", "test-token-20260904", {}, 0.1)
 
     def test_cli_bounds_are_fail_closed(self):
-        for argument in (("--max-cases", "0"), ("--max-cases", "9"), ("--timeout", "0"), ("--timeout", "601"), ("--timeout", "nan"), ("--engine-pid", "0")):
+        for argument in (("--max-cases", "0"), ("--max-cases", str(MAX_EVAL_CASES + 1)), ("--timeout", "0"), ("--timeout", "601"), ("--timeout", "nan"), ("--engine-pid", "0")):
             with self.subTest(argument=argument), self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
                 main(["--dry-run", *argument])
 
