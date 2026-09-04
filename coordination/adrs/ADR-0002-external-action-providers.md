@@ -49,7 +49,15 @@ The name therefore means full access to the explicitly selected safe capabilitie
 
 - The browser is visible and uses a newly created temporary user-data directory. The normal browser profile, existing cookies, saved passwords, extensions, and logged-in sessions are not used.
 - Initial actions are restricted to starting a session at an approved HTTPS URL, inspecting bounded page metadata/link candidates, following one resolved HTTPS link, and closing the session.
-- The provider does not type into forms, upload/download files, invoke custom protocols, execute model-supplied JavaScript, accept permission prompts, or click buttons that may mutate remote state.
+- Generic form/index mutation remains disabled. An operator may explicitly enable
+  the narrow safe-action gate with an HTTPS-origin allowlist: only an
+  inspection-issued opaque control handle can target a visible text/search/email/
+  tel/url field or a no-navigation `button` control, and every action is T3
+  confirmed with bounded destination/content disclosure. Password, file,
+  payment, credential, submit/reset, download/upload, cross-origin, popup, and
+  page-script-dependent targets remain rejected. The validating proxy is also
+  constrained to the configured origins. Model-supplied selectors, JavaScript,
+  coordinates, and generic mutation injection remain unavailable.
 - Link following is two phase: inspect resolves the displayed link and destination; confirmation binds the session, page revision, element identifier, and normalized destination; execution rechecks all bindings.
 - Redirects and every final destination pass public-host policy. Loopback/private/link-local destinations are denied outside a synthetic test harness bound to an exact random test port.
 - Browser/CDP binaries are not downloaded or installed on the target. If an approved compatible browser is absent, the provider is unavailable and ordinary `browser.open_url` remains separate.
