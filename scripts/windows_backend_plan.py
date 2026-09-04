@@ -98,6 +98,24 @@ def _intel_integrated_adapters(receipt: dict[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
+def _validate_vulkan_attestation(receipt_path: Path, adapter: dict[str, Any], attestation_path: Path | None) -> dict[str, Any]:
+    if attestation_path is None:
+        raise BackendPlanError("Vulkan requires a separate integrated-GPU attestation")
+    attestation = _load_json(attestation_path)
+    if attestation.get("schema") != "local_bmo.windows-gpu-attestation.v1":
+        raise BackendPlanError("GPU attestation schema is invalid")
+    if attestation.get("receipt_sha256") != _receipt_hash(receipt_path):
+        raise BackendPlanError("GPU attestation is not bound to this hardware receipt")
+    if attestation.get("integrated") is not True or attestation.get("pnp_device_id") != adapter.get("pnp_device_id"):
+        raise BackendPlanError("GPU attestation does not match the exact integrated adapter")
+    if not isinstance(attestation.get("basis"), str) or not attestation["basis"].strip():
+        raise BackendPlanError("GPU attestation lacks its bounded evidence basis")
+    vulkan = attestation.get("vulkan")
+    if not isinstance(vulkan, dict) or vulkan.get("pnp_device_id") != adapter.get("pnp_device_id") or vulkan.get("device_name") != adapter.get("name") or vulkan.get("driver_version") != adapter.get("driver_version"):
+        raise BackendPlanError("Vulkan evidence is not correlated to the exact adapter and driver")
+    return {"sha256": _receipt_hash(attestation_path), "basis": attestation["basis"]}
+
+
 def _validate_model_identity(model_path: str | None, size: int, digest: str) -> dict[str, Any]:
     if size != MODEL_SIZE_BYTES or digest != MODEL_SHA256 or not _SHA256.fullmatch(digest):
         raise BackendPlanError("model identity does not match the pinned Q4_K_M artifact")
@@ -122,11 +140,12 @@ def build_plan(
     model_path: str | None = None,
     model_size: int = MODEL_SIZE_BYTES,
     model_sha256: str = MODEL_SHA256,
+    attestation_path: Path | None = None,
 ) -> dict[str, Any]:
     """Return a bounded plan or raise; no backend fallback is ever performed."""
 
-    if backend not in {"cpu-safe", "intel-sycl-experimental"}:
-        raise BackendPlanError("backend must be explicitly cpu-safe or intel-sycl-experimental")
+    if backend not in {"cpu-safe", "intel-vulkan-conservative", "intel-sycl-experimental"}:
+        raise BackendPlanError("backend must be explicitly cpu-safe, intel-vulkan-conservative, or intel-sycl-experimental")
     receipt = _load_json(receipt_path)
     _validate_common_receipt(receipt)
     model = _validate_model_identity(model_path, model_size, model_sha256)
@@ -157,6 +176,31 @@ def build_plan(
     }
     if backend == "cpu-safe":
         plan["runtime"] = {"engine": "local-assistant-native", "compiled_backend": "cpu", "gpu_offload": False, "promotion_rank": 0}
+        return plan
+
+    if backend == "intel-vulkan-conservative":
+        adapters = _intel_integrated_adapters(receipt)
+        if len(adapters) != 1:
+            raise BackendPlanError("Vulkan requires exactly one explicitly integrated Intel adapter")
+        adapter = adapters[0]
+        if not isinstance(adapter.get("pnp_device_id"), str) or not adapter["pnp_device_id"].strip() or not isinstance(adapter.get("driver_version"), str) or not adapter["driver_version"].strip():
+            raise BackendPlanError("Vulkan adapter lacks exact PNP or driver identity")
+        attestation = _validate_vulkan_attestation(receipt_path, adapter, attestation_path)
+        vulkan = receipt.get("vulkan")
+        enumeration = vulkan.get("enumeration") if isinstance(vulkan, dict) else None
+        if not isinstance(vulkan, dict) or vulkan.get("loader_present") is not True or not isinstance(enumeration, dict) or enumeration.get("exit_code") != 0 or not isinstance(enumeration.get("summary"), str) or not enumeration["summary"].strip():
+            raise BackendPlanError("Vulkan loader and successful bounded enumeration are not proven")
+        plan["runtime"] = {
+            "engine": "local-assistant-native",
+            "compiled_backend": "vulkan",
+            "gpu_offload": True,
+            "promotion_rank": 1,
+            "gpu_layers_default": 20,
+            "gpu_layers_max": 99,
+            "requires_explicit_gpu_layer_policy": True,
+            "device": {"name": adapter.get("name"), "pnp_device_id": adapter["pnp_device_id"], "driver_version": adapter["driver_version"]},
+            "attestation": attestation,
+        }
         return plan
 
     if not PRODUCT_VULKAN_PROFILE_READY:
@@ -202,10 +246,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model-path")
     parser.add_argument("--model-size", type=int, default=MODEL_SIZE_BYTES)
     parser.add_argument("--model-sha256", default=MODEL_SHA256)
+    parser.add_argument("--attestation", type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     try:
-        plan = build_plan(args.backend, args.receipt, model_path=args.model_path, model_size=args.model_size, model_sha256=args.model_sha256)
+        plan = build_plan(args.backend, args.receipt, model_path=args.model_path, model_size=args.model_size, model_sha256=args.model_sha256, attestation_path=args.attestation)
     except (BackendPlanError, OSError, ValueError) as exc:
         print(f"backend plan refused: {exc}")
         return 2

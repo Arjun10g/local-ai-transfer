@@ -37,7 +37,10 @@
       "promotion_rank": 1,
       "reason": "reserved until the product engine has an approved Vulkan backend",
       "product_cmake_flags": ["-DLAE_ENABLE_LLAMA_CPP=ON", "-DGGML_VULKAN=ON"],
-      "implementation_status": "not_implemented; do_not_select"
+      "implementation_status": "product-engine-profile",
+      "gpu_layers_default": 20,
+      "gpu_layers_max": 99,
+      "requires_explicit_gpu_layer_policy": true
     },
     {
       "id": "intel-sycl-experimental",

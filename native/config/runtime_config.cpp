@@ -82,6 +82,9 @@ bool load_runtime_config(const std::filesystem::path& path, RuntimeConfigFile& c
   if (present) config.model_size_bytes = number;
   if (!number_field(json, "context_tokens", number, present) || (present && (number < 1 || number > 16384))) { error = "config context_tokens is invalid"; return false; }
   if (present) config.context_tokens = static_cast<unsigned>(number);
+  if (!number_field(json, "gpu_layers", number, present) || (present && number > 99)) { error = "config gpu_layers is invalid"; return false; }
+  if (present) config.gpu_layers = static_cast<unsigned>(number);
+  if (!string_field(json, "vulkan_device_name", config.vulkan_device_name, present)) { error = "config vulkan_device_name is invalid"; return false; }
   return true;
 }
 

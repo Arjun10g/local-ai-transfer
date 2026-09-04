@@ -31,6 +31,7 @@ def receipt(*, sycl=False, adapter_count=1):
         "os": {"caption": "Microsoft Windows 11 Pro", "architecture": "64-bit"},
         "computer": {"total_memory_bytes": 32 * 1024**3, "available_memory_bytes": 24 * 1024**3},
         "gpu_adapters": adapters,
+        "vulkan": {"loader_present": True, "enumeration": {"exit_code": 0, "summary": "Intel Graphics Vulkan device"}},
         "sycl_level_zero": ({
             "checked": True,
             "available": True,
@@ -52,6 +53,18 @@ class WindowsBackendPlanTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         return path
 
+    def write_vulkan_attestation(self, receipt_path):
+        path = receipt_path.with_name("windows-gpu-attestation.json")
+        path.write_text(json.dumps({
+            "schema": "local_bmo.windows-gpu-attestation.v1",
+            "receipt_sha256": planner._receipt_hash(receipt_path),
+            "integrated": True,
+            "pnp_device_id": "PCI\\VEN_8086&DEV_7D55&INDEX_0",
+            "basis": "operator DXGI and Vulkan device correlation",
+            "vulkan": {"pnp_device_id": "PCI\\VEN_8086&DEV_7D55&INDEX_0", "device_name": "Intel Graphics 0", "driver_version": "32.0.101.8247"},
+        }), encoding="utf-8")
+        return path
+
     def test_cpu_requires_explicit_selection_and_reports_conservative_memory(self):
         path = self.write_receipt(receipt())
         plan = planner.build_plan("cpu-safe", path)
@@ -70,6 +83,33 @@ class WindowsBackendPlanTests(unittest.TestCase):
         path = self.write_receipt(receipt())
         with self.assertRaisesRegex(planner.BackendPlanError, "GGML_VULKAN"):
             planner.build_plan("intel-sycl-experimental", path)
+
+    def test_vulkan_product_profile_requires_receipt_and_has_bounded_offload(self):
+        path = self.write_receipt(receipt())
+        attestation = self.write_vulkan_attestation(path)
+        plan = planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
+        self.assertEqual(plan["status"], "planned")
+        self.assertEqual(plan["runtime"]["compiled_backend"], "vulkan")
+        self.assertTrue(plan["runtime"]["gpu_offload"])
+        self.assertEqual(plan["runtime"]["gpu_layers_default"], 20)
+        self.assertEqual(plan["runtime"]["gpu_layers_max"], 99)
+
+    def test_vulkan_rejects_missing_loader_or_enumeration(self):
+        value = receipt()
+        value["vulkan"] = {"loader_present": False, "enumeration": None}
+        path = self.write_receipt(value)
+        attestation = self.write_vulkan_attestation(path)
+        with self.assertRaisesRegex(planner.BackendPlanError, "Vulkan loader"):
+            planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
+
+    def test_vulkan_rejects_unbound_or_mismatched_attestation(self):
+        path = self.write_receipt(receipt())
+        attestation = self.write_vulkan_attestation(path)
+        value = json.loads(attestation.read_text(encoding="utf-8"))
+        value["vulkan"]["driver_version"] = "wrong-driver"
+        attestation.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaisesRegex(planner.BackendPlanError, "correlated"):
+            planner.build_plan("intel-vulkan-conservative", path, attestation_path=attestation)
 
     def test_sycl_is_blocked_until_product_vulkan_profile(self):
         path = self.write_receipt(receipt(sycl=True))
@@ -110,12 +150,15 @@ class WindowsBackendPlanTests(unittest.TestCase):
     def test_scripts_require_explicit_backend_and_pin_sycl_flags(self):
         build = (ROOT / "release/windows/Build-WindowsBackend.ps1").read_text(encoding="utf-8")
         run = (ROOT / "release/windows/Run-WindowsBackend.ps1").read_text(encoding="utf-8")
-        self.assertIn("ValidateSet('cpu-safe', 'intel-sycl-experimental')", build)
+        self.assertIn("ValidateSet('cpu-safe', 'intel-vulkan-conservative', 'intel-sycl-experimental')", build)
         self.assertIn("AllowExperimentalSycl", build)
         self.assertIn("GGML_SYCL_TARGET=INTEL", build)
+        self.assertIn("LAE_ENABLE_LLAMA_VULKAN=ON", build)
+        self.assertIn("VulkanAttestation", build)
         self.assertIn("LinkType", build)
         self.assertIn("LinkType", run)
         self.assertIn("--device SYCL0", run)
+        self.assertIn("--backend intel-vulkan", run)
         self.assertIn("--n-predict 1", run)
         self.assertNotIn("--host 127.0.0.1", run)
         self.assertNotIn("llama-server", run.lower())
@@ -135,6 +178,21 @@ class WindowsBackendPlanTests(unittest.TestCase):
         self.assertIn("exact SKU", docs)
         self.assertIn("no fallback", docs.lower())
         self.assertIn("Vulkan (primary accelerated", docs)
+        self.assertIn("GGML_VULKAN", docs)
+
+    def test_native_vulkan_profile_is_authenticated_and_never_cpu_fallback(self):
+        cmake = (ROOT / "native/CMakeLists.txt").read_text(encoding="utf-8")
+        main = (ROOT / "native/main.cpp").read_text(encoding="utf-8")
+        backend = (ROOT / "native/backend/llama_backend.cpp").read_text(encoding="utf-8")
+        self.assertIn("option(LAE_ENABLE_LLAMA_VULKAN", cmake)
+        self.assertIn("set(GGML_VULKAN ON", cmake)
+        self.assertIn("LAE_ENABLE_LLAMA_VULKAN=1", cmake)
+        self.assertIn('backend == "intel-vulkan"', main)
+        self.assertIn("--gpu-layers", main)
+        self.assertIn("ggml_backend_dev_count", backend)
+        self.assertIn("model_params.devices", backend)
+        self.assertIn("exact configured Vulkan integrated device is unavailable", backend)
+        self.assertNotIn("intel-vulkan.*cpu", backend)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('cpu-safe', 'intel-sycl-experimental')]
+    [ValidateSet('cpu-safe', 'intel-vulkan-conservative', 'intel-sycl-experimental')]
     [string] $Backend,
     [Parameter(Mandatory = $true)]
     [string] $HardwareReceipt,
@@ -9,6 +9,7 @@ param(
     [string] $ModelPath,
     [string] $BuildRoot = (Join-Path $PSScriptRoot 'build'),
     [string] $LlamaSource,
+    [string] $VulkanAttestation,
     [string] $PythonCommand = 'py',
     [switch] $AllowExperimentalSycl
 )
@@ -26,6 +27,7 @@ Assert-SafePathInput $HardwareReceipt 'hardware receipt'
 Assert-SafePathInput $ModelPath 'model'
 Assert-SafePathInput $BuildRoot 'build root'
 if ($LlamaSource) { Assert-SafePathInput $LlamaSource 'llama source' }
+if ($VulkanAttestation) { Assert-SafePathInput $VulkanAttestation 'Vulkan attestation' }
 $releaseRoot = (Resolve-Path (Join-Path $PSScriptRoot '.')).Path
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $receiptItem = Get-Item -LiteralPath $HardwareReceipt
@@ -46,7 +48,14 @@ if ($modelHash -ne 'c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268
 New-Item -ItemType Directory -Path $buildRootFull | Out-Null
 $planPath = Join-Path $buildRootFull 'backend-plan.json'
 $planner = Join-Path $repoRoot 'scripts/windows_backend_plan.py'
-& $PythonCommand $planner --backend $Backend --receipt $receipt --model-path $model --model-size ([string]$modelItem.Length) --model-sha256 $modelHash --output $planPath
+$plannerArguments = @($planner, '--backend', $Backend, '--receipt', $receipt, '--model-path', $model, '--model-size', ([string]$modelItem.Length), '--model-sha256', $modelHash, '--output', $planPath)
+if ($Backend -eq 'intel-vulkan-conservative') {
+    if ([string]::IsNullOrWhiteSpace($VulkanAttestation)) { throw 'Vulkan requires -VulkanAttestation bound to this receipt' }
+    $attestationItem = Get-Item -LiteralPath $VulkanAttestation
+    if ($attestationItem.LinkType -or $attestationItem.PSIsContainer) { throw 'Vulkan attestation must be a regular non-link file' }
+    $plannerArguments += @('--attestation', $attestationItem.FullName)
+}
+& $PythonCommand @plannerArguments
 if ($LASTEXITCODE -ne 0) { throw 'backend capability plan refused the requested build' }
 
 function Invoke-Checked {
@@ -57,11 +66,12 @@ function Invoke-Checked {
 
 $flags = @()
 $binary = $null
-if ($Backend -eq 'cpu-safe') {
+if ($Backend -eq 'cpu-safe' -or $Backend -eq 'intel-vulkan-conservative') {
     $flags = @('-S', $repoRoot, '-B', $buildRootFull, '-DLAE_ENABLE_LLAMA_CPP=ON', '-DCMAKE_BUILD_TYPE=Release')
+    if ($Backend -eq 'intel-vulkan-conservative') { $flags += '-DLAE_ENABLE_LLAMA_VULKAN=ON' }
     Invoke-Checked 'cmake' $flags
     Invoke-Checked 'cmake' @('--build', $buildRootFull, '--config', 'Release', '--target', 'lae-engine')
-    $binaryCandidates = @((Join-Path $buildRootFull 'lae-engine.exe'), (Join-Path $buildRootFull 'Release/lae-engine.exe')) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+    $binaryCandidates = @((Join-Path $buildRootFull 'native/lae-engine.exe'), (Join-Path $buildRootFull 'native/Release/lae-engine.exe'), (Join-Path $buildRootFull 'lae-engine.exe'), (Join-Path $buildRootFull 'Release/lae-engine.exe')) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
     if ($binaryCandidates.Count -ne 1) { throw 'CPU build did not produce exactly one expected configuration binary' }
     $binary = $binaryCandidates[0]
 } else {

@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('cpu-safe', 'intel-sycl-experimental')]
+    [ValidateSet('cpu-safe', 'intel-vulkan-conservative', 'intel-sycl-experimental')]
     [string] $Backend,
     [Parameter(Mandatory = $true)]
     [string] $HardwareReceipt,
@@ -9,6 +9,7 @@ param(
     [string] $ModelPath,
     [string] $Engine,
     [string] $ConfigPath,
+    [string] $VulkanAttestation,
     [string] $PythonCommand = 'py'
 )
 
@@ -24,6 +25,7 @@ Assert-SafePathInput $HardwareReceipt 'hardware receipt'
 Assert-SafePathInput $ModelPath 'model'
 if ($Engine) { Assert-SafePathInput $Engine 'engine' }
 if ($ConfigPath) { Assert-SafePathInput $ConfigPath 'config' }
+if ($VulkanAttestation) { Assert-SafePathInput $VulkanAttestation 'Vulkan attestation' }
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $receiptItem = Get-Item -LiteralPath $HardwareReceipt
 if ($receiptItem.LinkType -or $receiptItem.PSIsContainer) { throw 'hardware receipt must be a regular non-link file' }
@@ -33,10 +35,17 @@ if ($modelItem.LinkType -or $modelItem.PSIsContainer) { throw 'model must be a r
 $model = $modelItem.FullName
 $planner = Join-Path $repoRoot 'scripts/windows_backend_plan.py'
 $planPath = Join-Path ([IO.Path]::GetTempPath()) 'lae-windows-backend-plan.json'
-& $PythonCommand $planner --backend $Backend --receipt $receipt --model-path $model --output $planPath
+$plannerArguments = @($planner, '--backend', $Backend, '--receipt', $receipt, '--model-path', $model, '--output', $planPath)
+if ($Backend -eq 'intel-vulkan-conservative') {
+    if ([string]::IsNullOrWhiteSpace($VulkanAttestation)) { throw 'Vulkan requires -VulkanAttestation bound to this receipt' }
+    $attestationItem = Get-Item -LiteralPath $VulkanAttestation
+    if ($attestationItem.LinkType -or $attestationItem.PSIsContainer) { throw 'Vulkan attestation must be a regular non-link file' }
+    $plannerArguments += @('--attestation', $attestationItem.FullName)
+}
+& $PythonCommand @plannerArguments
 if ($LASTEXITCODE -ne 0) { throw 'backend capability plan refused the requested runtime' }
 
-if ($Backend -eq 'cpu-safe') {
+if ($Backend -eq 'cpu-safe' -or $Backend -eq 'intel-vulkan-conservative') {
     if ([string]::IsNullOrWhiteSpace($Engine) -or [string]::IsNullOrWhiteSpace($ConfigPath)) { throw 'CPU runtime requires -Engine and -ConfigPath' }
     $enginePath = (Resolve-Path -LiteralPath $Engine).Path
     $config = (Resolve-Path -LiteralPath $ConfigPath).Path
@@ -48,7 +57,11 @@ if ($Backend -eq 'cpu-safe') {
     # from stdin.  The requested model/backend were already hash/capability
     # checked by the planner.
     Remove-Item Env:LAE_ENGINE_TOKEN
-    $token | & $enginePath serve --config $config --token-stdin
+    if ($Backend -eq 'intel-vulkan-conservative') {
+        $token | & $enginePath serve --config $config --backend intel-vulkan --gpu-layers 20 --token-stdin
+    } else {
+        $token | & $enginePath serve --config $config --backend cpu --token-stdin
+    }
     exit $LASTEXITCODE
 }
 

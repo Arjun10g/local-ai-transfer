@@ -13,6 +13,10 @@ struct BackendConfig {
   std::string model_id = "fixture";
   std::string backend_profile = "fixture-cpu";
   unsigned context_tokens = 8192;
+  // Bounded Vulkan offload policy. CPU ignores this; intel-vulkan requires
+  // an explicit positive value and never silently falls back.
+  unsigned gpu_layers = 20;
+  std::string vulkan_device_name;
 };
 
 struct GenerationRequest {

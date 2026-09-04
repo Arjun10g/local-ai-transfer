@@ -2,6 +2,7 @@
   "schema": "local_bmo.windows-backend-runtime.v1",
   "selection": "operator-explicit-no-fallback",
   "hardware_receipt": "hardware-receipt.json",
+  "vulkan_attestation": "windows-gpu-attestation.json",
   "backend_profile": "cpu-safe",
   "model": {
     "path": "D:/ApprovedModels/Qwen3.5-9B-Q4_K_M.gguf",

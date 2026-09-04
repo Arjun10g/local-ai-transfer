@@ -22,10 +22,13 @@ runtime selects `SYCL0` and emits bounded one-token output through
 promoted product backend until a separate review approves its compatibility.
 
 The profile order is CPU (mandatory baseline), Vulkan (primary accelerated
-candidate, currently reserved), then SYCL (experimental diagnostic, currently
-blocked). This
+candidate, implemented but not promoted), then SYCL (experimental diagnostic,
+currently blocked). This
 package does not claim that Vulkan features or SYCL support are present on the
-target until the receipt proves them.
+target until the receipt proves them. Vulkan additionally requires a separate
+operator GPU attestation bound by receipt SHA-256, exact PNP ID, adapter name,
+driver, and Vulkan enumeration identity; the WMI probe cannot infer integrated
+status from an Intel product name.
 
 The SYCL build requires an already-installed Visual Studio C++ toolchain,
 Intel oneAPI DPC++/C++ compiler and runtime, CMake, Ninja, and an existing
@@ -38,7 +41,7 @@ support and Intel Core iGPU generations; an Intel product name alone is not
 capability evidence. The read-only hardware receipt must contain an exact PNP
 device identity, explicit integrated/UMA evidence, and a bounded successful
 SYCL/Level Zero probe. The current probe intentionally records those fields as
-unknown/not checked, so it cannot authorize SYCL by itself.
+unknown/not checked, so it cannot authorize Vulkan or SYCL by itself.
 
 The planning defaults are conservative for the reported 32 GiB shared-memory
 machine: 8 GiB OS/application reserve, approximately 5.25 GiB resident Q4,
