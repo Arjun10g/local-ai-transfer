@@ -63,6 +63,7 @@ export function buildOperatorGrantBindings(config = {}) {
     if (entry.write === true) bindings.push({ capability: `local.filesystem:${entry.id}`, provider: 'local_filesystem', accountFingerprint: 'local_host', scope: entry.id, label: `Write files in workspace ${entry.id}` });
   }
   for (const id of Object.keys(config.applications ?? {})) bindings.push({ capability: `local.application:${id}`, provider: 'local_application', accountFingerprint: 'local_host', scope: id, label: `Open allowlisted application ${id}` });
+  if (config.process_actions?.enabled === true) for (const id of Object.keys(config.process_actions.actions ?? {})) bindings.push({ capability: `local.process:${id}`, provider: 'local_process', accountFingerprint: 'local_host', scope: id, label: `Run allowlisted process action ${id}` });
   bindings.push({ capability: 'local.clipboard', provider: 'local_clipboard', accountFingerprint: 'local_host', scope: 'clipboard', label: 'Write the local clipboard' });
   return bindings;
 }

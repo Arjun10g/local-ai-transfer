@@ -20,7 +20,7 @@ const revision = 'a'.repeat(64);
 test('external contract publishes complete strict schemas for every tool', async () => {
   const contract = JSON.parse(await readFile(new URL('../../contracts/external-tools/v0.1.0.json', import.meta.url), 'utf8'));
   assert.equal(contract.version, '0.1.0'); assert.equal(contract.additionalProperties, false);
-  assert.equal(new Set(contract.tools.map(tool => tool.name)).size, 13);
+  assert.equal(new Set(contract.tools.map(tool => tool.name)).size, 14);
   const riskTiers = new Set(contract.$defs.tool.properties.risk_tier.enum); for (const tool of contract.tools) { assert.ok(riskTiers.has(tool.risk_tier), `${tool.name} uses an undeclared risk tier`); assert.equal(tool.input_schema.type, 'object'); assert.equal(tool.input_schema.additionalProperties, false); assert.ok(typeof tool.input_schema.properties === 'object'); } for (const name of ['browser.session_start', 'browser.inspect_links', 'browser.follow_link', 'browser.session_close']) { const definition = createExternalToolRegistry()[name]; assert.equal(definition.parameters.additionalProperties, false); assert.ok(definition.description); }
 });
 
