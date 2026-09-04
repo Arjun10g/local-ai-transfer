@@ -1,5 +1,6 @@
 import { makeToolResult } from '../agent/tool-envelope.mjs';
 import { ProviderToolError, exactObject, boundedArray, boundedBoolean, boundedInteger, boundedString, checkAborted, digest, failureResult, jsonResponse, normalizeText, own, providerError, result, safeArray } from './provider-common.mjs';
+import { MicrosoftDeviceCodeCredential, MicrosoftGraphHttpsTransport, GRAPH_ORIGIN } from './microsoft-graph-auth.mjs';
 
 const API = '/v1.0';
 const FOLDERS = new Set(['inbox', 'sentitems', 'drafts', 'archive']);
@@ -89,19 +90,36 @@ const projectionDraft = value => {
   return { id: value.id.slice(0, 512), subject: typeof value.subject === 'string' ? value.subject.slice(0, 998) : '', body_preview: body.text.slice(0, 512), recipients, etag: typeof value['@odata.etag'] === 'string' ? value['@odata.etag'].slice(0, 512) : null };
 };
 const putBounded = (map, key, value, max) => { if (map.size >= max && !map.has(key)) map.delete(map.keys().next().value); map.set(key, value); };
+const validGraphPath = path => typeof path === 'string' && path.length <= 2048 && /^\/v1\.0\/(?:me(?:\/mailFolders\/[^/]+\/messages|\/messages(?:\/[^/]+(?:\/send)?)?|\/chats)?|chats\/[^/]+\/messages)$/u.test(path) && !path.includes('..') && !/[\u0000-\u001f\u007f]/u.test(path);
+const validGraphMethodPath = (method, path) => {
+  if (!['GET', 'POST', 'PATCH'].includes(method) || !validGraphPath(path)) return false;
+  if (method === 'GET') return true;
+  if (method === 'PATCH') return /^\/v1\.0\/me\/messages\/[^/]+$/u.test(path);
+  return /^\/v1\.0\/me\/messages$|^\/v1\.0\/me\/messages\/[^/]+\/send$|^\/v1\.0\/chats\/[^/]+\/messages$/u.test(path);
+};
+const requiredGraphScope = (method, path) => path === '/v1.0/me' ? 'User.Read' : path === '/v1.0/me/chats' || path.startsWith('/v1.0/chats/') && method === 'GET' ? 'Chat.Read' : path.startsWith('/v1.0/chats/') ? 'ChatMessage.Send' : method === 'POST' && path.endsWith('/send') ? 'Mail.Send' : method === 'POST' ? 'Mail.ReadWrite' : 'Mail.Read';
+const scopeAllows = (scopes, required) => scopes.includes(required) || required === 'Mail.Read' && scopes.includes('Mail.ReadWrite') || required === 'Chat.Read' && scopes.includes('Chat.ReadWrite') || required === 'ChatMessage.Send' && scopes.includes('Chat.ReadWrite');
 
 export class MicrosoftGraphProvider {
-  constructor({ enabled = false, credentialSource, transport, origin = 'https://graph.microsoft.com', permissionProfile = 'always_ask', grantStore, accountFingerprint = 'unknown', scope = 'account', now = () => Date.now(), requestTimeoutMs = REQUEST_TIMEOUT_MS } = {}) {
+  constructor({ enabled = false, credentialSource, transport, authTransport, tenant, clientId, scopes, onUserCode, sleep, origin = GRAPH_ORIGIN, permissionProfile = 'always_ask', grantStore, accountFingerprint = 'unknown', scope = 'account', now = () => Date.now(), requestTimeoutMs = REQUEST_TIMEOUT_MS } = {}) {
     if (!['always_ask', 'ask_before_writes', 'review_important_actions', 'full_access'].includes(permissionProfile)) throw new TypeError('invalid permission profile');
     if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 100 || requestTimeoutMs > 120000) throw new TypeError('invalid Graph request timeout');
     let parsed; try { parsed = new URL(origin); } catch { throw new TypeError('invalid Graph origin'); } if (parsed.origin !== 'https://graph.microsoft.com' || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) throw new TypeError('invalid Graph origin');
-    this.enabled = enabled === true; this.credentialSource = credentialSource; this.transport = transport; this.origin = parsed.origin; this.permissionProfile = permissionProfile; this.grantStore = grantStore; this.accountFingerprint = accountFingerprint; this.scope = scope; this.now = now; this.requestTimeoutMs = requestTimeoutMs; this.proposals = new Map(); this.idempotent = new Map(); this.writeLedger = new Map();
+    if (credentialSource && (tenant !== undefined || clientId !== undefined || scopes !== undefined)) throw new TypeError('credential source and device-code settings are mutually exclusive');
+    const graphTransport = transport ?? (tenant !== undefined || clientId !== undefined || scopes !== undefined ? new MicrosoftGraphHttpsTransport({ requestTimeoutMs, sleep }) : undefined);
+    this.enabled = enabled === true; this.credentialSource = credentialSource ?? (tenant !== undefined || clientId !== undefined || scopes !== undefined ? new MicrosoftDeviceCodeCredential({ tenant, clientId, scopes, transport: authTransport ?? graphTransport, now, sleep, requestTimeoutMs, onUserCode }) : undefined); this.transport = graphTransport; this.origin = parsed.origin; this.permissionProfile = permissionProfile; this.grantStore = grantStore; this.accountFingerprint = accountFingerprint; this.scope = scope; this.now = now; this.requestTimeoutMs = requestTimeoutMs; this.proposals = new Map(); this.idempotent = new Map(); this.writeLedger = new Map();
   }
   state() { if (!this.enabled) return 'disabled'; if (!this.credentialSource || !this.transport) return 'unconfigured'; return 'ready'; }
-  async status(signal) { const state = this.state(); if (state !== 'ready') return state; try { await this.token(signal); return 'ready'; } catch (error) { return error.code === 'provider_offline' ? 'offline' : error.code === 'provider_unauthorized' ? 'unauthorized' : 'failed'; } }
+  async status(signal) { const state = this.state(); if (state !== 'ready') return state; try { await this.token(signal); if (this.credentialSource instanceof MicrosoftDeviceCodeCredential) { const me = await this.request({ method: 'GET', path: '/v1.0/me', query: { '$select': 'id' }, signal }); if (typeof me.id !== 'string' || me.id.length < 1 || me.id.length > 512) throw new ProviderToolError('provider_invalid_response'); const fingerprint = digest({ tenant: this.credentialSource.tenant, id: me.id }); if (this.accountFingerprint !== 'unknown' && this.accountFingerprint !== fingerprint) { this.clearAuth(); throw new ProviderToolError('provider_unauthorized'); } this.authenticatedAccountFingerprint = fingerprint; this.accountFingerprint = fingerprint; } return 'ready'; } catch (error) { return error.code === 'provider_offline' ? 'offline' : error.code === 'provider_unauthorized' ? 'unauthorized' : 'failed'; } }
+  getAccountFingerprint() { return this.authenticatedAccountFingerprint ?? this.accountFingerprint; }
+  authStatus() { if (!this.enabled) return { state: 'disabled', prompt: null, accountFingerprint: null }; if (!this.credentialSource || !this.transport) return { state: 'unconfigured', prompt: null, accountFingerprint: null }; if (!(this.credentialSource instanceof MicrosoftDeviceCodeCredential)) return { state: 'external', prompt: null, accountFingerprint: null }; const status = this.credentialSource.authStatus(); return { ...status, state: status.state === 'authenticated' && !this.authenticatedAccountFingerprint ? 'checking_account' : status.state, accountFingerprint: this.authenticatedAccountFingerprint ?? null }; }
+  async startAuth(signal) { if (!this.enabled || !(this.credentialSource instanceof MicrosoftDeviceCodeCredential)) throw new ProviderToolError('provider_unconfigured'); await this.credentialSource.start(signal); if (await this.status(signal) !== 'ready') { this.clearAuth(); throw new ProviderToolError('provider_unauthorized'); } return this.getAccountFingerprint(); }
+  authConfigured() { return this.enabled && this.credentialSource instanceof MicrosoftDeviceCodeCredential; }
+  cancelAuth() { if (this.credentialSource instanceof MicrosoftDeviceCodeCredential) this.credentialSource.cancel(); }
+  clearAuth() { if (this.credentialSource instanceof MicrosoftDeviceCodeCredential) { this.credentialSource.clear(); this.authenticatedAccountFingerprint = null; for (const capability of [CAP_MAIL, CAP_TEAMS]) this.grantStore?.revoke?.(capability); } }
   capability(name) { return name.startsWith('mail.') ? CAP_MAIL : CAP_TEAMS; }
   isWrite(name) { return !['mail.list_messages', 'mail.read_message', 'teams.list_chats', 'teams.list_messages'].includes(name); }
-  grantValid(capability) { const grant = this.grantStore?.get(capability); return this.permissionProfile === 'full_access' && grant?.profile === 'full_access' && grant.provider === 'microsoft_graph' && grant.account_fingerprint === this.accountFingerprint && grant.scope === this.scope; }
+  grantValid(capability) { const grant = this.grantStore?.get(capability); if (this.credentialSource instanceof MicrosoftDeviceCodeCredential && (!this.authenticatedAccountFingerprint || this.accountFingerprint === 'unknown' || this.accountFingerprint !== this.authenticatedAccountFingerprint)) return false; return this.permissionProfile === 'full_access' && grant?.profile === 'full_access' && grant.provider === 'microsoft_graph' && grant.account_fingerprint === this.accountFingerprint && grant.scope === this.scope; }
   confirmationRequired(name) {
     const important = name === 'teams.send_message' || name === 'mail.send_draft';
     if (this.permissionProfile === 'always_ask') return true;
@@ -113,10 +131,12 @@ export class MicrosoftGraphProvider {
   validate(name, input) { return argument(name, input); }
   async token(signal) {
     checkAborted(signal); if (!this.enabled) throw new ProviderToolError('provider_disabled'); if (!this.credentialSource || !this.transport) throw new ProviderToolError('provider_unconfigured');
-    let value; try { value = typeof this.credentialSource === 'function' ? await this.credentialSource() : await this.credentialSource.getAccessToken?.(); } catch { throw new ProviderToolError('provider_unauthorized'); }
+    let value; try { value = typeof this.credentialSource === 'function' ? await this.credentialSource(signal) : await this.credentialSource.getAccessToken?.(signal); } catch (error) { if (['provider_cancelled', 'provider_offline', 'provider_timeout'].includes(error?.code)) throw new ProviderToolError(error.code); throw new ProviderToolError('provider_unauthorized'); }
     if (typeof value !== 'string' || !value || Buffer.byteLength(value, 'utf8') > MAX_TOKEN_BYTES || /[\u0000-\u001f\u007f]/u.test(value)) throw new ProviderToolError('provider_unauthorized'); return value;
   }
   async request({ method, path, query, headers = {}, body, signal }) {
+    if (!validGraphMethodPath(method, path)) throw new ProviderToolError('provider_destination_rejected');
+    if (this.credentialSource instanceof MicrosoftDeviceCodeCredential && !scopeAllows(this.credentialSource.scopes, requiredGraphScope(method, path))) throw new ProviderToolError('provider_unauthorized', 'configured delegated scopes do not cover this operation');
     const bearer = await this.token(signal); checkAborted(signal); const deadline = new AbortController(); let rejectAbort; const relay = () => { deadline.abort(); rejectAbort?.(Object.assign(new Error('provider cancelled'), { code: 'provider_cancelled' })); }; signal?.addEventListener('abort', relay, { once: true }); let timer;
     let response; try {
       const request = { origin: this.origin, method, path, query: query ?? {}, headers: { ...headers, authorization: `Bearer ${bearer}`, accept: 'application/json' }, body, signal: deadline.signal };
@@ -223,3 +243,5 @@ export function createMicrosoftGraphTools(options = {}) {
   const provider = options instanceof MicrosoftGraphProvider ? options : new MicrosoftGraphProvider(options);
   return Object.fromEntries(Object.entries(graphDefinitions).map(([name, definition]) => [name, { ...definition, confirmationRequired: call => provider.confirmationRequired(name, call), authorize: call => provider.authorize({ ...call, name }), preview: call => provider.preview({ ...call, name }), execute: call => provider.execute({ ...call, name }) }]));
 }
+
+export { MicrosoftDeviceCodeCredential, MicrosoftGraphHttpsTransport } from './microsoft-graph-auth.mjs';

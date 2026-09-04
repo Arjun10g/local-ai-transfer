@@ -6,11 +6,12 @@ import { join } from 'node:path';
 import { mkdtemp, readFile } from 'node:fs/promises';
 import { createExternalToolRegistry } from '../../host/providers/index.mjs';
 import { BrowserActionProvider, CdpClient, createBrowserActionTools, hostIsPrivate, publicAddress, publicUrl } from '../../host/providers/browser-actions.mjs';
-import { MicrosoftGraphProvider, createMicrosoftGraphTools } from '../../host/providers/microsoft-graph.mjs';
+import { MicrosoftGraphProvider, MicrosoftDeviceCodeCredential, MicrosoftGraphHttpsTransport, createMicrosoftGraphTools } from '../../host/providers/microsoft-graph.mjs';
 import { CopilotCliProvider, createCopilotTool, createCopilotVersionCheck, killCopilotProcessTree } from '../../host/providers/copilot-cli.mjs';
 import { OperatorGrantStore } from '../../host/providers/operator-grants.mjs';
 import { ConversationController } from '../../host/agent/controller.mjs';
 import { mergeConfig, validateConfig } from '../../host/agent/config.mjs';
+import { HostServer } from '../../host/server/host-server.mjs';
 
 const call = (name, arguments_, id = `call_${name.replaceAll('.', '_')}`) => ({ id, name, arguments: arguments_ });
 const value = result => JSON.parse(result.content[0].text);
@@ -85,6 +86,37 @@ test('Graph transport timeout is bounded and typed', async () => {
   const started = Date.now(); const output = value(await tools['mail.list_messages'].execute(call('mail.list_messages', {}))); assert.equal(output.code, 'provider_timeout'); assert.ok(Date.now() - started < 1000);
 });
 
+test('Microsoft device-code credential is explicit, bounded, and memory-only', async () => {
+  let now = 0; let polls = 0; const requests = []; const transport = { request: async request => { requests.push(request); if (request.path.endsWith('/devicecode')) return { status: 200, body: { device_code: 'device', user_code: 'CODE', verification_uri: 'https://microsoft.com/devicelogin', interval: 5 } }; polls += 1; return polls === 1 ? { status: 400, body: { error: 'authorization_pending' } } : { status: 200, body: { access_token: 'access-token-memory-only', expires_in: 3600, scope: 'User.Read Mail.Read' } }; } }; const credential = new MicrosoftDeviceCodeCredential({ tenant: 'organizations', clientId: '00001111-aaaa-2222-bbbb-3333cccc4444', scopes: ['User.Read', 'Mail.Read'], transport, now: () => now, sleep: async milliseconds => { now += milliseconds; } });
+  await assert.rejects(() => credential.getAccessToken(), error => error.code === 'provider_unauthorized'); await credential.start(); assert.equal(await credential.getAccessToken(), 'access-token-memory-only'); assert.equal(requests.length, 3); assert.deepEqual(credential.authStatus(), { state: 'authenticated', prompt: null }); assert.throws(() => new MicrosoftDeviceCodeCredential({ tenant: 'organizations', clientId: '00001111-aaaa-2222-bbbb-3333cccc4444', scopes: ['Mail.Read'], transport }), /explicit/); assert.throws(() => new MicrosoftDeviceCodeCredential({ tenant: 'organizations', clientId: '00001111-aaaa-2222-bbbb-3333cccc4444', scopes: ['https://graph.microsoft.com/.default'], transport }), /explicit/);
+});
+
+test('Microsoft Graph device auth verifies an opaque account and gates delegated operations', async () => {
+  let now = 0; const transport = { request: async request => request.path.endsWith('/devicecode') ? { status: 200, body: { device_code: 'device', user_code: 'CODE', verification_uri: 'https://microsoft.com/devicelogin', interval: 5 } } : request.path.endsWith('/token') ? { status: 200, body: { access_token: 'access-token-memory-only', expires_in: 3600 } } : { status: 200, body: { id: 'user-opaque-1', userPrincipalName: 'user@example.com' } } }; const provider = new MicrosoftGraphProvider({ enabled: true, tenant: 'organizations', clientId: '00001111-aaaa-2222-bbbb-3333cccc4444', scopes: ['User.Read', 'Chat.Read'], transport, now: () => now, sleep: async milliseconds => { now += milliseconds; } }); await provider.startAuth(); assert.match(provider.getAccountFingerprint(), /^[a-f0-9]{64}$/u); assert.equal(provider.authStatus().accountFingerprint, provider.getAccountFingerprint()); await assert.rejects(() => provider.request({ method: 'POST', path: '/v1.0/chats/chat-1/messages', body: { body: { content: 'x' } } }), error => error.code === 'provider_unauthorized');
+});
+
+test('Microsoft HTTPS transport uses redirect errors, JSON framing, and safe retry policy', async () => {
+  let calls = 0; const transport = new MicrosoftGraphHttpsTransport({ requestTimeoutMs: 1000, sleep: async () => {}, fetchImpl: async (_url, options) => { calls += 1; assert.equal(options.redirect, 'error'); return new Response('{"error":"busy"}', { status: 503, headers: { 'content-type': 'application/json' } }); } }); const response = await transport.request({ origin: 'https://graph.microsoft.com', method: 'POST', path: '/v1.0/me/messages', body: { subject: 'x' } }); assert.equal(response.status, 503); assert.equal(calls, 1); await assert.rejects(() => transport.request({ origin: 'https://graph.microsoft.com', method: 'GET', path: '/v1.0/me', headers: { 'x-forwarded-for': 'evil' } }), error => error.code === 'provider_destination_rejected');
+});
+
+test('Graph send accepts an empty 202 response exactly once', async () => {
+  let calls = 0;
+  const transport = new MicrosoftGraphHttpsTransport({
+    requestTimeoutMs: 1000,
+    sleep: async () => {},
+    fetchImpl: async (url, options) => {
+      calls += 1;
+      assert.equal(new URL(url).pathname, '/v1.0/me/messages/draft-202/send');
+      assert.equal(options.method, 'POST');
+      return new Response(null, { status: 202 });
+    },
+  });
+  const response = await transport.request({ origin: 'https://graph.microsoft.com', method: 'POST', path: '/v1.0/me/messages/draft-202/send' });
+  assert.equal(response.status, 202);
+  assert.deepEqual(response.body, {});
+  assert.equal(calls, 1);
+});
+
 test('Graph writes are at-most-once across concurrent and timeout retries', async () => {
   let dispatches = 0; const transport = { request: async request => { dispatches += 1; await new Promise((resolve, reject) => request.signal.addEventListener('abort', () => reject(Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' })))); } };
   const tools = createMicrosoftGraphTools({ enabled: true, requestTimeoutMs: 100, credentialSource: { getAccessToken: async () => 'synthetic-token' }, transport }); const draft = call('mail.create_draft', { to: ['alice@example.com'], subject: 'x', body: 'x' }, 'call_once'); await tools['mail.create_draft'].preview(draft); const authorization = { kind: 'user_confirmation' }; const first = tools['mail.create_draft'].execute({ ...draft, authorization }); await new Promise(resolve => setImmediate(resolve)); const concurrent = value(await tools['mail.create_draft'].execute({ ...draft, authorization })); assert.equal(concurrent.code, 'provider_write_already_attempted'); const timedOut = value(await first); assert.equal(timedOut.code, 'provider_timeout'); const retry = value(await tools['mail.create_draft'].execute({ ...draft, authorization })); assert.equal(retry.code, 'provider_timeout'); assert.equal(retry.idempotency, 'replayed'); assert.equal(dispatches, 1);
@@ -103,6 +135,48 @@ test('permission profiles apply confirmation floors to reads, writes, and T3 act
 
 test('provider configuration is strict, secret-free, and preserves injected runtime wiring', () => {
   const config = mergeConfig({ providers: { microsoft_graph: { enabled: true, permission_profile: 'ask_before_writes', account_fingerprint: 'acct', scope: 'account' }, copilot: { enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], version: '1.2.3' }, browser_actions: { enabled: true, executable: '/approved/chrome', allowlist: ['/approved/chrome'] } } }); assert.equal(config.providers.microsoft_graph.enabled, true); assert.equal(config.providers.browser_actions.enabled, true); assert.throws(() => validateConfig({ providers: { microsoft_graph: { token: 'must-not-be-configured' } } }), /unknown key/); assert.throws(() => validateConfig({ providers: { browser_actions: { token: 'must-not-be-configured' } } }), /unknown key/); assert.throws(() => validateConfig({ providers: { unknown: {} } }), /unknown key/); assert.throws(() => validateConfig({ providers: { copilot: { enabled: true, executable: 'copilot', allowlist: ['copilot'], version: 'latest' } } }), /executable invalid/); for (const executable of ['//server/copilot', '\\\\server\\copilot']) assert.throws(() => validateConfig({ providers: { copilot: { executable, allowlist: [executable] } } }), /executable invalid/); assert.throws(() => validateConfig({ providers: { copilot: { version: '1.2' } } }), /version invalid/); const registry = createExternalToolRegistry({ config: config.providers }); assert.equal(registry['mail.list_messages'].execute !== undefined, true); assert.equal(registry['mail.list_messages'].parameters.additionalProperties, false); assert.equal(registry.providerStatus().copilot, 'ready'); const injectedSpawn = createExternalToolRegistry({ config: config.providers, copilot: { spawn: () => new FakeChild() } }); assert.equal(injectedSpawn.providerStatus().copilot, 'unconfigured');
+});
+
+test('Graph auth configuration is explicit and full access requires an expected fingerprint', async () => {
+  const auth = mergeConfig({ providers: { microsoft_graph: { enabled: true, tenant: 'organizations', client_id: '00001111-aaaa-2222-bbbb-3333cccc4444', scopes: ['User.Read', 'ChatMessage.Send'] } } }); assert.deepEqual(auth.providers.microsoft_graph.scopes, ['User.Read', 'ChatMessage.Send']); assert.throws(() => validateConfig({ providers: { microsoft_graph: { permission_profile: 'full_access' } } }), /fingerprint required/); assert.throws(() => validateConfig({ providers: { microsoft_graph: { scopes: ['Mail.Read'] } } }), /scopes invalid/); assert.throws(() => validateConfig({ providers: { microsoft_graph: { scopes: ['User.Read', 'User.Read'] } } }), /scopes invalid/); assert.throws(() => mergeConfig({ providers: { microsoft_graph: { scopes: ['User.Read', 'User.Read'] } } }), /scopes invalid/); const schema = JSON.parse(await readFile(new URL('../../contracts/config-schema/v0.1.0.json', import.meta.url), 'utf8')); assert.equal(schema.properties.providers.properties.microsoft_graph.properties.scopes.uniqueItems, true); assert.deepEqual(schema.properties.providers.properties.microsoft_graph.properties.scopes.contains, { const: 'User.Read' });
+});
+
+test('HostServer exposes guarded Graph auth controls and deduplicates device starts', async t => {
+  const base = { controller: { cancelActive() {} }, engine: { async shutdown() {} } };
+  const request = async (address, path, options = {}) => {
+    const response = await fetch(`${address.url}${path}`, options);
+    const text = await response.text();
+    return { response, body: text ? JSON.parse(text) : null };
+  };
+  const unconfigured = new MicrosoftGraphProvider();
+  const unconfiguredHost = new HostServer({ ...base, providerAuth: () => ({ microsoft_graph: { configured: unconfigured.authConfigured(), start: () => { throw new Error('must not start'); }, status: () => unconfigured.authStatus(), cancel: () => unconfigured.cancelAuth(), clear: () => unconfigured.clearAuth() } }) });
+  const unconfiguredAddress = await unconfiguredHost.listen(0); t.after(() => unconfiguredHost.close());
+  for (const path of ['/api/provider-auth/microsoft_graph', '/api/provider-auth/microsoft_graph/start', '/api/provider-auth/microsoft_graph/cancel', '/api/provider-auth/microsoft_graph/clear']) {
+    const unauthenticated = await request(unconfiguredAddress, path, { method: path.endsWith('microsoft_graph') ? 'GET' : 'POST', headers: { 'content-type': 'application/json' }, body: path.endsWith('microsoft_graph') ? undefined : '{}' });
+    assert.equal(unauthenticated.response.status, 401);
+    const badOrigin = await request(unconfiguredAddress, path, { method: path.endsWith('microsoft_graph') ? 'GET' : 'POST', headers: { authorization: `Bearer ${unconfiguredAddress.token}`, 'content-type': 'application/json', origin: 'https://127.0.0.1.evil' }, body: path.endsWith('microsoft_graph') ? undefined : '{}' });
+    assert.equal(badOrigin.response.status, 403);
+  }
+  const originRejected = await request(unconfiguredAddress, '/api/provider-auth/microsoft_graph', { headers: { authorization: `Bearer ${unconfiguredAddress.token}`, origin: 'http://127.0.0.1.evil' } }); assert.equal(originRejected.response.status, 403);
+  const unconfiguredStatus = await request(unconfiguredAddress, '/api/provider-auth/microsoft_graph', { headers: { authorization: `Bearer ${unconfiguredAddress.token}` } }); assert.equal(unconfiguredStatus.response.status, 200); assert.equal(unconfiguredStatus.body.microsoft_graph.state, 'disabled'); assert.ok(Number(unconfiguredStatus.response.headers.get('content-length')) < 65536); assert.equal(new MicrosoftGraphProvider({ enabled: true }).authStatus().state, 'unconfigured');
+  const wrongType = await request(unconfiguredAddress, '/api/provider-auth/microsoft_graph/start', { method: 'POST', headers: { authorization: `Bearer ${unconfiguredAddress.token}` }, body: '{}' }); assert.equal(wrongType.response.status, 415);
+  const extraField = await request(unconfiguredAddress, '/api/provider-auth/microsoft_graph/cancel', { method: 'POST', headers: { authorization: `Bearer ${unconfiguredAddress.token}`, 'content-type': 'application/json' }, body: '{"unexpected":true}' }); assert.equal(extraField.response.status, 400);
+  const rejectedStart = await request(unconfiguredAddress, '/api/provider-auth/microsoft_graph/start', { method: 'POST', headers: { authorization: `Bearer ${unconfiguredAddress.token}`, 'content-type': 'application/json' }, body: '{}' }); assert.equal(rejectedStart.response.status, 409); assert.equal(rejectedStart.body.error, 'provider_unconfigured');
+
+  let deviceRequests = 0; const grants = new OperatorGrantStore(); const transport = { request: async requestValue => { if (requestValue.path.endsWith('/devicecode')) { deviceRequests += 1; return { status: 200, body: { device_code: 'device', user_code: 'CODE', verification_uri: 'https://microsoft.com/devicelogin', interval: 5 } }; } return { status: 400, body: { error: 'authorization_pending' } }; } };
+  const graph = new MicrosoftGraphProvider({ enabled: true, tenant: 'organizations', clientId: '00001111-aaaa-2222-bbbb-3333cccc4444', scopes: ['User.Read'], transport, grantStore: grants, sleep: async (milliseconds, signal) => await new Promise((resolve, reject) => { const timer = setTimeout(resolve, Math.min(milliseconds, 5)); signal?.addEventListener('abort', () => { clearTimeout(timer); reject(Object.assign(new Error('cancelled'), { code: 'provider_cancelled' })); }, { once: true }); }) });
+  grants.grant({ capability: 'microsoft.graph.mail', provider: 'microsoft_graph', accountFingerprint: 'acct-api', expiresAt: Date.now() + 60000 }); grants.grant({ capability: 'microsoft.graph.teams', provider: 'microsoft_graph', accountFingerprint: 'acct-api', expiresAt: Date.now() + 60000 });
+  const configuredHost = new HostServer({ ...base, providerAuth: () => ({ microsoft_graph: { configured: graph.authConfigured(), start: signal => graph.startAuth(signal), status: () => graph.authStatus(), cancel: () => graph.cancelAuth(), clear: () => graph.clearAuth() } }) }); const configuredAddress = await configuredHost.listen(0); t.after(() => configuredHost.close());
+  const authHeaders = { authorization: `Bearer ${configuredAddress.token}`, 'content-type': 'application/json' }; const [firstStart, secondStart] = await Promise.all([request(configuredAddress, '/api/provider-auth/microsoft_graph/start', { method: 'POST', headers: authHeaders, body: '{}' }), request(configuredAddress, '/api/provider-auth/microsoft_graph/start', { method: 'POST', headers: authHeaders, body: '{}' })]); assert.equal(firstStart.response.status, 202); assert.equal(secondStart.response.status, 202); await new Promise(resolve => setTimeout(resolve, 15)); assert.equal(deviceRequests, 1);
+  const pending = await request(configuredAddress, '/api/provider-auth/microsoft_graph', { headers: { authorization: authHeaders.authorization } }); assert.equal(pending.response.status, 200); assert.equal(pending.body.microsoft_graph.state, 'awaiting_user');
+  const cancelled = await request(configuredAddress, '/api/provider-auth/microsoft_graph/cancel', { method: 'POST', headers: authHeaders, body: '{}' }); assert.equal(cancelled.response.status, 200); assert.equal(cancelled.body.status.state, 'idle');
+  const cleared = await request(configuredAddress, '/api/provider-auth/microsoft_graph/clear', { method: 'POST', headers: authHeaders, body: '{}' }); assert.equal(cleared.response.status, 200); assert.equal(cleared.body.status.state, 'idle'); assert.equal(grants.get('microsoft.graph.mail'), null); assert.equal(grants.get('microsoft.graph.teams'), null);
+});
+
+test('Graph auth controls are present in the UI without exposing account credentials', async () => {
+  const html = await readFile(new URL('../../ui/index.html', import.meta.url), 'utf8'); const script = await readFile(new URL('../../ui/app.js', import.meta.url), 'utf8');
+  for (const id of ['graph-auth', 'graph-auth-cancel', 'graph-auth-clear']) assert.match(html, new RegExp(`id=["']${id}["']`, 'u'));
+  assert.match(script, /accountFingerprint/u); assert.doesNotMatch(html, /access_token|userPrincipalName|account[_-]?id/iu); assert.doesNotMatch(script, /access_token|userPrincipalName|account[_-]?id/iu);
 });
 
 test('registry maps protected config keys explicitly and exposes provider state separately', async () => {

@@ -38,9 +38,9 @@ async function body(req, maxBytes, timeoutMs) {
 }
 
 export class HostServer {
-  constructor({ controller, engine, config = {}, providers, operatorGrants } = {}) {
+  constructor({ controller, engine, config = {}, providers, providerAuth, operatorGrants } = {}) {
     if (!controller) throw new TypeError('controller is required');
-    this.controller = controller; this.engine = engine; this.config = mergeConfig(config); this.providers = providers; this.operatorGrants = operatorGrants; this.token = randomBytes(32).toString('base64url'); this.server = null; this.port = null; this.authFailures = new Map();
+    this.controller = controller; this.engine = engine; this.config = mergeConfig(config); this.providers = providers; this.providerAuth = providerAuth; this.operatorGrants = operatorGrants; this.token = randomBytes(32).toString('base64url'); this.server = null; this.port = null; this.authFailures = new Map();
   }
   async listen(port = 0) {
     if (this.server) return this.address();
@@ -74,10 +74,13 @@ export class HostServer {
     this.clearAuthFailure(req);
     if (req.method === 'GET' && ASSETS.has(path)) return this.asset(path, res);
     if (req.method === 'GET' && path === '/api/status') return this.status(res);
+    if (req.method === 'GET' && path === '/api/provider-auth/microsoft_graph') return this.providerAuthStatus(res);
     if (req.method === 'GET' && path === '/api/operator-grants') return json(res, 200, { capabilities: this.operatorGrants?.list?.() ?? [] });
     try {
       if (req.method === 'POST' && path === '/api/sessions') { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); const input = exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), ['session_id', 'reset']); if (input.session_id !== undefined && (typeof input.session_id !== 'string' || !OPAQUE_ID.test(input.session_id))) return json(res, 400, { error: 'invalid_request_body' }); if (input.reset !== undefined && typeof input.reset !== 'boolean') return json(res, 400, { error: 'invalid_request_body' }); const session = this.controller.createSession(input.session_id); if (input.reset) this.controller.resetSession(session.id); return json(res, 201, { session_id: session.id, state: this.controller.state(session.id) }); }
       if (req.method === 'POST' && path === '/api/chat') return await this.chat(req, res);
+      const authAction = path.match(/^\/api\/provider-auth\/microsoft_graph\/(start|cancel|clear)$/);
+      if (req.method === 'POST' && authAction) { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), []); const control = this.providerAuth?.()?.microsoft_graph; if (!control || control.configured !== true) return json(res, 409, { error: 'provider_unconfigured' }); if (authAction[1] === 'start') { void Promise.resolve(control.start()).catch(() => {}); return json(res, 202, { accepted: true, status: control.status() }); } if (authAction[1] === 'cancel') control.cancel(); else control.clear(); return json(res, 200, { accepted: true, status: control.status() }); }
       if (req.method === 'POST' && path === '/api/cancel') { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); const input = exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), ['request_id'], ['request_id']); if (typeof input.request_id !== 'string' || !OPAQUE_ID.test(input.request_id)) return json(res, 400, { error: 'invalid_request_id' }); const cancelled = this.controller.cancel(input.request_id); return json(res, cancelled ? 200 : 404, { cancelled }); }
       if (req.method === 'POST' && path === '/api/operator-grants/revoke-all') { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), []); this.controller.cancelActive?.(); return json(res, 200, this.operatorGrants?.revokeAll?.() ?? { revoked: 0 }); }
       const grant = path.match(/^\/api\/operator-grants\/([A-Za-z0-9_.:-]{1,256})$/);
@@ -94,6 +97,7 @@ export class HostServer {
       return json(res, 404, { error: 'not_found' });
     } catch (error) { if (res.headersSent) return this.fail(res, error); const code = error.code ?? (error instanceof TypeError ? 'invalid_request_body' : 'request_failed'); const status = code === 'body_too_large' ? 413 : code === 'request_timeout' ? 408 : (code.startsWith('invalid_') || code === 'unsupported_content_type') ? 400 : 500; return json(res, status, { error: code }); }
   }
+  providerAuthStatus(res) { const status = this.providerAuth?.()?.microsoft_graph?.status?.() ?? { state: 'unavailable', prompt: null }; return json(res, 200, { microsoft_graph: status }); }
   async asset(path, res) {
     const [file, type] = ASSETS.get(path); const candidate = resolve(join(UI_ROOT, file));
     if (!isWithinDirectory(UI_ROOT, candidate)) return json(res, 404, { error: 'not_found' });

@@ -17,6 +17,27 @@ draft identity/content/ETag, then revalidate it before dispatch. A bounded
 pre-dispatch ledger records every write attempt, so ambiguous failures cannot
 be resent.
 
+An explicitly configured Graph provider may use the Microsoft public-client device-code
+flow with `tenant`, `client_id`, and a bounded delegated `scopes` list. The implementation
+allowlists only the Microsoft login device-code/token endpoints and the Graph routes above,
+uses injected HTTPS transport/clock/sleep hooks for tests, and keeps access tokens in memory
+only. Device-code UI callbacks receive only the bounded user code and verification URL; tokens
+are never written to configuration, logs, model messages, or UI callback payloads. Transport
+bodies, retries, polling, timeouts, cancellation, and response parsing are bounded. After
+authentication, `status()` queries `/me` and exposes only a stable in-memory account fingerprint.
+The registry's bounded `providerAuthStatus()` control surface can be polled by the host/UI to
+obtain the current state and device `userCode`/verification URL; it contains no token or account
+identifier. Calling the credential's `clear()` aborts an in-flight device flow and removes its
+memory-only cache.
+The default registry remains disabled and unconfigured until an operator supplies explicit
+settings; no Microsoft account is contacted by tests or fixture launches.
+The Entra app registration must be an explicitly approved public client with public-client
+flows enabled; this path never accepts a client secret. The scope allowlist is limited to
+`User.Read`, `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `Chat.Read`, `Chat.ReadWrite`, and
+`ChatMessage.Send`; `User.Read` is mandatory for opaque account verification, and each Graph
+operation is rejected unless its least-privilege delegated scope (or documented higher scope)
+was configured and returned by the token response when a scope field is supplied.
+
 `OperatorGrantStore` is an in-memory, provider/account/scope-bound operator
 grant. `full_access` can suppress confirmation only for routine draft creation
 and mark-read when a matching, unexpired grant exists. Send actions always keep
