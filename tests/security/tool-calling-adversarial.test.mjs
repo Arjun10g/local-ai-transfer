@@ -304,10 +304,23 @@ test('host rejects hostile origin/host/auth and malformed bounded session bodies
   const sessionResponse = await fetch(`${address.url}/api/sessions`, { method: 'POST', headers: bodyHeaders(address.token), body: '{}' });
   const session = await sessionResponse.json();
   assert.match(session.session_id, /^[A-Za-z0-9_-]{8,96}$/);
+  const noType = await fetch(`${address.url}/api/sessions`, { method: 'POST', headers: auth(address.token), body: '{}' }); assert.equal(noType.status, 415);
+  const cancelNoType = await fetch(`${address.url}/api/cancel`, { method: 'POST', headers: auth(address.token), body: JSON.stringify({ request_id: 'req_valid01' }) }); assert.equal(cancelNoType.status, 415);
+  const wrongType = await fetch(`${address.url}/api/tool-confirmations/cnf_missing`, { method: 'POST', headers: bodyHeaders(address.token), body: JSON.stringify({ approved: 'yes', request_id: 'req_valid01', call_id: 'call_valid01' }) }); assert.equal(wrongType.status, 400);
+  for (let attempt = 0; attempt < 20; attempt++) await fetch(`${address.url}/api/status`);
+  assert.equal((await fetch(`${address.url}/api/status`)).status, 429);
 });
 
-test.todo('KNOWN GAP: confirmation HTTP bodies should reject unknown fields instead of silently ignoring them');
-test.todo('KNOWN GAP: HostServer must await chat-handler failures so invalid request IDs/body limits return typed HTTP errors instead of hanging');
+test('HostServer strictly validates confirmation bodies and contains chat handler faults', async t => {
+  const engine = new FixtureEngineClient({ delayMs: 0 }); const controller = new ConversationController({ engine }); const host = new HostServer({ controller, engine }); const address = await host.listen(0); t.after(() => host.close());
+  const extra = await fetch(`${address.url}/api/tool-confirmations/cnf_missing`, { method: 'POST', headers: bodyHeaders(address.token), body: JSON.stringify({ approved: true, request_id: 'req_valid01', call_id: 'call_valid01', extra: true }) });
+  assert.equal(extra.status, 400);
+  const badRequest = await fetch(`${address.url}/api/chat`, { method: 'POST', headers: bodyHeaders(address.token), body: JSON.stringify({ session_id: 'ses_valid01', request_id: 'bad id', message: 'hello' }) });
+  assert.equal(badRequest.status, 400); assert.equal((await badRequest.json()).error, 'invalid_request_id');
+  const faulty = new HostServer({ controller: { runTurn: async () => { throw new Error('handler fault'); } }, engine }); const faultyAddress = await faulty.listen(0); t.after(() => faulty.close());
+  const faultResponse = await fetch(`${faultyAddress.url}/api/chat`, { method: 'POST', headers: bodyHeaders(faultyAddress.token), body: JSON.stringify({ session_id: 'ses_valid01', request_id: 'req_valid01', message: 'hello' }) });
+  assert.equal(faultResponse.status, 500); assert.equal((await faultResponse.json()).error, 'request_failed');
+});
 
 test('confirmation endpoint integration requires both correlation fields and rejects replay', async t => {
   const engine = oneToolEngine(call('test.confirm', {}, 'call_http01'));
@@ -319,7 +332,7 @@ test('confirmation endpoint integration requires both correlation fields and rej
   const run = controller.runTurn({ sessionId: 'ses_http01', requestId: 'req_http01', message: 'confirm', onEvent: event => events.push(event) });
   const required = await waitForEvent(events, 'tool.confirmation_required');
   const missing = await fetch(`${address.url}/api/tool-confirmations/${required.data.confirmation_id}`, { method: 'POST', headers: bodyHeaders(address.token), body: JSON.stringify({ approved: true }) });
-  assert.equal(missing.status, 404);
+  assert.equal(missing.status, 400);
   const mismatch = await fetch(`${address.url}/api/tool-confirmations/${required.data.confirmation_id}`, { method: 'POST', headers: bodyHeaders(address.token), body: JSON.stringify({ approved: true, request_id: 'req_other01', call_id: 'call_http01' }) });
   assert.equal(mismatch.status, 404);
   const approved = await fetch(`${address.url}/api/tool-confirmations/${required.data.confirmation_id}`, { method: 'POST', headers: bodyHeaders(address.token), body: JSON.stringify({ approved: true, request_id: 'req_http01', call_id: 'call_http01' }) });
