@@ -526,6 +526,20 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertEqual(payload["stage"], "eval-stage-starting")
         self.assertEqual(payload["operation_stage"], "eval-bootstrap:mkdir")
 
+    def test_remote_failure_retains_bounded_redacted_stdout_evidence(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_remote_output")
+        completed = subprocess.CompletedProcess(
+            ["probe"],
+            2,
+            stdout="remote toolchain refused: token=do-not-retain\n",
+            stderr="",
+        )
+        with mock.patch.object(orchestrator.subprocess, "run", return_value=completed):
+            receipt = orchestrator._remote(["probe"], timeout=1)
+        self.assertEqual(receipt["status"], "failed")
+        self.assertEqual(receipt["exit_code"], 2)
+        self.assertEqual(receipt["stdout_tail"], "remote toolchain refused: token=<redacted>\n")
+
     def test_salvage_timeout_is_size_aware_and_deadline_bounded(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_timeout")
         info = {"phase_id": "j1m-test", "instance_info": {"ssh_user": "u", "ip": "127.0.0.1"}}

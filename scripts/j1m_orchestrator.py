@@ -36,8 +36,8 @@ class OperatorCancelled(Exception):
     pass
 
 
-def _redacted_stderr_tail(value: object) -> str:
-    """Return bounded stderr evidence without allowing credential-shaped text."""
+def _redacted_output_tail(value: object) -> str:
+    """Return bounded command evidence without allowing credential-shaped text."""
 
     text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value or "")
     text = re.sub(r"(?i)(api[_-]?key|token|password|secret)(\s*[=:]\s*)\S+", r"\1\2<redacted>", text)
@@ -67,10 +67,14 @@ def _remote(command: list[str], *, timeout: float) -> dict[str, Any]:
     try:
         result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        return {"status": "transport_timeout", "exit_code": None, "error_type": type(exc).__name__, "stderr_tail": _redacted_stderr_tail(exc.stderr)}
-    receipt = {"status": "completed" if result.returncode == 0 else "failed", "exit_code": result.returncode, "stderr_tail": _redacted_stderr_tail(result.stderr)}
+        return {"status": "transport_timeout", "exit_code": None, "error_type": type(exc).__name__, "stderr_tail": _redacted_output_tail(exc.stderr), "stdout_tail": _redacted_output_tail(exc.stdout)}
+    receipt = {"status": "completed" if result.returncode == 0 else "failed", "exit_code": result.returncode, "stderr_tail": _redacted_output_tail(result.stderr)}
     if result.returncode != 0:
         receipt["error_type"] = "remote_exit"
+        # Several bounded probes intentionally report a refusal on stdout.
+        # Retain only a redacted tail so a failed ephemeral host can be
+        # diagnosed after its mandatory teardown without logging credentials.
+        receipt["stdout_tail"] = _redacted_output_tail(result.stdout)
     return receipt
 
 
