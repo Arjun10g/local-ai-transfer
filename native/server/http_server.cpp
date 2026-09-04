@@ -138,6 +138,25 @@ const char* reason(int status) {
 
 }  // namespace
 
+std::string json_escape(const std::string& value) {
+  std::ostringstream out;
+  for (const unsigned char c : value) {
+    switch (c) {
+      case '"': out << "\\\""; break;
+      case '\\': out << "\\\\"; break;
+      case '\b': out << "\\b"; break;
+      case '\f': out << "\\f"; break;
+      case '\n': out << "\\n"; break;
+      case '\r': out << "\\r"; break;
+      case '\t': out << "\\t"; break;
+      default:
+        if (c < 0x20) { static constexpr char hex[] = "0123456789abcdef"; out << "\\u00" << hex[c >> 4] << hex[c & 0x0f]; }
+        else out << static_cast<char>(c);
+    }
+  }
+  return out.str();
+}
+
 HttpServer::HttpServer(Engine& engine, std::string bearer_token)
     : engine_(engine), bearer_token_(std::move(bearer_token)) {}
 HttpServer::~HttpServer() { stop(); }
@@ -285,7 +304,7 @@ void HttpServer::handle(Socket client) {
   } else if (method == "GET" && path == "/version") {
     respond(client, 200, "application/json", "{\"api_version\":\"" LAE_API_VERSION "\",\"engine_version\":\"" LAE_ENGINE_VERSION "\"}", request_id);
   } else if (method == "GET" && path == "/build-info") {
-    respond(client, 200, "application/json", "{\"engine_version\":\"" LAE_ENGINE_VERSION "\",\"api_version\":\"" LAE_API_VERSION "\",\"backend\":\"" + engine_.backend_id() + "\",\"source_revision\":\"fixture-no-upstream\",\"model\":\"none\"}", request_id);
+    respond(client, 200, "application/json", "{\"engine_version\":\"" LAE_ENGINE_VERSION "\",\"api_version\":\"" LAE_API_VERSION "\",\"backend\":\"" + engine_.backend_id() + "\",\"llama_cpp_revision\":\"" LAE_LLAMA_CPP_REVISION "\",\"model\":\"external-manifest\"}", request_id);
   } else if (method == "GET" && path == "/probe") {
     respond(client, 200, "application/json", "{\"bind\":\"127.0.0.1\",\"backend\":\"" + engine_.backend_id() + "\",\"platform\":\"" +
 #ifdef _WIN32
@@ -311,6 +330,8 @@ void HttpServer::handle(Socket client) {
     const unsigned max_tokens = json_unsigned(body, "max_tokens", 8);
     if (max_tokens < 1 || max_tokens > 64) { fail(400, "invalid_request"); close_socket(client); return; }
     const std::string session_id = json_string(body, "session_id");
+    const std::string prompt = json_string(body, "content");
+    if (prompt.empty()) { fail(400, "invalid_request"); close_socket(client); return; }
     const size_t stream_key = body.find("\"stream\"");
     const size_t stream_colon = stream_key == std::string::npos ? std::string::npos : body.find(':', stream_key + 8);
     size_t stream_value = stream_colon == std::string::npos ? std::string::npos : stream_colon + 1;
@@ -322,16 +343,18 @@ void HttpServer::handle(Socket client) {
       std::ostringstream head; head << "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nX-Request-Id: " << request_id << "\r\n\r\n";
       if (!send_all(client, head.str())) { cancellation->store(true); close_socket(client); return; }
       try {
-        const auto result = engine_.generate(request_id, session_id, {"fixture", max_tokens}, cancellation, [&](const std::string& token) {
+        const auto result = engine_.generate(request_id, session_id, {prompt, max_tokens}, cancellation, [&](const std::string& token) {
           combined += token;
-          return send_all(client, "data: {\"id\":\"" + request_id + "\",\"choices\":[{\"delta\":{\"content\":\"" + token + "\"}}]}\n\n");
+          return send_all(client, "data: {\"id\":\"" + json_escape(request_id) + "\",\"choices\":[{\"delta\":{\"content\":\"" + json_escape(token) + "\"}}]}\n\n");
         });
-        send_all(client, "data: {\"id\":\"" + request_id + "\",\"choices\":[{\"delta\":{},\"finish_reason\":\"" + result.finish_reason + "\"}]}\n\ndata: [DONE]\n\n");
-      } catch (const std::invalid_argument&) { send_all(client, "data: {\"error\":{\"code\":\"not_found\"}}\n\n"); }
+        send_all(client, "data: {\"id\":\"" + json_escape(request_id) + "\",\"choices\":[{\"delta\":{},\"finish_reason\":\"" + json_escape(result.finish_reason) + "\"}]}\n\ndata: [DONE]\n\n");
+      } catch (const std::invalid_argument&) { send_all(client, "data: {\"error\":{\"code\":\"not_found\"}}\n\ndata: [DONE]\n\n"); }
+      catch (const std::logic_error&) { send_all(client, "data: {\"error\":{\"code\":\"busy\"}}\n\ndata: [DONE]\n\n"); }
+      catch (...) { send_all(client, "data: {\"error\":{\"code\":\"internal_error\"}}\n\ndata: [DONE]\n\n"); }
     } else {
       try {
-        const auto result = engine_.generate(request_id, session_id, {"fixture", max_tokens}, cancellation, [&](const std::string& token) { combined += token; return true; });
-        respond(client, 200, "application/json", "{\"id\":\"" + request_id + "\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"" + combined + "\"},\"finish_reason\":\"" + result.finish_reason + "\"}],\"usage\":{\"completion_tokens\":" + std::to_string(result.generated_tokens) + "}}", request_id);
+        const auto result = engine_.generate(request_id, session_id, {prompt, max_tokens}, cancellation, [&](const std::string& token) { combined += token; return true; });
+        respond(client, 200, "application/json", "{\"id\":\"" + json_escape(request_id) + "\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"" + json_escape(combined) + "\"},\"finish_reason\":\"" + json_escape(result.finish_reason) + "\"}],\"usage\":{\"completion_tokens\":" + std::to_string(result.generated_tokens) + "}}", request_id);
       } catch (const std::invalid_argument&) { fail(404, "not_found"); } catch (const std::logic_error&) { fail(409, "busy"); } catch (...) { fail(500, "internal_error"); }
     }
   } else {
