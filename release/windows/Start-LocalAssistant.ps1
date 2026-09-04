@@ -87,6 +87,11 @@ try {
     $start.FileName = $nodePath
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $false
+    $start.EnvironmentVariables.Clear()
+    foreach ($name in @('SystemRoot', 'WINDIR', 'TEMP', 'TMP')) {
+        $value = [Environment]::GetEnvironmentVariable($name)
+        if (-not [string]::IsNullOrEmpty($value)) { $start.EnvironmentVariables[$name] = $value }
+    }
     $start.Arguments = (($arguments | ForEach-Object { ConvertTo-WindowsProcessArgument ([string]$_) }) -join ' ')
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $start

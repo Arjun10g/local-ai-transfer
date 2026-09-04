@@ -24,6 +24,7 @@ class PackageScannerTests(unittest.TestCase):
         self.assertIn("PipeOptions]::CurrentUserOnly", start)
         self.assertIn("--launch-gate-pipe", start)
         self.assertLess(start.index("[LocalAssistantJob]::Assign"), start.index('$gateWriter.Write("GO`n")'))
+        self.assertIn("$start.EnvironmentVariables.Clear()", start)
         self.assertIn("RevealBootstrapUrl", start)
         self.assertIn("if ($RevealBootstrapUrl) { Write-Output $bootstrapUrl }", start)
         self.assertEqual(1, start.count("Write-Output $bootstrapUrl"))
