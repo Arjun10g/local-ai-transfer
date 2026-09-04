@@ -2,7 +2,7 @@
   "schema": "local_bmo.tool-call-eval.v1",
   "model": "qwen35-9b-q4-k-m",
   "protocol": "qwen35-xml-tool-call-v1",
-  "limits": {"context_tokens": 2048, "max_output_tokens": 32, "temperature": 0, "max_cases": 8},
+  "limits": {"context_tokens": 2048, "max_output_tokens": 64, "temperature": 0, "max_cases": 8},
   "tools": [
     {"type": "function", "function": {"name": "system.get_info", "description": "Return local system information. Takes no arguments.", "parameters": {"type": "object", "properties": {}, "additionalProperties": false}}},
     {"type": "function", "function": {"name": "weather.get", "description": "Get a weather report for one city.", "parameters": {"type": "object", "properties": {"city": {"type": "string"}, "units": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["city", "units"], "additionalProperties": false}}}

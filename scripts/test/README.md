@@ -15,23 +15,25 @@ capability is recorded as `SKIP`, not `PASS`.
 ## Local Qwen tool-call evaluation
 
 The deterministic eight-case fixture covers tool selection, exact arguments,
-no-tool responses, malformed/unknown tools, and prompt injection. It uses the
-native engine's Qwen XML tool protocol because this API does not accept an
-OpenAI `tools` field. Validate the fixture without starting an engine with:
+no-tool responses, malformed/unknown tools, and prompt injection. It sends
+the native `tools` field, which the pinned runtime renders through Qwen's chat
+template. Validate the fixture without starting an engine with:
 
 ```text
 python3 scripts/test/evaluate_tool_calls.py --dry-run
 python3 -m unittest discover -s tests/model -p 'test_*.py' -q
 ```
 
-Against an already-running local engine, pass its bearer token on the command
-line or from a secret manager (the evaluator never prints it), and optionally
-pass the engine PID for RSS samples:
+Against an already-running local engine, provide a protected token file or an
+inherited `LAE_EVAL_TOKEN` environment variable (the evaluator never prints
+or accepts token material as an argument), and optionally pass the engine PID
+for RSS samples:
 
 ```text
 python3 scripts/test/evaluate_tool_calls.py \
   --endpoint http://127.0.0.1:PORT/v1/chat/completions \
-  --token '<local-token>' --timeout 90 --engine-pid PID
+  --token-file /protected/path/native-token \
+  --timeout 90 --engine-pid PID
 ```
 
 Result JSON contains case IDs, pass/fail/error reasons, latency, and optional
