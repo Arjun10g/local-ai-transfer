@@ -61,6 +61,16 @@ class J1MConfigTests(unittest.TestCase):
         hf_commands = [command for command in plan["commands"] if any(part == "download" for part in command)]
         self.assertEqual(len(hf_commands), 1)
         self.assertNotIn("--local-dir-use-symlinks", hf_commands[0])
+        remote_plan = self.j1m.command_plan(config, runner="/scratch/j1m/j1m_runner.py", config_path="/scratch/j1m/j1m-config.json")
+        nested_runner_commands = [command for command in remote_plan if "/scratch/j1m/j1m_runner.py" in command]
+        self.assertTrue(nested_runner_commands)
+        self.assertTrue(all("--config" in command for command in nested_runner_commands))
+        self.assertTrue(all(command[command.index("--config") + 1] == "/scratch/j1m/j1m-config.json" for command in nested_runner_commands))
+
+    def test_utility_mode_does_not_require_default_config(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(self.j1m, "DEFAULT_CONFIG", Path(directory) / "missing.json"), mock.patch.object(self.j1m, "check_scratch", return_value={"status": "ok"}) as check:
+            self.assertEqual(self.j1m.main(["--scratch", directory, "--min-scratch-gib", "1"]), 0)
+            check.assert_called_once()
 
     def test_hf_token_file_is_private_and_removed(self):
         with self.j1m.hf_token_file("test-token-never-logged") as path:

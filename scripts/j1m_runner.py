@@ -325,29 +325,29 @@ def command_plan(config: dict[str, Any], source: str = "/scratch/hf/Qwen3.5-9B",
         ["python3", "-m", "venv", "/scratch/j1m/venv"],
         ["mkdir", "-p", wheelhouse],
         ["/scratch/j1m/venv/bin/pip", "wheel", "--disable-pip-version-check", "--no-input", "--wheel-dir", wheelhouse, "-r", f"{llama['checkout']}/{config['python_dependencies']['requirements_file']}", f"{llama['checkout']}/{config['python_dependencies']['local_gguf_package']}"],
-        [python_exec, runner, "--wheelhouse-lock", wheelhouse_lock, "--wheelhouse", wheelhouse, "--llama-revision", llama["revision"]],
+        [python_exec, runner, "--config", config_path, "--wheelhouse-lock", wheelhouse_lock, "--wheelhouse", wheelhouse, "--llama-revision", llama["revision"]],
         ["/scratch/j1m/venv/bin/pip", "install", "--disable-pip-version-check", "--no-input", "--no-index", "--find-links", wheelhouse, "-r", f"{llama['checkout']}/{config['python_dependencies']['requirements_file']}", "gguf"],
-        [python_exec, runner, "--wheelhouse-lock", wheelhouse_lock, "--verify-wheelhouse", "--wheelhouse", wheelhouse],
-        [python_exec, runner, "--pip-freeze", f"{output}/pip-freeze.txt"],
-        [python_exec, runner, "--toolchain", f"{output}/toolchain.json", "--llama-checkout", llama["checkout"], "--wheelhouse-lock", wheelhouse_lock],
+        [python_exec, runner, "--config", config_path, "--wheelhouse-lock", wheelhouse_lock, "--verify-wheelhouse", "--wheelhouse", wheelhouse],
+        [python_exec, runner, "--config", config_path, "--pip-freeze", f"{output}/pip-freeze.txt"],
+        [python_exec, runner, "--config", config_path, "--toolchain", f"{output}/toolchain.json", "--llama-checkout", llama["checkout"], "--wheelhouse-lock", wheelhouse_lock],
         ["git", "--version"],
         ["cmake", "--version"],
         ["python3", "--version"],
         ["mkdir", "-p", source, output],
-        ["python3", runner, "--verify-llama", llama["checkout"], llama["revision"]],
+        ["python3", runner, "--config", config_path, "--verify-llama", llama["checkout"], llama["revision"]],
         ["cmake", "-S", llama["checkout"], "-B", f"{llama['checkout']}/build", "-DGGML_CUDA=OFF", "-DLLAMA_BUILD_TOOLS=ON"],
         ["cmake", "--build", f"{llama['checkout']}/build", "--target", "llama-quantize", "-j2"],
-        [python_exec, runner, "--scratch", "/scratch", "--min-scratch-gib", str(config["resources"]["required_scratch_gib"])],
+        [python_exec, runner, "--config", config_path, "--scratch", "/scratch", "--min-scratch-gib", str(config["resources"]["required_scratch_gib"])],
         [hf_exec, "download", config["source"]["model_id"], "--revision", config["source"]["revision"], "--local-dir", source],
-        [python_exec, runner, "--mark-source", source, "--revision", config["source"]["revision"]],
-        [python_exec, "-u", runner, "--verify-source", source, "--lock", "/scratch/j1m/qwen35-9b.source-lock.json", "--receipt", f"{output}/source-model-receipt.json"],
+        [python_exec, runner, "--config", config_path, "--mark-source", source, "--revision", config["source"]["revision"]],
+        [python_exec, "-u", runner, "--config", config_path, "--verify-source", source, "--lock", "/scratch/j1m/qwen35-9b.source-lock.json", "--receipt", f"{output}/source-model-receipt.json"],
         [python_exec, converter, source, "--outfile", f"{output}/Qwen3.5-9B-bf16.gguf", "--outtype", "bf16", "--no-mtp"],
         [python_exec, converter, source, "--outfile", f"{output}/Qwen3.5-9B-Q8_0.gguf", "--outtype", "q8_0", "--no-mtp"],
         [f"{llama['quantizer']}", f"{output}/Qwen3.5-9B-bf16.gguf", f"{output}/Qwen3.5-9B-Q4_K_M.gguf", "Q4_K_M"],
-        [python_exec, runner, "--inspect-tensors", f"{output}/Qwen3.5-9B-Q4_K_M.gguf", f"{output}/tensor-metadata.json", "--source-receipt", f"{output}/source-model-receipt.json"],
-        [python_exec, runner, "--scan", output],
+        [python_exec, runner, "--config", config_path, "--inspect-tensors", f"{output}/Qwen3.5-9B-Q4_K_M.gguf", f"{output}/tensor-metadata.json", "--source-receipt", f"{output}/source-model-receipt.json"],
+        [python_exec, runner, "--config", config_path, "--scan", output],
         ["rm", "-f", f"{output}/Qwen3.5-9B-bf16.gguf", f"{output}/Qwen3.5-9B-Q8_0.gguf"],
-        [python_exec, runner, "--post-cleanup", output],
+        [python_exec, runner, "--config", config_path, "--post-cleanup", output],
         [python_exec, runner, "--config", config_path, "--manifest", output],
     ]
 
@@ -487,7 +487,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--post-cleanup", type=Path)
     parser.add_argument("--execute", action="store_true", help="reserved for an already-approved host; never provisions")
     args = parser.parse_args(argv)
-    config = load_config(args.config)
     if args.verify_llama:
         checkout, expected = args.verify_llama
         actual = subprocess.run(["git", "-C", checkout, "rev-parse", "HEAD"], check=True, capture_output=True, text=True, timeout=30).stdout.strip()
@@ -588,6 +587,7 @@ def main(argv: list[str] | None = None) -> int:
         mark_source(args.mark_source, args.revision)
         return 0
     if args.manifest:
+        config = load_config(args.config)
         names = config["artifacts"]["allowlist"]
         write_artifacts(args.manifest, names, commands=command_plan(config), llama_revision=config["llama_cpp"]["revision"])
         return 0
@@ -605,9 +605,11 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(check_scratch(args.scratch, args.min_scratch_gib), sort_keys=True))
         return 0
     if args.run:
+        config = load_config(args.config)
         commands = command_plan(config, runner=str(Path(__file__).resolve()), config_path="/scratch/j1m/j1m-config.json")
         receipts = run_commands(commands, ROOT / config["resources"]["progress_path"], token_file=args.token_file, receipt_path=Path("/scratch/j1m/artifacts/command-receipt.json"))
         return 0 if receipts and all(item["status"] == "completed" for item in receipts) else 1
+    config = load_config(args.config)
     plan = build_plan(config)
     if args.plan:
         args.plan.parent.mkdir(parents=True, exist_ok=True)
