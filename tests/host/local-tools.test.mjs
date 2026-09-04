@@ -60,6 +60,6 @@ test('every local tool rejects unknown fields and wrong argument types', async (
 });
 
 test('filesystem patch rechecks canonical target before replacement', async () => {
-  const root = await fixture(); const realPolicy = new WorkspacePolicy([{ id: 'project', path: root, read: true, write: true }]); const original = realPolicy.regularFile.bind(realPolicy); let calls = 0; realPolicy.regularFile = async (...args) => { const file = await original(...args); if (++calls === 3) throw Object.assign(new Error('reparse target changed'), { code: 'path_changed' }); return file; };
+  const root = await fixture(); const realPolicy = new WorkspacePolicy([{ id: 'project', path: root, read: true, write: true }]); const original = realPolicy.regularFile.bind(realPolicy); let calls = 0; realPolicy.regularFile = async (...args) => { const file = await original(...args); if (++calls === 4) throw Object.assign(new Error('reparse target changed'), { code: 'path_changed' }); return file; };
   const tools = createFilesystemTools(realPolicy); const old = Buffer.from(await readFile(join(root, 'notes.txt'))); const patch = call('fs.apply_patch', { workspace_id: 'project', path: 'notes.txt', base_sha256: hash(old), replacement: 'should not apply' }); await assert.rejects(() => tools['fs.apply_patch'].execute(patch), error => error.code === 'path_changed'); assert.equal(await readFile(join(root, 'notes.txt'), 'utf8'), 'deadline: Friday\nsecond line\n');
 });
