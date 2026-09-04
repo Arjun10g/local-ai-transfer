@@ -38,9 +38,9 @@ async function body(req, maxBytes, timeoutMs) {
 }
 
 export class HostServer {
-  constructor({ controller, engine, config = {}, providers, providerAuth, operatorGrants } = {}) {
+  constructor({ controller, engine, config = {}, providers, providerAuth, providerShutdown, operatorGrants } = {}) {
     if (!controller) throw new TypeError('controller is required');
-    this.controller = controller; this.engine = engine; this.config = mergeConfig(config); this.providers = providers; this.providerAuth = providerAuth; this.operatorGrants = operatorGrants; this.token = randomBytes(32).toString('base64url'); this.server = null; this.port = null; this.authFailures = new Map();
+    this.controller = controller; this.engine = engine; this.config = mergeConfig(config); this.providers = providers; this.providerAuth = providerAuth; this.providerShutdown = providerShutdown; this.operatorGrants = operatorGrants; this.token = randomBytes(32).toString('base64url'); this.server = null; this.port = null; this.authFailures = new Map();
   }
   async listen(port = 0) {
     if (this.server) return this.address();
@@ -52,7 +52,7 @@ export class HostServer {
     this.port = this.server.address().port; return this.address();
   }
   address() { return { host: '127.0.0.1', port: this.port, token: this.token, url: `http://127.0.0.1:${this.port}` }; }
-  async close() { this.operatorGrants?.revokeAll?.(); this.controller.cancelActive?.(); if (!this.server) return; await new Promise(resolve => this.server.close(() => resolve())); this.server = null; await this.engine?.shutdown?.(); }
+  async close() { this.operatorGrants?.revokeAll?.(); this.controller.cancelActive?.(); await this.providerShutdown?.(); if (!this.server) return; await new Promise(resolve => this.server.close(() => resolve())); this.server = null; await this.engine?.shutdown?.(); }
   allowedRequest(req) {
     if (req.socket.remoteAddress && !['127.0.0.1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) return false;
     if (!LOCAL_HOST.test(req.headers.host ?? '')) return false;
