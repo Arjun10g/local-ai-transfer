@@ -246,6 +246,18 @@ class WindowsBackendPlanTests(unittest.TestCase):
         self.assertNotIn("llama-server", run.lower())
         self.assertNotIn("fallback", run.lower())
 
+    def test_native_build_metadata_is_bound_to_pinned_vendored_revision(self):
+        cmake = (ROOT / "native/CMakeLists.txt").read_text(encoding="utf-8")
+        ggml_cmake = (ROOT / "vendor/llama.cpp/ggml/CMakeLists.txt").read_text(encoding="utf-8")
+        main = (ROOT / "native/main.cpp").read_text(encoding="utf-8")
+        pin = "3581ba0cf591b3f772fbb002de0f70e294bc0396"
+        self.assertIn(f'set(LAE_LLAMA_CPP_REVISION "{pin}" CACHE INTERNAL', cmake)
+        self.assertIn('LAE_LLAMA_CPP_REVISION="${LAE_LLAMA_CPP_REVISION}"', cmake)
+        self.assertIn('set(LLAMA_BUILD_COMMIT "${LAE_LLAMA_CPP_REVISION}" CACHE STRING', cmake)
+        self.assertIn('set(GGML_BUILD_COMMIT "${LAE_LLAMA_CPP_REVISION}" CACHE STRING', cmake)
+        self.assertIn('if(NOT DEFINED GGML_BUILD_COMMIT OR GGML_BUILD_COMMIT STREQUAL "")', ggml_cmake)
+        self.assertIn("#include <algorithm>", main)
+
     def test_profile_and_docs_state_target_uncertainty(self):
         profiles = json.loads((ROOT / "release/windows/backend-profiles.json").read_text(encoding="utf-8"))
         self.assertEqual(profiles["schema_version"], "backend-profiles.v2")

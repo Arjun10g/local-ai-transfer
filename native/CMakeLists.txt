@@ -1,6 +1,7 @@
 option(LAE_ENABLE_LLAMA_CPP "Build against the pinned llama.cpp backend" OFF)
 option(LAE_ENABLE_LLAMA_CUDA "Build the authenticated product engine with CUDA offload" OFF)
 option(LAE_ENABLE_LLAMA_VULKAN "Build the authenticated product engine with Vulkan offload" OFF)
+set(LAE_LLAMA_CPP_REVISION "3581ba0cf591b3f772fbb002de0f70e294bc0396" CACHE INTERNAL "Pinned llama.cpp source revision" FORCE)
 if(LAE_ENABLE_LLAMA_CPP)
   set(_LAE_FIXTURE_CLI_DEFAULT OFF)
 else()
@@ -20,7 +21,7 @@ add_library(lae_runtime
 )
 target_include_directories(lae_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(lae_runtime PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/llama.cpp/vendor)
-target_compile_definitions(lae_runtime PUBLIC LAE_API_VERSION="0.1.0" LAE_ENGINE_VERSION="0.1.0" LAE_LLAMA_CPP_REVISION="3581ba0cf591b3f772fbb002de0f70e294bc0396")
+target_compile_definitions(lae_runtime PUBLIC LAE_API_VERSION="0.1.0" LAE_ENGINE_VERSION="0.1.0" LAE_LLAMA_CPP_REVISION="${LAE_LLAMA_CPP_REVISION}")
 if(LAE_ENABLE_FIXTURE_CLI)
   target_compile_definitions(lae_runtime PUBLIC LAE_ENABLE_FIXTURE_CLI=1)
 else()
@@ -70,6 +71,11 @@ if(LAE_ENABLE_LLAMA_CUDA)
   endif()
 endif()
 if(LAE_ENABLE_LLAMA_CPP)
+  # The vendored upstream tree intentionally has no .git directory. Force its
+  # generated metadata to the reviewed source pin instead of allowing nested
+  # CMake files to discover the outer product repository commit.
+  set(LLAMA_BUILD_COMMIT "${LAE_LLAMA_CPP_REVISION}" CACHE STRING "Pinned llama.cpp source revision" FORCE)
+  set(GGML_BUILD_COMMIT "${LAE_LLAMA_CPP_REVISION}" CACHE STRING "Pinned ggml source revision" FORCE)
   set(LLAMA_BUILD_COMMON OFF CACHE BOOL "" FORCE)
   set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
   set(LLAMA_BUILD_TOOLS OFF CACHE BOOL "" FORCE)

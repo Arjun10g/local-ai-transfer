@@ -1,11 +1,15 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+# This verifier is intentionally for the generated package emitted by
+# qa.clean_machine.package_runner. The checked-in release/windows tree is a
+# source skeleton and must not be represented as a finished package.
 $root = (Resolve-Path (Join-Path $PSScriptRoot '.')).Path
 $manifestPath = Join-Path $root 'RELEASE_MANIFEST.json'
 $checksumsPath = Join-Path $root 'CHECKSUMS.sha256'
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw 'RELEASE_MANIFEST.json is missing' }
 if (-not (Test-Path -LiteralPath $checksumsPath -PathType Leaf)) { throw 'CHECKSUMS.sha256 is missing' }
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+if ($manifest.kind -eq 'fixture-skeleton') { throw 'checked-in source skeleton is not a generated package; run the approved package builder first' }
 if ($manifest.schema_version -ne 'release-manifest.v1' -or $manifest.kind -ne 'portable-windows-x64-cpu' -or $manifest.model_included -ne $false -or $manifest.python_required_on_target -ne $false) {
     throw 'Release manifest identity is invalid'
 }

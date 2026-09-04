@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <fstream>
 #include <filesystem>
+#include <algorithm>
 #ifndef _WIN32
 #include <fcntl.h>
 #include <sys/stat.h>

@@ -8,6 +8,12 @@ CPU engine:
 python scripts/package/build_portable.py --source . --engine D:\build\lae-engine-cpu.exe --node D:\approved\node.exe --node-license D:\approved\node-v24.20.0-LICENSE --output D:\package\LocalBMO
 ```
 
+The checked-in `RELEASE_MANIFEST.json` is intentionally a `fixture-skeleton`
+manifest and `CHECKSUMS.sha256` is only a placeholder. `Verify-Release.ps1`
+therefore applies only to the generated package directory produced by the
+approved package builder; the source template must not be reported as a
+finished package.
+
 `node.exe` must be the official Node.js v24.20.0 Windows x64 executable with
 SHA-256 `5c976096e04e5c2c1f091938926234cc9fbebfe9787ddd149351b3b0ecc707b5`;
 the builder rejects any other bytes. Python is a packaging-machine tool only.
