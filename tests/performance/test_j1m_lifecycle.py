@@ -530,6 +530,7 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertIn("--backend", flattened)
         self.assertIn("cuda", flattened)
         self.assertIn("--token-file", flattened)
+        self.assertIn("--toolchain-receipt", flattened)
         self.assertIn("remote_model_eval.py", " ".join(flattened))
         self.assertNotIn("--token", flattened)
         self.assertTrue(all(";" not in part and "&&" not in part for part in flattened))
@@ -539,15 +540,20 @@ class StaticSafetyTests(unittest.TestCase):
         j1m = load(ROOT / "scripts/j1m_runner.py", "j1m_eval_upload_config")
         uploads = orchestrator._eval_uploads(j1m.load_config(), "/scratch/j1m", Path("/tmp/Qwen3.5-9B-Q4_K_M.gguf"), Path("/tmp/model-manifest.json"))
         names = {local.name for local, _remote, _recursive in uploads}
-        self.assertEqual(names, {"Qwen3.5-9B-Q4_K_M.gguf", "model-manifest.json", "model-manifest.sha256", "remote_model_eval.py", "evaluate_tool_calls.py", "cuda_device_probe.py", "cuda_source_closure.py", "ggml-cuda-source-lock.json", "tool_call_eval.json", "CMakeLists.txt", "native"})
+        self.assertEqual(names, {"Qwen3.5-9B-Q4_K_M.gguf", "model-manifest.json", "model-manifest.sha256", "remote_model_eval.py", "evaluate_tool_calls.py", "cuda_device_probe.py", "remote_toolchain_probe.py", "cuda_source_closure.py", "ggml-cuda-source-lock.json", "tool_call_eval.json", "CMakeLists.txt", "native"})
         self.assertTrue(any(recursive and local.name == "native" for local, _remote, recursive in uploads))
         closure_upload = next((remote for local, remote, _recursive in uploads if local.name == "cuda_source_closure.py"), None)
         self.assertEqual(closure_upload, "/scratch/j1m/engine/scripts/cuda_source_closure.py")
         lock_upload = next((remote for local, remote, _recursive in uploads if local.name == "ggml-cuda-source-lock.json"), None)
-        self.assertEqual(lock_upload, "/scratch/j1m/engine/vendor/llama.cpp/ggml-cuda-source-lock.json")
+        self.assertEqual(lock_upload, "/scratch/j1m/ggml-cuda-source-lock.json")
         source = (ROOT / "scripts/j1m_orchestrator.py").read_text(encoding="utf-8")
-        self.assertIn("for command in eval_commands[:5]", source)
-        self.assertIn("for command in eval_commands[5:]", source)
+        self.assertIn("for command in eval_commands[:3]", source)
+        self.assertIn("for command in eval_commands[3:]", source)
+        commands = orchestrator._eval_remote_commands(j1m.load_config(), "/scratch/j1m")
+        self.assertEqual(commands[1][:2], ["sudo", "apt-get"])
+        self.assertEqual(commands[2][:5], ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install"])
+        self.assertEqual(commands[3][0:2], ["python3", "/scratch/j1m/remote_toolchain_probe.py"])
+        self.assertEqual(commands[8], ["cp", "/scratch/j1m/ggml-cuda-source-lock.json", "/scratch/j1m/engine/vendor/llama.cpp/ggml-cuda-source-lock.json"])
         native_upload = next(remote for local, remote, recursive in uploads if local.name == "native" and recursive)
         self.assertEqual(native_upload, "/scratch/j1m/engine")
         self.assertNotIn("/engine/native/native", native_upload)
@@ -622,6 +628,7 @@ class StaticSafetyTests(unittest.TestCase):
                 "schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "verified", "artifact": artifact,
                 "engine": {"llama_cpp_revision": config["llama_cpp"]["revision"], "compiled_backend": f"llama.cpp/{config['llama_cpp']['revision'][:8]}/cuda"},
                 "cuda_device": {"schema": "local_bmo.j1m.cuda-device-receipt.v1", "status": "verified", "selector": "CUDA0", "device_count": 1, "device": {"name": "NVIDIA A100 80GB", "memory_total_mib": 81920}},
+                "toolchain": {"schema": "local_bmo.j1m.remote-toolchain-receipt.v1", "status": "verified", "versions": {"python3": {"major": 3, "minor": 10}, "git": {"major": 2, "minor": 39}, "cmake": {"major": 3, "minor": 22}, "g++": {"major": 11, "minor": 4}, "nvcc": {"major": 12, "minor": 2}}},
                 "metrics": {"case_count": 8, "passed": 8, "failed": 0, "errors": 0, "peak_rss_kib": 123},
                 "prompt_response_logging": False, "token_logging": False,
             }), encoding="utf-8")
@@ -639,6 +646,12 @@ class StaticSafetyTests(unittest.TestCase):
             failed["metrics"] = {"case_count": 8, "passed": 8, "failed": 0, "errors": 0, "peak_rss_kib": 123}
             receipt.write_text(json.dumps(failed), encoding="utf-8")
             with self.assertRaises(ValueError):
+                orchestrator._verify_eval_receipt(receipt, artifact)
+            failed["status"] = "verified"
+            failed["metrics"] = {"case_count": 8, "passed": 8, "failed": 0, "errors": 0, "peak_rss_kib": 123}
+            failed.pop("toolchain", None)
+            receipt.write_text(json.dumps(failed), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "toolchain"):
                 orchestrator._verify_eval_receipt(receipt, artifact)
 
     def test_remote_eval_metrics_reject_bool_missing_and_bad_totals(self):
@@ -662,6 +675,25 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertEqual(receipt["device_count"], 1)
         self.assertEqual(run.call_args.args[0][:2], ["nvidia-smi", "--query-gpu=index,name,memory.total,driver_version"])
         self.assertEqual(written["status"], "verified")
+
+    def test_remote_toolchain_probe_requires_cmake_and_nvcc_versions(self):
+        probe = load(ROOT / "scripts/test/remote_toolchain_probe.py", "remote_toolchain_probe_test")
+        versions = {
+            "python3": "Python 3.10.12\n",
+            "git": "git version 2.39.2\n",
+            "cmake": "cmake version 3.22.1\n",
+            "g++": "g++ (Ubuntu 11.4.0) 11.4.0\n",
+            "nvcc": "Cuda compilation tools, release 12.2, V12.2.140\n",
+        }
+        def run(command, **_kwargs):
+            return types.SimpleNamespace(returncode=0, stdout=versions[command[0]], stderr="")
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(probe.subprocess, "run", side_effect=run):
+            receipt = probe.probe(Path(directory) / "toolchain-receipt.json")
+            self.assertEqual(receipt["status"], "verified")
+            self.assertEqual(json.loads((Path(directory) / "toolchain-receipt.json").read_text())["versions"]["cmake"]["major"], 3)
+        with mock.patch.object(probe.subprocess, "run", side_effect=FileNotFoundError):
+            with self.assertRaisesRegex(RuntimeError, "cmake_unavailable"):
+                probe._probe("cmake")
 
     def test_eval_receipt_rejects_cpu_identity_for_cuda_lane(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_cuda_identity")
@@ -712,7 +744,7 @@ class StaticSafetyTests(unittest.TestCase):
         artifact = {"name": "Qwen3.5-9B-Q4_K_M.gguf", "size_bytes": 4, "sha256": "a" * 64, "llama_cpp_revision": "b" * 40}
         with tempfile.TemporaryDirectory() as directory:
             receipt = Path(directory) / "eval-receipt.json"
-            args = ["--model", "m", "--model-manifest", "mm", "--model-manifest-lock", "ml", "--source-revision", "c" * 40, "--llama-revision", "b" * 40, "--llama-checkout", "checkout", "--engine", "engine", "--evaluator", "eval", "--fixture", "fixture", "--token-file", "token", "--receipt", str(receipt)]
+            args = ["--model", "m", "--model-manifest", "mm", "--model-manifest-lock", "ml", "--source-revision", "c" * 40, "--llama-revision", "b" * 40, "--llama-checkout", "checkout", "--engine", "engine", "--evaluator", "eval", "--fixture", "fixture", "--token-file", "token", "--toolchain-receipt", "toolchain", "--receipt", str(receipt)]
             failed_metrics = {"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "completed_with_failures", "artifact": artifact, "engine": {"llama_cpp_revision": "b" * 40, "compiled_backend": "llama.cpp/bbbbbbbb/cpu"}, "metrics": {"case_count": 8, "passed": 7, "failed": 1, "errors": 0, "peak_rss_kib": 1}, "prompt_response_logging": False, "token_logging": False}
             with mock.patch.object(remote, "verify_artifact", return_value=artifact), mock.patch.object(remote, "_launch_and_evaluate", return_value=failed_metrics):
                 self.assertEqual(remote.main(args), 0)

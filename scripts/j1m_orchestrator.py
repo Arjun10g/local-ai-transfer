@@ -54,6 +54,15 @@ def _persist_lifecycle(phase_id: str, lifecycle: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def _progress(path: Path, stage: str, **details: Any) -> None:
+    """Best-effort atomic progress marker; never masks cleanup failures."""
+
+    try:
+        j1m_runner.write_progress(path, stage, **details)
+    except Exception:
+        pass
+
+
 def _remote(command: list[str], *, timeout: float) -> dict[str, Any]:
     try:
         result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout)
@@ -137,8 +146,12 @@ def _eval_uploads(config: dict[str, Any], remote_root: str, artifact_path: Path,
         (ROOT / "scripts" / "test" / "remote_model_eval.py", f"{remote_root}/remote_model_eval.py", False),
         (ROOT / "scripts" / "test" / "evaluate_tool_calls.py", f"{remote_root}/evaluate_tool_calls.py", False),
         (ROOT / "scripts" / "test" / "cuda_device_probe.py", f"{remote_root}/cuda_device_probe.py", False),
+        (ROOT / "scripts" / "test" / "remote_toolchain_probe.py", f"{remote_root}/remote_toolchain_probe.py", False),
         (ROOT / "scripts" / "cuda_source_closure.py", f"{remote_root}/engine/scripts/cuda_source_closure.py", False),
-        (ROOT / "vendor" / "llama.cpp" / "ggml-cuda-source-lock.json", f"{remote_root}/engine/vendor/llama.cpp/ggml-cuda-source-lock.json", False),
+        # The pinned checkout directory is created remotely after these
+        # uploads; the lock is copied into its final vendor path by an argv
+        # stage after the checkout copy.
+        (ROOT / "vendor" / "llama.cpp" / "ggml-cuda-source-lock.json", f"{remote_root}/ggml-cuda-source-lock.json", False),
         (ROOT / "tests" / "model" / "tool_call_eval.json", f"{remote_root}/tool_call_eval.json", False),
         (ROOT / "CMakeLists.txt", f"{remote_root}/engine/CMakeLists.txt", False),
         # Recursive scp copies the source directory beneath its destination;
@@ -158,14 +171,18 @@ def _eval_remote_commands(config: dict[str, Any], remote_root: str) -> list[list
     build_root = f"{remote_root}/engine-build"
     return [
         ["mkdir", "-p", f"{remote_root}/model", f"{engine_root}/native", f"{engine_root}/vendor", f"{engine_root}/scripts", f"{remote_root}/artifacts"],
+        ["sudo", "apt-get", "update"],
+        ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "--no-install-recommends", "ca-certificates", "cmake", "build-essential", "git", "python3", "python3-venv"],
+        ["python3", f"{remote_root}/remote_toolchain_probe.py", "--output", f"{remote_root}/artifacts/toolchain-receipt.json"],
         ["git", "clone", "--filter=blob:none", llama["repository"], checkout],
         ["git", "-C", checkout, "checkout", "--detach", llama["revision"]],
         ["git", "-C", checkout, "rev-parse", "HEAD"],
         ["cp", "-a", checkout, f"{engine_root}/vendor/llama.cpp"],
+        ["cp", f"{remote_root}/ggml-cuda-source-lock.json", f"{engine_root}/vendor/llama.cpp/ggml-cuda-source-lock.json"],
         ["python3", f"{remote_root}/cuda_device_probe.py", "--output", f"{remote_root}/artifacts/cuda-device-receipt.json"],
         ["cmake", "-S", engine_root, "-B", build_root, "-DCMAKE_BUILD_TYPE=Release", "-DLAE_ENABLE_LLAMA_CPP=ON", "-DLAE_ENABLE_LLAMA_CUDA=ON", f"-DCMAKE_CUDA_ARCHITECTURES={eval_mode['cuda_architecture']}"],
         ["cmake", "--build", build_root, "--target", "lae-engine", "--parallel", "2"],
-        ["python3", f"{remote_root}/remote_model_eval.py", "--model", f"{remote_root}/model/Qwen3.5-9B-Q4_K_M.gguf", "--model-manifest", f"{remote_root}/model-manifest.json", "--model-manifest-lock", f"{remote_root}/model-manifest.sha256", "--source-revision", config["source"]["revision"], "--llama-revision", llama["revision"], "--llama-checkout", checkout, "--engine", f"{build_root}/native/lae-engine", "--evaluator", f"{remote_root}/evaluate_tool_calls.py", "--fixture", f"{remote_root}/tool_call_eval.json", "--token-file", f"{remote_root}/engine-token", "--backend", eval_mode["backend"], "--cuda-device-name", device_name, "--cuda-device-receipt", f"{remote_root}/artifacts/cuda-device-receipt.json", "--receipt", f"{remote_root}/artifacts/eval-receipt.json", "--timeout", "600"],
+        ["python3", f"{remote_root}/remote_model_eval.py", "--model", f"{remote_root}/model/Qwen3.5-9B-Q4_K_M.gguf", "--model-manifest", f"{remote_root}/model-manifest.json", "--model-manifest-lock", f"{remote_root}/model-manifest.sha256", "--source-revision", config["source"]["revision"], "--llama-revision", llama["revision"], "--llama-checkout", checkout, "--engine", f"{build_root}/native/lae-engine", "--evaluator", f"{remote_root}/evaluate_tool_calls.py", "--fixture", f"{remote_root}/tool_call_eval.json", "--token-file", f"{remote_root}/engine-token", "--backend", eval_mode["backend"], "--cuda-device-name", device_name, "--cuda-device-receipt", f"{remote_root}/artifacts/cuda-device-receipt.json", "--toolchain-receipt", f"{remote_root}/artifacts/toolchain-receipt.json", "--receipt", f"{remote_root}/artifacts/eval-receipt.json", "--timeout", "600"],
     ]
 
 
@@ -204,12 +221,21 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     device = cuda_device.get("device") if isinstance(cuda_device, dict) else None
     if (not isinstance(cuda_device, dict) or cuda_device.get("schema") != "local_bmo.j1m.cuda-device-receipt.v1" or cuda_device.get("status") != "verified" or cuda_device.get("selector") != "CUDA0" or cuda_device.get("device_count") != 1 or not isinstance(device, dict) or "a100" not in str(device.get("name", "")).lower() or not isinstance(device.get("memory_total_mib"), int) or device["memory_total_mib"] < 70000):
         raise ValueError("eval receipt CUDA placement attestation invalid")
+    toolchain = payload.get("toolchain")
+    versions = toolchain.get("versions") if isinstance(toolchain, dict) else None
+    minimums = {"python3": (3, 8), "git": (2, 30), "cmake": (3, 18), "g++": (9, 0), "nvcc": (11, 0)}
+    if not isinstance(toolchain, dict) or toolchain.get("schema") != "local_bmo.j1m.remote-toolchain-receipt.v1" or toolchain.get("status") != "verified" or not isinstance(versions, dict):
+        raise ValueError("eval receipt toolchain evidence invalid")
+    for name, minimum in minimums.items():
+        version = versions.get(name)
+        if not isinstance(version, dict) or isinstance(version.get("major"), bool) or not isinstance(version.get("major"), int) or isinstance(version.get("minor"), bool) or not isinstance(version.get("minor"), int) or (version["major"], version["minor"]) < minimum:
+            raise ValueError("eval receipt toolchain version invalid")
     peak_rss = metrics.get("peak_rss_kib")
     if peak_rss is not None and (isinstance(peak_rss, bool) or not isinstance(peak_rss, int) or peak_rss < 0):
         raise ValueError("eval receipt RSS metric invalid")
     if payload.get("prompt_response_logging") is not False or payload.get("token_logging") is not False:
         raise ValueError("eval receipt logging policy missing")
-    return {"status": status, "metrics": {key: metrics[key] for key in ("case_count", "passed", "failed", "errors", "peak_rss_kib")}}
+    return {"status": status, "metrics": {key: metrics[key] for key in ("case_count", "passed", "failed", "errors", "peak_rss_kib")}, "toolchain": toolchain}
 
 
 def _salvage(
@@ -363,6 +389,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             ssh_user = sf.validate_ssh_user(info["ssh_user"])
             lifecycle["host_key"] = sf.acquire_pinned_host_key(info, known_hosts)
             lifecycle["status"] = "active"
+            lifecycle["stage"] = "active"
             remote_root = "/scratch/j1m"
             workspace_stages = (
                 ("scratch_root", ["sudo", "mkdir", "-p", "/scratch"]),
@@ -406,17 +433,21 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 lifecycle["job"] = _remote(remote_job, timeout=max(30, provider_deadline - time.monotonic() - transfer_reserve - 120))
             else:
                 eval_commands = _eval_remote_commands(config, remote_root)
-                # The clone and immutable revision check precede uploads; the
-                # remaining stages consume the uploaded source/evaluator.
-                # Copy the exact pinned checkout before uploading the lock
-                # into its final vendor directory; otherwise SCP would target
-                # a path that does not yet exist (or create a nested tree).
-                for command in eval_commands[:5]:
+                _progress(progress_path, "eval-bootstrap-starting", phase_id=phase_id)
+                # Install and upload the bounded bootstrap before any source
+                # work. The remaining stages consume those uploads and copy
+                # the lock into the now-existing pinned vendor tree.
+                for command in eval_commands[:3]:
+                    lifecycle["stage"] = f"eval-bootstrap:{command[0]}"
+                    _progress(progress_path, "eval-bootstrap-stage-starting", phase_id=phase_id, stage=lifecycle["stage"])
                     stage = _remote(sf.ssh_base(info, identity, known_hosts) + command, timeout=_eval_timeout(provider_deadline, 300))
                     lifecycle.setdefault("eval_stages", []).append(stage)
+                    _progress(progress_path, "eval-bootstrap-stage-result", phase_id=phase_id, stage=lifecycle["stage"], status=stage["status"], exit_code=stage.get("exit_code"))
                     if stage["status"] != "completed":
                         raise sf.ShadeformError("eval source preparation failed")
                 for local, remote, recursive in _eval_uploads(config, remote_root, model_artifact, model_manifest):
+                    lifecycle["stage"] = f"eval-upload:{local.name}"
+                    _progress(progress_path, "eval-upload-starting", phase_id=phase_id, stage=lifecycle["stage"])
                     scp = sf.scp_base(info, identity, known_hosts)
                     if recursive:
                         scp = [scp[0], "-r", *scp[1:]]
@@ -425,11 +456,15 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     timeout = _eval_timeout(provider_deadline, requested_timeout)
                     upload_receipt = _remote(scp + [str(local), destination], timeout=timeout)
                     lifecycle.setdefault("eval_uploads", []).append({"name": local.name, **upload_receipt})
+                    _progress(progress_path, "eval-upload-result", phase_id=phase_id, stage=lifecycle["stage"], status=upload_receipt["status"], exit_code=upload_receipt.get("exit_code"))
                     if upload_receipt["status"] != "completed":
                         raise sf.ShadeformError("required eval upload failed")
-                for command in eval_commands[5:]:
+                for command in eval_commands[3:]:
+                    lifecycle["stage"] = f"eval-stage:{command[0]}"
+                    _progress(progress_path, "eval-stage-starting", phase_id=phase_id, stage=lifecycle["stage"])
                     stage = _remote(sf.ssh_base(info, identity, known_hosts) + command, timeout=_eval_timeout(provider_deadline, 600))
                     lifecycle.setdefault("eval_stages", []).append(stage)
+                    _progress(progress_path, "eval-stage-result", phase_id=phase_id, stage=lifecycle["stage"], status=stage["status"], exit_code=stage.get("exit_code"))
                     if stage["status"] != "completed":
                         raise sf.ShadeformError("eval build or evaluation failed")
                 lifecycle["job"] = lifecycle["eval_stages"][-1]
@@ -437,6 +472,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 lifecycle["status"] = lifecycle["job"]["status"]
                 raise sf.ShadeformError("J1M remote job did not complete")
             lifecycle["status"] = "completed"
+            _progress(progress_path, "completed", phase_id=phase_id, mode=mode)
         except (KeyboardInterrupt, OperatorCancelled):
             lifecycle["status"] = "cancelled_by_operator"
             if instance_id is None and not ambiguous_create:
@@ -451,6 +487,8 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 settle_attempt_after_cleanup = True
             lifecycle["status"] = lifecycle.get("status") if lifecycle.get("status") not in {None, "starting", "active"} else "failed"
             lifecycle["failure"] = {"error_type": type(exc).__name__}
+            lifecycle["failed_stage"] = lifecycle.get("stage", "unknown")
+            _progress(progress_path, "failed", phase_id=phase_id, failed_stage=lifecycle["failed_stage"], error_type=type(exc).__name__)
             raise
         finally:
             try:
@@ -473,6 +511,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                         watchdog.wait(timeout=10)
                     except (OSError, subprocess.TimeoutExpired):
                         pass
+            _progress(progress_path, "teardown-salvage-starting", phase_id=phase_id, failed_stage=lifecycle.get("failed_stage"))
             fetch_allowlist = (
                 config["artifacts"]["local_fetch_allowlist"] if mode == "build"
                 else config["artifacts"]["eval_fetch_allowlist"] if mode == "eval"
@@ -554,6 +593,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 _persist_lifecycle(phase_id, lifecycle)
             except Exception:
                 pass
+            _progress(progress_path, "completed" if lifecycle.get("status") == "completed" else "failed", phase_id=phase_id, failed_stage=lifecycle.get("failed_stage"), teardown="finished")
             for number, handler in previous_handlers.items():
                 signal.signal(number, handler)
         return lifecycle
