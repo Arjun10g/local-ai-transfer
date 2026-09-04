@@ -45,3 +45,31 @@ content.
 
 On non-Windows hosts clipboard calls return a typed `platform_unsupported`
 result; no provider or shell fallback is attempted.
+
+## Allowlisted process actions
+
+`process.run_allowlisted` is disabled unless an operator configures a named
+action. Each action uses an absolute executable path and fixed arguments;
+shells, interpreters, script extensions, common LOLBins, PATH lookup, and
+prototype-pollution IDs are rejected. Substitutions are constrained to safe
+identifiers, workspace-relative paths, enums, or bounded scalar values.
+
+The configured executable is an unsandboxed operator trust boundary: it may
+access the network or local data, so previews disclose `operator_configured`
+egress and T3 confirmation is required unless the exact action has a current
+operator grant. Cwd is canonicalized inside a writable workspace immediately
+before dispatch. Children receive only injected `SystemRoot`/`WINDIR`, stdin
+is closed unless a bounded literal input parameter is declared, and stdout/
+stderr are byte-bounded with UTF-8-safe decoding. Cancellation, timeout, and
+overflow await bounded process-tree cleanup. Dispatches are at-most-once and
+the bounded ledger rejects new actions after its safety limit; stderr content
+is never returned.
+
+Executable identity is checked as a regular, non-symlink file at preview and
+again immediately before spawn. Node path APIs cannot provide a kernel-level
+no-swap guarantee if a trusted parent directory is replaced between that final
+check and process creation; that residual remains a platform acceptance item.
+
+This is allowlisting and lifecycle control, not an OS sandbox. Windows
+process-tree behavior requires platform-specific acceptance evidence; the
+fake process tests exercise the injectable termination boundary.
