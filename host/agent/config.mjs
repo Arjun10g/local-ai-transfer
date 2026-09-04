@@ -10,10 +10,11 @@ export function validateConfig(input = {}) {
   keys(input, ['version', 'host', 'engine', 'workspace_roots', 'network'], 'config');
   if (own(input, 'version') && input.version !== CONFIG_VERSION) throw new Error('unsupported config version');
   if (own(input, 'host')) {
-    const h = object(input.host, 'host'); keys(h, ['bind', 'max_body_bytes', 'request_timeout_ms'], 'host');
+    const h = object(input.host, 'host'); keys(h, ['bind', 'max_body_bytes', 'request_timeout_ms', 'max_connections'], 'host');
     if (own(h, 'bind') && h.bind !== '127.0.0.1') throw new Error('host.bind must be 127.0.0.1');
     if (own(h, 'max_body_bytes') && (!Number.isInteger(h.max_body_bytes) || h.max_body_bytes < 1024 || h.max_body_bytes > 1048576)) throw new Error('host.max_body_bytes out of range');
     if (own(h, 'request_timeout_ms') && (!Number.isInteger(h.request_timeout_ms) || h.request_timeout_ms < 100 || h.request_timeout_ms > 120000)) throw new Error('host.request_timeout_ms out of range');
+    if (own(h, 'max_connections') && (!Number.isInteger(h.max_connections) || h.max_connections < 1 || h.max_connections > 256)) throw new Error('host.max_connections out of range');
   }
   if (own(input, 'engine')) {
     const e = object(input.engine, 'engine'); keys(e, ['mode', 'endpoint'], 'engine');
@@ -30,6 +31,6 @@ export function validateConfig(input = {}) {
   return structuredClone(input);
 }
 
-export const DEFAULT_CONFIG = Object.freeze({ version: CONFIG_VERSION, host: { bind: '127.0.0.1', max_body_bytes: 65536, request_timeout_ms: 30000 }, engine: { mode: 'fixture' }, workspace_roots: [], network: { provider: 'disabled' } });
+export const DEFAULT_CONFIG = Object.freeze({ version: CONFIG_VERSION, host: { bind: '127.0.0.1', max_body_bytes: 65536, request_timeout_ms: 30000, max_connections: 32 }, engine: { mode: 'fixture' }, workspace_roots: [], network: { provider: 'disabled' } });
 
 export function mergeConfig(input = {}) { const checked = validateConfig(input); return validateConfig({ ...DEFAULT_CONFIG, ...checked, host: { ...DEFAULT_CONFIG.host, ...(checked.host ?? {}) }, engine: { ...DEFAULT_CONFIG.engine, ...(checked.engine ?? {}) }, network: { ...DEFAULT_CONFIG.network, ...(checked.network ?? {}) } }); }

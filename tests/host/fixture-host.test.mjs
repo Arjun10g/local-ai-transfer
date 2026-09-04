@@ -4,7 +4,7 @@ import { parseStrictJson, parseToolCall, validateToolResult, EnvelopeError } fro
 import { validateEvent } from '../../host/agent/assistant-events.mjs';
 import { ConversationController } from '../../host/agent/controller.mjs';
 import { FixtureEngineClient } from '../../host/engine/fixture-engine.mjs';
-import { HostServer } from '../../host/server/host-server.mjs';
+import { HostServer, isWithinDirectory } from '../../host/server/host-server.mjs';
 import { mergeConfig } from '../../host/agent/config.mjs';
 
 const auth = token => ({ authorization: `Bearer ${token}` });
@@ -41,6 +41,15 @@ test('controller cancellation leaves reusable terminal state', async () => {
   const next = await controller.runTurn({ sessionId: 'ses_cancel', requestId: 'req_next01', message: 'hello', onEvent: () => {} }); assert.equal(next.state, 'COMPLETED');
 });
 
+test('controller bounds sessions with deterministic LRU eviction and history', async () => {
+  const controller = new ConversationController({ engine: new FixtureEngineClient({ delayMs: 0 }), maxSessions: 2, maxHistoryMessages: 3, maxHistoryBytes: 2048 });
+  controller.createSession('ses_lru01'); controller.createSession('ses_lru02'); controller.getSession('ses_lru01'); controller.createSession('ses_lru03');
+  assert.equal(controller.sessions.has('ses_lru01'), true); assert.equal(controller.sessions.has('ses_lru02'), false); assert.equal(controller.sessions.has('ses_lru03'), true);
+  await controller.runTurn({ sessionId: 'ses_hist01', requestId: 'req_hist01', message: 'hello', onEvent: () => {} });
+  await controller.runTurn({ sessionId: 'ses_hist01', requestId: 'req_hist02', message: 'second bounded turn', onEvent: () => {} });
+  const session = controller.sessions.get('ses_hist01'); assert.ok(session); assert.ok(session.history.length <= 3); assert.ok(session.history_bytes <= 2048);
+});
+
 test('host enforces loopback auth/origin, static allowlist, and streams fixture events', async t => {
   const engine = new FixtureEngineClient({ chunkSize: 4, delayMs: 0 }); const controller = new ConversationController({ engine }); const host = new HostServer({ controller, engine });
   const address = await host.listen(0); t.after(() => host.close());
@@ -59,6 +68,22 @@ test('config rejects unknown/non-loopback settings and host enforces body bound'
   assert.throws(() => mergeConfig({ host: { bind: '0.0.0.0' } }), /127\.0\.0\.1/);
   const engine = new FixtureEngineClient(); const controller = new ConversationController({ engine }); const host = new HostServer({ controller, engine, config: { host: { max_body_bytes: 1024 } } }); const address = await host.listen(0); t.after(() => host.close());
   const response = await fetch(`${address.url}/api/sessions`, { method: 'POST', headers: { ...auth(address.token), 'content-type': 'application/json' }, body: JSON.stringify({ padding: 'x'.repeat(2000) }) }); assert.equal(response.status, 413);
+});
+
+test('pending confirmation cancellation resolves immediately and cannot replay', async () => {
+  const engine = { async *generate({ messages }) { if (!messages.some(m => m.role === 'tool')) { yield { kind: 'tool_call_chunk', text: '{"id":"call_cancel1","name":"test.confirm","arguments":{}}' }; return; } yield { kind: 'text_delta', text: 'unexpected continuation' }; } };
+  const controller = new ConversationController({ engine, confirmationTimeoutMs: 10000, toolRegistry: { 'test.confirm': { name: 'test.confirm', risk_tier: 'T2', requires_confirmation: true, execute: async () => { throw new Error('must not execute'); } } } });
+  const events = []; const promise = controller.runTurn({ sessionId: 'ses_wait01', requestId: 'req_wait01', message: 'confirm', onEvent: event => events.push(event) });
+  while (!events.some(e => e.event === 'tool.confirmation_required')) await new Promise(resolve => setTimeout(resolve, 1));
+  const required = events.find(e => e.event === 'tool.confirmation_required'); assert.equal(controller.cancel('req_wait01'), true);
+  const result = await promise; assert.equal(result.state, 'CANCELLED'); assert.equal(controller.pending.size, 0); assert.equal(controller.confirm(required.data.confirmation_id, true, { requestId: 'req_wait01', callId: 'call_cancel1' }), false);
+  assert.equal(events.some(e => e.event === 'tool.started'), false); assert.equal(events.at(-1).event, 'request.cancelled');
+});
+
+test('asset containment helper is separator-safe and connection cap is explicit', async t => {
+  assert.equal(isWithinDirectory('/tmp/ui', '/tmp/ui/index.html'), true); assert.equal(isWithinDirectory('/tmp/ui', '/tmp/ui-other/index.html'), false); assert.equal(isWithinDirectory('/tmp/ui', '/tmp/ui/../secret'), false);
+  const engine = new FixtureEngineClient(); const controller = new ConversationController({ engine }); const host = new HostServer({ controller, engine, config: { host: { max_connections: 2 } } }); const address = await host.listen(0); t.after(() => host.close());
+  assert.equal(host.server.maxConnections, 2); const response = await fetch(`${address.url}/api/status`, { headers: auth(address.token) }); const status = await response.json(); assert.equal(status.limits.max_connections, 2);
 });
 
 test('confirmation is request/call bound and denial continues as a safe tool result', async () => {

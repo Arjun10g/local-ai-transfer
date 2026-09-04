@@ -3,7 +3,8 @@
   "host": {
     "bind": "127.0.0.1",
     "max_body_bytes": 65536,
-    "request_timeout_ms": 30000
+    "request_timeout_ms": 30000,
+    "max_connections": 32
   },
   "engine": { "mode": "fixture" },
   "workspace_roots": [],
