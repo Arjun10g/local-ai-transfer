@@ -11,6 +11,7 @@ import { validateToolArguments } from '../../host/tools/local/argument-validatio
 import { WorkspacePolicy, validateRelativePath } from '../../host/tools/local/workspace-policy.mjs';
 import { createFilesystemTools } from '../../host/tools/local/filesystem.mjs';
 import { createSystemTools } from '../../host/tools/local/system-tools.mjs';
+import { publicUrl } from '../../host/providers/browser-actions.mjs';
 
 const call = (name, arguments_, id = 'call_adv01') => ({ id, name, arguments: arguments_ });
 const auth = token => ({ authorization: `Bearer ${token}` });
@@ -300,8 +301,11 @@ test('browser provider process failure is returned as a typed failure and never 
   assert.equal(failed.code, 'ENOENT');
 });
 
-test.todo('KNOWN GAP: browser URL policy must reject bracketed private IPv6 literals (for example https://[::1]/)');
-test.todo('KNOWN GAP: browser URL policy must resolve DNS and reject hostnames that resolve to private/link-local addresses');
+test('browser action URL policy rejects bracketed private IPv6 and DNS rebinding destinations', async () => {
+  await assert.rejects(() => publicUrl('https://[::1]/', async () => ['::1']), error => error.code === 'provider_destination_rejected');
+  await assert.rejects(() => publicUrl('https://rebind.example/', async () => ['93.184.216.34', '169.254.1.1']), error => error.code === 'provider_destination_rejected');
+  await assert.rejects(() => publicUrl('https://example.com:8443/', async () => ['93.184.216.34']), error => error.code === 'provider_destination_rejected');
+});
 
 test('browser and app launches use argv boundaries rather than shell interpretation', async () => {
   const root = await mkdtemp(join(tmpdir(), 'lae-spawn-'));
