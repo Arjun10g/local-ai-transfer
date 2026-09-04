@@ -24,7 +24,7 @@
       "properties": {
         "name": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{1,95}$"},
         "version": {"const": "0.1.0"},
-        "risk_tier": {"enum": ["T1", "T2", "T3"]},
+        "risk_tier": {"enum": ["T0", "T1", "T2", "T3"]},
         "side_effect": {"type": "string", "minLength": 1, "maxLength": 64},
         "network": {"type": "boolean"},
         "data_egress": {"type": "string", "minLength": 1, "maxLength": 64},

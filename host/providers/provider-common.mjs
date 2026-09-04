@@ -81,4 +81,4 @@ export function normalizeText(value, maxBytes) {
   let text = new TextDecoder().decode(bytes.subarray(0, maxBytes)); while (text && text.endsWith('\uFFFD')) text = text.slice(0, -1); return { text, truncated: true };
 }
 
-export function safeArray(value) { return Array.isArray(value) ? value : []; }
+export function safeArray(value, max = 256) { return Array.isArray(value) ? value.slice(0, max) : []; }

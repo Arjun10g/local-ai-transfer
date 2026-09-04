@@ -17,7 +17,7 @@ test('external contract publishes complete strict schemas for every tool', async
   const contract = JSON.parse(await readFile(new URL('../../contracts/external-tools/v0.1.0.json', import.meta.url), 'utf8'));
   assert.equal(contract.version, '0.1.0'); assert.equal(contract.additionalProperties, false);
   assert.equal(new Set(contract.tools.map(tool => tool.name)).size, 13);
-  for (const tool of contract.tools) { assert.equal(tool.input_schema.type, 'object'); assert.equal(tool.input_schema.additionalProperties, false); assert.ok(typeof tool.input_schema.properties === 'object'); }
+  const riskTiers = new Set(contract.$defs.tool.properties.risk_tier.enum); for (const tool of contract.tools) { assert.ok(riskTiers.has(tool.risk_tier), `${tool.name} uses an undeclared risk tier`); assert.equal(tool.input_schema.type, 'object'); assert.equal(tool.input_schema.additionalProperties, false); assert.ok(typeof tool.input_schema.properties === 'object'); }
 });
 
 test('Graph provider is disabled/auth typed and rejects unknown or oversized arguments', async () => {
@@ -38,6 +38,11 @@ test('Graph fake transport receives fixed /me endpoints and bounded projections'
   const read = value(await tools['mail.read_message'].execute(call('mail.read_message', { message_id: 'm-1', max_bytes: 32 }))); assert.equal(read.message.text, 'Body & more'); assert.equal(requests[1].path, '/v1.0/me/messages/m-1'); assert.equal(requests[1].headers.Prefer, 'outlook.body-content-type="text"'); assert.equal(requests[1].query.$select.includes('body'), true);
   const chats = value(await tools['teams.list_chats'].execute(call('teams.list_chats', { limit: 1 }))); assert.deepEqual(chats.chats, [{ id: 'm-1', topic: '', type: 'unknown', last_updated: null, participants: [] }]); assert.equal(requests[2].path, '/v1.0/me/chats'); assert.equal(requests[2].query.$select.includes('members'), false);
   const messages = value(await tools['teams.list_messages'].execute(call('teams.list_messages', { chat_id: 'chat-1', limit: 1 }))); assert.equal(requests.at(-1).path, '/v1.0/chats/chat-1/messages'); assert.deepEqual(requests.at(-1).query, { '$top': 1 }); assert.equal(messages.messages[0].web_url, 'https://teams.microsoft.com/l/chat/0/0');
+});
+
+test('Graph hostile response arrays are bounded before projection', async () => {
+  let observed; const hostile = Array.from({ length: 100000 }, (_, index) => index === 0 ? { id: 'm-safe', subject: 'safe' } : { id: `m-${index}`, subject: 'discarded' }); const tools = createMicrosoftGraphTools({ enabled: true, credentialSource: { getAccessToken: async () => 'synthetic-token' }, transport: { request: async request => { observed = request; return { status: 200, body: { value: hostile } }; } } });
+  const output = value(await tools['mail.list_messages'].execute(call('mail.list_messages', { limit: 1 }))); assert.equal(output.messages.length, 1); assert.equal(output.messages[0].id, 'm-safe'); assert.equal(output.truncated, true); assert.equal(observed.query.$top, 1);
 });
 
 test('Graph writes require preview, bind proposals, retain high-impact confirmation, and deduplicate retries', async () => {
