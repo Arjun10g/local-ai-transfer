@@ -504,7 +504,7 @@ class StaticSafetyTests(unittest.TestCase):
 
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_deadline_ceiling")
         envelope = orchestrator._eval_deadline_ceiling(config)
-        self.assertEqual(envelope["upload_count"], 12)
+        self.assertEqual(envelope["upload_count"], 15)
         self.assertLess(envelope["ceiling_seconds"], envelope["watchdog_seconds"])
         self.assertLess(envelope["host_shutdown_from_create_seconds"], envelope["watchdog_seconds"])
 
@@ -607,12 +607,15 @@ class StaticSafetyTests(unittest.TestCase):
         j1m = load(ROOT / "scripts/j1m_runner.py", "j1m_eval_upload_config")
         uploads = orchestrator._eval_uploads(j1m.load_config(), "/scratch/j1m", Path("/tmp/Qwen3.5-9B-Q4_K_M.gguf"), Path("/tmp/model-manifest.json"))
         names = {local.name for local, _remote, _recursive in uploads}
-        self.assertEqual(names, {"Qwen3.5-9B-Q4_K_M.gguf", "model-manifest.json", "model-manifest.sha256", "remote_model_eval.py", "remote_eval_prepare.py", "evaluate_tool_calls.py", "cuda_device_probe.py", "remote_toolchain_probe.py", "cuda_source_closure.py", "ggml-cuda-source-lock.json", "tool_call_eval.json", "CMakeLists.txt", "native"})
+        self.assertEqual(names, {"Qwen3.5-9B-Q4_K_M.gguf", "model-manifest.json", "model-manifest.sha256", "remote_model_eval.py", "remote_eval_prepare.py", "evaluate_tool_calls.py", "cuda_device_probe.py", "remote_toolchain_probe.py", "cuda_source_closure.py", "ggml-cuda-source-lock.json", "tool_call_eval.json", "CMakeLists.txt", "native", "runtime_tests.cpp", "model_validator_tests.cpp"})
         self.assertTrue(any(recursive and local.name == "native" for local, _remote, recursive in uploads))
         closure_upload = next((remote for local, remote, _recursive in uploads if local.name == "cuda_source_closure.py"), None)
         self.assertEqual(closure_upload, "/scratch/j1m/engine/scripts/cuda_source_closure.py")
         lock_upload = next((remote for local, remote, _recursive in uploads if local.name == "ggml-cuda-source-lock.json"), None)
         self.assertEqual(lock_upload, "/scratch/j1m/ggml-cuda-source-lock.json")
+        self.assertIn((ROOT / "vendor/llama.cpp/ggml/CMakeLists.txt", "/scratch/j1m/ggml-CMakeLists.txt", False), uploads)
+        self.assertIn((ROOT / "tests/native/runtime_tests.cpp", "/scratch/j1m/engine/tests/native/runtime_tests.cpp", False), uploads)
+        self.assertIn((ROOT / "tests/native/model_validator_tests.cpp", "/scratch/j1m/engine/tests/native/model_validator_tests.cpp", False), uploads)
         source = (ROOT / "scripts/j1m_orchestrator.py").read_text(encoding="utf-8")
         self.assertIn("eval_commands[:3]", source)
         self.assertIn("eval_commands[3:]", source)
@@ -626,6 +629,7 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertGreater(toolchain_indices[1], j1m_index)
         self.assertLess(toolchain_indices[1], next(index for index, command in enumerate(commands) if command[0:2] == ["cmake", "-S"]))
         self.assertIn(["cp", "/scratch/j1m/ggml-cuda-source-lock.json", "/scratch/j1m/engine/vendor/llama.cpp/ggml-cuda-source-lock.json"], commands)
+        self.assertIn(["cp", "/scratch/j1m/ggml-CMakeLists.txt", "/scratch/j1m/engine/vendor/llama.cpp/ggml/CMakeLists.txt"], commands)
         self.assertIn(["cp", "-a", "/scratch/llama.cpp", "/scratch/j1m/engine/vendor/llama.cpp"], commands)
         self.assertIn(["python3", "/scratch/j1m/remote_eval_prepare.py", "--artifact", "/scratch/j1m/artifacts/Qwen3.5-9B-Q4_K_M.gguf", "--manifest", "/scratch/j1m/model-manifest.json", "--output", "/scratch/j1m/artifacts/eval-artifact-receipt.json"], commands)
         self.assertIn(["python3", "/scratch/j1m/j1m_runner.py", "--run", "--config", "/scratch/j1m/j1m-config.json"], commands)

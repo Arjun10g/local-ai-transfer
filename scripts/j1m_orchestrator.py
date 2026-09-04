@@ -161,11 +161,19 @@ def _eval_uploads(config: dict[str, Any], remote_root: str, artifact_path: Path 
         # uploads; the lock is copied into its final vendor path by an argv
         # stage after the checkout copy.
         (ROOT / "vendor" / "llama.cpp" / "ggml-cuda-source-lock.json", f"{remote_root}/ggml-cuda-source-lock.json", False),
+        # Preserve the product's immutable upstream build-metadata guard. The
+        # remote HF checkout is pristine and therefore does not contain this
+        # reviewed CMake patch.
+        (ROOT / "vendor" / "llama.cpp" / "ggml" / "CMakeLists.txt", f"{remote_root}/ggml-CMakeLists.txt", False),
         (ROOT / "tests" / "model" / "tool_call_eval.json", f"{remote_root}/tool_call_eval.json", False),
         (ROOT / "CMakeLists.txt", f"{remote_root}/engine/CMakeLists.txt", False),
         # Recursive scp copies the source directory beneath its destination;
         # target the engine parent so the result is exactly engine/native.
         (ROOT / "native", f"{remote_root}/engine", True),
+        # These sources are referenced unconditionally by native/CMakeLists;
+        # they are needed at configure time even when only lae-engine builds.
+        (ROOT / "tests" / "native" / "runtime_tests.cpp", f"{remote_root}/engine/tests/native/runtime_tests.cpp", False),
+        (ROOT / "tests" / "native" / "model_validator_tests.cpp", f"{remote_root}/engine/tests/native/model_validator_tests.cpp", False),
     ])
     return uploads
 
@@ -183,7 +191,7 @@ def _eval_remote_commands(config: dict[str, Any], remote_root: str) -> list[list
     engine_root = f"{remote_root}/engine"
     build_root = f"{remote_root}/engine-build"
     return [
-        ["mkdir", "-p", f"{remote_root}/model", f"{engine_root}/native", f"{engine_root}/vendor", f"{engine_root}/scripts", f"{remote_root}/artifacts"],
+        ["mkdir", "-p", f"{remote_root}/model", f"{engine_root}/native", f"{engine_root}/vendor", f"{engine_root}/scripts", f"{engine_root}/tests/native", f"{remote_root}/artifacts"],
         ["sudo", "apt-get", "update"],
         ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "--no-install-recommends", "ca-certificates", "cmake", "build-essential", "git", "python3", "python3-venv"],
         # Fail before the expensive HF checkout/conversion when the CUDA
@@ -196,6 +204,7 @@ def _eval_remote_commands(config: dict[str, Any], remote_root: str) -> list[list
         ["python3", f"{remote_root}/j1m_runner.py", "--run", "--config", f"{remote_root}/j1m-config.json"],
         ["cp", "-a", checkout, f"{engine_root}/vendor/llama.cpp"],
         ["cp", f"{remote_root}/ggml-cuda-source-lock.json", f"{engine_root}/vendor/llama.cpp/ggml-cuda-source-lock.json"],
+        ["cp", f"{remote_root}/ggml-CMakeLists.txt", f"{engine_root}/vendor/llama.cpp/ggml/CMakeLists.txt"],
         ["python3", f"{remote_root}/remote_eval_prepare.py", "--artifact", f"{remote_root}/artifacts/Qwen3.5-9B-Q4_K_M.gguf", "--manifest", f"{remote_root}/model-manifest.json", "--output", f"{remote_root}/artifacts/eval-artifact-receipt.json"],
         # This is intentionally after J1M's apt/pip/bootstrap work. The
         # receipt must describe the final environment used by CUDA build/eval.
