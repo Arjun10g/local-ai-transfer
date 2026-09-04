@@ -1,0 +1,1 @@
+{"positive":{"id":"call_fixture_1","name":"time.now","status":"ok","content":[{"type":"text","text":"fixture"}],"metadata":{"truncated":false,"duration_ms":1}},"negative":{"id":"call_fixture_1","name":"time.now","status":"ok","content":[{"type":"text","text":"fixture"}],"metadata":{"truncated":false,"duration_ms":1},"extra":true}}
