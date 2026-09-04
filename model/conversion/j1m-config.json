@@ -15,14 +15,11 @@
     "revision_evidence": "GitHub commits API path=convert_hf_to_gguf.py; verify with git rev-parse before build",
     "tested_revision_status": "conversion smoke pending Sol-approved J1M"
   },
-  "python_dependencies": [
-    "gguf==0.17.1",
-    "numpy==2.2.5",
-    "protobuf==5.29.4",
-    "sentencepiece==0.2.0",
-    "torch==2.7.0",
-    "transformers==4.51.3"
-  ],
+  "python_dependencies": {
+    "requirements_file": "requirements/requirements-convert_hf_to_gguf.txt",
+    "local_gguf_package": "gguf-py",
+    "resolution_policy": "install only from pinned llama.cpp checkout requirements, then capture pip freeze"
+  },
   "text_only": true,
   "shadeform_target": {
     "cloud": "hyperstack",
@@ -68,7 +65,8 @@
       "tensor-metadata.json",
       "source-model-receipt.json",
       "conversion-receipt.json",
-      "model-receipt.json"
+      "model-receipt.json",
+      "toolchain.json"
     ],
     "local_fetch_allowlist": [
       "Qwen3.5-9B-Q4_K_M.gguf",
@@ -77,7 +75,8 @@
       "tensor-metadata.json",
       "source-model-receipt.json",
       "conversion-receipt.json",
-      "model-receipt.json"
+      "model-receipt.json",
+      "toolchain.json"
     ],
     "prove_fetch_allowlist": ["proving-receipt.json"],
     "vision_projection": "excluded"

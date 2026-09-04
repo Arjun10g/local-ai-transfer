@@ -37,11 +37,11 @@ class J1MConfigTests(unittest.TestCase):
         self.assertEqual(prove["commands"], [["python3", "scripts/j1m_runner.py", "--prove"]])
         self.assertEqual(config["artifacts"]["prove_fetch_allowlist"], ["proving-receipt.json"])
         self.assertNotIn("Qwen3.5-9B-Q4_K_M.gguf", config["artifacts"]["prove_fetch_allowlist"])
-        self.assertIn("torch==2.7.0", " ".join(plan["commands"][3]))
+        self.assertIn("requirements-convert_hf_to_gguf.txt", " ".join(plan["commands"][3]))
         converters = [command for command in plan["commands"] if any("convert_hf_to_gguf.py" in part for part in command)]
         self.assertEqual(len(converters), 2)
         self.assertTrue(all("--no-mtp" in command for command in converters))
-        self.assertTrue(any("torch==2.7.0" in command for command in plan["commands"][3]))
+        self.assertTrue(any("gguf-py" in command for command in plan["commands"][3]))
         self.assertTrue(any("--verify-llama" in command for command in plan["commands"]))
         self.assertTrue(any("--inspect-tensors" in command for command in plan["commands"]))
 
@@ -64,8 +64,11 @@ class J1MConfigTests(unittest.TestCase):
             names = ["Qwen3.5-9B-bf16.gguf", "Qwen3.5-9B-Q8_0.gguf", "Qwen3.5-9B-Q4_K_M.gguf"]
             for name in names:
                 (root / name).write_bytes(b"fixture")
+            (root / "source-model-receipt.json").write_text(json.dumps({"status": "verified", "revision": "a" * 40, "tokenizer_sha256": "b" * 64, "chat_template_sha256": "c" * 64, "license_sha256": "d" * 64}), encoding="utf-8")
+            (root / "tensor-metadata.json").write_text(json.dumps({"status": "verified", "tensor_count": 3}), encoding="utf-8")
+            (root / "toolchain.json").write_text(json.dumps({"schema": "local_bmo.j1m.toolchain.v1", "llama_cpp_head": "e" * 40}), encoding="utf-8")
             manifest = self.j1m.write_artifacts(root, names)
-            self.assertEqual(len(manifest["artifacts"]), 7)
+            self.assertEqual(len(manifest["artifacts"]), 8)
             self.assertTrue((root / "manifest.json").is_file())
             self.assertTrue((root / "checksums.sha256").is_file())
 

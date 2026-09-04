@@ -80,7 +80,7 @@ def verify_source(source_dir: Path, lock_path: Path = SOURCE_LOCK) -> dict[str, 
         if not path.is_file() or _sha256(path) != expected:
             raise ValueError(f"source hash mismatch: {item.get('path')}")
         checked.append(str(item["path"]))
-    return {"revision": revision, "checked_files": checked, "verified_at_utc": utc_now()}
+    return {"schema": "local_bmo.j1m.source-model-receipt.v1", "status": "verified", "model_id": lock["model_id"], "revision": revision, "checked_files": checked, "file_hashes": {str(item["path"]): str(item.get("sha256") or item.get("lfs_sha256")) for item in lock.get("source_files", []) if isinstance(item, dict) and str(item.get("path")) in checked}, "license_sha256": lock["source_receipts"]["license_sha256"], "tokenizer_sha256": lock["source_receipts"]["tokenizer_sha256"], "chat_template_sha256": lock["source_receipts"]["chat_template_sha256"], "verified_at_utc": utc_now()}
 
 
 def mark_source(source_dir: Path, revision: str) -> None:
@@ -139,7 +139,7 @@ def artifact_manifest(output_dir: Path, names: list[str], *, tensor_metadata: di
     }
 
 
-def write_artifacts(output_dir: Path, names: list[str]) -> dict[str, Any]:
+def write_artifacts(output_dir: Path, names: list[str], *, source_lock: Path = SOURCE_LOCK, commands: list[list[str]] | None = None, llama_revision: str | None = None) -> dict[str, Any]:
     """Write receipts in dependency order, avoiding a self-referential manifest."""
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -147,9 +147,24 @@ def write_artifacts(output_dir: Path, names: list[str]) -> dict[str, Any]:
     tensor_path = output_dir / "tensor-metadata.json"
     if not tensor_path.is_file():
         tensor_path.write_text(json.dumps({"schema": "local_bmo.j1m.tensor-metadata.v1", "status": "converter-inspection-pending", "text_only": True}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    for name, schema in (("source-model-receipt.json", "source-verified"), ("conversion-receipt.json", "conversion-complete"), ("model-receipt.json", "model-validated")):
-        (output_dir / name).write_text(json.dumps({"schema": f"local_bmo.j1m.{name.removesuffix('.json')}.v1", "status": schema, "text_only": True, "artifact_names": primary}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    manifest = artifact_manifest(output_dir, [*primary, "tensor-metadata.json", "source-model-receipt.json", "conversion-receipt.json", "model-receipt.json"])
+    source_receipt = output_dir / "source-model-receipt.json"
+    if not source_receipt.is_file():
+        raise ValueError("source-model-receipt.json must be emitted by hash verification before artifacts")
+    source = json.loads(source_receipt.read_text(encoding="utf-8"))
+    if source.get("status") != "verified":
+        raise ValueError("source receipt is not verified")
+    tensor = json.loads(tensor_path.read_text(encoding="utf-8"))
+    if tensor.get("status") != "verified":
+        raise ValueError("tensor metadata was not verified by the pinned GGUF reader")
+    artifact_hashes = {name: {"size_bytes": (output_dir / name).stat().st_size, "sha256": _sha256(output_dir / name)} for name in primary}
+    toolchain_path = output_dir / "toolchain.json"
+    if not toolchain_path.is_file():
+        raise ValueError("toolchain receipt is required before model receipt")
+    toolchain = json.loads(toolchain_path.read_text(encoding="utf-8"))
+    converter_commands = [command for command in (commands or []) if any("convert_hf_to_gguf.py" in part for part in command) or "Q4_K_M" in command]
+    (output_dir / "conversion-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.conversion-receipt.v1", "status": "conversion-complete", "text_only": True, "source_revision": source.get("revision"), "llama_cpp_revision": llama_revision, "artifacts": artifact_hashes, "converter_and_quantizer_argv": converter_commands, "toolchain": toolchain, "no_mmproj": True, "no_mtp": True}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (output_dir / "model-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.model-receipt.v1", "status": "checksums-and-tensor-inventory-verified", "text_only": True, "q4_artifact": artifact_hashes.get("Qwen3.5-9B-Q4_K_M.gguf"), "tensor_metadata_sha256": _sha256(tensor_path), "tokenizer_sha256": source.get("tokenizer_sha256"), "chat_template_sha256": source.get("chat_template_sha256"), "license_sha256": source.get("license_sha256")}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    manifest = artifact_manifest(output_dir, [*primary, "tensor-metadata.json", "source-model-receipt.json", "conversion-receipt.json", "model-receipt.json", "toolchain.json"])
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     checksum_names = [item["name"] for item in manifest["artifacts"]] + ["manifest.json"]
     checksums = "".join(f"{_sha256(output_dir / name)}  {name}\n" for name in checksum_names)
@@ -161,13 +176,14 @@ def command_plan(config: dict[str, Any], source: str = "/scratch/hf/Qwen3.5-9B",
     llama = config["llama_cpp"]
     converter = f"{llama['checkout']}/convert_hf_to_gguf.py"
     python_exec = "/scratch/j1m/venv/bin/python"
-    hf_exec = "/scratch/j1m/venv/bin/huggingface-cli"
+    hf_exec = "/scratch/j1m/venv/bin/hf"
     return [
         ["git", "clone", "--filter=blob:none", config["llama_cpp"]["repository"], llama["checkout"]],
         ["git", "-C", llama["checkout"], "checkout", "--detach", llama["revision"]],
         ["python3", "-m", "venv", "/scratch/j1m/venv"],
-        ["/scratch/j1m/venv/bin/pip", "install", "--disable-pip-version-check", "--no-input", *config["python_dependencies"], "huggingface_hub==0.32.4", "safetensors==0.5.3"],
+        ["/scratch/j1m/venv/bin/pip", "install", "--disable-pip-version-check", "--no-input", "-r", f"{llama['checkout']}/{config['python_dependencies']['requirements_file']}", "-e", f"{llama['checkout']}/{config['python_dependencies']['local_gguf_package']}"],
         [python_exec, runner, "--pip-freeze", "/scratch/j1m/pip-freeze.txt"],
+        [python_exec, runner, "--toolchain", f"{output}/toolchain.json", "--llama-checkout", llama["checkout"]],
         ["git", "--version"],
         ["cmake", "--version"],
         ["python3", "--version"],
@@ -177,7 +193,7 @@ def command_plan(config: dict[str, Any], source: str = "/scratch/hf/Qwen3.5-9B",
         ["cmake", "--build", f"{llama['checkout']}/build", "--target", "llama-quantize", "-j2"],
         [hf_exec, "download", config["source"]["model_id"], "--revision", config["source"]["revision"], "--local-dir", source, "--local-dir-use-symlinks", "false"],
         [python_exec, runner, "--mark-source", source, "--revision", config["source"]["revision"]],
-        [python_exec, "-u", runner, "--verify-source", source, "--lock", "/scratch/j1m/qwen35-9b.source-lock.json"],
+        [python_exec, "-u", runner, "--verify-source", source, "--lock", "/scratch/j1m/qwen35-9b.source-lock.json", "--receipt", f"{output}/source-model-receipt.json"],
         [python_exec, converter, source, "--outfile", f"{output}/Qwen3.5-9B-bf16.gguf", "--outtype", "bf16", "--no-mtp"],
         [python_exec, converter, source, "--outfile", f"{output}/Qwen3.5-9B-Q8_0.gguf", "--outtype", "q8_0", "--no-mtp"],
         [f"{llama['quantizer']}", f"{output}/Qwen3.5-9B-bf16.gguf", f"{output}/Qwen3.5-9B-Q4_K_M.gguf", "Q4_K_M"],
@@ -259,12 +275,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--revision")
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--lock", type=Path, default=SOURCE_LOCK)
+    parser.add_argument("--receipt", type=Path)
     parser.add_argument("--verify-llama", nargs=2, metavar=("CHECKOUT", "REVISION"))
     parser.add_argument("--prove", action="store_true", help="write a cheap host receipt; no model conversion")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--run", action="store_true", help="run the reviewed local argv plan")
     parser.add_argument("--token-file", type=Path, help="private remote token file; path only, never token material")
     parser.add_argument("--pip-freeze", type=Path)
+    parser.add_argument("--toolchain", type=Path)
+    parser.add_argument("--llama-checkout", type=Path)
     parser.add_argument("--inspect-tensors", nargs=2, metavar=("GGUF", "OUTPUT"))
     parser.add_argument("--execute", action="store_true", help="reserved for an already-approved host; never provisions")
     args = parser.parse_args(argv)
@@ -280,6 +299,20 @@ def main(argv: list[str] | None = None) -> int:
         freeze = subprocess.run([sys.executable, "-m", "pip", "freeze"], check=True, capture_output=True, text=True, timeout=120).stdout
         args.pip_freeze.write_text(freeze, encoding="utf-8")
         return 0
+    if args.toolchain:
+        checkout = args.llama_checkout or Path(".")
+        def version(command: list[str]) -> str:
+            try:
+                return subprocess.run(command, check=False, capture_output=True, text=True, timeout=30).stdout.splitlines()[0]
+            except (OSError, IndexError):
+                return "unavailable"
+        freeze_path = args.toolchain.parent / "pip-freeze.txt"
+        freeze = freeze_path.read_text(encoding="utf-8") if freeze_path.is_file() else ""
+        head = subprocess.run(["git", "-C", str(checkout), "rev-parse", "HEAD"], check=True, capture_output=True, text=True, timeout=30).stdout.strip()
+        payload = {"schema": "local_bmo.j1m.toolchain.v1", "llama_cpp_head": head, "python": version([sys.executable, "--version"]), "cmake": version(["cmake", "--version"]), "compiler": version(["cc", "--version"]), "pip_freeze": freeze}
+        args.toolchain.parent.mkdir(parents=True, exist_ok=True)
+        args.toolchain.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return 0
     if args.inspect_tensors:
         gguf_path, metadata_path = (Path(value) for value in args.inspect_tensors)
         try:
@@ -293,7 +326,11 @@ def main(argv: list[str] | None = None) -> int:
         metadata_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return 0
     if args.verify_source:
-        print(json.dumps(verify_source(args.verify_source, args.lock), sort_keys=True))
+        receipt = verify_source(args.verify_source, args.lock)
+        if args.receipt:
+            args.receipt.parent.mkdir(parents=True, exist_ok=True)
+            args.receipt.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(json.dumps(receipt, sort_keys=True))
         return 0
     if args.mark_source:
         if not args.revision:
@@ -302,7 +339,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.manifest:
         names = config["artifacts"]["allowlist"]
-        write_artifacts(args.manifest, names)
+        write_artifacts(args.manifest, names, commands=command_plan(config), llama_revision=config["llama_cpp"]["revision"])
         return 0
     if args.prove:
         import platform
