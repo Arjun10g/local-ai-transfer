@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0.0",
+  "fixture_id": "qwen35-9b-quality-v1",
+  "purpose": "Compact deterministic contract fixtures; full prompts/results remain outside ordinary logs",
+  "model": "qwen35-9b-q4-k-m",
+  "split_policy": {"train": "prompt-tuning-only", "dev": "bounded-selection", "test": "held-out-and-immutable"},
+  "categories": [
+    {"id": "instruction", "minimum_cases": 100, "metric": "rubric_pass"},
+    {"id": "continuity_reset", "minimum_cases": 80, "metric": "state_canary_and_pass"},
+    {"id": "summarization", "minimum_cases": 60, "metric": "key_fact_coverage_and_hallucination"},
+    {"id": "extraction", "minimum_cases": 80, "metric": "exact_or_f1"},
+    {"id": "reasoning", "minimum_cases": 60, "metric": "exact"},
+    {"id": "code_command", "minimum_cases": 60, "metric": "tests_or_exact"},
+    {"id": "file_task_planning", "minimum_cases": 80, "metric": "action_plan_correctness"},
+    {"id": "tool_selection_no_tool", "minimum_cases": 200, "metric": "exact_and_false_positive_rate"},
+    {"id": "tool_arguments", "minimum_cases": 160, "metric": "exact_and_field_f1"},
+    {"id": "tool_recovery", "minimum_cases": 80, "metric": "final_task_success"},
+    {"id": "policy_safety", "minimum_cases": 100, "metric": "violation_rate"},
+    {"id": "long_short_integrity", "minimum_cases": 60, "metric": "pair_pass_and_corruption_flag"},
+    {"id": "thinking_control", "minimum_cases": 60, "metric": "mode_and_budget_compliance"}
+  ],
+  "fixture_cases": [
+    {"id": "thinking-off-001", "category": "thinking_control", "messages": [{"role": "user", "content": "Return exactly the word READY."}], "settings": {"enable_thinking": false, "max_output_tokens": 8, "temperature": 0}, "expected": {"must_not_contain": ["<think>"], "stop": "eos"}},
+    {"id": "tool-xml-001", "category": "tool_selection_no_tool", "messages": [{"role": "user", "content": "Call system.get_info with no arguments."}], "tools": ["system.get_info"], "expected": {"canonical_tool": "system.get_info", "arguments": {}}},
+    {"id": "reset-long-short-001", "category": "long_short_integrity", "messages": [{"role": "user", "content": "State canary: ALPHA-17."}], "follow_up": {"reset": true, "messages": [{"role": "user", "content": "Return only BETA-29."}]}, "expected": {"must_equal": "BETA-29", "must_not_leak": "ALPHA-17"}}
+  ],
+  "comparison": {"runtime_oracle": "pinned-upstream-same-artifact", "quality_comparator": "same-source-q8-or-higher", "bootstrap_resamples": 10000, "confidence": 0.95, "non_inferiority_margin_points": 2, "critical_category_max_drop_points": 8},
+  "logging": {"record_case_ids_and_metrics": true, "never_record": ["full_prompts", "full_responses", "tool_payloads", "model_weights", "credentials"]}
+}

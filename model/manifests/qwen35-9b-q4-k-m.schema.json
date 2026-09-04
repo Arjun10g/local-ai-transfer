@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local-assistant-engine.invalid/contracts/model-manifest/qwen35-9b-q4-k-m-1.1.0.schema.json",
+  "title": "Qwen3.5-9B text-only Q4_K_M model manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "model_id", "display_name", "source", "artifact", "conversion", "expected_profile", "tokenizer_and_template", "runtime_policy", "approvals"],
+  "properties": {
+    "schema_version": {"const": "1.1.0"},
+    "model_id": {"const": "qwen35-9b-q4-k-m"},
+    "display_name": {"const": "Qwen3.5-9B Q4_K_M"},
+    "source": {"$ref": "#/$defs/source"},
+    "artifact": {"$ref": "#/$defs/artifact"},
+    "conversion": {"$ref": "#/$defs/conversion"},
+    "expected_profile": {"$ref": "#/$defs/profile"},
+    "tokenizer_and_template": {"$ref": "#/$defs/tokenizer"},
+    "runtime_policy": {"$ref": "#/$defs/runtime"},
+    "approvals": {"$ref": "#/$defs/approvals"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "ref": {"type": "string", "minLength": 1, "pattern": "^(?!<|\\$\\{|TODO|UNSET|PLACEHOLDER).+"},
+    "source": {"type": "object", "additionalProperties": false, "required": ["organization", "repository", "revision", "license_id", "model_card_sha256", "license_file_sha256"], "properties": {"organization": {"const": "Qwen"}, "repository": {"const": "Qwen3.5-9B"}, "revision": {"$ref": "#/$defs/revision"}, "license_id": {"const": "Apache-2.0"}, "model_card_sha256": {"$ref": "#/$defs/sha256"}, "license_file_sha256": {"$ref": "#/$defs/sha256"}}},
+    "artifact": {"type": "object", "additionalProperties": false, "required": ["format", "architecture", "modality_profile", "quantization_profile", "expected_file_name", "expected_size_bytes", "sha256", "tensor_inventory_sha256", "gguf_metadata_sha256"], "properties": {"format": {"const": "gguf"}, "architecture": {"enum": ["qwen35", "qwen3_5"]}, "modality_profile": {"const": "text_only_no_mmproj"}, "quantization_profile": {"const": "Q4_K_M"}, "expected_file_name": {"const": "Qwen3.5-9B-Q4_K_M.gguf"}, "expected_size_bytes": {"type": "integer", "exclusiveMinimum": 0}, "sha256": {"$ref": "#/$defs/sha256"}, "tensor_inventory_sha256": {"$ref": "#/$defs/sha256"}, "gguf_metadata_sha256": {"$ref": "#/$defs/sha256"}}},
+    "conversion": {"type": "object", "additionalProperties": false, "required": ["llama_cpp_revision", "conversion_command_receipt", "quantization_command_receipt", "build_environment_receipt", "reference_artifact_id", "created_at_utc"], "properties": {"llama_cpp_revision": {"$ref": "#/$defs/revision"}, "conversion_command_receipt": {"$ref": "#/$defs/ref"}, "quantization_command_receipt": {"$ref": "#/$defs/ref"}, "build_environment_receipt": {"$ref": "#/$defs/ref"}, "reference_artifact_id": {"$ref": "#/$defs/ref"}, "created_at_utc": {"type": "string", "format": "date-time"}}},
+    "profile": {"type": "object", "additionalProperties": false, "required": ["parameter_class", "layers", "hidden_size", "hybrid_pattern", "full_attention_layers", "query_heads_on_attention_layers", "kv_heads_on_attention_layers", "attention_head_dimension", "native_context_tokens", "mtp_present", "vision_projection_required_for_text_only", "accepted_gguf_versions", "metadata_allowlist_version"], "properties": {"parameter_class": {"const": "9B"}, "layers": {"const": 32}, "hidden_size": {"const": 4096}, "hybrid_pattern": {"const": "8x(3_gated_deltanet_then_1_gated_attention)"}, "full_attention_layers": {"const": 8}, "query_heads_on_attention_layers": {"const": 16}, "kv_heads_on_attention_layers": {"const": 4}, "attention_head_dimension": {"const": 256}, "native_context_tokens": {"const": 262144}, "mtp_present": {"const": true}, "vision_projection_required_for_text_only": {"const": false}, "accepted_gguf_versions": {"type": "array", "const": [3]}, "metadata_allowlist_version": {"const": "qwen35-9b-v1"}}},
+    "tokenizer": {"type": "object", "additionalProperties": false, "required": ["tokenizer_metadata_sha256", "chat_template_sha256", "special_token_fixture_version", "tool_call_fixture_version", "thinking_control"], "properties": {"tokenizer_metadata_sha256": {"$ref": "#/$defs/sha256"}, "chat_template_sha256": {"$ref": "#/$defs/sha256"}, "special_token_fixture_version": {"$ref": "#/$defs/ref"}, "tool_call_fixture_version": {"$ref": "#/$defs/ref"}, "thinking_control": {"const": "chat_template_enable_thinking_boolean"}}},
+    "runtime": {"type": "object", "additionalProperties": false, "required": ["default_context_tokens", "maximum_mvp_context_tokens", "default_thinking", "default_active_generations", "cpu_backend_required", "accelerated_backend_policy", "minimum_engine_build"], "properties": {"default_context_tokens": {"const": 8192}, "maximum_mvp_context_tokens": {"const": 16384}, "default_thinking": {"const": false}, "default_active_generations": {"const": 1}, "cpu_backend_required": {"const": true}, "accelerated_backend_policy": {"const": "approved_hardware_receipt_only"}, "minimum_engine_build": {"$ref": "#/$defs/ref"}}},
+    "approvals": {"type": "object", "additionalProperties": false, "required": ["source_approval", "artifact_scan_receipt", "transfer_receipt"], "properties": {"source_approval": {"$ref": "#/$defs/ref"}, "artifact_scan_receipt": {"$ref": "#/$defs/ref"}, "transfer_receipt": {"$ref": "#/$defs/ref"}, "signature_or_attestation": {"type": "string"}}}
+  }
+}

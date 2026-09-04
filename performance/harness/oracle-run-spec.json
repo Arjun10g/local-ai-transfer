@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0.0",
+  "spec_id": "qwen35-9b-pinned-oracle-v1",
+  "job": "J2",
+  "status": "prepared_not_run",
+  "dependencies": ["model/source-lock/qwen35-9b.source-lock.json", "accepted-J1M-model-receipt"],
+  "required_identity": ["llama_cpp_revision", "product_commit", "compiler_flags", "machine_manifest", "model_sha256", "context", "kv_cache_type", "recurrent_state_type", "threads", "batch", "ubatch", "mtp_status", "sampling", "corpus_version"],
+  "scenarios": ["tokenization", "rendered_chat_template", "first_step_logits", "top_tokens", "greedy_64", "thinking_off", "thinking_on", "tool_call_normalization", "tool_result_continuation", "reset", "cancel", "long_prompt_short_prompt"],
+  "acceptance": {"tokenization": "exact", "prompt_tokens": "exact", "top1_agreement": 0.995, "top5_overlap": 0.999, "logit_cosine": 0.9999, "greedy_first_64_prompt_fraction": 0.95},
+  "execution": {"same_artifact_only": true, "deterministic_seed_required": true, "raw_machine_output_required": true, "weights_in_repo": false, "network_after_artifact_staging": false}
+}
