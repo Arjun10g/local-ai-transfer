@@ -529,6 +529,24 @@ class LoopbackLifecycleTests(unittest.TestCase):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator")
         result = orchestrator._remote([os.sys.executable, "-c", "import time; time.sleep(1)"], timeout=0.01)
         self.assertEqual(result["status"], "transport_timeout")
+        self.assertEqual(result["error_type"], "TimeoutExpired")
+
+    def test_remote_stderr_is_bounded_and_redacted(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_stderr")
+        result = orchestrator._remote([os.sys.executable, "-c", "import sys; sys.stderr.write('api_key=secret-value ' * 300); sys.exit(3)"], timeout=5)
+        self.assertEqual(result["status"], "failed")
+        self.assertLessEqual(len(result["stderr_tail"]), 1200)
+        self.assertNotIn("secret-value", result["stderr_tail"])
+        self.assertIn("<redacted>", result["stderr_tail"])
+
+    def test_provider_endpoint_rejects_unsafe_identity_inputs(self):
+        from scripts import shadeform_lifecycle as sf
+        with self.assertRaises(sf.ShadeformError):
+            sf.ssh_base({"ip": "not-an-ip", "ssh_user": "ubuntu", "ssh_port": 22}, Path("/tmp/id"), Path("/tmp/known"))
+        with self.assertRaises(sf.ShadeformError):
+            sf.ssh_base({"ip": "127.0.0.1", "ssh_user": "ubuntu;rm", "ssh_port": 22}, Path("/tmp/id"), Path("/tmp/known"))
+        with self.assertRaises(sf.ShadeformError):
+            sf.ssh_base({"ip": "127.0.0.1", "ssh_user": "ubuntu", "ssh_port": 70000}, Path("/tmp/id"), Path("/tmp/known"))
 
 
 if __name__ == "__main__":
