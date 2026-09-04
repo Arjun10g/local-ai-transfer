@@ -25,6 +25,7 @@
 | TOOL-023 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-022, SOL-003 | S0, S4 | `2f811f1`, `e30b06c`; Graph Outlook/Teams endpoints, bounded hostile response projections, host revisions, at-most-once writes, profile/grant tests, explicit account/profile/scope mapping |
 | TOOL-024 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-022, SOL-003 | S0, S4 | `2f811f1`, `e30b06c`, `a1230c8`; prompt-only Copilot stdin bridge with supported flags, minimal env, redaction/version/cancel tests, isolated provider status |
 | TOOL-025 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-022, SOL-003 | S0, S4 | `f30ad1b`, `d5cc74c`; bounded operator-configured process.run_allowlisted with strict per-action schemas, absolute executable/interpreter denylist, writable workspace cwd binding, canonical executable identity preview/dispatch binding, exact authorization objects, integer argv parity, minimal env/stdin/output bounds, cancellation/tree cleanup, at-most-once ledger, grant revocation, and focused/full green evidence |
+| TOOL-026 | S3 | `luna/agent-tools` | IN_PROGRESS | TOOL-023, TOOL-024, SOL-003 | S0, S4 | startup packet committed; Graph/UI audit hardening in progress |
 | QA-001 | S4 | `luna/qa-release` | CLAIMED | SOL-001 | S0 | pending |
 | SEC-001 | S4 | `luna/qa-release` | CLAIMED | QA-001, SOL-003 | S0 | pending |
 | RUN-019 | S1 | `main` | IN_PROGRESS | RUN-010, MODEL-004 | S0, S4 | real tool-role/template pipeline and tests pending |
