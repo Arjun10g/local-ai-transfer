@@ -130,3 +130,11 @@ tests prove dependency closure and launch wiring only. They do not prove the
 Node executable, PE/DLL loader, 5.6 GB artifact, Intel target, or providers on
 the actual laptop. No Shadeform, Intel, real-model, or native-Windows evidence
 is implied by this source tree.
+
+The repository-side Phase 8 procedure is
+`qa/windows_acceptance/README.md`, with the executable harness at
+`qa/windows_acceptance/Invoke-WindowsAcceptance.ps1` and the fail-closed
+offline gate at `python -m qa.windows_acceptance.verify`. Keep that acceptance
+bundle separate from the runtime package. Its checked-in target values are
+reported assertions, not evidence: current target status remains `NOT_READY`
+until the real Windows hardware and execution receipts pass Sol review.
