@@ -1,6 +1,6 @@
 import { createMicrosoftGraphTools, MicrosoftGraphProvider, graphDefinitions } from './microsoft-graph.mjs';
 import { createCopilotTool, CopilotCliProvider, copilotDefinition } from './copilot-cli.mjs';
-import { OperatorGrantStore, PERMISSION_PROFILES } from './operator-grants.mjs';
+import { OperatorGrantStore, OperatorGrantControl, buildOperatorGrantBindings, PERMISSION_PROFILES } from './operator-grants.mjs';
 
 function exactOptions(value, allowed, name) { if (value === undefined) return {}; if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError(`${name} must be an object`); for (const key of Object.keys(value)) if (!allowed.includes(key)) throw new TypeError(`${name} has unknown option: ${key}`); return value; }
 
@@ -12,4 +12,4 @@ export function createExternalToolRegistry({ graph, copilot, config = {} } = {})
   const registry = { ...createMicrosoftGraphTools(graphProvider), [copilotDefinition.name]: createCopilotTool(copilotProvider) }; Object.defineProperty(registry, 'providerStatus', { enumerable: false, value: () => ({ microsoft_graph: graphProvider.state(), copilot: copilotProvider.state() }) }); return registry;
 }
 
-export { CopilotCliProvider, MicrosoftGraphProvider, OperatorGrantStore, PERMISSION_PROFILES, copilotDefinition, graphDefinitions };
+export { CopilotCliProvider, MicrosoftGraphProvider, OperatorGrantStore, OperatorGrantControl, buildOperatorGrantBindings, PERMISSION_PROFILES, copilotDefinition, graphDefinitions };

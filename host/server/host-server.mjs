@@ -38,9 +38,9 @@ async function body(req, maxBytes, timeoutMs) {
 }
 
 export class HostServer {
-  constructor({ controller, engine, config = {}, providers } = {}) {
+  constructor({ controller, engine, config = {}, providers, operatorGrants } = {}) {
     if (!controller) throw new TypeError('controller is required');
-    this.controller = controller; this.engine = engine; this.config = mergeConfig(config); this.providers = providers; this.token = randomBytes(32).toString('base64url'); this.server = null; this.port = null; this.authFailures = new Map();
+    this.controller = controller; this.engine = engine; this.config = mergeConfig(config); this.providers = providers; this.operatorGrants = operatorGrants; this.token = randomBytes(32).toString('base64url'); this.server = null; this.port = null; this.authFailures = new Map();
   }
   async listen(port = 0) {
     if (this.server) return this.address();
@@ -52,7 +52,7 @@ export class HostServer {
     this.port = this.server.address().port; return this.address();
   }
   address() { return { host: '127.0.0.1', port: this.port, token: this.token, url: `http://127.0.0.1:${this.port}` }; }
-  async close() { if (!this.server) return; await new Promise(resolve => this.server.close(() => resolve())); this.server = null; await this.engine?.shutdown?.(); }
+  async close() { this.operatorGrants?.revokeAll?.(); this.controller.cancelActive?.(); if (!this.server) return; await new Promise(resolve => this.server.close(() => resolve())); this.server = null; await this.engine?.shutdown?.(); }
   allowedRequest(req) {
     if (req.socket.remoteAddress && !['127.0.0.1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) return false;
     if (!LOCAL_HOST.test(req.headers.host ?? '')) return false;
@@ -74,22 +74,32 @@ export class HostServer {
     this.clearAuthFailure(req);
     if (req.method === 'GET' && ASSETS.has(path)) return this.asset(path, res);
     if (req.method === 'GET' && path === '/api/status') return this.status(res);
+    if (req.method === 'GET' && path === '/api/operator-grants') return json(res, 200, { capabilities: this.operatorGrants?.list?.() ?? [] });
     try {
       if (req.method === 'POST' && path === '/api/sessions') { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); const input = exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), ['session_id', 'reset']); if (input.session_id !== undefined && (typeof input.session_id !== 'string' || !OPAQUE_ID.test(input.session_id))) return json(res, 400, { error: 'invalid_request_body' }); if (input.reset !== undefined && typeof input.reset !== 'boolean') return json(res, 400, { error: 'invalid_request_body' }); const session = this.controller.createSession(input.session_id); if (input.reset) this.controller.resetSession(session.id); return json(res, 201, { session_id: session.id, state: this.controller.state(session.id) }); }
       if (req.method === 'POST' && path === '/api/chat') return await this.chat(req, res);
       if (req.method === 'POST' && path === '/api/cancel') { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); const input = exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), ['request_id'], ['request_id']); if (typeof input.request_id !== 'string' || !OPAQUE_ID.test(input.request_id)) return json(res, 400, { error: 'invalid_request_id' }); const cancelled = this.controller.cancel(input.request_id); return json(res, cancelled ? 200 : 404, { cancelled }); }
+      if (req.method === 'POST' && path === '/api/operator-grants/revoke-all') { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), []); this.controller.cancelActive?.(); return json(res, 200, this.operatorGrants?.revokeAll?.() ?? { revoked: 0 }); }
+      const grant = path.match(/^\/api\/operator-grants\/([A-Za-z0-9_.:-]{1,256})$/);
+      if (req.method === 'POST' && grant) {
+        if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' });
+        const input = exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), ['granted', 'duration_ms'], ['granted']);
+        if (typeof input.granted !== 'boolean' || (input.granted && (!Number.isInteger(input.duration_ms) || input.duration_ms < 60000 || input.duration_ms > 28800000)) || (!input.granted && input.duration_ms !== undefined)) return json(res, 400, { error: 'invalid_request_body' });
+        const value = input.granted ? this.operatorGrants?.grant?.(grant[1], input.duration_ms) : this.operatorGrants?.revoke?.(grant[1]);
+        return value ? json(res, 200, value) : json(res, 404, { error: 'unknown_capability' });
+      }
       const confirmation = path.match(/^\/api\/tool-confirmations\/([A-Za-z0-9_-]{8,96})$/);
       if (req.method === 'POST' && confirmation) { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); const input = exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), ['approved', 'request_id', 'call_id'], ['approved', 'request_id', 'call_id']); if (typeof input.approved !== 'boolean' || typeof input.request_id !== 'string' || !OPAQUE_ID.test(input.request_id) || typeof input.call_id !== 'string' || !OPAQUE_ID.test(input.call_id)) return json(res, 400, { error: 'invalid_request_body' }); const accepted = this.controller.confirm(confirmation[1], input.approved, { requestId: input.request_id, callId: input.call_id }); return json(res, accepted ? 200 : 404, { accepted }); }
       if (req.method === 'POST' && path === '/api/shutdown') { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), []); json(res, 200, { shutting_down: true }); setImmediate(() => this.close()); return; }
       return json(res, 404, { error: 'not_found' });
-    } catch (error) { if (res.headersSent) return this.fail(res, error); const code = error.code ?? 'request_failed'; const status = code === 'body_too_large' ? 413 : code === 'request_timeout' ? 408 : (code.startsWith('invalid_') || code === 'unsupported_content_type') ? 400 : 500; return json(res, status, { error: code }); }
+    } catch (error) { if (res.headersSent) return this.fail(res, error); const code = error.code ?? (error instanceof TypeError ? 'invalid_request_body' : 'request_failed'); const status = code === 'body_too_large' ? 413 : code === 'request_timeout' ? 408 : (code.startsWith('invalid_') || code === 'unsupported_content_type') ? 400 : 500; return json(res, status, { error: code }); }
   }
   async asset(path, res) {
     const [file, type] = ASSETS.get(path); const candidate = resolve(join(UI_ROOT, file));
     if (!isWithinDirectory(UI_ROOT, candidate)) return json(res, 404, { error: 'not_found' });
     try { let content = await readFile(candidate, 'utf8'); if (file === 'index.html') content = content.replaceAll('__LAE_BOOTSTRAP__', this.token); res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', ...securityHeaders() }); res.end(content); } catch { json(res, 404, { error: 'not_found' }); }
   }
-  async status(res) { let engine = { ready: false, backend: 'unknown' }; try { engine = await this.engine?.health?.() ?? engine; } catch { /* generic status only */ } const providers = typeof this.providers === 'function' ? this.providers() : this.providers ?? {}; json(res, 200, { host: { bind: '127.0.0.1', port: this.port }, engine, network: { provider: this.config.network.provider, enabled: this.config.network.provider !== 'disabled' }, providers, limits: { max_body_bytes: this.config.host.max_body_bytes, max_connections: this.config.host.max_connections } }); }
+  async status(res) { let engine = { ready: false, backend: 'unknown' }; try { engine = await this.engine?.health?.() ?? engine; } catch { /* generic status only */ } const providers = typeof this.providers === 'function' ? this.providers() : this.providers ?? {}; json(res, 200, { host: { bind: '127.0.0.1', port: this.port }, engine, network: { provider: this.config.network.provider, enabled: this.config.network.provider !== 'disabled' }, providers, operator_grants: { available: this.operatorGrants?.list?.().length ?? 0, active: this.operatorGrants?.list?.().filter(value => value.granted).length ?? 0 }, limits: { max_body_bytes: this.config.host.max_body_bytes, max_connections: this.config.host.max_connections } }); }
   async chat(req, res) {
     if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' });
     const input = exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), ['session_id', 'message', 'mode', 'request_id'], ['session_id', 'message', 'request_id']);

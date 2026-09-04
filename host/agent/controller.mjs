@@ -112,6 +112,7 @@ export class ConversationController {
   state(sessionId) { return this.getSession(sessionId).state; }
   _cancelPending(requestId) { const active = this.active; if (!active || active.requestId !== requestId || !active.confirmationId) return false; const item = this.pending.get(active.confirmationId); if (!item) return false; this.pending.delete(active.confirmationId); active.confirmationId = null; item.resolve(CANCELLED_CONFIRMATION); return true; }
   cancel(requestId) { if (this.active?.requestId !== requestId) return false; this.active.controller.abort(); this._cancelPending(requestId); this.engine.cancel?.(requestId); return true; }
+  cancelActive() { return this.active ? this.cancel(this.active.requestId) : false; }
   confirm(confirmationId, approved, { requestId, callId } = {}) { const item = this.pending.get(confirmationId); if (!item || typeof approved !== 'boolean') return false; if (typeof requestId !== 'string' || typeof callId !== 'string' || requestId !== item.requestId || callId !== item.callId) return false; this.pending.delete(confirmationId); item.resolve(approved); return true; }
   emitFactory(requestId, sessionId, onEvent) { let sequence = 0; return (event, data) => { const output = makeEvent({ event, requestId, sessionId, sequence: sequence++, data }); onEvent?.(output); return output; }; }
   async runTurn({ sessionId, message, mode = 'normal', requestId = opaque('req'), signal, onEvent } = {}) {
@@ -146,7 +147,7 @@ export class ConversationController {
         let preview;
         if (tool.preview) preview = await invokeWithTimeout(tool, tool.preview, call, controller.signal);
         emit('tool.proposed', { call, ...(preview === undefined ? {} : { preview }) });
-        let approved = true; let authorization = { kind: 'policy' }; const autoAuthorization = tool.authorize ? await invokeWithTimeout(tool, tool.authorize, { ...call, preview }, controller.signal) : null; if (autoAuthorization && typeof autoAuthorization === 'object') authorization = autoAuthorization;
+        let approved = true; let authorization = { kind: 'policy' };
         const requiresConfirmation = typeof tool.confirmationRequired === 'function' ? await tool.confirmationRequired(call, { preview }) : Boolean(tool.requires_confirmation);
         if (requiresConfirmation) {
           session.state = 'WAITING_CONFIRMATION'; const confirmationId = opaque('cnf');
@@ -155,7 +156,7 @@ export class ConversationController {
           this.active.confirmationId = null;
           if (approved === CANCELLED_CONFIRMATION) throw Object.assign(new Error('cancelled'), { code: 'cancelled' });
           if (approved) authorization = { kind: 'user_confirmation' };
-        }
+        } else { const autoAuthorization = tool.authorize ? await invokeWithTimeout(tool, tool.authorize, { ...call, preview }, controller.signal) : null; if (autoAuthorization && typeof autoAuthorization === 'object') authorization = autoAuthorization; }
         session.state = 'TOOL_RUNNING'; emit('tool.started', { call, approved, authorization: authorization.kind });
         let result;
         if (!approved) result = makeToolResult({ id: call.id, name: call.name, status: 'denied', text: 'User denied this action.' });

@@ -8,7 +8,10 @@
     "chat": {"allowed": ["session_id", "request_id", "message", "mode"], "required": ["session_id", "request_id", "message"]},
     "cancel": {"allowed": ["request_id"], "required": ["request_id"]},
     "tool_confirmation": {"allowed": ["approved", "request_id", "call_id"], "required": ["approved", "request_id", "call_id"]},
+    "operator_grant": {"allowed": ["granted", "duration_ms"], "required": ["granted"], "minimum_duration_ms": 60000, "maximum_duration_ms": 28800000},
+    "operator_grant_revoke_all": {"allowed": [], "required": []},
     "shutdown": {"allowed": [], "required": []}
   },
-  "disconnect": "abort_active_chat"
+  "disconnect": "abort_active_chat",
+  "operator_grants": {"storage": "memory_only", "binding": ["capability", "provider", "account_fingerprint", "scope"], "projection_excludes": ["account_fingerprint", "generation"], "shutdown": "revoke_all"}
 }

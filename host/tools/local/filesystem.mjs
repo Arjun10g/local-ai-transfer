@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { makeToolResult } from '../../agent/tool-envelope.mjs';
 import { WorkspaceError } from './workspace-policy.mjs';
 import { validateToolArguments } from './argument-validation.mjs';
+import { applyOperatorGrantPolicy } from '../../providers/operator-tool-policy.mjs';
 
 const MAX_READ = 65536; const MAX_SEARCH_FILES = 200; const MAX_SEARCH_MATCHES = 500;
 const NOFOLLOW = fsConstants.O_NOFOLLOW;
@@ -59,7 +60,7 @@ async function readRegular(file, platform, maxBytes) {
   try { return await readHandle(handle, maxBytes); } finally { await closeQuietly(handle); }
 }
 
-export function createFilesystemTools(policy, { platform = process.platform } = {}) {
+export function createFilesystemTools(policy, { platform = process.platform, grantControl } = {}) {
   if (!policy) throw new TypeError('WorkspacePolicy is required');
   const list = async call => {
     assertPlatformSafe(platform);
@@ -106,5 +107,6 @@ export function createFilesystemTools(policy, { platform = process.platform } = 
     const finalHandle = await openNoFollow(prepared.file.canonical, platform); let written; try { const finalStat = await finalHandle.stat(); if (finalStat.size > 2 * 1024 * 1024) throw new WorkspaceError('file_too_large', 'replacement exceeds the bounded operation size'); written = await readHandle(finalHandle, 2 * 1024 * 1024); } finally { await closeQuietly(finalHandle); } return result(call, 'ok', JSON.stringify({ applied: true, ...prepared.preview, final_sha256: sha256(written) }));
   };
   const tools = { 'fs.list': { ...filesystemDefinitions['fs.list'], execute: list }, 'fs.read_text': { ...filesystemDefinitions['fs.read_text'], execute: readText }, 'fs.search_text': { ...filesystemDefinitions['fs.search_text'], execute: searchText }, 'fs.write_new': { ...filesystemDefinitions['fs.write_new'], execute: writeNew }, 'fs.apply_patch': { ...filesystemDefinitions['fs.apply_patch'], preview: async call => (await patchPreview(call)).preview, execute: applyPatch } };
+  for (const name of ['fs.write_new', 'fs.apply_patch']) tools[name] = applyOperatorGrantPolicy(tools[name], { grantControl, capabilityForCall: call => `local.filesystem:${call.arguments.workspace_id}` });
   return tools;
 }

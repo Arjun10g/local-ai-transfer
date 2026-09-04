@@ -7,6 +7,7 @@ import { ConversationController } from '../../host/agent/controller.mjs';
 import { FixtureEngineClient } from '../../host/engine/fixture-engine.mjs';
 import { HostServer, isWithinDirectory } from '../../host/server/host-server.mjs';
 import { mergeConfig } from '../../host/agent/config.mjs';
+import { OperatorGrantStore, OperatorGrantControl, buildOperatorGrantBindings } from '../../host/providers/operator-grants.mjs';
 
 const auth = token => ({ authorization: `Bearer ${token}` });
 
@@ -175,6 +176,23 @@ test('config rejects unknown/non-loopback settings and host enforces body bound'
   assert.throws(() => mergeConfig({ host: { bind: '0.0.0.0' } }), /127\.0\.0\.1/);
   const engine = new FixtureEngineClient(); const controller = new ConversationController({ engine }); const host = new HostServer({ controller, engine, config: { host: { max_body_bytes: 1024 } } }); const address = await host.listen(0); t.after(() => host.close());
   const response = await fetch(`${address.url}/api/sessions`, { method: 'POST', headers: { ...auth(address.token), 'content-type': 'application/json' }, body: JSON.stringify({ padding: 'x'.repeat(2000) }) }); assert.equal(response.status, 413);
+});
+
+test('authenticated operator grant API grants, projects, revokes, and rejects widening', async t => {
+  const config = mergeConfig({ providers: { microsoft_graph: { enabled: true, permission_profile: 'full_access', account_fingerprint: 'acct-test', scope: 'account' } }, applications: { outlook: { executable: 'outlook.exe', args: [] } } });
+  const store = new OperatorGrantStore(); const grants = new OperatorGrantControl({ store, bindings: buildOperatorGrantBindings(config) });
+  const engine = new FixtureEngineClient(); const controller = new ConversationController({ engine }); const host = new HostServer({ controller, engine, config, operatorGrants: grants }); const address = await host.listen(0); t.after(() => host.close());
+  assert.equal((await fetch(`${address.url}/api/operator-grants`)).status, 401);
+  const listed = await fetch(`${address.url}/api/operator-grants`, { headers: auth(address.token) }); assert.equal(listed.status, 200); const initial = await listed.json(); assert.deepEqual(initial.capabilities.map(value => value.capability), ['local.application:outlook', 'local.clipboard', 'microsoft.graph.mail', 'microsoft.graph.teams']);
+  const endpoint = `${address.url}/api/operator-grants/microsoft.graph.mail`;
+  for (const value of [{}, { granted: true }, { granted: true, duration_ms: 59999 }, { granted: false, duration_ms: 60000 }, { granted: true, duration_ms: 60000, scope: '*' }]) {
+    const response = await fetch(endpoint, { method: 'POST', headers: { ...auth(address.token), 'content-type': 'application/json' }, body: JSON.stringify(value) }); assert.equal(response.status, 400);
+  }
+  const granted = await fetch(endpoint, { method: 'POST', headers: { ...auth(address.token), 'content-type': 'application/json' }, body: JSON.stringify({ granted: true, duration_ms: 60000 }) }); assert.equal(granted.status, 200); const projection = await granted.json(); assert.equal(projection.granted, true); assert.equal(Object.hasOwn(projection, 'account_fingerprint'), false); assert.equal(Object.hasOwn(projection, 'generation'), false);
+  const unknown = await fetch(`${address.url}/api/operator-grants/microsoft.graph.admin`, { method: 'POST', headers: { ...auth(address.token), 'content-type': 'application/json' }, body: JSON.stringify({ granted: true, duration_ms: 60000 }) }); assert.equal(unknown.status, 404);
+  const revoked = await fetch(endpoint, { method: 'POST', headers: { ...auth(address.token), 'content-type': 'application/json' }, body: JSON.stringify({ granted: false }) }); assert.equal(revoked.status, 200); assert.equal((await revoked.json()).granted, false);
+  grants.grant('microsoft.graph.mail', 60000); grants.grant('microsoft.graph.teams', 60000);
+  const all = await fetch(`${address.url}/api/operator-grants/revoke-all`, { method: 'POST', headers: { ...auth(address.token), 'content-type': 'application/json' }, body: '{}' }); assert.equal(all.status, 200); assert.equal((await all.json()).revoked, 2); assert.equal(store.grants.size, 0);
 });
 
 test('pending confirmation cancellation resolves immediately and cannot replay', async () => {

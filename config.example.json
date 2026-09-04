@@ -8,5 +8,6 @@
   },
   "engine": { "mode": "fixture" },
   "workspace_roots": [],
+  "applications": {},
   "network": { "provider": "disabled" }
 }

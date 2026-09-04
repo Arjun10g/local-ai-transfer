@@ -6,6 +6,11 @@ import { makeToolResult } from '../../host/agent/tool-envelope.mjs';
 import { createCopilotTool } from '../../host/providers/copilot-cli.mjs';
 import { createMicrosoftGraphTools, MicrosoftGraphProvider } from '../../host/providers/microsoft-graph.mjs';
 import { OperatorGrantStore } from '../../host/providers/operator-grants.mjs';
+import { OperatorGrantControl, buildOperatorGrantBindings } from '../../host/providers/operator-grants.mjs';
+import { createLocalToolRegistry } from '../../host/tools/local/index.mjs';
+import { mkdtemp, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const call = (name, arguments_, id = `call_${name.replaceAll('.', '_')}`) => ({ id, name, arguments: arguments_ });
 const resultValue = result => JSON.parse(result.content[0].text);
@@ -90,7 +95,43 @@ test('FULL-ACCESS contract: capability, provider, account, and scope bindings ar
   assert.equal(grants.matches('microsoft.graph.mail', { provider: 'microsoft_graph', accountFingerprint: 'acct-1', scope: 'mailbox-2' }), false);
 });
 
-test.todo('KNOWN GAP: authenticated operator grant/revoke controls are not yet wired to workspace and application capabilities');
+test('FULL-ACCESS contract: operator controls are capability-bound to configured workspace and applications', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'lae-grant-root-'));
+  const config = mergeConfig({ workspace_roots: [{ id: 'project', path: root, read: true, write: true }], applications: { probe: { executable_id: 'probe', executable: process.execPath, args: ['-e', ''] } } });
+  const store = new OperatorGrantStore(); const control = new OperatorGrantControl({ store, bindings: buildOperatorGrantBindings(config) });
+  const capabilities = control.list(); assert.deepEqual(capabilities.map(value => value.capability), ['local.application:probe', 'local.clipboard', 'local.filesystem:project']);
+  assert.equal(JSON.stringify(capabilities).includes('accountFingerprint'), false); assert.equal(JSON.stringify(capabilities).includes('generation'), false);
+  const tools = createLocalToolRegistry({ workspaces: config.workspace_roots, applications: config.applications, grantControl: control, platform: process.platform });
+  const write = call('fs.write_new', { workspace_id: 'project', path: 'granted.txt', content: 'scoped' }, 'call_grantedwrite');
+  assert.equal(await tools['fs.write_new'].confirmationRequired(write), true);
+  control.grant('local.filesystem:project', 60000); assert.equal(await tools['fs.write_new'].confirmationRequired(write), false);
+  const authorization = await tools['fs.write_new'].authorize(write); assert.equal(authorization.kind, 'operator_grant');
+  assert.equal(resultValue(await tools['fs.write_new'].execute({ ...write, authorization } )).created, true); assert.equal(await readFile(join(root, 'granted.txt'), 'utf8'), 'scoped');
+  control.revoke('local.filesystem:project');
+  await assert.rejects(() => tools['fs.write_new'].execute({ ...write, id: 'call_replayedwrite', arguments: { ...write.arguments, path: 'replay.txt' }, authorization }), error => error.code === 'provider_permission_revoked');
+  assert.equal(await tools['app.open'].confirmationRequired(call('app.open', { app_id: 'probe' }, 'call_appgrant')), true);
+  assert.equal(control.grant('local.application:missing', 60000), null);
+});
+
+test('FULL-ACCESS contract: grant expiry and revoke-all notify in-flight subscribers', async () => {
+  const store = new OperatorGrantStore(); const expired = []; const revoked = [];
+  store.subscribe('cap.expiring', () => expired.push(true)); store.subscribe('cap.other', () => revoked.push(true));
+  store.grant({ capability: 'cap.expiring', provider: 'provider', accountFingerprint: 'account', expiresAt: Date.now() + 20 });
+  store.grant({ capability: 'cap.other', provider: 'provider', accountFingerprint: 'account' });
+  const deadline = Date.now() + 2000; while (!expired.length && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5)); assert.equal(store.get('cap.expiring'), null); assert.equal(expired.length, 1);
+  assert.equal(store.revokeAll(), 1); assert.equal(revoked.length, 1); assert.equal(store.grants.size, 0);
+});
+
+test('FULL-ACCESS contract: confirmation decision precedes auto-authorization to close grant TOCTOU', async () => {
+  let authorizeCalls = 0; let executed = 0;
+  const tool = { name: 'test.ordered_auth', risk_tier: 'T2', timeout_ms: 1000, requires_confirmation: true, confirmationRequired: () => true, authorize: async () => { authorizeCalls += 1; throw new Error('must not auto-authorize a confirmed action'); }, execute: async value => { executed += 1; assert.equal(value.authorization.kind, 'user_confirmation'); return makeToolResult({ id: value.id, name: value.name }); } };
+  const engine = { async *generate({ messages }) { if (!messages.some(message => message.role === 'tool')) { yield { kind: 'tool_call_chunk', text: JSON.stringify(call(tool.name, {}, 'call_authorder')) }; return; } yield { kind: 'text_delta', text: 'done' }; } };
+  const controller = new ConversationController({ engine, toolRegistry: { [tool.name]: tool }, confirmationTimeoutMs: 1000 }); const events = [];
+  const pending = controller.runTurn({ sessionId: 'ses_authorder', requestId: 'req_authorder', message: 'confirm it', onEvent: event => events.push(event) });
+  while (!events.some(event => event.event === 'tool.confirmation_required')) await nextTick();
+  const event = events.find(value => value.event === 'tool.confirmation_required'); assert.equal(controller.confirm(event.data.confirmation_id, true, { requestId: 'req_authorder', callId: 'call_authorder' }), true);
+  assert.equal((await pending).state, 'COMPLETED'); assert.equal(authorizeCalls, 0); assert.equal(executed, 1);
+});
 
 test('FULL-ACCESS contract: T4 and unregistered policy tools remain prohibited', async () => {
   const grants = new OperatorGrantStore();

@@ -13,7 +13,17 @@ controller generation.
 | `POST /api/chat` | required `session_id`, `request_id`, `message`; optional `mode` |
 | `POST /api/cancel` | required `request_id` |
 | `POST /api/tool-confirmations/{id}` | required `approved`, `request_id`, `call_id` |
+| `POST /api/operator-grants/{capability}` | required `granted`; `duration_ms` required only when granting (1 minute–8 hours) |
+| `POST /api/operator-grants/revoke-all` | `{}` |
 | `POST /api/shutdown` | `{}` |
+
+Authenticated `GET /api/operator-grants` lists only host-configured capability,
+provider, scope, label, profile, and expiry projections. It never returns account
+fingerprints or grant generations. A grant request selects one exact
+host-configured binding; callers cannot provide or widen provider, account, root,
+application, or scope values. Grants are memory-only, expire automatically, and
+are all revoked on host shutdown. The revoke-all route also cancels the active
+controller turn.
 
 Failed authentication uses timing-safe token comparison and a bounded per-loopback
 rate limit. Header count/size limits use Node's `maxHeadersCount` and
