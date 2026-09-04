@@ -54,11 +54,11 @@ def _persist_lifecycle(phase_id: str, lifecycle: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
-def _progress(path: Path, stage: str, **details: Any) -> None:
+def _progress(path: Path, event: str, **details: Any) -> None:
     """Best-effort atomic progress marker; never masks cleanup failures."""
 
     try:
-        j1m_runner.write_progress(path, stage, **details)
+        j1m_runner.write_progress(path, event, **details)
     except Exception:
         pass
 

@@ -517,6 +517,12 @@ class StaticSafetyTests(unittest.TestCase):
                 mode="eval", model_artifact=Path("/tmp/Qwen3.5-9B-Q4_K_M.gguf"),
             )
 
+    def test_progress_wrapper_accepts_stage_detail_without_collision(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_progress_wrapper")
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(orchestrator.j1m_runner, "write_progress") as writer:
+            orchestrator._progress(Path(directory) / "progress.json", "eval-stage-starting", phase_id="p", stage="eval-bootstrap:mkdir")
+        writer.assert_called_once_with(Path(directory) / "progress.json", "eval-stage-starting", phase_id="p", stage="eval-bootstrap:mkdir")
+
     def test_salvage_timeout_is_size_aware_and_deadline_bounded(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_timeout")
         info = {"phase_id": "j1m-test", "instance_info": {"ssh_user": "u", "ip": "127.0.0.1"}}
