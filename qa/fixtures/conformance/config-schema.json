@@ -1,1 +1,1 @@
-{"positive":{"model_path":"D:/ApprovedModels/model.gguf","context_tokens":8192,"backend_profile":"cpu-safe"},"negative":{"model_path":"D:/model.gguf","context_tokens":8192,"unexpected_secret":"do-not-accept"}}
+{"positive":{"host":{"bind":"127.0.0.1","max_body_bytes":65536,"request_timeout_ms":10000,"max_connections":8},"engine":{"mode":"fixture","endpoint":"http://127.0.0.1"},"workspace_roots":["D:/Approved"],"network":{"provider":"disabled"}},"negative":{"host":{"bind":"0.0.0.0"},"unknown":"do-not-accept"}}

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
 from typing import Any, Callable
 
 Validator = Callable[[Any], bool]
@@ -22,15 +23,19 @@ def _exact_keys(value: Any, keys: set[str]) -> bool:
 
 
 def _engine(value: Any) -> bool:
-    return isinstance(value, dict) and value.get("bind") == "127.0.0.1" and value.get("authenticated") is True
+    return isinstance(value, dict) and value.get("api_version") == "0.1.0" and bool(value.get("routes")) and value.get("origin_policy", {}).get("allow_cors_wildcard") is False
 
 
 def _events(value: Any) -> bool:
-    return isinstance(value, list) and value[:2] == ["message.started", "message.completed"] and len(value) >= 2
+    return isinstance(value, dict) and value.get("version") == "0.1.0" and value.get("event") in {"message.started", "message.delta", "message.completed", "request.cancelled"} and isinstance(value.get("data"), dict)
 
 
 def _tool(value: Any) -> bool:
     return _exact_keys(value, {"id", "name", "arguments"}) and isinstance(value["id"], str) and isinstance(value["name"], str) and isinstance(value["arguments"], dict)
+
+
+def _tool_result(value: Any) -> bool:
+    return _exact_keys(value, {"id", "name", "status", "content", "metadata"}) and value.get("status") in {"ok", "denied", "cancelled", "failed"} and isinstance(value.get("content"), list) and isinstance(value.get("metadata"), dict)
 
 
 def _model(value: Any) -> bool:
@@ -38,7 +43,7 @@ def _model(value: Any) -> bool:
 
 
 def _config(value: Any) -> bool:
-    return isinstance(value, dict) and set(value).issubset({"model_path", "context_tokens", "backend_profile"}) and isinstance(value.get("context_tokens"), int) and 1 <= value["context_tokens"] <= 16384
+    return isinstance(value, dict) and set(value).issubset({"host", "engine", "workspace_roots", "network"}) and value.get("host", {}).get("bind", "127.0.0.1") == "127.0.0.1"
 
 
 def _metrics(value: Any) -> bool:
@@ -46,7 +51,7 @@ def _metrics(value: Any) -> bool:
 
 
 def _error(value: Any) -> bool:
-    return isinstance(value, dict) and value.get("code") in {"invalid_request", "unauthorized", "cancelled", "provider_unconfigured", "network_unavailable"} and isinstance(value.get("message"), str)
+    return isinstance(value, dict) and value.get("code") in {"unauthorized", "not_found", "method_not_allowed", "invalid_json", "invalid_request", "request_too_large", "not_ready", "busy", "request_cancelled", "shutdown", "internal_error"} and isinstance(value.get("http_status"), int)
 
 
 def _cancel(value: Any) -> bool:
@@ -68,6 +73,7 @@ VALIDATORS: dict[str, Validator] = {
     "engine-api": _engine,
     "assistant-events": _events,
     "tool-envelope": _tool,
+    "tool-result": _tool_result,
     "model-manifest": _model,
     "config-schema": _config,
     "metrics-schema": _metrics,
@@ -76,6 +82,67 @@ VALIDATORS: dict[str, Validator] = {
     "session-lifecycle": _session,
     "release-manifest": _release,
 }
+
+SCHEMA_FILES = {
+    "engine-api": "contracts/engine-api/engine-api.schema.json",
+    "assistant-events": "contracts/assistant-events/v0.1.0.json",
+    "config-schema": "contracts/config-schema/v0.1.0.json",
+    "tool-envelope": "contracts/tool-envelope/v0.1.0.json",
+}
+SCHEMA_FILES["tool-result"] = "contracts/tool-envelope/result-v0.1.0.json"
+
+
+def schema_errors(value: Any, schema: dict[str, Any], path: str = "$", root: dict[str, Any] | None = None) -> list[str]:
+    """Small dependency-free JSON Schema subset used by checked-in contracts."""
+    root = root or schema
+    if "$ref" in schema:
+        ref = schema["$ref"]
+        if ref.startswith("#/"):
+            target: Any = root
+            for part in ref[2:].split("/"):
+                target = target[part]
+            return schema_errors(value, target, path, root)
+    errors: list[str] = []
+    if "const" in schema and value != schema["const"]:
+        errors.append(f"{path}:const")
+    if "enum" in schema and value not in schema["enum"]:
+        errors.append(f"{path}:enum")
+    types = schema.get("type")
+    if types:
+        allowed = set(types) if isinstance(types, list) else {types}
+        actual = "null" if value is None else "boolean" if isinstance(value, bool) else "integer" if isinstance(value, int) and not isinstance(value, bool) else "number" if isinstance(value, (int, float)) and not isinstance(value, bool) else "string" if isinstance(value, str) else "array" if isinstance(value, list) else "object" if isinstance(value, dict) else "unknown"
+        if actual not in allowed:
+            return errors + [f"{path}:type"]
+    if isinstance(value, dict):
+        required = schema.get("required", [])
+        errors.extend(f"{path}.{key}:required" for key in required if key not in value)
+        properties = schema.get("properties", {})
+        if schema.get("additionalProperties") is False:
+            errors.extend(f"{path}.{key}:additional" for key in value if key not in properties)
+        for key, child in properties.items():
+            if key in value:
+                errors.extend(schema_errors(value[key], child, f"{path}.{key}", root))
+        if "maxProperties" in schema and len(value) > schema["maxProperties"]:
+            errors.append(f"{path}:maxProperties")
+    elif isinstance(value, list):
+        if "maxItems" in schema and len(value) > schema["maxItems"]:
+            errors.append(f"{path}:maxItems")
+        if "items" in schema:
+            for index, child in enumerate(value):
+                errors.extend(schema_errors(child, schema["items"], f"{path}[{index}]", root))
+    elif isinstance(value, str):
+        if "minLength" in schema and len(value) < schema["minLength"]:
+            errors.append(f"{path}:minLength")
+        if "maxLength" in schema and len(value) > schema["maxLength"]:
+            errors.append(f"{path}:maxLength")
+        if "pattern" in schema and re.fullmatch(schema["pattern"], value) is None:
+            errors.append(f"{path}:pattern")
+    elif isinstance(value, int) and not isinstance(value, bool):
+        if "minimum" in schema and value < schema["minimum"]:
+            errors.append(f"{path}:minimum")
+        if "maximum" in schema and value > schema["maximum"]:
+            errors.append(f"{path}:maximum")
+    return errors
 
 
 def run_fixture_file(path: Path) -> dict[str, Any]:
@@ -88,13 +155,22 @@ def run_fixture_file(path: Path) -> dict[str, Any]:
         raise ValueError(f"{path}: expected positive and negative cases")
     positive_ok = validator(fixture["positive"])
     negative_rejected = not validator(fixture["negative"])
+    schema_path = Path(__file__).parents[2] / SCHEMA_FILES[contract] if contract in SCHEMA_FILES else None
+    schema_checks = None
+    if schema_path and schema_path.is_file():
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        positive_schema_errors = schema_errors(fixture["positive"], schema)
+        negative_schema_errors = schema_errors(fixture["negative"], schema)
+        positive_ok = positive_ok and not positive_schema_errors
+        negative_rejected = negative_rejected or bool(negative_schema_errors)
+        schema_checks = {"positive_errors": positive_schema_errors, "negative_errors": negative_schema_errors, "schema": str(schema_path)}
     return {
         "schema_version": "test-result.v1",
         "test_id": f"QA-CONFORMANCE-{contract.upper().replace('-', '_')}",
         "status": "PASS" if positive_ok and negative_rejected else "FAIL",
         "kind": "fixture",
         "duration_ms": 0,
-        "details": {"contract": contract, "positive_accepted": positive_ok, "negative_rejected": negative_rejected},
+        "details": {"contract": contract, "positive_accepted": positive_ok, "negative_rejected": negative_rejected, "schema_checks": schema_checks},
         "artifact": str(path),
     }
 

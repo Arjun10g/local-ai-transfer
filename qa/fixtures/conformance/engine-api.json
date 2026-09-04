@@ -1,1 +1,1 @@
-{"positive":{"bind":"127.0.0.1","authenticated":true},"negative":{"bind":"0.0.0.0","authenticated":true}}
+{"positive":{"api_version":"0.1.0","lifecycle_states":["NEW","READY"],"limits":{"max_body_bytes":65536,"max_tokens":64,"max_active_generations":1},"routes":[{"method":"GET","path":"/healthz","auth":false}],"stream":{"media_type":"text/event-stream","terminator":"data: [DONE]\n\n","finish_reasons":["stop"]},"origin_policy":{"allow_cors_wildcard":false}},"negative":{"api_version":"9.9.9","lifecycle_states":[],"limits":{},"routes":[],"stream":{}}}
