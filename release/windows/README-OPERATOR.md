@@ -14,13 +14,16 @@ environment before invoking `Start-LocalAssistant.ps1`.
 receipt-gated choice with no fallback. Run `Build-WindowsBackend.ps1 -Backend cpu-safe ...` for
 the product CPU engine, or select
 `-Backend intel-sycl-experimental -AllowExperimentalSycl ...` for an explicit
-upstream llama.cpp SYCL diagnostic build. `Run-WindowsBackend.ps1` requires the
+upstream llama.cpp SYCL CLI diagnostic build (currently blocked until the
+product engine has a reviewed `GGML_VULKAN` profile). `Run-WindowsBackend.ps1` requires the
 same choice and never changes it to CPU when SYCL is unavailable. The SYCL
-runtime selects `SYCL0` and is loopback-only; it is not a promoted product
-backend until a separate review approves its compatibility.
+runtime selects `SYCL0` and emits bounded one-token output through
+`llama-cli`; it does not expose an unauthenticated server and is not a
+promoted product backend until a separate review approves its compatibility.
 
 The profile order is CPU (mandatory baseline), Vulkan (primary accelerated
-candidate, currently reserved), then SYCL (experimental diagnostic). This
+candidate, currently reserved), then SYCL (experimental diagnostic, currently
+blocked). This
 package does not claim that Vulkan features or SYCL support are present on the
 target until the receipt proves them.
 

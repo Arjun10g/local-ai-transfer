@@ -19,6 +19,10 @@ MODEL_NAME = "Qwen3.5-9B-Q4_K_M.gguf"
 MODEL_SHA256 = "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b"
 MODEL_SIZE_BYTES = 5629109088
 LLAMA_CPP_REVISION = "3581ba0cf591b3f772fbb002de0f70e294bc0396"
+# The product engine currently has no reviewed GGML_VULKAN CMake profile.
+# Keep this false until that profile and runtime offload path land together;
+# an upstream SYCL binary must not become a backdoor product runtime.
+PRODUCT_VULKAN_PROFILE_READY = False
 SYCL_BUILD_FLAGS = [
     "-DGGML_SYCL=ON",
     "-DGGML_SYCL_TARGET=INTEL",
@@ -129,7 +133,7 @@ def build_plan(
     memory = receipt["computer"]["total_memory_bytes"] / 1024**3
     plan: dict[str, Any] = {
         "schema": "local_bmo.windows-backend-plan.v1",
-        "status": "ready",
+        "status": "planned" if not model["file_verified"] else "ready",
         "execution_ready": model["file_verified"],
         "backend": backend,
         "selection": "operator-explicit-no-fallback",
@@ -154,6 +158,9 @@ def build_plan(
     if backend == "cpu-safe":
         plan["runtime"] = {"engine": "local-assistant-native", "compiled_backend": "cpu", "gpu_offload": False, "promotion_rank": 0}
         return plan
+
+    if not PRODUCT_VULKAN_PROFILE_READY:
+        raise BackendPlanError("SYCL diagnostic is blocked until the product-engine GGML_VULKAN profile is reviewed")
 
     adapters = _intel_integrated_adapters(receipt)
     if len(adapters) != 1:

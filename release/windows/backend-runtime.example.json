@@ -33,6 +33,7 @@
       "sycl_level_zero.probe"
     ],
     "device_selector": "SYCL0",
+    "runtime": "bounded-upstream-llama-cli-diagnostic",
     "build_flags": ["-DGGML_SYCL=ON", "-DGGML_SYCL_TARGET=INTEL", "-DGGML_SYCL_F16=ON"]
   },
   "provenance": {

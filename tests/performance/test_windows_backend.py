@@ -58,6 +58,7 @@ class WindowsBackendPlanTests(unittest.TestCase):
         self.assertEqual(plan["backend"], "cpu-safe")
         self.assertEqual(plan["selection"], "operator-explicit-no-fallback")
         self.assertEqual(plan["runtime"]["compiled_backend"], "cpu")
+        self.assertEqual(plan["status"], "planned")
         self.assertFalse(plan["execution_ready"])
         self.assertFalse(plan["runtime"]["gpu_offload"])
         self.assertEqual(plan["memory"]["default_context_tokens"], 8192)
@@ -67,31 +68,24 @@ class WindowsBackendPlanTests(unittest.TestCase):
 
     def test_sycl_is_not_inferred_from_intel_name_or_loader(self):
         path = self.write_receipt(receipt())
-        with self.assertRaisesRegex(planner.BackendPlanError, "not proven"):
+        with self.assertRaisesRegex(planner.BackendPlanError, "GGML_VULKAN"):
             planner.build_plan("intel-sycl-experimental", path)
 
-    def test_sycl_ready_plan_contains_exact_provenance_and_flags(self):
+    def test_sycl_is_blocked_until_product_vulkan_profile(self):
         path = self.write_receipt(receipt(sycl=True))
-        plan = planner.build_plan("intel-sycl-experimental", path)
-        self.assertEqual(plan["runtime"]["compiled_backend"], "sycl")
-        self.assertTrue(plan["runtime"]["gpu_offload"])
-        self.assertTrue(plan["runtime"]["diagnostic_only"])
-        self.assertFalse(plan["execution_ready"])
-        self.assertEqual(plan["runtime"]["device_selector"], "SYCL0")
-        self.assertEqual(plan["runtime"]["build_flags"], planner.SYCL_BUILD_FLAGS)
-        self.assertEqual(plan["provenance"]["llama_cpp_revision"], planner.LLAMA_CPP_REVISION)
-        self.assertIn("exact Core Ultra SKU", plan["provenance"]["target_sku_status"])
+        with self.assertRaisesRegex(planner.BackendPlanError, "GGML_VULKAN"):
+            planner.build_plan("intel-sycl-experimental", path)
 
     def test_sycl_rejects_ambiguous_integrated_adapters(self):
         path = self.write_receipt(receipt(sycl=True, adapter_count=2))
-        with self.assertRaisesRegex(planner.BackendPlanError, "exactly one"):
+        with self.assertRaisesRegex(planner.BackendPlanError, "GGML_VULKAN"):
             planner.build_plan("intel-sycl-experimental", path)
 
     def test_sycl_rejects_adapter_without_explicit_integrated_evidence(self):
         value = receipt(sycl=True)
         value["gpu_adapters"][0]["integrated"] = None
         path = self.write_receipt(value)
-        with self.assertRaisesRegex(planner.BackendPlanError, "exactly one"):
+        with self.assertRaisesRegex(planner.BackendPlanError, "GGML_VULKAN"):
             planner.build_plan("intel-sycl-experimental", path)
 
     def test_neither_invalid_backend_nor_failed_sycl_falls_back(self):
@@ -122,6 +116,9 @@ class WindowsBackendPlanTests(unittest.TestCase):
         self.assertIn("LinkType", build)
         self.assertIn("LinkType", run)
         self.assertIn("--device SYCL0", run)
+        self.assertIn("--n-predict 1", run)
+        self.assertNotIn("--host 127.0.0.1", run)
+        self.assertNotIn("llama-server", run.lower())
         self.assertNotIn("fallback", run.lower())
 
     def test_profile_and_docs_state_target_uncertainty(self):
@@ -132,6 +129,8 @@ class WindowsBackendPlanTests(unittest.TestCase):
         sycl = next(item for item in profiles["profiles"] if item["id"] == "intel-sycl-experimental")
         self.assertTrue(sycl["requires_explicit_sycl_probe"])
         self.assertTrue(sycl["diagnostic_only"])
+        self.assertFalse(sycl["operator_selectable"])
+        self.assertIn("GGML_VULKAN", profiles["profiles"][1]["product_cmake_flags"][-1])
         docs = (ROOT / "release/windows/README-OPERATOR.md").read_text(encoding="utf-8")
         self.assertIn("exact SKU", docs)
         self.assertIn("no fallback", docs.lower())
