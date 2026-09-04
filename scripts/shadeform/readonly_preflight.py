@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import math
 import re
 import sys
 import urllib.error
@@ -51,7 +52,7 @@ def cap_float(values: dict[str, str], key: str) -> float:
         value = float(values[key])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"{key} must be numeric") from exc
-    if value <= 0:
+    if not math.isfinite(value) or value <= 0:
         raise ValueError(f"{key} must be positive")
     return value
 
@@ -82,7 +83,7 @@ def float_policy(values: dict[str, str], keys: tuple[str, ...], default: float =
                 result = float(values[key])
             except ValueError as exc:
                 raise ValueError(f"{key} must be numeric") from exc
-            if result < 0:
+            if not math.isfinite(result) or result < 0:
                 raise ValueError(f"{key} cannot be negative")
             return result
     return default
@@ -203,7 +204,7 @@ def profile_reasons(profile: dict, rules: dict[str, object], *, include_rate: bo
     if profile.get("available") is False:
         reasons.append("not_available")
     rate = profile.get("hourly_usd")
-    if include_rate and (not isinstance(rate, (int, float)) or rate <= 0 or rate > rules["max_hourly_cost_usd"]):
+    if include_rate and (not isinstance(rate, (int, float)) or isinstance(rate, bool) or not math.isfinite(float(rate)) or rate <= 0 or rate > rules["max_hourly_cost_usd"]):
         reasons.append("hourly_cost_over_cap")
     return reasons
 
@@ -236,16 +237,19 @@ def read_ledger(path: Path | None) -> tuple[float, list[dict], bool]:
         if status == "pending" or event.get("pending") is True:
             pending.append({"line": number, "run_id": event.get("run_id"), "status": "pending"})
             continue
+        # Never replace a malformed settled event with an estimate: the latest
+        # event is authoritative and an absent actual would understate spend.
         value = event.get("actual_cost_usd")
-        if not isinstance(value, (int, float)):
-            value = event.get("estimated_cost_usd")
-        if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
-            total += float(value)
+        if (isinstance(value, bool) or not isinstance(value, (int, float)) or
+                not math.isfinite(float(value)) or value < 0):
+            raise ValueError(f"ledger line {number} has invalid settled actual cost")
+        total += float(value)
     return total, pending, bool(pending)
 
 
 def select_profiles(catalogue: dict, values: dict[str, str], hours: float, ledger_path: Path | None = None) -> tuple[list[dict], dict]:
-    if hours <= 0:
+    if (isinstance(hours, bool) or not isinstance(hours, (int, float)) or
+            not math.isfinite(float(hours)) or hours <= 0):
         raise ValueError("requested runtime hours must be positive")
     rules = policy(values)
     spent, pending, has_pending = read_ledger(ledger_path)
@@ -288,7 +292,8 @@ def mutation_readiness(values: dict[str, str]) -> dict[str, object]:
     auto_hours = values.get("SHADEFORM_AUTO_TERMINATE_HOURS")
     if auto_hours:
         try:
-            if float(auto_hours) <= 0:
+            parsed_hours = float(auto_hours)
+            if not math.isfinite(parsed_hours) or parsed_hours <= 0:
                 missing.append("SHADEFORM_AUTO_TERMINATE_HOURS_positive")
         except ValueError:
             invalid.append("SHADEFORM_AUTO_TERMINATE_HOURS_numeric")

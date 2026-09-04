@@ -126,6 +126,32 @@ class ShadeformPreflightTests(unittest.TestCase):
             ]) + "\n", encoding="utf-8")
             self.assertEqual(self.module.read_ledger(ledger), (0.5, [], False))
 
+    def test_policy_rejects_nonfinite_caps_and_runtime(self):
+        values = {
+            "SHADEFORM_API_KEY": "secret",
+            "SHADEFORM_MAX_HOURLY_COST_USD": "10",
+            "SHADEFORM_MAX_TOTAL_COST_USD": "20",
+        }
+        for key in ("SHADEFORM_MAX_HOURLY_COST_USD", "SHADEFORM_MAX_TOTAL_COST_USD"):
+            for raw in ("nan", "inf", "-inf", "0", "-1"):
+                invalid = dict(values)
+                invalid[key] = raw
+                with self.subTest(key=key, raw=raw), self.assertRaises(ValueError):
+                    self.module.policy(invalid)
+        catalogue = {"profiles": []}
+        with self.assertRaises(ValueError):
+            self.module.select_profiles(catalogue, values, float("nan"))
+        with self.assertRaises(ValueError):
+            self.module.select_profiles(catalogue, values, float("inf"))
+
+    def test_settled_ledger_requires_finite_actual_cost(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Path(directory) / "ledger.jsonl"
+            for value in (None, True, -1, float("nan"), float("inf")):
+                ledger.write_text(json.dumps({"instance_id": "attempt-1", "status": "settled", "actual_cost_usd": value}) + "\n", encoding="utf-8")
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    self.module.read_ledger(ledger)
+
 
 class RemoteExternalToolsGateTests(unittest.TestCase):
     def test_inherited_remote_qa_cannot_reach_provider(self):
@@ -137,6 +163,14 @@ class RemoteExternalToolsGateTests(unittest.TestCase):
         load_env.assert_not_called()
         list_candidates.assert_not_called()
         create_instance.assert_not_called()
+
+    def test_cli_execute_gate_precedes_environment_loading(self):
+        module = load_module(ROOT / "scripts/shadeform/remote_external_tools.py", "remote_external_tools_cli_gate")
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(module.shadeform, "load_env") as load_env, mock.patch.object(module, "build_plan") as build_plan:
+                self.assertEqual(module.main(["--execute", "--env-file", str(Path(directory) / "missing.env")]), 2)
+            load_env.assert_not_called()
+            build_plan.assert_not_called()
 
 
 if __name__ == "__main__":

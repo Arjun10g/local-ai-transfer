@@ -76,11 +76,26 @@ class J1MConfigTests(unittest.TestCase):
         self.assertTrue(nested_runner_commands)
         self.assertTrue(all("--config" in command for command in nested_runner_commands))
         self.assertTrue(all(command[command.index("--config") + 1] == "/scratch/j1m/j1m-config.json" for command in nested_runner_commands))
+        manifest_command = next(command for command in remote_plan if "--manifest" in command)
+        self.assertEqual(manifest_command[manifest_command.index("--lock") + 1], str(self.j1m.SOURCE_LOCK))
 
     def test_utility_mode_does_not_require_default_config(self):
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(self.j1m, "DEFAULT_CONFIG", Path(directory) / "missing.json"), mock.patch.object(self.j1m, "check_scratch", return_value={"status": "ok"}) as check:
             self.assertEqual(self.j1m.main(["--scratch", directory, "--min-scratch-gib", "1"]), 0)
             check.assert_called_once()
+
+    def test_manifest_handler_passes_explicit_source_lock_to_writer_and_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            custom_lock = Path(directory) / "uploaded.source-lock.json"
+            output = Path(directory) / "artifacts"
+            with mock.patch.object(self.j1m, "write_artifacts") as writer:
+                self.assertEqual(self.j1m.main(["--manifest", str(output), "--lock", str(custom_lock)]), 0)
+            writer.assert_called_once()
+            call = writer.call_args.kwargs
+            self.assertEqual(call["source_lock"], custom_lock)
+            manifest_commands = [command for command in call["commands"] if "--manifest" in command]
+            self.assertEqual(len(manifest_commands), 1)
+            self.assertEqual(manifest_commands[0][manifest_commands[0].index("--lock") + 1], str(custom_lock))
 
     def test_hf_token_file_is_private_and_removed(self):
         with self.j1m.hf_token_file("test-token-never-logged") as path:
@@ -234,6 +249,13 @@ class J1MConfigTests(unittest.TestCase):
             self.assertNotEqual(manifest["tensor_metadata"]["status"], "pending_converter_receipt")
             self.assertTrue((root / "manifest.json").is_file())
             self.assertTrue((root / "checksums.sha256").is_file())
+            command_payload = json.loads((root / "command-receipt.json").read_text(encoding="utf-8"))
+            command_payload[0]["exit_code"] = False
+            (root / "command-receipt.json").write_text(json.dumps(command_payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "command receipt status"):
+                self.j1m.write_artifacts(root, names)
+            command_payload[0]["exit_code"] = 0
+            (root / "command-receipt.json").write_text(json.dumps(command_payload), encoding="utf-8")
             forged = json.loads((root / "source-model-receipt.json").read_text(encoding="utf-8"))
             forged["status"] = "verified"
             forged["file_hashes"][next(iter(forged["file_hashes"]))] = "f" * 64
@@ -529,6 +551,23 @@ class StaticSafetyTests(unittest.TestCase):
                 sf.append_cost_event({"instance_id": "instance-ledger-1", "phase_id": "phase-a", "status": "settled", "actual_cost_usd": 0.42})
                 self.assertEqual(sf.ledger_spend(), (0.42, []))
                 self.assertEqual(len(sf.COST_LEDGER.read_text().splitlines()), 2)
+            finally:
+                sf.COST_LEDGER = original
+
+    def test_cost_ledger_rejects_malformed_settled_amounts(self):
+        from scripts import shadeform_lifecycle as sf
+        with tempfile.TemporaryDirectory() as directory:
+            original = sf.COST_LEDGER
+            sf.COST_LEDGER = Path(directory) / "cost-ledger.jsonl"
+            try:
+                for value in (True, -1, float("nan"), float("inf")):
+                    sf.COST_LEDGER.write_text(json.dumps({
+                        "instance_id": "instance-invalid-cost",
+                        "status": "settled",
+                        "actual_cost_usd": value,
+                    }) + "\n", encoding="utf-8")
+                    with self.subTest(value=value), self.assertRaises(sf.ShadeformError):
+                        sf.ledger_spend()
             finally:
                 sf.COST_LEDGER = original
 
@@ -859,7 +898,7 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertIn(["cp", "/scratch/j1m/ggml-CMakeLists.txt", "/scratch/j1m/engine/vendor/llama.cpp/ggml/CMakeLists.txt"], commands)
         self.assertIn(["cp", "-a", "/scratch/llama.cpp", "/scratch/j1m/engine/vendor/llama.cpp"], commands)
         self.assertIn(["python3", "/scratch/j1m/remote_eval_prepare.py", "--artifact", "/scratch/j1m/artifacts/Qwen3.5-9B-Q4_K_M.gguf", "--manifest", "/scratch/j1m/model-manifest.json", "--output", "/scratch/j1m/artifacts/eval-artifact-receipt.json"], commands)
-        self.assertIn(["python3", "/scratch/j1m/j1m_runner.py", "--run", "--config", "/scratch/j1m/j1m-config.json"], commands)
+        self.assertIn(["python3", "/scratch/j1m/j1m_runner.py", "--run", "--config", "/scratch/j1m/j1m-config.json", "--lock", "/scratch/j1m/qwen35-9b.source-lock.json"], commands)
         self.assertEqual(orchestrator._eval_stage_timeout(j1m.load_config(), next(command for command in commands if "j1m_runner.py" in command[1])), 1800.0)
         eval_command = next(command for command in commands if command and command[0] == "python3" and any("remote_model_eval.py" in part for part in command))
         self.assertEqual(eval_command[eval_command.index("--model") + 1], "/scratch/j1m/artifacts/Qwen3.5-9B-Q4_K_M.gguf")

@@ -160,7 +160,10 @@ def _validate_producer_receipts(output_dir: Path, source_lock: Path, *, llama_re
             raise ValueError("command receipt entry is invalid")
         if isinstance(item["stage"], bool) or not isinstance(item["stage"], int) or item["stage"] <= 0 or not isinstance(item["argv"], list) or not item["argv"] or any(not isinstance(arg, str) or "\x00" in arg or len(arg) > 4096 for arg in item["argv"]):
             raise ValueError("command receipt argv is invalid")
-        if item["status"] not in {"completed", "failed", "launch_failed", "transport_timeout"} or item["stage"] != expected_stage or item["status"] != "completed" or item["exit_code"] != 0:
+        if (item["status"] not in {"completed", "failed", "launch_failed", "transport_timeout"} or
+                item["stage"] != expected_stage or item["status"] != "completed" or
+                isinstance(item["exit_code"], bool) or not isinstance(item["exit_code"], int) or
+                item["exit_code"] != 0):
             raise ValueError("command receipt status is invalid")
         if any(not isinstance(item[field], str) or not item[field] for field in ("started_at_utc", "ended_at_utc")):
             raise ValueError("command receipt timestamp is invalid")
@@ -422,7 +425,7 @@ def write_artifacts(output_dir: Path, names: list[str], *, source_lock: Path = S
     return manifest
 
 
-def command_plan(config: dict[str, Any], source: str = "/scratch/hf/Qwen3.5-9B", output: str = "/scratch/j1m/artifacts", runner: str = "scripts/j1m_runner.py", config_path: str = "model/conversion/j1m-config.json") -> list[list[str]]:
+def command_plan(config: dict[str, Any], source: str = "/scratch/hf/Qwen3.5-9B", output: str = "/scratch/j1m/artifacts", runner: str = "scripts/j1m_runner.py", config_path: str = "model/conversion/j1m-config.json", source_lock: str | None = None) -> list[list[str]]:
     llama = config["llama_cpp"]
     converter = f"{llama['checkout']}/convert_hf_to_gguf.py"
     python_exec = "/scratch/j1m/venv/bin/python"
@@ -470,7 +473,7 @@ def command_plan(config: dict[str, Any], source: str = "/scratch/hf/Qwen3.5-9B",
         [python_exec, runner, "--config", config_path, "--scan", output],
         ["rm", "-f", f"{output}/Qwen3.5-9B-bf16.gguf", f"{output}/Qwen3.5-9B-Q8_0.gguf"],
         [python_exec, runner, "--config", config_path, "--post-cleanup", output],
-        [python_exec, runner, "--config", config_path, "--manifest", output],
+        [python_exec, runner, "--config", config_path, "--manifest", output, "--lock", source_lock or str(SOURCE_LOCK)],
     ]
 
 
@@ -714,7 +717,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.manifest:
         config = load_config(args.config)
         names = config["artifacts"]["allowlist"]
-        write_artifacts(args.manifest, names, commands=command_plan(config), llama_revision=config["llama_cpp"]["revision"])
+        write_artifacts(args.manifest, names, source_lock=args.lock, commands=command_plan(config, source_lock=str(args.lock)), llama_revision=config["llama_cpp"]["revision"])
         return 0
     if args.prove:
         import platform
@@ -731,7 +734,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.run:
         config = load_config(args.config)
-        commands = command_plan(config, runner=str(Path(__file__).resolve()), config_path="/scratch/j1m/j1m-config.json")
+        commands = command_plan(config, runner=str(Path(__file__).resolve()), config_path="/scratch/j1m/j1m-config.json", source_lock=str(args.lock))
         receipts = run_commands(commands, ROOT / config["resources"]["progress_path"], token_file=args.token_file, receipt_path=Path("/scratch/j1m/artifacts/command-receipt.json"))
         return 0 if receipts and all(item["status"] == "completed" for item in receipts) else 1
     config = load_config(args.config)

@@ -445,6 +445,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.self_test:
             self_test()
             return 0
+        # This gate must precede environment loading and planning: the
+        # inherited wrapper is not an approved mutation lifecycle and must not
+        # even touch credentials when an operator accidentally supplies
+        # ``--execute``.
+        if args.execute and not REMOTE_EXECUTION_ENABLED:
+            raise RunnerError("remote external-tools QA execution is gated pending lifecycle redesign")
         env = shadeform.load_env(args.env_file) if args.env_file.is_file() else {}
         plan = build_plan(phase_id=args.phase_id, run_id=args.run_id, runtime_hours=args.runtime_hours, fuzz_cases=args.fuzz_cases, soak_iterations=args.soak_iterations, env=env)
         if not args.execute:

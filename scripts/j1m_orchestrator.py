@@ -299,7 +299,7 @@ def _eval_remote_commands(config: dict[str, Any], remote_root: str) -> list[list
         # conversion and Q4 quantization remotely. This keeps the 5--6 GiB
         # model off the operator laptop and makes the accepted manifest the
         # sole integrity boundary for the generated deployable artifact.
-        ["python3", f"{remote_root}/j1m_runner.py", "--run", "--config", f"{remote_root}/j1m-config.json"],
+        ["python3", f"{remote_root}/j1m_runner.py", "--run", "--config", f"{remote_root}/j1m-config.json", "--lock", f"{remote_root}/qwen35-9b.source-lock.json"],
         ["cp", "-a", checkout, f"{engine_root}/vendor/llama.cpp"],
         ["cp", f"{remote_root}/ggml-cuda-source-lock.json", f"{engine_root}/vendor/llama.cpp/ggml-cuda-source-lock.json"],
         ["cp", f"{remote_root}/ggml-CMakeLists.txt", f"{engine_root}/vendor/llama.cpp/ggml/CMakeLists.txt"],

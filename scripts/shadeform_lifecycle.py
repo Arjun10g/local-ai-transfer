@@ -31,6 +31,7 @@ import fcntl
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
@@ -342,15 +343,23 @@ def ledger_spend() -> tuple[float, list[str]]:
                 event = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise ShadeformError(f"cost ledger line {number} is invalid JSON") from exc
-            instance_id = str(event.get("instance_id", "unknown"))
+            if not isinstance(event, dict):
+                raise ShadeformError(f"cost ledger line {number} is not an object")
+            instance_id = event.get("instance_id")
+            if not isinstance(instance_id, str) or not instance_id or len(instance_id) > 256:
+                raise ShadeformError(f"cost ledger line {number} has no bounded instance identity")
             latest[instance_id] = event
         spent = 0.0
         pending: list[str] = []
         for instance_id, event in latest.items():
             if event.get("status") == "pending":
                 pending.append(instance_id)
-            elif isinstance(event.get("actual_cost_usd"), (int, float)):
-                spent += float(event["actual_cost_usd"])
+            else:
+                actual = event.get("actual_cost_usd")
+                if (isinstance(actual, bool) or not isinstance(actual, (int, float)) or
+                        not math.isfinite(float(actual)) or actual < 0):
+                    raise ShadeformError(f"cost ledger entry {instance_id} has invalid settled cost")
+                spent += float(actual)
         return round(spent, 6), pending
     if not MARKDOWN_LEDGER.is_file():
         return 0.0, []
@@ -362,9 +371,13 @@ def ledger_spend() -> tuple[float, list[str]]:
             continue
         cost = row["cost"].strip().lstrip("$")
         try:
-            spent += float(cost)
+            parsed_cost = float(cost)
         except ValueError:
             pending.append(row["instance_id"])
+            continue
+        if not math.isfinite(parsed_cost) or parsed_cost < 0:
+            raise ShadeformError(f"markdown ledger entry {row['instance_id']} has invalid cost")
+        spent += parsed_cost
     return round(spent, 6), pending
 
 
@@ -621,7 +634,12 @@ def _hourly_usd(value: object) -> float | None:
 def remaining_budget_usd(env: dict[str, str]) -> float:
     """Dollars left in the project budget, refusing to guess past an unaccounted row."""
 
-    cap = float(env.get("SHADEFORM_MAX_TOTAL_COST_USD", "50") or "50")
+    try:
+        cap = float(env.get("SHADEFORM_MAX_TOTAL_COST_USD", "50") or "50")
+    except (TypeError, ValueError) as exc:
+        raise BudgetError("SHADEFORM_MAX_TOTAL_COST_USD must be finite and positive") from exc
+    if not math.isfinite(cap) or cap <= 0:
+        raise BudgetError("SHADEFORM_MAX_TOTAL_COST_USD must be finite and positive")
     spent, pending = ledger_spend()
     if pending:
         raise BudgetError(
@@ -964,12 +982,12 @@ def _auto_delete(env: dict[str, str], runtime_hours: float) -> dict[str, str]:
     """Provider-side backstop, sized per run at duration + 25%.
 
     This deliberately overrides the dotenv ``SHADEFORM_AUTO_TERMINATE_HOURS``
-    default in both directions: our jobs are minutes, and a two-hour backstop on
+    default in both directions: our jobs are minutes, and a 2.5-hour backstop on
     a twelve-minute job is eleven-twelfths of a bill nobody meant to pay. The
     dotenv value remains the ceiling below.
 
-    That ``min`` used to truncate silently, and on 2026-09-03 it set a two-hour
-    backstop on an eight-hour run (EP-014). The provider deleted the instance at
+    That ``min`` used to truncate silently, and on 2026-09-03 it set an
+    insufficient backstop on an eight-hour run (EP-014). The provider deleted the instance at
     2.08 h with 239,088 records held in memory on it, and every projection
     computed that day was measured against a deadline the instance could not
     reach. A ceiling written as a spending guard had become a limit on how long
@@ -981,7 +999,10 @@ def _auto_delete(env: dict[str, str], runtime_hours: float) -> dict[str, str]:
     a guard.
     """
 
-    ceiling = float(env.get("SHADEFORM_AUTO_TERMINATE_HOURS", "2") or "2")
+    # Keep the packaged default above the 1.25x provider backstop for the
+    # longest supported model-evaluation run (2.425h). Operators may set a
+    # stricter ceiling explicitly, in which case the guard below refuses it.
+    ceiling = float(env.get("SHADEFORM_AUTO_TERMINATE_HOURS", "2.5") or "2.5")
     hours = min(max(0.25, runtime_hours * 1.25), max(0.25, ceiling))
     # Assert the EFFECTIVE backstop against the run, not the ceiling against the
     # run. Those differ exactly where it matters: at runtime == ceiling the
