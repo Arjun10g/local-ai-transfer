@@ -258,8 +258,7 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any]) -> 
         # inspection and is forbidden by the evaluation contract.
         launch = [
             os.fspath(engine), "serve", "--port", "0", "--backend", backend,
-            "--model", args.model, "--size", str(artifact["size_bytes"]),
-            "--sha256", artifact["sha256"], "--context", "2048",
+            "--model", args.model, "--context", "2048",
             "--token-file", os.fspath(token_file),
         ]
         if backend == "cuda":

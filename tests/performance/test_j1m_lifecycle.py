@@ -716,7 +716,10 @@ class StaticSafetyTests(unittest.TestCase):
 
     def test_remote_eval_redacts_diagnostics_and_never_accepts_bearer_argv(self):
         remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_security")
-        self.assertNotIn('"--token",', (ROOT / "scripts/test/remote_model_eval.py").read_text(encoding="utf-8"))
+        source = (ROOT / "scripts/test/remote_model_eval.py").read_text(encoding="utf-8")
+        self.assertNotIn('"--token",', source)
+        self.assertNotIn('"--size"', source)
+        self.assertNotIn('"--sha256"', source)
         self.assertNotIn("secret-value", remote._tail("token=secret-value"))
         self.assertIn("<redacted>", remote._tail("token=secret-value"))
 
