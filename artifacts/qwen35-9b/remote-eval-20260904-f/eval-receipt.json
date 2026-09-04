@@ -1,0 +1,7 @@
+{
+  "error_type": "ValueError",
+  "prompt_response_logging": false,
+  "schema": "local_bmo.j1m.real-tool-eval-receipt.v1",
+  "status": "failed",
+  "token_logging": false
+}
