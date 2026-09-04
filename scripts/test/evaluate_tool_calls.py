@@ -599,6 +599,14 @@ def run_local(
     }
 
 
+def aggregate_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Return only the remote-safe metrics contract, excluding case details."""
+    return {key: result[key] for key in (
+        "case_count", "passed", "failed", "errors", "peak_rss_kib",
+        "category_summary", "canary", "error_diagnostics",
+    )}
+
+
 def load_bearer_token(token_file: Path | None, token_env: str) -> str:
     """Read a protected token without accepting token material as an argument."""
     if token_file is not None and token_env in os.environ:
@@ -675,7 +683,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
     result = run_local(fixture, endpoint, token, timeout=args.timeout, max_cases=min(args.max_cases, int(fixture["limits"]["max_cases"])), engine_pid=args.engine_pid)
-    print(json.dumps(result, sort_keys=True))
+    print(json.dumps(aggregate_result(result), sort_keys=True))
     return 0 if result["errors"] == 0 and result["failed"] == 0 else 1
 
 

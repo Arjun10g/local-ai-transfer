@@ -27,6 +27,7 @@ from scripts.test.evaluate_tool_calls import (
     validate_fixture,
     validate_endpoint,
 )
+from scripts.test import remote_model_eval
 
 
 class ToolCallEvaluatorTests(unittest.TestCase):
@@ -138,6 +139,23 @@ class ToolCallEvaluatorTests(unittest.TestCase):
         self.assertEqual((result["passed"], result["failed"], result["errors"]), (0, 0, 34))
         self.assertEqual(post.call_count, 1)
         self.assertEqual(result["error_diagnostics"]["overall"], {"http_503": 34})
+
+    def test_cli_aggregate_contract_round_trips_to_remote_parser(self):
+        fixture = load_fixture()
+        def fake_post(*args, include_usage=False, **kwargs):
+            value = "<tool_call><function=system.get_info></function></tool_call>"
+            return (value, 700) if include_usage else value
+        with patch("scripts.test.evaluate_tool_calls._post", side_effect=fake_post):
+            produced = run_local(fixture, "http://127.0.0.1:1/v1/chat/completions", "test-token-20260904", timeout=0.1, max_cases=1)
+        aggregate = __import__("scripts.test.evaluate_tool_calls", fromlist=["aggregate_result"]).aggregate_result(produced)
+        self.assertEqual(set(aggregate), {"case_count", "passed", "failed", "errors", "peak_rss_kib", "category_summary", "canary", "error_diagnostics"})
+        parsed, all_passed, has_failure = remote_model_eval._parse_evaluator_result(
+            {"status": "completed", "exit_code": 0, "stdout": json.dumps(aggregate)},
+            expected_case_count=1, expected_categories={"tool_selection"}, require_diagnostics=True,
+        )
+        self.assertTrue(all_passed)
+        self.assertFalse(has_failure)
+        self.assertEqual(parsed["case_count"], 1)
 
     def test_endpoint_is_explicit_loopback_http_only(self):
         self.assertEqual(validate_endpoint("http://127.0.0.1:49912/v1/chat/completions"), "http://127.0.0.1:49912/v1/chat/completions")
