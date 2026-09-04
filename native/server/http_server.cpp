@@ -67,6 +67,27 @@ std::string trim(std::string value) {
   return value;
 }
 
+bool valid_loopback_authority(const std::string& authority) {
+  if (authority.empty() || authority.find_first_of("/\\?#@") != std::string::npos) return false;
+  for (const unsigned char c : authority) if (std::isspace(c)) return false;
+  const size_t colon = authority.find(':');
+  if (colon != std::string::npos && authority.find(':', colon + 1) != std::string::npos) return false;
+  const std::string host = lower(colon == std::string::npos ? authority : authority.substr(0, colon));
+  if (host != "127.0.0.1" && host != "localhost") return false;
+  if (colon == std::string::npos) return true;
+  const std::string port = authority.substr(colon + 1);
+  if (port.empty() || port.size() > 5 || !std::all_of(port.begin(), port.end(), [](unsigned char c) { return std::isdigit(c); })) return false;
+  try { const unsigned value = std::stoul(port); return value >= 1 && value <= 65535; }
+  catch (...) { return false; }
+}
+
+bool valid_loopback_origin(const std::string& origin) {
+  constexpr const char* scheme = "http://";
+  if (origin.rfind(scheme, 0) != 0) return false;
+  const std::string authority = origin.substr(std::strlen(scheme));
+  return valid_loopback_authority(authority);
+}
+
 std::string json_string(const std::string& body, const std::string& key) {
   const std::string marker = "\"" + key + "\"";
   const size_t start = body.find(marker);
@@ -248,8 +269,12 @@ void HttpServer::handle(Socket client) {
   auto fail = [&](int status, const std::string& code) {
     respond(client, status, "application/json", "{\"error\":{\"code\":\"" + code + "\",\"request_id\":\"" + request_id + "\"}}", request_id);
   };
+  const auto host = headers.find("host");
+  if (protocol != "HTTP/1.1" || host == headers.end() || !valid_loopback_authority(host->second)) {
+    fail(400, "invalid_request"); close_socket(client); return;
+  }
   const auto origin = headers.find("origin");
-  if (origin != headers.end() && origin->second.rfind("http://127.0.0.1", 0) != 0 && origin->second.rfind("http://localhost", 0) != 0) { fail(401, "unauthorized"); close_socket(client); return; }
+  if (origin != headers.end() && !valid_loopback_origin(origin->second)) { fail(400, "invalid_request"); close_socket(client); return; }
   const bool public_health = method == "GET" && path == "/healthz";
   if (!public_health && !authorized(headers)) { fail(401, "unauthorized"); close_socket(client); return; }
   if (method == "GET" && path == "/healthz") {

@@ -33,7 +33,7 @@ int main() {
   assert(output.empty());
 
   // Session storage is bounded and eviction is deterministic (oldest opaque ID first).
-  for (unsigned i = 0; i < 64; ++i) engine.create_session();
+  for (unsigned i = 0; i < 4; ++i) engine.create_session();
   assert(!engine.has_session(session.id));
   assert(!engine.delete_session(session.id));
   assert(!engine.has_session(session.id));

@@ -16,6 +16,11 @@ The server binds only to `127.0.0.1`; `--port 0` chooses an ephemeral port.
 `GET /healthz` is unauthenticated and reports process/lifecycle liveness.
 Every other route requires `Authorization: Bearer <launch-token>`.
 Requests are capped at 64 KiB, at most 16 connections are active, and one active generation is allowed per engine.
+HTTP/1.1 `Host` is required and must be exactly `127.0.0.1` or `localhost`, with
+an optional numeric port from 1 through 65535. If supplied, `Origin` must be
+exactly `http://127.0.0.1[:port]` or `http://localhost[:port]` under the same
+port rule; all other origins are rejected. The server emits no CORS headers and
+never emits `Access-Control-Allow-Origin: *`.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
@@ -58,4 +63,5 @@ snapshot unchanged. A session has at most one active generation.
 {"id":"sess-00000001","object":"session","state_version":1}
 ```
 
-Session IDs are opaque and must not be interpreted by clients.
+Session IDs are opaque and must not be interpreted by clients. At most four
+sessions are stored; creating a fifth evicts the oldest committed session.

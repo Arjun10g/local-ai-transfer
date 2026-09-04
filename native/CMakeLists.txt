@@ -17,3 +17,9 @@ target_link_libraries(lae-engine PRIVATE lae_runtime)
 add_executable(lae-runtime-tests ../tests/native/runtime_tests.cpp)
 target_link_libraries(lae-runtime-tests PRIVATE lae_runtime)
 add_test(NAME lae-runtime-tests COMMAND lae-runtime-tests)
+
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME lae-http-negative-tests
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tests/native/http_negative_tests.py $<TARGET_FILE:lae-engine>)
+endif()

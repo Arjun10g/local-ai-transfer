@@ -36,13 +36,14 @@ int main(int argc, char** argv) {
   }
   if (command != "serve") { usage(); return command == "help" ? 0 : 2; }
 
-  unsigned port = 0; std::string token = "fixture-token";
+  unsigned port = 0; std::string token; bool token_seen = false;
   for (int i = 2; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--port" && i + 1 < argc) port = static_cast<unsigned>(std::stoul(argv[++i]));
-    else if (arg == "--token" && i + 1 < argc) token = argv[++i];
+    else if (arg == "--token" && i + 1 < argc) { token = argv[++i]; token_seen = true; }
     else { std::cerr << "unknown argument\n"; return 2; }
   }
+  if (!token_seen || token.empty()) { std::cerr << "serve requires a non-empty --token\n"; return 2; }
   lae::Engine engine(std::make_unique<lae::FixtureBackend>());
   try { engine.initialize(); } catch (const std::exception& error) { std::cerr << error.what() << "\n"; return 1; }
   lae::HttpServer server(engine, token);

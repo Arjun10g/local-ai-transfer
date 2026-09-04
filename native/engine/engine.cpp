@@ -65,7 +65,7 @@ std::string Engine::backend_id() const { return backend_ ? backend_->id() : "non
 SessionInfo Engine::create_session() {
   std::lock_guard<std::mutex> lock(mutex_);
   if (state_ != LifecycleState::READY) throw std::runtime_error("engine is not ready");
-  constexpr size_t kMaxSessions = 64;
+  constexpr size_t kMaxSessions = 4;
   if (sessions_.size() >= kMaxSessions) sessions_.erase(sessions_.begin());
   std::ostringstream id;
   id << "sess-" << std::string(8 - std::min<size_t>(8, std::to_string(next_session_).size()), '0')
