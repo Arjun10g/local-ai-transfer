@@ -12,6 +12,10 @@
 
 namespace lae {
 
+// Escapes arbitrary UTF-8 bytes for a JSON string without emitting raw
+// control characters. Used for model-generated SSE and JSON responses.
+std::string json_escape(const std::string& value);
+
 class HttpServer final {
  public:
   using Socket = intptr_t;
