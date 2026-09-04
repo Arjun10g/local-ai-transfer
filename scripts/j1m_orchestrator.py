@@ -93,12 +93,12 @@ def _remote_job_command(mode: str, remote_root: str, required_scratch_gib: int) 
     raise ValueError(f"unsupported J1M mode: {mode}")
 
 
-def _verify_eval_artifact(path: Path, manifest_path: Path, config: dict[str, Any]) -> dict[str, Any]:
-    """Verify the local Q4 identity before any provider call is possible."""
+def _verify_eval_artifact(path: Path | None, manifest_path: Path, config: dict[str, Any]) -> dict[str, Any]:
+    """Verify the accepted Q4 identity without requiring local model bytes."""
 
     expected_name = "Qwen3.5-9B-Q4_K_M.gguf"
-    if path.name != expected_name or not path.is_file():
-        raise ValueError("eval requires the exact local Q4_K_M artifact")
+    if path is not None and (path.name != expected_name or not path.is_file()):
+        raise ValueError("eval artifact has the wrong name or is missing")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict) or manifest.get("schema_version") != "1.1.0":
         raise ValueError("eval model manifest is invalid")
@@ -123,9 +123,11 @@ def _verify_eval_artifact(path: Path, manifest_path: Path, config: dict[str, Any
         raise ValueError("eval model manifest checksum lock is invalid")
     if j1m_runner._sha256(manifest_path) != lock_parts[0]:
         raise ValueError("eval model manifest checksum mismatch")
-    size = path.stat().st_size
-    digest = j1m_runner._sha256(path)
-    if artifact.get("expected_size_bytes") != size or artifact.get("sha256") != digest:
+    size = artifact.get("expected_size_bytes")
+    digest = artifact.get("sha256")
+    if not isinstance(size, int) or size <= 0 or not isinstance(digest, str) or len(digest) != 64:
+        raise ValueError("eval artifact manifest size or SHA-256 is invalid")
+    if path is not None and (size != path.stat().st_size or digest != j1m_runner._sha256(path)):
         raise ValueError("eval artifact size or SHA-256 does not match the approved manifest")
     return {
         "name": expected_name,
@@ -136,14 +138,17 @@ def _verify_eval_artifact(path: Path, manifest_path: Path, config: dict[str, Any
     }
 
 
-def _eval_uploads(config: dict[str, Any], remote_root: str, artifact_path: Path, manifest_path: Path) -> list[tuple[Path, str, bool]]:
+def _eval_uploads(config: dict[str, Any], remote_root: str, artifact_path: Path | None, manifest_path: Path) -> list[tuple[Path, str, bool]]:
     """Local files to upload for eval; the GGUF and receipts stay allowlisted."""
 
-    return [
-        (artifact_path, f"{remote_root}/model/Qwen3.5-9B-Q4_K_M.gguf", False),
+    uploads: list[tuple[Path, str, bool]] = []
+    if artifact_path is not None:
+        uploads.append((artifact_path, f"{remote_root}/model/Qwen3.5-9B-Q4_K_M.gguf", False))
+    uploads.extend([
         (manifest_path, f"{remote_root}/model-manifest.json", False),
         (manifest_path.with_name("model-manifest.sha256"), f"{remote_root}/model-manifest.sha256", False),
         (ROOT / "scripts" / "test" / "remote_model_eval.py", f"{remote_root}/remote_model_eval.py", False),
+        (ROOT / "scripts" / "test" / "remote_eval_prepare.py", f"{remote_root}/remote_eval_prepare.py", False),
         (ROOT / "scripts" / "test" / "evaluate_tool_calls.py", f"{remote_root}/evaluate_tool_calls.py", False),
         (ROOT / "scripts" / "test" / "cuda_device_probe.py", f"{remote_root}/cuda_device_probe.py", False),
         (ROOT / "scripts" / "test" / "remote_toolchain_probe.py", f"{remote_root}/remote_toolchain_probe.py", False),
@@ -157,7 +162,8 @@ def _eval_uploads(config: dict[str, Any], remote_root: str, artifact_path: Path,
         # Recursive scp copies the source directory beneath its destination;
         # target the engine parent so the result is exactly engine/native.
         (ROOT / "native", f"{remote_root}/engine", True),
-    ]
+    ])
+    return uploads
 
 
 def _eval_remote_commands(config: dict[str, Any], remote_root: str) -> list[list[str]]:
@@ -166,23 +172,30 @@ def _eval_remote_commands(config: dict[str, Any], remote_root: str) -> list[list
     llama = config["llama_cpp"]
     eval_mode = config["modes"]["eval"]
     device_name = eval_mode["cuda_device_name"]
-    checkout = f"{remote_root}/llama.cpp"
+    # J1M's command plan owns the checkout location; use that validated
+    # config value rather than inventing a remote-root-relative path.
+    checkout = llama["checkout"]
     engine_root = f"{remote_root}/engine"
     build_root = f"{remote_root}/engine-build"
     return [
         ["mkdir", "-p", f"{remote_root}/model", f"{engine_root}/native", f"{engine_root}/vendor", f"{engine_root}/scripts", f"{remote_root}/artifacts"],
         ["sudo", "apt-get", "update"],
         ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "--no-install-recommends", "ca-certificates", "cmake", "build-essential", "git", "python3", "python3-venv"],
-        ["python3", f"{remote_root}/remote_toolchain_probe.py", "--output", f"{remote_root}/artifacts/toolchain-receipt.json"],
-        ["git", "clone", "--filter=blob:none", llama["repository"], checkout],
-        ["git", "-C", checkout, "checkout", "--detach", llama["revision"]],
-        ["git", "-C", checkout, "rev-parse", "HEAD"],
+        # J1M performs the immutable HF download, source verification,
+        # conversion and Q4 quantization remotely. This keeps the 5--6 GiB
+        # model off the operator laptop and makes the accepted manifest the
+        # sole integrity boundary for the generated deployable artifact.
+        ["python3", f"{remote_root}/j1m_runner.py", "--run", "--config", f"{remote_root}/j1m-config.json"],
         ["cp", "-a", checkout, f"{engine_root}/vendor/llama.cpp"],
         ["cp", f"{remote_root}/ggml-cuda-source-lock.json", f"{engine_root}/vendor/llama.cpp/ggml-cuda-source-lock.json"],
+        ["python3", f"{remote_root}/remote_eval_prepare.py", "--artifact", f"{remote_root}/artifacts/Qwen3.5-9B-Q4_K_M.gguf", "--manifest", f"{remote_root}/model-manifest.json", "--output", f"{remote_root}/artifacts/eval-artifact-receipt.json"],
+        # This is intentionally after J1M's apt/pip/bootstrap work. The
+        # receipt must describe the final environment used by CUDA build/eval.
+        ["python3", f"{remote_root}/remote_toolchain_probe.py", "--output", f"{remote_root}/artifacts/toolchain-receipt.json"],
         ["python3", f"{remote_root}/cuda_device_probe.py", "--output", f"{remote_root}/artifacts/cuda-device-receipt.json"],
         ["cmake", "-S", engine_root, "-B", build_root, "-DCMAKE_BUILD_TYPE=Release", "-DLAE_ENABLE_LLAMA_CPP=ON", "-DLAE_ENABLE_LLAMA_CUDA=ON", f"-DCMAKE_CUDA_ARCHITECTURES={eval_mode['cuda_architecture']}"],
         ["cmake", "--build", build_root, "--target", "lae-engine", "--parallel", "2"],
-        ["python3", f"{remote_root}/remote_model_eval.py", "--model", f"{remote_root}/model/Qwen3.5-9B-Q4_K_M.gguf", "--model-manifest", f"{remote_root}/model-manifest.json", "--model-manifest-lock", f"{remote_root}/model-manifest.sha256", "--source-revision", config["source"]["revision"], "--llama-revision", llama["revision"], "--llama-checkout", checkout, "--engine", f"{build_root}/native/lae-engine", "--evaluator", f"{remote_root}/evaluate_tool_calls.py", "--fixture", f"{remote_root}/tool_call_eval.json", "--token-file", f"{remote_root}/engine-token", "--backend", eval_mode["backend"], "--cuda-device-name", device_name, "--cuda-device-receipt", f"{remote_root}/artifacts/cuda-device-receipt.json", "--toolchain-receipt", f"{remote_root}/artifacts/toolchain-receipt.json", "--receipt", f"{remote_root}/artifacts/eval-receipt.json", "--timeout", "600"],
+        ["python3", f"{remote_root}/remote_model_eval.py", "--model", f"{remote_root}/artifacts/Qwen3.5-9B-Q4_K_M.gguf", "--model-manifest", f"{remote_root}/model-manifest.json", "--model-manifest-lock", f"{remote_root}/model-manifest.sha256", "--source-revision", config["source"]["revision"], "--llama-revision", llama["revision"], "--llama-checkout", checkout, "--engine", f"{build_root}/native/lae-engine", "--evaluator", f"{remote_root}/evaluate_tool_calls.py", "--fixture", f"{remote_root}/tool_call_eval.json", "--token-file", f"{remote_root}/engine-token", "--backend", eval_mode["backend"], "--cuda-device-name", device_name, "--cuda-device-receipt", f"{remote_root}/artifacts/cuda-device-receipt.json", "--toolchain-receipt", f"{remote_root}/artifacts/toolchain-receipt.json", "--receipt", f"{remote_root}/artifacts/eval-receipt.json", "--timeout", "600"],
     ]
 
 
@@ -193,6 +206,76 @@ def _eval_timeout(provider_deadline: float, requested: float, *, reserve: float 
     if remaining < 30.0:
         raise sf.ShadeformError("eval provider deadline has no cleanup-safe stage budget remaining")
     return min(float(requested), remaining)
+
+
+def _eval_stage_timeout(config: dict[str, Any], command: list[str]) -> float:
+    """Return a bounded request for one post-upload eval stage."""
+
+    budgets = config["modes"]["eval"]["stage_budgets_seconds"]
+    if command[0:2] == ["cmake", "-S"]:
+        return float(budgets["configure"])
+    if command[0:2] == ["cmake", "--build"]:
+        return float(budgets["build"])
+    if command[0] == "python3" and any("j1m_runner.py" in part for part in command) and "--run" in command:
+        return float(budgets["source_prepare"])
+    if command[0] == "python3" and any("remote_eval_prepare.py" in part for part in command):
+        return 120.0
+    if command[0:2] == ["git", "clone"]:
+        return 300.0
+    if len(command) >= 2 and command[0:2] == ["git", "-C"]:
+        return 60.0
+    if command[0] == "cp":
+        return 300.0 if len(command) > 1 and command[1] == "-a" else 30.0
+    if command[0] == "python3" and any("remote_toolchain_probe.py" in part for part in command):
+        return 120.0
+    if command[0] == "python3" and any("cuda_device_probe.py" in part for part in command):
+        return 120.0
+    return float(budgets["evaluation"])
+
+
+def _eval_deadline_ceiling(config: dict[str, Any]) -> dict[str, float]:
+    """Compute the remote-only eval's sequential worst-case clock envelope.
+
+    This includes bounded activation/host-key/workspace setup, the three
+    initial J1M uploads, all small eval uploads, every post-upload command,
+    and the cleanup reserve.  It is deliberately conservative and is checked
+    before any provider API mutation.
+    """
+
+    mode = config["modes"]["eval"]
+    commands = _eval_remote_commands(config, "/scratch/j1m")
+    bootstrap = sum((30.0, 120.0, 270.0))
+    post_upload = sum(_eval_stage_timeout(config, command) for command in commands[3:])
+    eval_uploads = _eval_uploads(
+        config, "/scratch/j1m", None,
+        ROOT / "artifacts" / "qwen35-9b" / "model-manifest.json",
+    )
+    small_uploads = float(mode["stage_budgets_seconds"]["small_uploads"])
+    # Remote-only has no model upload; every upload is in the small bucket.
+    upload_ceiling = small_uploads
+    fixed_setup = 3 * 120.0 + 5 * 30.0 + 30.0  # config/runner/lock + workspace + shutdown arm
+    host_key = 120.0 + 3 * 15.0  # bounded two-scan acquisition + key fingerprints
+    cleanup = float(mode["stage_budgets_seconds"]["cleanup_reserve"])
+    work = float(mode.get("activation_timeout_seconds", 600)) + host_key + fixed_setup + bootstrap + upload_ceiling + post_upload
+    run_seconds = float(mode["runtime_hours"]) * 3600.0
+    watchdog_seconds = float(mode["external_watchdog_seconds"])
+    provider_seconds = float(mode["provider_backstop_hours"]) * 3600.0
+    host_shutdown_seconds = float(mode.get("activation_timeout_seconds", 600)) + host_key + 5 * 30.0 + 30.0 + float(mode["host_shutdown_delay_minutes"]) * 60.0
+    ceiling = work + cleanup
+    if not (ceiling < watchdog_seconds < run_seconds < provider_seconds):
+        raise ValueError("eval sequential budget does not fit watchdog/run/provider clocks")
+    if host_shutdown_seconds >= watchdog_seconds:
+        raise ValueError("eval host shutdown backstop is later than watchdog cleanup")
+    return {
+        "work_seconds": work,
+        "cleanup_reserve_seconds": cleanup,
+        "ceiling_seconds": ceiling,
+        "host_shutdown_from_create_seconds": host_shutdown_seconds,
+        "watchdog_seconds": watchdog_seconds,
+        "run_seconds": run_seconds,
+        "provider_seconds": provider_seconds,
+        "upload_count": float(len(eval_uploads)),
+    }
 
 
 def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]:
@@ -230,6 +313,10 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
         version = versions.get(name)
         if not isinstance(version, dict) or isinstance(version.get("major"), bool) or not isinstance(version.get("major"), int) or isinstance(version.get("minor"), bool) or not isinstance(version.get("minor"), int) or (version["major"], version["minor"]) < minimum:
             raise ValueError("eval receipt toolchain version invalid")
+    packages = toolchain.get("packages")
+    expected_packages = {"ca-certificates", "cmake", "build-essential", "git", "python3", "python3-venv"}
+    if not isinstance(packages, dict) or set(packages) != expected_packages or any(not isinstance(value, str) or not value or len(value) > 160 for value in packages.values()):
+        raise ValueError("eval receipt package evidence invalid")
     peak_rss = metrics.get("peak_rss_kib")
     if peak_rss is not None and (isinstance(peak_rss, bool) or not isinstance(peak_rss, int) or peak_rss < 0):
         raise ValueError("eval receipt RSS metric invalid")
@@ -275,10 +362,16 @@ def _salvage(
 def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, artifact_destination: Path, mode: str = "prove", model_artifact: Path | None = None, model_manifest: Path | None = None) -> dict[str, Any]:
     config = j1m_runner.load_config(config_path)
     if mode == "eval":
-        if model_artifact is None:
-            raise ValueError("eval requires --model-artifact; no implicit or alternate model is accepted")
-        model_manifest = model_manifest or model_artifact.parent / "model-manifest.json"
-        eval_artifact = _verify_eval_artifact(model_artifact, model_manifest, config)
+        # The evaluation lane is remote-only: the host downloads the pinned
+        # public HF source and deterministically rebuilds Q4. A local artifact
+        # is refused so this path cannot consume laptop disk or bandwidth.
+        if model_artifact is not None:
+            raise ValueError("eval is remote-only; --model-artifact is refused to protect local disk")
+        model_manifest = model_manifest or (
+            ROOT / "artifacts" / "qwen35-9b" / "model-manifest.json"
+        )
+        eval_artifact = _verify_eval_artifact(None, model_manifest, config)
+        _eval_deadline_ceiling(config)
         # Eval is explicitly CUDA-only on the approved A100. A CPU binary or
         # missing CUDA placement receipt is rejected by the remote verifier.
     else:
@@ -357,7 +450,8 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             lifecycle["instance_id"] = instance_id
             launcher_pid = os.getpid()
             launcher_start_marker = sf.process_start_marker(launcher_pid)
-            record = sf.OwnedResource(phase_id=phase_id, run_id=run_id, instance_id=instance_id, ownership_nonce=nonce, ssh_key_id=key_id, ssh_key_name=f"j1m-{nonce}", gpu=candidate.gpu, cloud=candidate.cloud, region=candidate.region, hourly_usd=candidate.hourly_usd, created_at_utc=sf.utc_now().isoformat(), active_deadline_utc=(sf.utc_now() + sf.timedelta(minutes=30)).isoformat(), run_deadline_utc=(sf.utc_now() + sf.timedelta(hours=runtime)).isoformat(), instance_type=candidate.instance_type, launcher_pid=launcher_pid, launcher_start_marker=launcher_start_marker)
+            activation_seconds = int(config["modes"][mode].get("activation_timeout_seconds", 1800))
+            record = sf.OwnedResource(phase_id=phase_id, run_id=run_id, instance_id=instance_id, ownership_nonce=nonce, ssh_key_id=key_id, ssh_key_name=f"j1m-{nonce}", gpu=candidate.gpu, cloud=candidate.cloud, region=candidate.region, hourly_usd=candidate.hourly_usd, created_at_utc=sf.utc_now().isoformat(), active_deadline_utc=(sf.utc_now() + sf.timedelta(seconds=activation_seconds)).isoformat(), run_deadline_utc=(sf.utc_now() + sf.timedelta(hours=runtime)).isoformat(), instance_type=candidate.instance_type, launcher_pid=launcher_pid, launcher_start_marker=launcher_start_marker)
             # Ownership record is written before any poll/upload. If this
             # fails, the fallback below still deletes the exact returned ID.
             sf.write_owned_resource(record)
@@ -382,7 +476,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             # watchdog are in place.
             sf.append_cost_event({"instance_id": attempt_id, "phase_id": phase_id, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
             j1m_runner.write_progress(progress_path, "wait-active-starting", phase_id=phase_id)
-            wait_budget = max(30, int(min(1800, provider_deadline - time.monotonic() - 120)))
+            wait_budget = max(30, int(min(float(config["modes"][mode].get("activation_timeout_seconds", 1800)), provider_deadline - time.monotonic() - 120)))
             info = sf.wait_active(api_key, phase_id, instance_id, timeout_seconds=wait_budget)
             lifecycle["instance_info"] = info
             sf.verify_instance_ownership(info, instance_id=instance_id, phase_id=phase_id, nonce=nonce, expected_name=sf.owned_instance_name(run_id, nonce), ssh_key_id=key_id, expected_cloud=candidate.cloud, expected_region=candidate.region, expected_instance_type=candidate.instance_type, expected_hourly_usd=candidate.hourly_usd, expected_gpu=candidate.gpu, expected_gpu_count=1, expected_vram_gb=candidate.vram_gb, expected_os_image=candidate.os_image)
@@ -437,22 +531,26 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 # Install and upload the bounded bootstrap before any source
                 # work. The remaining stages consume those uploads and copy
                 # the lock into the now-existing pinned vendor tree.
-                for command in eval_commands[:3]:
+                bootstrap_timeouts = (30.0, 120.0, 270.0)
+                for index, command in enumerate(eval_commands[:3]):
                     lifecycle["stage"] = f"eval-bootstrap:{command[0]}"
                     _progress(progress_path, "eval-bootstrap-stage-starting", phase_id=phase_id, stage=lifecycle["stage"])
-                    stage = _remote(sf.ssh_base(info, identity, known_hosts) + command, timeout=_eval_timeout(provider_deadline, 300))
+                    stage = _remote(sf.ssh_base(info, identity, known_hosts) + command, timeout=_eval_timeout(provider_deadline, bootstrap_timeouts[index]))
                     lifecycle.setdefault("eval_stages", []).append(stage)
                     _progress(progress_path, "eval-bootstrap-stage-result", phase_id=phase_id, stage=lifecycle["stage"], status=stage["status"], exit_code=stage.get("exit_code"))
                     if stage["status"] != "completed":
                         raise sf.ShadeformError("eval source preparation failed")
-                for local, remote, recursive in _eval_uploads(config, remote_root, model_artifact, model_manifest):
+                eval_uploads = _eval_uploads(config, remote_root, model_artifact, model_manifest)
+                small_upload_divisor = len(eval_uploads) - 1 if model_artifact is not None else len(eval_uploads)
+                small_upload_timeout = float(config["modes"]["eval"]["stage_budgets_seconds"]["small_uploads"]) / max(1, small_upload_divisor)
+                for local, remote, recursive in eval_uploads:
                     lifecycle["stage"] = f"eval-upload:{local.name}"
                     _progress(progress_path, "eval-upload-starting", phase_id=phase_id, stage=lifecycle["stage"])
                     scp = sf.scp_base(info, identity, known_hosts)
                     if recursive:
                         scp = [scp[0], "-r", *scp[1:]]
                     destination = f"{ssh_user}@{info['ip']}:{remote}"
-                    requested_timeout = max(600.0, float(eval_artifact["size_bytes"]) / (1024**3) * 180.0) if local == model_artifact else 180.0
+                    requested_timeout = float(config["modes"]["eval"]["stage_budgets_seconds"]["model_upload"]) if local == model_artifact else small_upload_timeout
                     timeout = _eval_timeout(provider_deadline, requested_timeout)
                     upload_receipt = _remote(scp + [str(local), destination], timeout=timeout)
                     lifecycle.setdefault("eval_uploads", []).append({"name": local.name, **upload_receipt})
@@ -462,7 +560,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 for command in eval_commands[3:]:
                     lifecycle["stage"] = f"eval-stage:{command[0]}"
                     _progress(progress_path, "eval-stage-starting", phase_id=phase_id, stage=lifecycle["stage"])
-                    stage = _remote(sf.ssh_base(info, identity, known_hosts) + command, timeout=_eval_timeout(provider_deadline, 600))
+                    stage = _remote(sf.ssh_base(info, identity, known_hosts) + command, timeout=_eval_timeout(provider_deadline, _eval_stage_timeout(config, command)))
                     lifecycle.setdefault("eval_stages", []).append(stage)
                     _progress(progress_path, "eval-stage-result", phase_id=phase_id, stage=lifecycle["stage"], status=stage["status"], exit_code=stage.get("exit_code"))
                     if stage["status"] != "completed":
@@ -607,8 +705,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-id", default="J1M")
     parser.add_argument("--artifact-destination", type=Path, default=ROOT / "artifacts" / "qwen35-9b")
     parser.add_argument("--mode", choices=("prove", "build", "eval"), default="prove")
-    parser.add_argument("--model-artifact", type=Path, help="exact approved local Q4_K_M artifact required by --mode eval")
-    parser.add_argument("--model-manifest", type=Path, help="approved model manifest paired with --model-artifact")
+    parser.add_argument("--model-artifact", type=Path, help="refused for eval; the Q4 artifact is always built remotely")
+    parser.add_argument("--model-manifest", type=Path, help="approved manifest; defaults to the checked-in Q4 acceptance manifest")
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args(argv)
     config = j1m_runner.load_config(args.config)
@@ -618,7 +716,7 @@ def main(argv: list[str] | None = None) -> int:
     plan["mode_active_cost_usd"] = config["modes"][args.mode]["active_cost_usd"]
     if args.mode == "eval":
         plan["commands"] = _eval_remote_commands(config, "/scratch/j1m")
-        plan["artifact"] = "--model-artifact is required at execution; no model is copied during planning"
+        plan["artifact"] = "remote HF download/conversion/quantization; local Q4 is never required or copied"
         plan["quality_only"] = True
         plan["execution_backend"] = "cuda"
         plan["cuda_architecture"] = 80

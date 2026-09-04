@@ -18,6 +18,7 @@ _REQUIRED = {
     "g++": (9, 0),
     "nvcc": (11, 0),
 }
+_PACKAGES = ("ca-certificates", "cmake", "build-essential", "git", "python3", "python3-venv")
 
 
 def _probe(binary: str) -> dict[str, object]:
@@ -42,6 +43,25 @@ def _probe(binary: str) -> dict[str, object]:
     return {"major": major, "minor": minor, "reported": first_line}
 
 
+def _package_versions() -> dict[str, str]:
+    try:
+        result = subprocess.run(["dpkg-query", "-W", "-f=${Package}=${Version}\n", *_PACKAGES], check=False, capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("dpkg_query_unavailable") from exc
+    output = result.stdout or ""
+    if result.returncode != 0 or len(output.encode("utf-8")) > _MAX_OUTPUT:
+        raise RuntimeError("dpkg_query_failed")
+    versions: dict[str, str] = {}
+    for line in output.splitlines():
+        name, separator, version = line.partition("=")
+        if separator != "=" or name not in _PACKAGES or not version or name in versions:
+            raise RuntimeError("dpkg_query_shape_invalid")
+        versions[name] = version[:160]
+    if set(versions) != set(_PACKAGES):
+        raise RuntimeError("dpkg_query_missing_package")
+    return versions
+
+
 def probe(output: Path) -> dict[str, object]:
     versions = {binary: _probe(binary) for binary in _REQUIRED}
     receipt: dict[str, object] = {
@@ -49,7 +69,8 @@ def probe(output: Path) -> dict[str, object]:
         "status": "verified",
         "required": {key: f">={value[0]}.{value[1]}" for key, value in _REQUIRED.items()},
         "versions": versions,
-        "package_install": "ubuntu apt repositories; resolved package versions captured by reported tool versions",
+        "packages": _package_versions(),
+        "package_install": "ubuntu apt repositories; exact resolved package versions captured by dpkg-query",
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")

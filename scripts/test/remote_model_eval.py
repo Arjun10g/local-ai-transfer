@@ -194,6 +194,10 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any]) -> 
         version = versions.get(name)
         if (not isinstance(version, dict) or isinstance(version.get("major"), bool) or not isinstance(version.get("major"), int) or isinstance(version.get("minor"), bool) or not isinstance(version.get("minor"), int) or (version["major"], version["minor"]) < minimum):
             raise ValueError("toolchain_receipt_invalid")
+    packages = toolchain.get("packages")
+    expected_packages = {"ca-certificates", "cmake", "build-essential", "git", "python3", "python3-venv"}
+    if not isinstance(packages, dict) or set(packages) != expected_packages or any(not isinstance(value, str) or not value or len(value) > 160 for value in packages.values()):
+        raise ValueError("toolchain_receipt_invalid")
     build_info = _engine_build_info(engine, artifact["llama_cpp_revision"], backend)
     token_file = Path(args.token_file)
     _write_token(token_file)
