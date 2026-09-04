@@ -1,0 +1,14 @@
+{
+  "api_version": "0.1.0",
+  "auth": {"healthz": false, "other_routes": true, "failed_attempt_limit": 20, "window_ms": 60000},
+  "limits": {"default_max_header_bytes": 16384, "default_max_header_count": 64},
+  "post_content_type": "application/json[;charset=utf-8]",
+  "exact_bodies": {
+    "sessions": {"allowed": ["session_id", "reset"], "required": []},
+    "chat": {"allowed": ["session_id", "request_id", "message", "mode"], "required": ["session_id", "request_id", "message"]},
+    "cancel": {"allowed": ["request_id"], "required": ["request_id"]},
+    "tool_confirmation": {"allowed": ["approved", "request_id", "call_id"], "required": ["approved", "request_id", "call_id"]},
+    "shutdown": {"allowed": [], "required": []}
+  },
+  "disconnect": "abort_active_chat"
+}
