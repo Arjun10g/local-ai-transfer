@@ -148,6 +148,31 @@ struct FirmwareEvidence {
   std::vector<MemoryEvidence> memory;
 };
 
+enum class DisplayCorrelationDisposition : std::uint8_t {
+  kRelevantPci,
+  kExcludedSoftware,
+  kExcludedRemote,
+  kExcludedIndirect,
+};
+
+struct DisplayExclusionRule final {
+  std::wstring_view hardware_id;
+  DisplayCorrelationDisposition disposition;
+};
+
+// Only generic, root-enumerated identities in this closed table may be omitted
+// from DXGI/PCI coverage. Any other non-PCI display identity, including an
+// unrecognized indirect-display implementation, is ambiguous and refuses the
+// entire receipt. The intentionally empty indirect policy is explicit: v1 has
+// no independently accepted generic indirect-display hardware ID.
+constexpr std::array<DisplayExclusionRule, 4> kDisplayExclusionRules = {{
+    {L"ROOT\\BASICDISPLAY", DisplayCorrelationDisposition::kExcludedSoftware},
+    {L"ROOT\\BASICRENDER", DisplayCorrelationDisposition::kExcludedSoftware},
+    {L"ROOT\\RDPIDD", DisplayCorrelationDisposition::kExcludedRemote},
+    {L"ROOT\\RDPIDD_INDIRECTDISPLAY",
+     DisplayCorrelationDisposition::kExcludedRemote},
+}};
+
 struct DisplayDeviceEvidence {
   std::string hardware_tuple;
   std::string hardware_tuple_sha256;
@@ -159,6 +184,8 @@ struct DisplayDeviceEvidence {
   std::string driver_date;
   std::string provider;
   std::string driver_signature_status = "unproven";
+  DisplayCorrelationDisposition correlation_disposition =
+      DisplayCorrelationDisposition::kRelevantPci;
 };
 
 struct AdapterEvidence {
@@ -200,6 +227,7 @@ struct Evidence {
   FirmwareEvidence firmware;
   std::vector<DisplayDeviceEvidence> display_devices;
   std::vector<AdapterEvidence> adapters;
+  bool display_correlation_complete = false;
   bool vulkan_present = false;
   std::string vulkan_sha256;
   std::string vpro_status = "unproven";
@@ -886,8 +914,61 @@ bool registry_string(HKEY key, const wchar_t* name, std::string& output) {
   return wide_utf8(buffer.data(), length, output, 128);
 }
 
-bool display_hardware_tuple(HDEVINFO devices, SP_DEVINFO_DATA& item,
-                            DisplayDeviceEvidence& output) {
+const char* display_disposition_name(
+    DisplayCorrelationDisposition disposition) noexcept {
+  switch (disposition) {
+    case DisplayCorrelationDisposition::kRelevantPci: return "relevant_pci";
+    case DisplayCorrelationDisposition::kExcludedSoftware:
+      return "excluded_software";
+    case DisplayCorrelationDisposition::kExcludedRemote:
+      return "excluded_remote";
+    case DisplayCorrelationDisposition::kExcludedIndirect:
+      return "excluded_indirect";
+  }
+  return "invalid";
+}
+
+bool exact_display_exclusion(
+    std::wstring_view value,
+    DisplayCorrelationDisposition& disposition) noexcept {
+  if (value.empty() || value.size() > 256) return false;
+  std::array<wchar_t, 257> upper{};
+  for (std::size_t index = 0; index < value.size(); ++index) {
+    const wchar_t character = value[index];
+    if (character > 0x7f || character < 0x20) return false;
+    upper[index] = character >= L'a' && character <= L'z'
+        ? static_cast<wchar_t>(character - L'a' + L'A') : character;
+  }
+  const std::wstring_view normalized(upper.data(), value.size());
+  for (const auto& rule : kDisplayExclusionRules) {
+    if (normalized == rule.hardware_id) {
+      disposition = rule.disposition;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool excluded_display_identity(
+    DisplayCorrelationDisposition disposition,
+    DisplayDeviceEvidence& output) {
+  if (disposition == DisplayCorrelationDisposition::kRelevantPci) return false;
+  const char* name = display_disposition_name(disposition);
+  if (std::string_view(name) == "invalid") return false;
+  output = DisplayDeviceEvidence{};
+  output.correlation_disposition = disposition;
+  output.hardware_tuple = std::string("DISPLAY-EXCLUSION;CLASS=") + name;
+  std::array<std::uint8_t, 32> digest{};
+  constexpr char domain_separator[] = "lae.hardware.display-exclusion.v1\0";
+  std::string domain(domain_separator, sizeof(domain_separator) - 1);
+  domain.append(output.hardware_tuple);
+  if (!sha256_bytes(domain, digest)) return false;
+  output.hardware_tuple_sha256 = hex(digest.data(), digest.size());
+  return true;
+}
+
+bool display_hardware_identity(HDEVINFO devices, SP_DEVINFO_DATA& item,
+                               DisplayDeviceEvidence& output) {
   std::array<std::uint8_t, 4096> bytes{};
   DWORD type = 0;
   DWORD required = 0;
@@ -902,7 +983,11 @@ bool display_hardware_tuple(HDEVINFO devices, SP_DEVINFO_DATA& item,
   if (values[characters - 1] != L'\0' || values[characters - 2] != L'\0')
     return false;
   std::size_t offset = 0;
-  bool found = false;
+  bool found_pci = false;
+  bool found_exclusion = false;
+  bool unknown_without_pci = false;
+  DisplayCorrelationDisposition exclusion =
+      DisplayCorrelationDisposition::kRelevantPci;
   while (offset + 1 < characters && values[offset] != L'\0') {
     std::size_t end = offset;
     while (end < characters && values[end] != L'\0') ++end;
@@ -910,14 +995,30 @@ bool display_hardware_tuple(HDEVINFO devices, SP_DEVINFO_DATA& item,
     DisplayDeviceEvidence candidate;
     if (normalized_pci_tuple(
             std::wstring_view(values + offset, end - offset), candidate)) {
-      if (found && candidate.hardware_tuple != output.hardware_tuple)
-        return false;
+      if (found_exclusion || found_pci) return false;
       output = std::move(candidate);
-      found = true;
+      output.correlation_disposition =
+          DisplayCorrelationDisposition::kRelevantPci;
+      found_pci = true;
+    } else {
+      DisplayCorrelationDisposition candidate_exclusion =
+          DisplayCorrelationDisposition::kRelevantPci;
+      if (exact_display_exclusion(
+              std::wstring_view(values + offset, end - offset),
+              candidate_exclusion)) {
+        if (found_pci || (found_exclusion && candidate_exclusion != exclusion))
+          return false;
+        exclusion = candidate_exclusion;
+        found_exclusion = true;
+      } else if (!found_pci) {
+        unknown_without_pci = true;
+      }
     }
     offset = end + 1;
   }
-  return found;
+  if (found_pci) return !found_exclusion;
+  return found_exclusion && !unknown_without_pci &&
+      excluded_display_identity(exclusion, output);
 }
 
 bool collect_display_devices(const CollectionContext& context,
@@ -937,7 +1038,7 @@ bool collect_display_devices(const CollectionContext& context,
     }
     if (index == kMaximumDisplayDevices) return false;
     DisplayDeviceEvidence device;
-    if (!display_hardware_tuple(raw, item, device) ||
+    if (!display_hardware_identity(raw, item, device) ||
         !tuple_digests.insert(device.hardware_tuple_sha256).second)
       return false;
     HKEY key = SetupDiOpenDevRegKey(
@@ -966,6 +1067,13 @@ bool collect_dxgi(const CollectionContext& context, Evidence& evidence) {
     return false;
   std::set<std::pair<std::uint32_t, std::uint32_t>> luids;
   std::set<std::size_t> matched_display_devices;
+  const std::size_t relevant_display_devices = static_cast<std::size_t>(
+      std::count_if(evidence.display_devices.begin(),
+                    evidence.display_devices.end(),
+                    [](const DisplayDeviceEvidence& device) {
+                      return device.correlation_disposition ==
+                          DisplayCorrelationDisposition::kRelevantPci;
+                    }));
   for (UINT index = 0; index <= kMaximumAdapters; ++index) {
     if (cancelled_or_expired(context)) return false;
     ComPtr<IDXGIAdapter1> adapter;
@@ -999,7 +1107,9 @@ bool collect_dxgi(const CollectionContext& context, Evidence& evidence) {
       for (std::size_t display = 0;
            display < evidence.display_devices.size(); ++display) {
         const auto& candidate = evidence.display_devices[display];
-        if (candidate.vendor_id == result.vendor_id &&
+        if (candidate.correlation_disposition ==
+                DisplayCorrelationDisposition::kRelevantPci &&
+            candidate.vendor_id == result.vendor_id &&
             candidate.device_id == result.device_id &&
             candidate.subsystem_id == result.subsystem_id &&
             candidate.revision == result.revision)
@@ -1017,7 +1127,11 @@ bool collect_dxgi(const CollectionContext& context, Evidence& evidence) {
     result.integrated_classification = "unproven";
     evidence.adapters.push_back(std::move(result));
   }
-  return !evidence.adapters.empty();
+  if (evidence.adapters.empty() ||
+      matched_display_devices.size() != relevant_display_devices)
+    return false;
+  evidence.display_correlation_complete = true;
+  return true;
 }
 
 bool collect_vulkan_presence(const CollectionContext& context,
@@ -1102,7 +1216,10 @@ void append_display_devices(
   for (std::size_t index = 0; index < devices.size(); ++index) {
     if (index != 0) output.push_back(',');
     const auto& item = devices[index];
-    output.append("{\"device_id\":"); output.append(std::to_string(item.device_id));
+    output.append("{\"correlation_disposition\":");
+    append_json_string(output,
+                       display_disposition_name(item.correlation_disposition));
+    output.append(",\"device_id\":"); output.append(std::to_string(item.device_id));
     output.append(",\"driver_date\":"); append_nullable_string(output, item.driver_date);
     output.append(",\"driver_signature_status\":"); append_json_string(output, item.driver_signature_status);
     output.append(",\"driver_version\":"); append_nullable_string(output, item.driver_version);
@@ -1161,7 +1278,7 @@ bool build_receipt(Evidence& evidence, bool executed_on_target,
     exact_memory = exact_memory && item.memory_type == 34 &&
         item.configured_speed_mts == 5600;
   bool exact_display = false;
-  bool exact_correlation = true;
+  bool exact_correlation = evidence.display_correlation_complete;
   for (const auto& item : evidence.adapters) {
     if (!item.software && item.vendor_id == 0x8086 &&
         item.driver_version == "32.0.101.8247") exact_display = true;
@@ -1252,9 +1369,14 @@ AttestorStatus collect_full(const CollectionContext& context,
   if (cancelled_or_expired(context)) return AttestorStatus::kDeadlineExceeded;
   if (!collect_smbios(evidence)) return AttestorStatus::kFirmwareMalformed;
   if (cancelled_or_expired(context)) return AttestorStatus::kDeadlineExceeded;
-  if (!collect_display_devices(context, evidence))
+  if (!collect_display_devices(context, evidence)) {
+    add_reason(evidence, "display_device_identity_ambiguous");
     return AttestorStatus::kDriverAmbiguous;
-  if (!collect_dxgi(context, evidence)) return AttestorStatus::kAdapterAmbiguous;
+  }
+  if (!collect_dxgi(context, evidence)) {
+    add_reason(evidence, "dxgi_pnp_correlation_incomplete");
+    return AttestorStatus::kAdapterAmbiguous;
+  }
   if (!collect_vulkan_presence(context, evidence))
     add_reason(evidence, "vulkan_runtime_unavailable");
   if (!utc_now(evidence.generated_at_utc)) return AttestorStatus::kInternal;

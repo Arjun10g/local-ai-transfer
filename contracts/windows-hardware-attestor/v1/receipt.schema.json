@@ -65,7 +65,7 @@
       "maxItems": 16,
       "uniqueItems": true,
       "items": {
-        "enum": ["cpu_exact_sku_unconfigured", "display_driver_signature_unproven", "integrated_gpu_classification_unproven", "invalid_collection_context", "offline_authenticode_policy_unreviewed", "supervised_global_deadline_unavailable", "target_trust_anchor_unavailable", "vpro_status_unproven", "vulkan_runtime_unavailable"]
+        "enum": ["cpu_exact_sku_unconfigured", "display_device_identity_ambiguous", "display_driver_signature_unproven", "dxgi_pnp_correlation_incomplete", "integrated_gpu_classification_unproven", "invalid_collection_context", "offline_authenticode_policy_unreviewed", "supervised_global_deadline_unavailable", "target_trust_anchor_unavailable", "vpro_status_unproven", "vulkan_runtime_unavailable"]
       }
     },
     "receipt_kind": {"const": "diagnostic_only"},
@@ -85,8 +85,8 @@
     },
     "displayDevice": {
       "type": "object", "additionalProperties": false,
-      "required": ["device_id", "driver_date", "driver_signature_status", "driver_version", "hardware_tuple_sha256", "provider", "revision", "subsystem_id", "vendor_id"],
-      "properties": {"device_id": {"type": "integer", "minimum": 0, "maximum": 65535}, "driver_date": {"$ref": "#/$defs/nullableString"}, "driver_signature_status": {"const": "unproven"}, "driver_version": {"$ref": "#/$defs/nullableString"}, "hardware_tuple_sha256": {"$ref": "#/$defs/sha256"}, "provider": {"$ref": "#/$defs/nullableString"}, "revision": {"type": "integer", "minimum": 0, "maximum": 255}, "subsystem_id": {"type": "integer", "minimum": 0, "maximum": 4294967295}, "vendor_id": {"type": "integer", "minimum": 0, "maximum": 65535}}
+      "required": ["correlation_disposition", "device_id", "driver_date", "driver_signature_status", "driver_version", "hardware_tuple_sha256", "provider", "revision", "subsystem_id", "vendor_id"],
+      "properties": {"correlation_disposition": {"enum": ["excluded_indirect", "excluded_remote", "excluded_software", "relevant_pci"]}, "device_id": {"type": "integer", "minimum": 0, "maximum": 65535}, "driver_date": {"$ref": "#/$defs/nullableString"}, "driver_signature_status": {"const": "unproven"}, "driver_version": {"$ref": "#/$defs/nullableString"}, "hardware_tuple_sha256": {"$ref": "#/$defs/sha256"}, "provider": {"$ref": "#/$defs/nullableString"}, "revision": {"type": "integer", "minimum": 0, "maximum": 255}, "subsystem_id": {"type": "integer", "minimum": 0, "maximum": 4294967295}, "vendor_id": {"type": "integer", "minimum": 0, "maximum": 65535}}
     },
     "memory": {
       "type": "object", "additionalProperties": false,

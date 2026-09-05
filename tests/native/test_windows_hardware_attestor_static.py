@@ -12,6 +12,14 @@ ANCHOR = SOURCE_DIR / "trust_anchor.hpp"
 SCHEMA = ROOT / "contracts" / "windows-hardware-attestor" / "v1" / "receipt.schema.json"
 CONTRACT = ROOT / "contracts" / "windows-hardware-attestor" / "v1" / "contract.json"
 FIXTURE = ROOT / "tests" / "native" / "fixtures" / "windows_hardware_attestor" / "source-refusal.fixture.json"
+CORRELATION_FIXTURE = (
+    ROOT
+    / "tests"
+    / "native"
+    / "fixtures"
+    / "windows_hardware_attestor"
+    / "display-correlation-cases.fixture.json"
+)
 
 
 def strict_json(path):
@@ -36,6 +44,44 @@ def assert_sorted_keys(test, value):
             assert_sorted_keys(test, child)
 
 
+def fixture_correlation_accepts(case, policy):
+    exclusions = {}
+    for disposition in ("software", "remote", "indirect"):
+        for hardware_id in policy[f"excluded_{disposition}_hardware_ids"]:
+            if hardware_id in exclusions:
+                return False
+            exclusions[hardware_id] = disposition
+
+    relevant = []
+    for device in case["setup_devices"]:
+        tuples = device["pci_tuples"]
+        hardware_ids = device["hardware_ids"]
+        if tuples:
+            if len(tuples) != 1 or any(item in exclusions for item in hardware_ids):
+                return False
+            if tuples[0] in relevant:
+                return False
+            relevant.append(tuples[0])
+            continue
+        if not hardware_ids:
+            return False
+        dispositions = {exclusions.get(item) for item in hardware_ids}
+        if None in dispositions or len(dispositions) != 1:
+            return False
+
+    if not case["dxgi_adapters"]:
+        return False
+    unmatched = set(relevant)
+    for adapter in case["dxgi_adapters"]:
+        if adapter["software"]:
+            continue
+        hardware_tuple = adapter["tuple"]
+        if hardware_tuple is None or hardware_tuple not in unmatched:
+            return False
+        unmatched.remove(hardware_tuple)
+    return not unmatched
+
+
 class WindowsHardwareAttestorStaticTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -45,6 +91,7 @@ class WindowsHardwareAttestorStaticTests(unittest.TestCase):
         cls.schema = strict_json(SCHEMA)
         cls.contract = strict_json(CONTRACT)
         cls.fixture = strict_json(FIXTURE)
+        cls.correlation_fixture = strict_json(CORRELATION_FIXTURE)
 
     def test_source_is_windows_only_and_not_activated(self):
         self.assertIn('#error "The Windows hardware attestor source is Windows-only"', self.header)
@@ -127,8 +174,78 @@ class WindowsHardwareAttestorStaticTests(unittest.TestCase):
         self.assertIn("CreateDXGIFactory1", self.cpp)
         self.assertIn("matches.size() != 1", self.cpp)
         self.assertIn("!matched_display_devices.insert(matches.front()).second", self.cpp)
+        self.assertIn("matched_display_devices.size() != relevant_display_devices", self.cpp)
+        self.assertIn("evidence.display_correlation_complete = true", self.cpp)
+        self.assertIn(
+            "device.correlation_disposition ==\n"
+            "                          DisplayCorrelationDisposition::kRelevantPci",
+            self.cpp,
+        )
         self.assertIn('integrated_classification = "unproven"', self.cpp)
         self.assertIn("kMaximumAdapters", self.cpp)
+
+    def test_display_exclusion_policy_is_closed_and_matches_fixture(self):
+        policy = self.contract["display_correlation_policy"]
+        fixture_policy = self.correlation_fixture["policy"]
+        for name in (
+            "excluded_indirect_hardware_ids",
+            "excluded_remote_hardware_ids",
+            "excluded_software_hardware_ids",
+        ):
+            self.assertEqual(policy[name], fixture_policy[name])
+        self.assertEqual(policy["excluded_indirect_hardware_ids"], [])
+        for hardware_id in (
+            "ROOT\\BASICDISPLAY",
+            "ROOT\\BASICRENDER",
+            "ROOT\\RDPIDD",
+            "ROOT\\RDPIDD_INDIRECTDISPLAY",
+        ):
+            self.assertIn(f'L"{hardware_id.replace(chr(92), chr(92) * 2)}"', self.cpp)
+        self.assertNotIn('L"ROOT\\\\INDIRECTDISPLAY"', self.cpp)
+
+    def test_display_correlation_adversarial_fixture(self):
+        assert_sorted_keys(self, self.correlation_fixture)
+        results = {
+            case["name"]: fixture_correlation_accepts(
+                case, self.correlation_fixture["policy"]
+            )
+            for case in self.correlation_fixture["cases"]
+        }
+        expected = {
+            case["name"]: case["accepted"]
+            for case in self.correlation_fixture["cases"]
+        }
+        self.assertEqual(results, expected)
+        self.assertTrue(results["one_exact_hardware_match_with_closed_exclusions"])
+        for name in (
+            "unmatched_extra_intel_setup_device",
+            "unmatched_extra_discrete_setup_device",
+            "unknown_setup_display_identity",
+            "missing_setup_identifiers",
+            "ambiguous_setup_pci_identifiers",
+            "unapproved_indirect_display_not_excluded",
+        ):
+            self.assertFalse(results[name])
+
+    def test_schema_and_builder_bind_complete_correlation(self):
+        display = self.schema["$defs"]["displayDevice"]
+        self.assertIn("correlation_disposition", display["required"])
+        self.assertEqual(
+            display["properties"]["correlation_disposition"]["enum"],
+            [
+                "excluded_indirect",
+                "excluded_remote",
+                "excluded_software",
+                "relevant_pci",
+            ],
+        )
+        allowed = set(self.schema["properties"]["reason_codes"]["items"]["enum"])
+        self.assertIn("display_device_identity_ambiguous", allowed)
+        self.assertIn("dxgi_pnp_correlation_incomplete", allowed)
+        self.assertIn(
+            "bool exact_correlation = evidence.display_correlation_complete;",
+            self.cpp,
+        )
 
     def test_vulkan_is_fixed_presence_hash_only(self):
         vulkan = self.cpp[self.cpp.index("bool collect_vulkan_presence"):self.cpp.index("bool utc_now")]

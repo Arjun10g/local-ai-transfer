@@ -22,9 +22,16 @@ The latent collector is deliberately narrow:
 - SetupAPI reads only the display hardware-ID and fixed driver registry values.
   It normalizes the non-instance PCI vendor/device/subsystem/revision tuple and
   emits only its domain-separated SHA-256. Full device-instance IDs, INF paths,
-  and locations are never emitted. DXGI adapters must correlate one-to-one with
-  that normalized tuple. DXGI alone is not treated as authoritative evidence of
-  integrated/UMA status.
+  and locations are never emitted. Every present SetupAPI display with a PCI
+  tuple must correlate one-to-one with a non-software DXGI adapter, and every
+  such SetupAPI entry must be consumed exactly once. An unmatched extra Intel,
+  discrete, or unknown display refuses the receipt rather than being hidden by
+  matches for other adapters. Only the exact generic root IDs listed in the
+  machine contract may be excluded as software or remote displays. The v1
+  indirect-display exclusion list is deliberately empty; an unrecognized or
+  mixed identity refuses. Exclusions are emitted only as a closed disposition
+  and a domain-separated digest, never as a raw device ID. DXGI alone is not
+  treated as authoritative evidence of integrated/UMA status.
 - Vulkan evidence is limited to opening and hashing the fixed
   `System32\\vulkan-1.dll` file. The collector never loads the DLL, enumerates a
   runtime, launches a process, or loads a model.

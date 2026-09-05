@@ -112,6 +112,7 @@ REVIEWED_TEST_SUPPORT_FILES = frozenset({
     "tests/native/fixtures/windows_broker/unknown-argument.json",
     "tests/native/fixtures/action_journal_storage/header-vector.json",
     "tests/native/fixtures/windows_readonly_fs/refusal-cases.json",
+    "tests/native/fixtures/windows_hardware_attestor/display-correlation-cases.fixture.json",
     "tests/native/fixtures/windows_hardware_attestor/source-refusal.fixture.json",
     "tests/performance/__init__.py",
     "tests/performance/lifecycle_test_isolation.py",

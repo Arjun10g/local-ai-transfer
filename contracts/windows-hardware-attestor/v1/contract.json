@@ -7,6 +7,20 @@
     "production_available": false
   },
   "collector": "lae_windows_hardware_attestor",
+  "display_correlation_policy": {
+    "excluded_indirect_hardware_ids": [],
+    "excluded_remote_hardware_ids": [
+      "ROOT\\RDPIDD",
+      "ROOT\\RDPIDD_INDIRECTDISPLAY"
+    ],
+    "excluded_software_hardware_ids": [
+      "ROOT\\BASICDISPLAY",
+      "ROOT\\BASICRENDER"
+    ],
+    "exclusion_rule": "a display without exactly one normalized PCI tuple is excluded only when every hardware ID is the same closed software, remote, or indirect category; mixed or unknown exclusion identities refuse",
+    "relevant_device_rule": "every present SetupAPI display with an exact normalized PCI vendor/device/subsystem/revision tuple must have exactly one non-software DXGI match",
+    "unmatched_relevant_device": "refuse"
+  },
   "input": {
     "caller_supplied_expected_identity": false,
     "environment_configuration": false,
