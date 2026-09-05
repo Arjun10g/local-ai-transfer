@@ -31,6 +31,21 @@ from scripts.test import remote_model_eval
 
 
 class ToolCallEvaluatorTests(unittest.TestCase):
+    def test_production_fixture_is_bounded_and_covers_exact_host_profile(self):
+        fixture = load_fixture(Path(__file__).with_name("production_tool_call_eval.json"))
+        self.assertEqual(len(fixture["tools"]), 28)
+        self.assertEqual(len(fixture["cases"]), 32)
+        self.assertEqual(fixture["limits"]["context_tokens"], 8192)
+        self.assertEqual(fixture["limits"]["max_output_tokens"], 64)
+        names = {tool["function"]["name"] for tool in fixture["tools"]}
+        covered = {case["expected"]["call"]["name"] for case in fixture["cases"] if "call" in case["expected"]}
+        self.assertEqual(covered, names)
+        contract = remote_model_eval._fixture_contract(Path(__file__).with_name("production_tool_call_eval.json"))
+        self.assertEqual(contract["case_count"], 32)
+        self.assertEqual(contract["tool_count"], 28)
+        self.assertEqual(contract["context_tokens"], 8192)
+        self.assertEqual(contract["output_reserve_tokens"], 64)
+
     def test_fixture_is_bounded_and_covers_required_categories(self):
         fixture = load_fixture()
         self.assertEqual(len(fixture["cases"]), 34)

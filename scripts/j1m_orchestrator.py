@@ -119,17 +119,25 @@ def _progress(path: Path, event: str, **details: Any) -> None:
         pass
 
 
-def _tool_eval_contract() -> tuple[int, set[str], dict[str, int]]:
+def _tool_eval_contract() -> dict[str, Any]:
     """Return the bounded case/category contract shipped with the evaluator."""
 
-    fixture_path = ROOT / "tests" / "model" / "tool_call_eval.json"
+    fixture_path = ROOT / "tests" / "model" / "production_tool_call_eval.json"
     fixture = _bounded_json(fixture_path, _EVAL_FIXTURE_MAX_BYTES)
     limits = fixture.get("limits") if isinstance(fixture, dict) else None
     cases = fixture.get("cases") if isinstance(fixture, dict) else None
     count = limits.get("max_cases") if isinstance(limits, dict) else None
+    tools = fixture.get("tools") if isinstance(fixture, dict) else None
+    tool_names = [tool.get("function", {}).get("name") if isinstance(tool, dict) and isinstance(tool.get("function"), dict) else None for tool in tools] if isinstance(tools, list) else []
     if (not isinstance(fixture, dict) or set(fixture) != {"schema", "model", "protocol", "limits", "tools", "cases"} or
+            not isinstance(limits, dict) or
+            set(limits) != {"context_tokens", "max_output_tokens", "temperature", "max_cases"} or
             fixture.get("schema") != "local_bmo.tool-call-eval.v1" or isinstance(count, bool) or not isinstance(count, int) or
-            not isinstance(cases, list) or len(cases) != count or not 1 <= count <= 40):
+            not isinstance(cases, list) or len(cases) != count or not 1 <= count <= 64 or
+            not isinstance(tools, list) or len(tools) != 28 or len(set(tool_names)) != len(tool_names) or
+            any(not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_.-]{1,95}", name) for name in tool_names) or
+            not isinstance(limits.get("context_tokens"), int) or not 1 <= limits["context_tokens"] <= 16384 or
+            not isinstance(limits.get("max_output_tokens"), int) or not 1 <= limits["max_output_tokens"] < limits["context_tokens"]):
         raise ValueError("eval fixture count invalid")
     if any(not isinstance(case, dict) or set(case) != {"id", "category", "messages", "expected"} or
            not isinstance(case.get("id"), str) or not 1 <= len(case["id"]) <= 128 or
@@ -140,7 +148,10 @@ def _tool_eval_contract() -> tuple[int, set[str], dict[str, int]]:
     categories = {case["category"] for case in cases}
     if not categories or not all(isinstance(category, str) and category.isascii() for category in categories):
         raise ValueError("eval fixture categories invalid")
-    return count, categories, {category: sum(case["category"] == category for case in cases) for category in categories}
+    return {"case_count": count, "categories": categories,
+            "category_counts": {category: sum(case["category"] == category for case in cases) for category in categories},
+            "tool_count": len(tools), "context_tokens": limits["context_tokens"],
+            "output_reserve_tokens": limits["max_output_tokens"]}
 
 
 def _remote(command: list[str], *, timeout: float) -> dict[str, Any]:
@@ -276,7 +287,7 @@ def _eval_uploads(config: dict[str, Any], remote_root: str, artifact_path: Path 
         # remote HF checkout is pristine and therefore does not contain this
         # reviewed CMake patch.
         (ROOT / "vendor" / "llama.cpp" / "ggml" / "CMakeLists.txt", f"{remote_root}/ggml-CMakeLists.txt", False),
-        (ROOT / "tests" / "model" / "tool_call_eval.json", f"{remote_root}/tool_call_eval.json", False),
+        (ROOT / "tests" / "model" / "production_tool_call_eval.json", f"{remote_root}/production_tool_call_eval.json", False),
         (ROOT / "CMakeLists.txt", f"{remote_root}/engine/CMakeLists.txt", False),
         # Recursive scp copies the source directory beneath its destination;
         # target the engine parent so the result is exactly engine/native.
@@ -323,7 +334,7 @@ def _eval_remote_commands(config: dict[str, Any], remote_root: str) -> list[list
         ["python3", f"{remote_root}/cuda_device_probe.py", "--output", f"{remote_root}/artifacts/cuda-device-receipt.json"],
         ["cmake", "-S", engine_root, "-B", build_root, "-DCMAKE_BUILD_TYPE=Release", "-DLAE_ENABLE_LLAMA_CPP=ON", "-DLAE_ENABLE_LLAMA_CUDA=ON", f"-DCMAKE_CUDA_ARCHITECTURES={eval_mode['cuda_architecture']}", f"-DCMAKE_CUDA_COMPILER={cuda_compiler}"],
         ["cmake", "--build", build_root, "--target", "lae-engine", "--parallel", str(eval_mode["build_parallelism"])],
-        ["python3", f"{remote_root}/remote_model_eval.py", "--model", f"{remote_root}/artifacts/Qwen3.5-9B-Q4_K_M.gguf", "--model-manifest", f"{remote_root}/model-manifest.json", "--model-manifest-lock", f"{remote_root}/model-manifest.sha256", "--source-revision", config["source"]["revision"], "--llama-revision", llama["revision"], "--llama-checkout", checkout, "--engine", f"{build_root}/native/lae-engine", "--evaluator", f"{remote_root}/evaluate_tool_calls.py", "--fixture", f"{remote_root}/tool_call_eval.json", "--token-file", f"{remote_root}/engine-token", "--backend", eval_mode["backend"], "--cuda-device-name", device_name, "--cuda-device-receipt", f"{remote_root}/artifacts/cuda-device-receipt.json", "--toolchain-receipt", f"{remote_root}/artifacts/toolchain-receipt.json", "--receipt", f"{remote_root}/artifacts/eval-receipt.json", "--preflight-receipt", f"{remote_root}/artifacts/startup-preflight-receipt.json", "--timeout", "420"],
+        ["python3", f"{remote_root}/remote_model_eval.py", "--model", f"{remote_root}/artifacts/Qwen3.5-9B-Q4_K_M.gguf", "--model-manifest", f"{remote_root}/model-manifest.json", "--model-manifest-lock", f"{remote_root}/model-manifest.sha256", "--source-revision", config["source"]["revision"], "--llama-revision", llama["revision"], "--llama-checkout", checkout, "--engine", f"{build_root}/native/lae-engine", "--evaluator", f"{remote_root}/evaluate_tool_calls.py", "--fixture", f"{remote_root}/production_tool_call_eval.json", "--token-file", f"{remote_root}/engine-token", "--backend", eval_mode["backend"], "--cuda-device-name", device_name, "--cuda-device-receipt", f"{remote_root}/artifacts/cuda-device-receipt.json", "--toolchain-receipt", f"{remote_root}/artifacts/toolchain-receipt.json", "--receipt", f"{remote_root}/artifacts/eval-receipt.json", "--preflight-receipt", f"{remote_root}/artifacts/startup-preflight-receipt.json", "--timeout", "420"],
     ]
 
 
@@ -493,10 +504,12 @@ def _verify_eval_quality_diagnostics(value: Any, *, failed: int, categories: set
     return {"schema": value["schema"], "total_failed": total, "overall": dict(overall), "by_category": {category: dict(by_category[category]) for category in sorted(categories)}}
 
 
-def _verify_eval_canary(value: Any) -> dict[str, Any]:
+def _verify_eval_canary(value: Any, *, expected_tool_count: int = 11, expected_context_tokens: int = 2048, expected_output_reserve_tokens: int = 64) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {"attempted", "passed", "error_code", "tool_count", "message_chars", "prompt_tokens", "context_tokens", "output_reserve_tokens"} or value.get("attempted") is not True:
         raise ValueError("eval receipt canary invalid")
-    if not isinstance(value.get("passed"), bool) or value.get("tool_count") != 11 or value.get("message_chars") != 2400 or value.get("context_tokens") != 2048 or value.get("output_reserve_tokens") != 64:
+    if (not isinstance(value.get("passed"), bool) or value.get("tool_count") != expected_tool_count or
+            value.get("message_chars") != 2400 or value.get("context_tokens") != expected_context_tokens or
+            value.get("output_reserve_tokens") != expected_output_reserve_tokens):
         raise ValueError("eval receipt canary invalid")
     code = value.get("error_code")
     prompt_tokens = value.get("prompt_tokens")
@@ -567,7 +580,10 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
             any(isinstance(metrics.get(key), bool) or not isinstance(metrics.get(key), int) or metrics[key] < 0 for key in ("case_count", "passed", "failed", "errors"))):
         raise ValueError("eval receipt metrics invalid")
     summary = metrics.get("category_summary")
-    expected_count, expected_categories, expected_category_counts = _tool_eval_contract()
+    eval_contract = _tool_eval_contract()
+    expected_count = eval_contract["case_count"]
+    expected_categories = eval_contract["categories"]
+    expected_category_counts = eval_contract["category_counts"]
     if metrics["case_count"] != expected_count or not isinstance(summary, dict) or set(summary) != expected_categories:
         raise ValueError("eval receipt metrics invalid")
     category_total = 0
@@ -591,7 +607,7 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     if "error_diagnostics" not in metrics or "canary" not in metrics or "quality_diagnostics" not in metrics:
         raise ValueError("eval receipt diagnostics missing")
     diagnostics = _verify_eval_diagnostics(metrics["error_diagnostics"], errors=metrics["errors"], categories=expected_categories, category_errors={category: summary[category]["errors"] for category in expected_categories})
-    canary = _verify_eval_canary(metrics["canary"])
+    canary = _verify_eval_canary(metrics["canary"], expected_tool_count=eval_contract["tool_count"], expected_context_tokens=eval_contract["context_tokens"], expected_output_reserve_tokens=eval_contract["output_reserve_tokens"])
     _verify_eval_canary_coherence(canary, metrics=metrics, summary=summary, diagnostics=diagnostics, expected_count=expected_count, categories=expected_categories)
     quality_diagnostics = _verify_eval_quality_diagnostics(metrics["quality_diagnostics"], failed=metrics["failed"], categories=expected_categories, category_failed={category: summary[category]["failed"] for category in expected_categories})
     child = _verify_eval_child(payload.get("child")) if payload.get("status") == "failed" else None

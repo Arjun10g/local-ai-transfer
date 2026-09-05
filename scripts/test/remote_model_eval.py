@@ -29,6 +29,7 @@ from typing import Any
 
 MODEL_NAME = "Qwen3.5-9B-Q4_K_M.gguf"
 PIN_RE = set("0123456789abcdef")
+TOOL_NAME = re.compile(r"^[a-z][a-z0-9_.-]{1,95}$")
 SAFE_ERROR_CODES = frozenset({
     "artifact_manifest_invalid", "cuda_device_receipt_invalid", "engine_binary_missing",
     "engine_build_info_failed", "engine_build_info_invalid", "engine_llama_identity_mismatch",
@@ -79,7 +80,7 @@ MAX_EVAL_OUTPUT = 256 * 1024
 FIXTURE_MAX_BYTES = 256 * 1024
 MAX_RECEIPT_BYTES = 64 * 1024
 MAX_METADATA_BYTES = 256 * 1024
-MAX_EVAL_CASES = 40
+MAX_EVAL_CASES = 64
 EVAL_TOTAL_TIMEOUT = 480.0
 CLEANUP_RESERVE_SECONDS = 30.0
 MODEL_PREFLIGHT_RECEIPT_SCHEMA = "local_bmo.j1m.startup-preflight-receipt.v1"
@@ -621,10 +622,10 @@ def _engine_model_preflight(
         raise ValueError(error_code) from exc
 
 
-def _engine_launch_argv(args: argparse.Namespace, token_file: Path, backend: str) -> list[str]:
+def _engine_launch_argv(args: argparse.Namespace, token_file: Path, backend: str, context_tokens: int = 2048) -> list[str]:
     launch = [
         os.fspath(args.engine), "serve", "--port", "0", "--backend", backend,
-        "--model", args.model, "--context", "2048",
+        "--model", args.model, "--context", str(context_tokens),
         "--token-file", os.fspath(token_file),
     ]
     if backend == "cuda":
@@ -632,7 +633,7 @@ def _engine_launch_argv(args: argparse.Namespace, token_file: Path, backend: str
     return launch
 
 
-def _fixture_contract(path: Path, *, deadline: float | None = None) -> tuple[int, set[str], dict[str, int]]:
+def _fixture_contract(path: Path, *, deadline: float | None = None) -> dict[str, Any]:
     """Read only the bounded fixture contract; never echo its prompts."""
 
     try:
@@ -649,9 +650,19 @@ def _fixture_contract(path: Path, *, deadline: float | None = None) -> tuple[int
             fixture.get("schema") != "local_bmo.tool-call-eval.v1" or not isinstance(fixture.get("limits"), dict) or
             not isinstance(fixture.get("tools"), list) or not isinstance(fixture.get("cases"), list)):
         raise ValueError("evaluator_fixture_invalid")
-    count = fixture["limits"].get("max_cases")
+    limits = fixture.get("limits")
+    if set(limits) != {"context_tokens", "max_output_tokens", "temperature", "max_cases"}:
+        raise ValueError("evaluator_fixture_invalid")
+    count = limits.get("max_cases") if isinstance(limits, dict) else None
     cases = fixture["cases"]
-    if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= MAX_EVAL_CASES or len(cases) != count:
+    tools = fixture.get("tools")
+    context_tokens = limits.get("context_tokens") if isinstance(limits, dict) else None
+    output_reserve_tokens = limits.get("max_output_tokens") if isinstance(limits, dict) else None
+    tool_names = [tool.get("function", {}).get("name") if isinstance(tool, dict) and isinstance(tool.get("function"), dict) else None for tool in tools]
+    if (isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= MAX_EVAL_CASES or len(cases) != count or
+            not isinstance(tools, list) or not 1 <= len(tools) <= 32 or isinstance(context_tokens, bool) or not isinstance(context_tokens, int) or not 1 <= context_tokens <= 16384 or
+            isinstance(output_reserve_tokens, bool) or not isinstance(output_reserve_tokens, int) or not 1 <= output_reserve_tokens < context_tokens or
+            any(not isinstance(name, str) or not TOOL_NAME.fullmatch(name) for name in tool_names) or len(set(tool_names)) != len(tool_names)):
         raise ValueError("evaluator_fixture_count_invalid")
     if any(not isinstance(case, dict) or set(case) != {"id", "category", "messages", "expected"} or
            not isinstance(case.get("id"), str) or not 1 <= len(case["id"]) <= 128 or
@@ -663,7 +674,9 @@ def _fixture_contract(path: Path, *, deadline: float | None = None) -> tuple[int
     if len(categories) == 0 or any(not category.isascii() for category in categories):
         raise ValueError("evaluator_fixture_categories_invalid")
     category_counts = {category: sum(case["category"] == category for case in cases) for category in categories}
-    return count, categories, category_counts
+    return {"case_count": count, "categories": categories, "category_counts": category_counts,
+            "tool_count": len(tools), "context_tokens": context_tokens,
+            "output_reserve_tokens": output_reserve_tokens}
 
 
 def _validate_diagnostics(value: Any, *, expected_errors: int, expected_categories: set[str], category_errors: dict[str, int]) -> dict[str, Any]:
@@ -740,10 +753,12 @@ def _validate_quality_diagnostics(value: Any, *, expected_failed: int, expected_
     return {"schema": value["schema"], "total_failed": total, "overall": dict(overall), "by_category": {category: dict(by_category[category]) for category in sorted(expected_categories)}}
 
 
-def _validate_canary(value: Any) -> dict[str, Any]:
+def _validate_canary(value: Any, *, expected_tool_count: int = 11, expected_context_tokens: int = 2048, expected_output_reserve_tokens: int = 64) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {"attempted", "passed", "error_code", "tool_count", "message_chars", "prompt_tokens", "context_tokens", "output_reserve_tokens"} or value.get("attempted") is not True:
         raise ValueError("evaluator_canary_invalid")
-    if not isinstance(value.get("passed"), bool) or value.get("tool_count") != 11 or value.get("message_chars") != 2400 or value.get("context_tokens") != 2048 or value.get("output_reserve_tokens") != 64:
+    if (not isinstance(value.get("passed"), bool) or value.get("tool_count") != expected_tool_count or
+            value.get("message_chars") != 2400 or value.get("context_tokens") != expected_context_tokens or
+            value.get("output_reserve_tokens") != expected_output_reserve_tokens):
         raise ValueError("evaluator_canary_invalid")
     code = value.get("error_code")
     prompt_tokens = value.get("prompt_tokens")
@@ -768,7 +783,7 @@ def _validate_canary_coherence(canary: dict[str, Any], *, metrics: dict[str, Any
         raise ValueError("evaluator_canary_invalid")
 
 
-def _validate_metrics(metrics: Any, *, expected_case_count: int = 8, expected_categories: set[str] | None = None, expected_category_counts: dict[str, int] | None = None, require_diagnostics: bool = False) -> dict[str, Any]:
+def _validate_metrics(metrics: Any, *, expected_case_count: int = 8, expected_categories: set[str] | None = None, expected_category_counts: dict[str, int] | None = None, expected_tool_count: int = 11, expected_context_tokens: int = 2048, expected_output_reserve_tokens: int = 64, require_diagnostics: bool = False) -> dict[str, Any]:
     if not isinstance(metrics, dict):
         raise ValueError("evaluator_metrics_invalid")
     counts = ("case_count", "passed", "failed", "errors")
@@ -808,20 +823,20 @@ def _validate_metrics(metrics: Any, *, expected_case_count: int = 8, expected_ca
         if "error_diagnostics" not in metrics or "canary" not in metrics or "quality_diagnostics" not in metrics:
             raise ValueError("evaluator_diagnostics_invalid")
         result["error_diagnostics"] = _validate_diagnostics(metrics["error_diagnostics"], expected_errors=metrics["errors"], expected_categories=expected_categories or set(), category_errors={category: summary[category]["errors"] for category in (expected_categories or set())})
-        result["canary"] = _validate_canary(metrics["canary"])
+        result["canary"] = _validate_canary(metrics["canary"], expected_tool_count=expected_tool_count, expected_context_tokens=expected_context_tokens, expected_output_reserve_tokens=expected_output_reserve_tokens)
         _validate_canary_coherence(result["canary"], metrics=metrics, summary=summary, diagnostics=result["error_diagnostics"], expected_case_count=expected_case_count, expected_categories=expected_categories or set())
         result["quality_diagnostics"] = _validate_quality_diagnostics(metrics["quality_diagnostics"], expected_failed=metrics["failed"], expected_categories=expected_categories or set(), category_failed={category: summary[category]["failed"] for category in (expected_categories or set())})
     elif "error_diagnostics" in metrics or "canary" in metrics or "quality_diagnostics" in metrics:
         if "error_diagnostics" in metrics:
             result["error_diagnostics"] = _validate_diagnostics(metrics["error_diagnostics"], expected_errors=metrics["errors"], expected_categories=expected_categories or set(), category_errors={category: summary[category]["errors"] for category in (expected_categories or set())})
         if "canary" in metrics:
-            result["canary"] = _validate_canary(metrics["canary"])
+            result["canary"] = _validate_canary(metrics["canary"], expected_tool_count=expected_tool_count, expected_context_tokens=expected_context_tokens, expected_output_reserve_tokens=expected_output_reserve_tokens)
         if "quality_diagnostics" in metrics:
             result["quality_diagnostics"] = _validate_quality_diagnostics(metrics["quality_diagnostics"], expected_failed=metrics["failed"], expected_categories=expected_categories or set(), category_failed={category: summary[category]["failed"] for category in (expected_categories or set())})
     return result
 
 
-def _parse_evaluator_result(result: dict[str, Any], *, expected_case_count: int, expected_categories: set[str], expected_category_counts: dict[str, int] | None = None, require_diagnostics: bool = False) -> tuple[dict[str, Any], bool, bool]:
+def _parse_evaluator_result(result: dict[str, Any], *, expected_case_count: int, expected_categories: set[str], expected_category_counts: dict[str, int] | None = None, expected_tool_count: int = 11, expected_context_tokens: int = 2048, expected_output_reserve_tokens: int = 64, require_diagnostics: bool = False) -> tuple[dict[str, Any], bool, bool]:
     exit_code = result.get("exit_code")
     if result.get("status") not in {"completed", "failed"} or isinstance(exit_code, bool) or exit_code not in {0, 1}:
         raise ValueError("evaluator_process_failed")
@@ -829,7 +844,7 @@ def _parse_evaluator_result(result: dict[str, Any], *, expected_case_count: int,
         metrics = _strict_json_object(result.get("stdout", ""))
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("evaluator_receipt_invalid") from exc
-    metrics = _validate_metrics(metrics, expected_case_count=expected_case_count, expected_categories=expected_categories, expected_category_counts=expected_category_counts, require_diagnostics=require_diagnostics)
+    metrics = _validate_metrics(metrics, expected_case_count=expected_case_count, expected_categories=expected_categories, expected_category_counts=expected_category_counts, expected_tool_count=expected_tool_count, expected_context_tokens=expected_context_tokens, expected_output_reserve_tokens=expected_output_reserve_tokens, require_diagnostics=require_diagnostics)
     all_passed = metrics["passed"] == expected_case_count and metrics["failed"] == 0 and metrics["errors"] == 0
     has_failure = metrics["failed"] > 0 or metrics["errors"] > 0
     if (exit_code == 0) != all_passed or (exit_code == 1) != has_failure:
@@ -850,7 +865,13 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any], dea
     backend = getattr(args, "backend", "cpu")
     if backend not in {"cpu", "cuda"}:
         raise ValueError("evaluation_backend_invalid")
-    expected_case_count, expected_categories, expected_category_counts = _fixture_contract(Path(args.fixture), deadline=deadline)
+    fixture_contract = _fixture_contract(Path(args.fixture), deadline=deadline)
+    expected_case_count = fixture_contract["case_count"]
+    expected_categories = fixture_contract["categories"]
+    expected_category_counts = fixture_contract["category_counts"]
+    expected_tool_count = fixture_contract["tool_count"]
+    expected_context_tokens = fixture_contract["context_tokens"]
+    expected_output_reserve_tokens = fixture_contract["output_reserve_tokens"]
     cuda_receipt = None
     if backend == "cuda":
         receipt_path = Path(getattr(args, "cuda_device_receipt", ""))
@@ -904,7 +925,7 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any], dea
         # The protected token-file option is deliberately explicit.  Passing
         # a bearer as a command-line argument would expose it through process
         # inspection and is forbidden by the evaluation contract.
-        launch = _engine_launch_argv(args, token_file, backend)
+        launch = _engine_launch_argv(args, token_file, backend, expected_context_tokens)
         engine_stderr = tempfile.TemporaryFile()
         process = subprocess.Popen(launch, stdout=subprocess.PIPE, stderr=engine_stderr, text=False)
         if process.stdout is None:
@@ -942,6 +963,9 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any], dea
             expected_case_count=expected_case_count,
             expected_categories=expected_categories,
             expected_category_counts=expected_category_counts,
+            expected_tool_count=expected_tool_count,
+            expected_context_tokens=expected_context_tokens,
+            expected_output_reserve_tokens=expected_output_reserve_tokens,
             require_diagnostics=True,
         )
         child_status = _bounded_child_status(process)

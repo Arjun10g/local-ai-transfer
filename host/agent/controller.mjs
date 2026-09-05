@@ -36,7 +36,7 @@ const parameterSchema = name => {
   };
   return { type: 'object', ...(schemas[name] ?? { properties: {} }), additionalProperties: false };
 };
-const modelToolDefinitions = tools => [...tools.values()].map(tool => ({
+export const modelToolDefinitions = tools => [...tools.values()].map(tool => ({
   type: 'function', function: { name: tool.name, description: tool.description ?? descriptions[tool.name] ?? `Execute the local ${tool.name} operation.`, parameters: tool.parameters ?? parameterSchema(tool.name) }
 }));
 
