@@ -19,20 +19,12 @@ def load_module(path: Path, name: str):
 
 
 class HardwareProbeTests(unittest.TestCase):
-    def test_probe_is_read_only_and_bounded(self):
+    def test_probe_refuses_before_unbounded_collection(self):
         source = (ROOT / "hardware/windows-probe/Get-HardwareReceipt.ps1").read_text()
-        self.assertIn("read_only = $true", source)
-        self.assertIn("admin_required = $false", source)
-        self.assertIn("WaitForExit(10000)", source)
-        self.assertNotIn("Invoke-WebRequest", source)
-        self.assertNotIn("Install-", source)
-        self.assertNotIn("Remove-Item", source)
-        self.assertNotIn("Get-ChildItem Env:", source)
-        self.assertNotIn("IdentifyingNumber", source)
-        self.assertNotIn("product_identifier", source)
-        self.assertNotIn('Write-Output "Receipt written: $([IO.Path]::GetFullPath', source)
-        self.assertIn("pnp_device_id", source)
-        self.assertIn("vulkan-1.dll", source)
+        self.assertIn("throw 'NOT_READY: bounded native Windows hardware collector is unavailable", source)
+        self.assertIn("no query or probe ran", source)
+        for forbidden in ("Get-CimInstance", "ConvertTo-Json", "System.Diagnostics.Process", "WriteAllText", "New-Item", "Invoke-WebRequest"):
+            self.assertNotIn(forbidden, source)
 
 
 class ShadeformPreflightTests(unittest.TestCase):

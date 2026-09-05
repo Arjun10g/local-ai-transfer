@@ -1,28 +1,12 @@
-# Windows hardware receipt probe
+# Windows hardware receipt — NOT_READY
 
-`Get-HardwareReceipt.ps1` is a no-admin, read-only target probe for `PERF-001`
-and `PERF-019`. It collects exact Windows/CPU/DIMM/baseboard/BIOS fields, Dell
-product, display adapter/PNP/driver identity, storage, known graphics runtime
-DLLs, and optional bounded `vulkaninfo --summary` evidence.
-It does not read a full environment, credentials, browser state, model files, or
-network settings; it does not install or update a driver/runtime and makes no
-network changes.
+`Get-HardwareReceipt.ps1` refuses before querying CIM/WMI, inspecting a probe,
+or writing output. PowerShell management providers and `ConvertTo-Json`
+materialize data before script-level byte bounds, so they cannot establish the
+required bounded target receipt.
 
-Run on the Dell target with an explicit output path:
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-& .\Get-HardwareReceipt.ps1 `
-  -OutputPath .\out\hardware-receipt.json `
-  -VulkanInfoPath D:\ApprovedTools\vulkaninfo.exe `
-  -ExpectedVulkanInfoSha256 '<approved lowercase SHA-256>'
-```
-
-The probe writes `hardware-receipt.json`, a SHA-256 sidecar, and a short summary.
-Do not commit the target receipt unless identifiers have been redacted and Sol/S4
-approve it. Missing Vulkan/SYCL information is recorded as unknown, never inferred
-as unsupported. An ambient `vulkaninfo` is recorded as unpinned and cannot satisfy
-the target acceptance gate; the gate requires the explicit path and approved hash
-form above. The receipt is the input to backend profile selection; Intel vendor
-name alone is not sufficient for promotion. Serial numbers, machine/user names,
-network data, environment dumps, and credentials are deliberately omitted.
+Do not bypass the refusal. A remotely built native collector must stream a
+fixed schema with per-field, record, total-byte, and deadline limits. Until it
+is independently reviewed and accepted on the exact target, CPU/GPU PNP, OS,
+Vulkan, RAM, and board details remain user-reported rather than product
+evidence.

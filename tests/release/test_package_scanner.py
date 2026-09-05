@@ -1,95 +1,123 @@
+import json
+from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
-from pathlib import Path
 
-from qa.clean_machine.package import HOST_RUNTIME_FILES, scan_binary_dependencies, scan_tree
-from qa.clean_machine.package_runner import NODE_EXE_SHA256, NODE_LICENSE_SHA256, build_package
+from qa.clean_machine.package import (
+    BoundedFileError,
+    FORBIDDEN_PACKAGE_PATHS,
+    HOST_RUNTIME_FILES,
+    PACKAGE_ALLOWLIST,
+    checksums,
+    scan_binary_dependencies,
+    scan_tree,
+)
+from qa.clean_machine.package_runner import PACKAGE_BUILD_BLOCKER, build_package
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+class ExplodingPath:
+    def __fspath__(self):
+        raise AssertionError("caller path was accessed")
 
 
 class PackageScannerTests(unittest.TestCase):
-    def test_repository_source_template_is_allowlisted(self):
-        result = scan_tree(Path("release/windows"), require_runtime=False)
+    def test_repository_source_lint_is_bounded_advisory_only(self):
+        result = scan_tree(ROOT / "release/windows", require_runtime=False)
         self.assertEqual("PASS", result["status"], result)
+        self.assertEqual("ADVISORY-SOURCE-LINT-ONLY", result["authorization"])
         self.assertEqual("SKIP", result["native_windows_launch"])
-        verify = Path("release/windows/Verify-Release.ps1").read_text(encoding="utf-8")
-        readme = Path("release/windows/README-OPERATOR.md").read_text(encoding="utf-8")
-        self.assertIn("fixture-skeleton", verify)
-        self.assertIn("generated package", verify)
-        self.assertIn("finished package", readme)
-        start = Path("release/windows/Start-LocalAssistant.ps1").read_text(encoding="utf-8")
-        self.assertIn("portable-supervisor.mjs", start)
-        self.assertNotIn("PythonCommand", start)
-        self.assertNotIn("LAE_ENGINE_TOKEN", start)
-        self.assertIn("AssignProcessToJobObject", start)
-        self.assertIn("JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000", start)
-        self.assertIn("ShellExecute($bootstrapUrl)", start)
-        self.assertNotIn("Start-Process $bootstrapUrl", start)
-        self.assertIn("NamedPipeServerStream", start)
-        self.assertIn("PipeOptions]::CurrentUserOnly", start)
-        self.assertIn("--launch-gate-pipe", start)
-        self.assertLess(start.index("[LocalAssistantJob]::Assign"), start.index('$gateWriter.Write("GO`n")'))
-        self.assertIn("$start.EnvironmentVariables.Clear()", start)
-        self.assertIn("RevealBootstrapUrl", start)
-        self.assertIn("if ($RevealBootstrapUrl) { Write-Output $bootstrapUrl }", start)
-        self.assertEqual(1, start.count("Write-Output $bootstrapUrl"))
-        self.assertNotIn("Write-Host $bootstrapUrl", start)
-        self.assertIn("FileAttributes]::ReparsePoint", start)
-        self.assertIn("Wait-PipeConnectionBounded", start)
-        run = Path("release/windows/Run-WindowsBackend.ps1").read_text(encoding="utf-8")
-        self.assertIn("FileAttributes]::ReparsePoint", run)
-        provenance = __import__("json").loads(Path("release/windows/node-provenance.json").read_text(encoding="utf-8"))
-        self.assertEqual("24.20.0", provenance["version"])
-        self.assertEqual("win-x64", provenance["platform"])
-        self.assertEqual("https://nodejs.org/download/release/v24.20.0/win-x64/node.exe", provenance["download_url"])
-        self.assertEqual("https://nodejs.org/en/blog/release/v24.20.0", provenance["release_page"])
-        self.assertEqual("https://nodejs.org/download/release/latest-v24.x/", provenance["release_index"])
-        self.assertEqual(NODE_EXE_SHA256, provenance["sha256"])
 
-    def test_builder_closes_host_dependencies_without_target_python(self):
-        with tempfile.TemporaryDirectory() as directory:
-            base = Path(directory)
-            engine = base / "lae-engine-cpu.exe"; engine.write_bytes(b"MZ\0kernel32.dll\0")
-            node = base / "node.exe"; node.write_bytes(b"MZ\0kernel32.dll\0")
-            node_license = base / "LICENSE"; node_license.write_text("fixture license", encoding="utf-8")
-            output = base / "package"
-            with mock.patch("qa.clean_machine.package_runner.file_sha256", side_effect=lambda path: NODE_EXE_SHA256 if path.name == "node.exe" else NODE_LICENSE_SHA256):
-                result = build_package(Path(".").resolve(), engine, node, node_license, output)
-            self.assertEqual("PASS", result["status"], result)
-            packaged = {p.relative_to(output).as_posix() for p in output.rglob("*") if p.is_file()}
-            self.assertTrue(HOST_RUNTIME_FILES.issubset(packaged))
-            self.assertIn("host/providers/copilot-context.mjs", packaged)
-            manifest = __import__("json").loads((output / "RELEASE_MANIFEST.json").read_text(encoding="utf-8"))
-            self.assertFalse(manifest["python_required_on_target"])
-            self.assertNotIn("windows_backend_plan.py", manifest["files"])
-            self.assertNotIn("Run-WindowsBackend.ps1", manifest["files"])
-            self.assertNotIn("lae-host.mjs", manifest["files"])
-            self.assertIn("runtime/node.exe", manifest["files"])
-            self.assertIn("licenses/Node.js-LICENSE.txt", manifest["files"])
-            self.assertIn("licenses/llama.cpp-LICENSE.txt", manifest["files"])
-            self.assertIn("node-provenance.json", manifest["files"])
-            self.assertEqual(NODE_EXE_SHA256, manifest["bundled_node"]["sha256"])
+        manifest = json.loads((ROOT / "release/windows/RELEASE_MANIFEST.json").read_text(encoding="utf-8"))
+        self.assertEqual("fixture-skeleton", manifest["kind"])
+        self.assertEqual("REFUSED-NOT_READY", manifest["package_build"])
+        self.assertEqual("REFUSED-NOT_READY", manifest["native_windows_launch"])
+        self.assertTrue(FORBIDDEN_PACKAGE_PATHS.isdisjoint(PACKAGE_ALLOWLIST))
+        self.assertTrue(FORBIDDEN_PACKAGE_PATHS.isdisjoint(HOST_RUNTIME_FILES))
+        self.assertNotIn("lae-host.mjs", manifest["files"])
 
-    def test_weight_and_secret_files_are_rejected(self):
+        notices = (ROOT / "release/windows/THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+        self.assertIn("does not bundle `runtime/node.exe`", notices)
+        self.assertNotIn("license texts are included", notices.lower())
+
+    def test_runtime_scan_refuses_before_path_access(self):
+        with mock.patch.dict(scan_tree.__globals__, {"_tree_entries": mock.Mock(side_effect=AssertionError("enumerated"))}):
+            result = scan_tree(ExplodingPath(), require_runtime=True)
+        self.assertEqual("FAIL", result["status"])
+        self.assertEqual("NONE", result["authorization"])
+        self.assertEqual(["secure-handle-relative-package-scan-unavailable"], result["findings"])
+
+    def test_builder_refuses_before_path_access_or_output_write(self):
+        path = ExplodingPath()
+        result = build_package(path, path, path, path, path)
+        self.assertEqual(
+            {
+                "status": "FAIL",
+                "stage": "safety-unavailable",
+                "findings": [PACKAGE_BUILD_BLOCKER],
+                "output_created": False,
+                "native_windows_launch": "REFUSED",
+            },
+            result,
+        )
+        with self.assertRaisesRegex(BoundedFileError, "handle-relative package checksums"):
+            checksums(path, ["file"])
+
+    def test_windows_entrypoints_refuse_without_access_write_or_spawn_primitives(self):
+        scripts = (
+            "Start-LocalAssistant.ps1",
+            "Build-WindowsBackend.ps1",
+            "Run-WindowsBackend.ps1",
+            "Verify-Release.ps1",
+        )
+        forbidden = (
+            "Add-Type",
+            "Get-Item",
+            "Get-Content",
+            "Get-FileHash",
+            "New-Item",
+            "Set-Content",
+            "System.Diagnostics.Process",
+            "Start-Process",
+            "Invoke-Expression",
+            "& $",
+        )
+        for name in scripts:
+            source = (ROOT / "release/windows" / name).read_text(encoding="utf-8")
+            self.assertIn("throw 'NOT_READY:", source, name)
+            self.assertIn("no path was accessed", source, name)
+            for token in forbidden:
+                self.assertNotIn(token, source, name)
+
+    def test_advisory_scanner_rejects_weights_secrets_and_unknown_dlls(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for relative in ("Start-LocalAssistant.ps1", "Run-WindowsBackend.ps1", "windows_backend_plan.py", "config.example.json", "ui/index.html", "THIRD_PARTY_NOTICES.md", "SBOM.spdx.json", "RELEASE_MANIFEST.json", "CHECKSUMS.sha256", "README-OPERATOR.md"):
-                path = root / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("safe", encoding="utf-8")
             (root / "Qwen3.5-9B.gguf").write_bytes(b"weights")
             (root / "credentials.txt").write_text("api_key = TEST_ONLY_SECRET_VALUE", encoding="utf-8")
             result = scan_tree(root)
-        self.assertEqual("FAIL", result["status"])
-        self.assertTrue(any(item.startswith("forbidden-artifact:") for item in result["findings"]))
-        self.assertTrue(any(item.startswith("secret-pattern:") for item in result["findings"]))
+            self.assertEqual("FAIL", result["status"])
+            self.assertTrue(any(item.startswith("forbidden-artifact:") for item in result["findings"]))
+            self.assertTrue(any(item.startswith("secret-pattern:") for item in result["findings"]))
 
-    def test_unknown_dll_is_unresolved(self):
+            binary = root / "fixture.exe"
+            binary.write_bytes(b"MZ\0evil.dll\0kernel32.dll\0")
+            self.assertEqual(["evil.dll"], scan_binary_dependencies(binary)["unresolved"])
+
+    def test_advisory_tree_and_file_reads_have_explicit_bounds(self):
         with tempfile.TemporaryDirectory() as directory:
-            binary = Path(directory) / "fixture.exe"
-            binary.write_bytes(b"MZ\x00evil.dll\x00kernel32.dll\x00")
-            result = scan_binary_dependencies(binary)
-        self.assertEqual(["evil.dll"], result["unresolved"])
+            root = Path(directory)
+            (root / "RELEASE_MANIFEST.json").write_text("[]", encoding="utf-8")
+            result = scan_tree(root)
+            self.assertIn("manifest-invalid", result["findings"])
+
+            with mock.patch.dict(scan_tree.__globals__, {"MAX_TREE_ENTRIES": 2}):
+                for name in ("one", "two", "three"):
+                    (root / name).write_text("x", encoding="utf-8")
+                result = scan_tree(root)
+            self.assertIn("tree-exceeds-2-entries", result["findings"])
 
 
 if __name__ == "__main__":

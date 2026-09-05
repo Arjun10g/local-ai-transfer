@@ -13,6 +13,7 @@ from qa.windows_acceptance.verify import (
     MODEL_SIZE,
     NODE_SHA256,
     NODE_VERSION,
+    PORTABLE_RUNTIME_BLOCKER,
     REQUIRED_LIVE_CHECKS,
     ReceiptError,
     evaluate_receipt,
@@ -108,13 +109,15 @@ def hardware_bytes(value):
 
 
 class WindowsAcceptanceGateTests(unittest.TestCase):
-    def test_complete_in_memory_contract_can_reach_ready_only_with_binding_and_live_consent(self):
+    def test_complete_historical_contract_cannot_authorize_disabled_runtime(self):
         value = complete_receipt()
         verdict = evaluate_receipt(value, hardware_source_bytes=hardware_bytes(value))
-        self.assertEqual("READY", verdict["status"], verdict)
-        self.assertTrue(verdict["core_ready"])
-        self.assertTrue(verdict["full_access_ready"])
-        self.assertEqual("PASS", verdict["vulkan_disposition"])
+        self.assertEqual("NOT_READY", verdict["status"], verdict)
+        self.assertFalse(verdict["core_ready"])
+        self.assertFalse(verdict["full_access_ready"])
+        self.assertIn(PORTABLE_RUNTIME_BLOCKER, verdict["reasons"])
+        self.assertEqual("UNPROVEN_OR_REJECTED", verdict["cpu_disposition"])
+        self.assertEqual("UNPROVEN_OR_REJECTED", verdict["vulkan_disposition"])
 
     def test_fixture_or_unbound_hardware_can_never_be_ready(self):
         fixture_value = complete_receipt(fixture=True)
@@ -125,10 +128,11 @@ class WindowsAcceptanceGateTests(unittest.TestCase):
         self.assertFalse(unbound["core_ready"])
         self.assertTrue(any("not bound" in item for item in unbound["reasons"]))
 
-    def test_core_evidence_without_opt_in_full_access_stays_not_ready(self):
+    def test_historical_core_shape_cannot_bypass_current_producer_blocker(self):
         value = complete_receipt(include_live=False)
         verdict = evaluate_receipt(value, hardware_source_bytes=hardware_bytes(value))
-        self.assertTrue(verdict["core_ready"], verdict)
+        self.assertFalse(verdict["core_ready"], verdict)
+        self.assertIn(PORTABLE_RUNTIME_BLOCKER, verdict["reasons"])
         self.assertFalse(verdict["full_access_ready"])
         self.assertEqual("NOT_READY", verdict["status"])
         self.assertEqual(len(REQUIRED_LIVE_CHECKS), sum(item.startswith("live check is not proven") for item in verdict["live_reasons"]))
@@ -177,40 +181,40 @@ class WindowsAcceptanceGateTests(unittest.TestCase):
             receipt_path = root / "target-acceptance-receipt.json"
             receipt_path.write_text(json.dumps(value), encoding="utf-8")
             with redirect_stdout(io.StringIO()):
-                self.assertEqual(0, verify_main([str(receipt_path)]))
+                self.assertEqual(2, verify_main([str(receipt_path)]))
             hardware_path.write_text("{}", encoding="utf-8")
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(2, verify_main([str(receipt_path)]))
 
 
 class WindowsAcceptanceHarnessStaticTests(unittest.TestCase):
-    def test_hardware_probe_collects_exact_target_fields_and_pins_vulkan(self):
+    def test_hardware_probe_refuses_before_query_probe_or_output(self):
         source = (ROOT / "hardware/windows-probe/Get-HardwareReceipt.ps1").read_text(encoding="utf-8")
-        for required in ("Win32_BaseBoard", "Win32_BIOS", "Win32_PhysicalMemory", "Win32_PnPEntity", "ProcessorId", "PNPDeviceID", "ConfiguredClockSpeed", "ExpectedVulkanInfoSha256", "explicitly_pinned", "primary_device"):
-            self.assertIn(required, source)
-        for forbidden in ("IdentifyingNumber", "Get-ChildItem Env:", "Install-", "Invoke-WebRequest"):
+        self.assertIn("throw 'NOT_READY: bounded native Windows hardware collector is unavailable", source)
+        self.assertIn("no output was written", source)
+        for forbidden in ("Get-CimInstance", "ConvertTo-Json", "Add-Type", "System.Diagnostics.Process", "WriteAllText", "Set-Content", "New-Item", "Get-FileHash", "Invoke-WebRequest"):
             self.assertNotIn(forbidden, source)
 
-    def test_harness_exercises_product_lifecycle_without_secret_output(self):
+    def test_harness_refuses_before_package_account_process_or_receipt_access(self):
         source = (ROOT / "qa/windows_acceptance/Invoke-WindowsAcceptance.ps1").read_text(encoding="utf-8")
-        for required in ("-NoBrowser", "-RevealBootstrapUrl", "ShellExecute($run.bootstrap_url)", "Get-DescendantProcesses", "Wait-PidsGone", "Sec-Fetch-Site", "Referer", "REJECTED_WITH_EVIDENCE", "--backend', 'intel-vulkan", "--token-stdin", "I CONSENT TO SYNTHETIC LIVE ACTIONS", "coding.copilot_ask"):
-            self.assertIn(required, source)
-        self.assertNotIn("Write-Output $bootstrap", source)
-        self.assertNotIn("Write-Output $bearer", source)
-        self.assertNotIn("Get-ChildItem Env:", source)
-        self.assertNotIn("Install-", source)
-        self.assertNotIn("Invoke-Expression", source)
-        self.assertNotIn("Start-Process", source)
+        self.assertIn("throw 'NOT_READY: portable package, launch, and bounded hardware collection are unavailable", source)
+        self.assertIn("no receipt was written", source)
+        for forbidden in ("Get-Item", "Get-Content", "Get-CimInstance", "Add-Type", "System.Diagnostics.Process", "HttpClient", "ShellExecute", "Start-Process", "Read-Host", "WriteAllText", "Set-Content", "New-Item"):
+            self.assertNotIn(forbidden, source)
 
     def test_profile_and_docs_refuse_current_readiness_or_vulkan_promotion(self):
         profile = json.loads((ROOT / "qa/windows_acceptance/target-profile.json").read_text(encoding="utf-8"))
-        self.assertEqual("reported-values-awaiting-exact-receipt", profile["status"])
+        self.assertEqual("not-ready-producers-and-launcher-disabled", profile["status"])
+        self.assertEqual("disabled-before-path-access", profile["package_builder"])
+        self.assertEqual("disabled-before-process-creation", profile["portable_launch"])
+        self.assertEqual("disabled-before-management-query", profile["hardware_collection"])
+        self.assertEqual("disabled-before-input-access", profile["acceptance_producer"])
         self.assertFalse(profile["backends"]["candidate_is_promoted"])
         self.assertEqual(list(REQUIRED_LIVE_CHECKS), profile["required_live_checks_for_full_access"])
         docs = (ROOT / "qa/windows_acceptance/README.md").read_text(encoding="utf-8")
-        self.assertIn("Current status", docs)
-        self.assertIn("`NOT_READY`", docs)
-        self.assertIn("Do not use execution-policy bypass", docs)
+        self.assertIn("NOT_READY", docs)
+        self.assertIn("refuses before reading", docs)
+        self.assertIn("always includes", docs)
 
 
 if __name__ == "__main__":

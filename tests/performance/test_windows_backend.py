@@ -219,32 +219,17 @@ class WindowsBackendPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(planner.BackendPlanError, "sane"):
             planner.build_plan("cpu-safe", path, model_path=str(self.planning_model()))
 
-    def test_scripts_require_explicit_backend_and_pin_sycl_flags(self):
+    def test_backend_scripts_preserve_explicit_interface_but_refuse_before_access(self):
         build = (ROOT / "release/windows/Build-WindowsBackend.ps1").read_text(encoding="utf-8")
         run = (ROOT / "release/windows/Run-WindowsBackend.ps1").read_text(encoding="utf-8")
-        self.assertIn("ValidateSet('cpu-safe', 'intel-vulkan-conservative', 'intel-sycl-experimental')", build)
+        for source in (build, run):
+            self.assertIn("ValidateSet('cpu-safe', 'intel-vulkan-conservative', 'intel-sycl-experimental')", source)
+            self.assertIn("throw 'NOT_READY:", source)
+            self.assertIn("no path was accessed", source)
+            for forbidden in ("Get-Item", "Get-Content", "Get-FileHash", "System.Diagnostics.Process", "Start-Process", "& $"):
+                self.assertNotIn(forbidden, source)
         self.assertIn("AllowExperimentalSycl", build)
-        self.assertIn("GGML_SYCL_TARGET=INTEL", build)
-        self.assertIn("LAE_ENABLE_LLAMA_VULKAN=ON", build)
-        self.assertIn("VulkanAttestation", build)
-        self.assertIn("LinkType", build)
-        self.assertIn("LinkType", run)
-        self.assertNotIn("--output", run)
-        self.assertIn("--device $plan.runtime.device_selector", run)
-        self.assertIn("$plan.runtime.engine_cli_backend", run)
-        self.assertIn("--n-predict 1", run)
-        self.assertNotIn("--host 127.0.0.1", run)
-        self.assertNotIn("ConfigPath", run)
-        self.assertNotIn("'--config'", run)
-        self.assertIn("'--model', $plan.model.path", run)
-        self.assertIn("Remove-Item Env:LAE_ENGINE_TOKEN", run)
-        self.assertIn("$token | & $enginePath @engineArguments", run)
-        self.assertIn("Join-Path $PSScriptRoot 'windows_backend_plan.py'", run)
-        self.assertNotIn("scripts/windows_backend_plan.py", run)
-        self.assertNotIn("--model-size", build)
-        self.assertNotIn("--model-sha256", build)
-        self.assertNotIn("llama-server", run.lower())
-        self.assertNotIn("fallback", run.lower())
+        self.assertIn("VulkanAttestation", run)
 
     def test_native_build_metadata_is_bound_to_pinned_vendored_revision(self):
         cmake = (ROOT / "native/CMakeLists.txt").read_text(encoding="utf-8")
@@ -274,11 +259,10 @@ class WindowsBackendPlanTests(unittest.TestCase):
         self.assertEqual(runtime["vulkan"]["status"], "implemented-not-promoted")
         self.assertIn("attestation", runtime["vulkan"]["blocked_reason"])
         docs = (ROOT / "release/windows/README-OPERATOR.md").read_text(encoding="utf-8")
-        self.assertIn("exact SKU", docs)
-        self.assertIn("no fallback", docs.lower())
-        self.assertIn("Vulkan (primary accelerated", docs)
-        self.assertIn("GGML_VULKAN", docs.replace("ggml-vulkan", "GGML_VULKAN"))
-        self.assertIn("not promoted", docs.lower())
+        self.assertIn("NOT_READY", docs)
+        self.assertIn("ADVISORY-SOURCE-LINT-ONLY", docs)
+        self.assertIn("exact Dell Core Ultra 7 vPro", docs)
+        self.assertIn("never safe to package or execute", docs)
 
     def test_native_vulkan_profile_is_authenticated_and_never_cpu_fallback(self):
         cmake = (ROOT / "native/CMakeLists.txt").read_text(encoding="utf-8")
