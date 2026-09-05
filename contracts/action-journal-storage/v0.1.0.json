@@ -1,0 +1,164 @@
+{
+  "schema_version": "lae.action-journal-storage-boundary.v1",
+  "$id": "lae://contracts/action-journal-storage/0.1.0",
+  "title": "Inert Win32 ActionJournal container storage boundary",
+  "version": "0.1.0",
+  "status": "source_only_not_enabled",
+  "production_available": false,
+  "native_target_registered": false,
+  "helper_added": false,
+  "transport_added": false,
+  "node_integration_added": false,
+  "package_added": false,
+  "activation_permitted": false,
+  "platform": "windows_x64_source_only",
+  "abi_version": 1,
+  "container_contract": "lae.action-journal-container-layout.v1",
+  "protocol_contract": "lae.action-journal.v0.1.0",
+  "fixed_leaf_name": "action-journal-v1.container",
+  "limits": {
+    "max_path_utf16_code_units": 32767,
+    "container_bytes": 33558528,
+    "header_bytes": 4096,
+    "io_chunk_bytes": 65536,
+    "container_id_bytes": 32,
+    "file_id_bytes": 16,
+    "max_ancestor_handles": 256
+  },
+  "operations": {
+    "create_new": {
+      "disposition": "CREATE_NEW",
+      "expected_identity": "must_be_absent",
+      "on_failure": "retain_partial_file_for_manual_recovery_never_delete_or_repair"
+    },
+    "open_existing": {
+      "disposition": "OPEN_EXISTING",
+      "expected_identity": "required_exact_volume_serial_file_id_container_id"
+    }
+  },
+  "path_policy": {
+    "directory": "absolute canonical drive-letter DOS path only",
+    "leaf": "fixed_by_contract_not_caller_controlled",
+    "reject": [
+      "UNC",
+      "device_path",
+      "extended_path",
+      "alternate_data_stream",
+      "dot_component",
+      "trailing_dot_or_space_component",
+      "forward_slash",
+      "embedded_nul",
+      "relative_path",
+      "noncanonical_alias"
+    ],
+    "ancestors": "open existing with FILE_FLAG_OPEN_REPARSE_POINT, reject reparse, retain handles denying delete",
+    "leaf_open": "FILE_FLAG_OPEN_REPARSE_POINT with FILE_SHARE_READ only",
+    "after_acquisition": "all data and metadata operations use retained handles; pathname is used once more only for held-handle identity reopen proof"
+  },
+  "volume_policy": {
+    "drive_type": "DRIVE_FIXED",
+    "filesystem_allowlist": ["NTFS"],
+    "required_flags": ["FILE_PERSISTENT_ACLS"],
+    "rejected_flags": ["FILE_READ_ONLY_VOLUME", "FILE_VOLUME_IS_COMPRESSED"]
+  },
+  "security_policy": {
+    "owner": "exact current process-token user SID",
+    "dacl": "present_non_null_protected_nondefaulted_single_noninherited_allow_ace_for_exact_current_user",
+    "ace_mask": "FILE_ALL_ACCESS",
+    "broad_or_service_principals": "rejected",
+    "parent": "existing fixed leaf parent must already satisfy the same private profile",
+    "creation": "absolute security descriptor is supplied atomically to CREATE_NEW"
+  },
+  "file_policy": {
+    "type": "FILE_TYPE_DISK regular non-directory",
+    "reparse": false,
+    "link_count": 1,
+    "delete_pending": false,
+    "attributes_rejected": [
+      "FILE_ATTRIBUTE_REPARSE_POINT",
+      "FILE_ATTRIBUTE_DIRECTORY",
+      "FILE_ATTRIBUTE_DEVICE",
+      "FILE_ATTRIBUTE_OFFLINE",
+      "FILE_ATTRIBUTE_SPARSE_FILE",
+      "FILE_ATTRIBUTE_COMPRESSED",
+      "FILE_ATTRIBUTE_ENCRYPTED",
+      "FILE_ATTRIBUTE_RECALL_ON_OPEN",
+      "FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS",
+      "FILE_ATTRIBUTE_VIRTUAL"
+    ],
+    "identity": "exact FILE_ID_INFO volume serial and 128-bit file ID stable before and after genesis/open and equal on pathname reopen",
+    "sharing": "write and delete sharing denied for retained file lifetime",
+    "size": 33558528
+  },
+  "genesis": [
+    "new handle must report size zero",
+    "write exactly 33558528 zero bytes through bounded handle I/O",
+    "FlushFileBuffers",
+    "read back and verify every byte is zero",
+    "generate a nonzero 32-byte container ID with BCryptGenRandom system-preferred RNG",
+    "encode the exact 4096-byte merged container header and SHA-256 domain checksum",
+    "write the full header through the retained handle",
+    "FlushFileBuffers",
+    "read back and strictly decode the exact header",
+    "revalidate file, volume, DACL, ancestor, path, size, and identity before success"
+  ],
+  "open_existing": [
+    "validate file, volume, DACL, size, and caller-supplied trusted identity",
+    "read and strictly decode the exact immutable 4096-byte header",
+    "bind decoded container ID to the trusted identity",
+    "reopen the still-pinned fixed path and require exact file identity",
+    "revalidate every retained handle before success"
+  ],
+  "status_codes": [
+    "ok_created",
+    "ok_opened",
+    "platform_unavailable",
+    "invalid_request",
+    "unsafe_path",
+    "unsafe_volume",
+    "unsupported_filesystem",
+    "private_directory_required",
+    "already_exists",
+    "not_found",
+    "access_denied",
+    "security_unavailable",
+    "reparse_refused",
+    "unsupported_file_type",
+    "link_count_refused",
+    "delete_pending",
+    "size_mismatch",
+    "identity_mismatch",
+    "reopen_identity_mismatch",
+    "rng_failed",
+    "hash_failed",
+    "io_failed",
+    "genesis_incomplete",
+    "container_unformatted",
+    "container_corrupt_header",
+    "internal"
+  ],
+  "receipt": {
+    "schema": "lae.action-journal-storage-receipt.v1",
+    "fields": [
+      "abi_version",
+      "status",
+      "container_bytes",
+      "container_id_hex",
+      "volume_serial_hex",
+      "file_id_hex",
+      "filesystem",
+      "dacl_profile",
+      "identity_reopened",
+      "handle_retained"
+    ],
+    "forbidden": ["path", "user_sid", "username", "security_descriptor", "secret", "free_form_error"]
+  },
+  "residual_gates": [
+    "independent source and security review",
+    "remote Windows SDK compile and static analysis",
+    "native container codec integration without duplicating authority",
+    "authenticated foreground helper protocol and supervision",
+    "exact Windows crash, power-loss, filter-driver, and filesystem acceptance",
+    "build provenance, dependency scan, package allowlist, and target approval"
+  ]
+}
