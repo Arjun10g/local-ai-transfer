@@ -30,10 +30,16 @@
   `55f3dfd` (implementation) through `65decba` (merge). Its production
   store is deliberately unavailable, so journal-dependent production actions
   remain hidden/refused.
+- The inert Win32 journal-storage boundary is source-merged from `d0ed670` by
+  `3d46ccb`; the journal container source is source-merged by `16b4b0e`.
+  Journal helper slice 4 and the read-only filesystem slice remain WIP and
+  unmerged. The process-broker reference candidate `ed3bf7d` is unmerged and
+  inert.
 - The external lifecycle hardening is source-merged at `91de464`. Remote
   execution remains disabled by the source guard (`REMOTE_EXECUTION_ENABLED=False`),
   and no approved/committed cost-ledger genesis or new provider run is claimed.
-- Graph reconciliation source `b4702a5` is merged on `main` after two
+- Graph read tools `ed9d1cb` are merged on `main` by `c2154ba`. Graph
+  reconciliation source `b4702a5` is merged on `main` after two
   independent source-safety approvals and a 96-pass mocked integration run.
   This does not establish live Graph readiness; production action dispatch and
   live-provider evidence remain unavailable.
@@ -51,9 +57,9 @@
   predecessor `5dc2ad2` remains historical. No live browser, Windows process,
   approved-executable, or target evidence exists, so live readiness is not
   claimed.
-- Native journal container candidate `dd85ca0`, Graph-read completeness, and
-  current Copilot hardening remain unmerged/in progress. They provide no
-  production or live capability on `main`.
+- Copilot source hardening `c41b97b` is merged by `a39a09f`, but Copilot is
+  globally omitted/unavailable in production and has no live evidence. It
+  provides no production or live capability on `main`.
 - The strongest recorded general remote tool evaluation is 27/34, below its
   gate. The later production-profile result is 13/32 and failed that profile;
   these are distinct results and neither establishes model/tool readiness.
