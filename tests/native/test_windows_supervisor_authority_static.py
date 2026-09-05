@@ -50,12 +50,20 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
                 "native_target_registered", "cmake_registered", "launcher_registered",
                 "host_registered", "package_registered", "activation_permitted",
                 "trust", "transport", "limits", "capability",
+                "journal",
                 "redacted_receipt_fields", "forbidden_receipt_fields",
                 "unknown_outcome_policy",
             },
         )
         self.assertEqual(self.contract["schema"], "lae.windows-supervisor.contract.v1")
         self.assertEqual(self.contract["status"], "SOURCE_ONLY_NOT_READY")
+        self.assertEqual(
+            self.contract["journal"]["dispatch_status_values"],
+            ["pre_dispatch_failure", "dispatched_unknown", "terminal_failure",
+             "terminal_success", "persistence_failure"],
+        )
+        self.assertTrue(self.contract["journal"]["persistence_failure_is_unknown"])
+        self.assertTrue(self.contract["journal"]["next_operation_requires_terminal_record"])
         for key in (
             "production_available", "native_target_registered", "cmake_registered",
             "launcher_registered", "host_registered", "package_registered",
@@ -183,7 +191,7 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
             "OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE",
             "GetProcessTimes", "QueryFullProcessImageNameW", "CreateFileW",
             "FILE_FLAG_OPEN_REPARSE_POINT", "FILE_ID_INFO", "FileIdInfo",
-            "server_creation_time", "PIPE_CLIENT_END", "direction_proven",
+            "server_creation_time", "PIPE_SERVER_END", "direction_proven",
             "pipe.server_pid != expected_server_pid",
             "proof.pipe_server.creation_time != proof.parent.creation_time",
             "executable_identity_bound(observed_parent.image",
@@ -198,6 +206,9 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
     def test_bootstrap_ownership_and_direction_are_not_caller_claims(self):
         self.assertIn("DuplicateHandle", self.cpp)
         self.assertNotIn("FILE_ACCESS_INFORMATION", self.cpp)
+        self.assertNotIn("(pipe_flags & PIPE_CLIENT_END) == 0", self.cpp)
+        self.assertIn("(pipe_flags & PIPE_SERVER_END) != 0", self.cpp)
+        self.assertIn("HANDLE_FLAG_PROTECT_FROM_CLOSE", self.cpp)
         self.assertIn("const DWORD desired", self.cpp)
         self.assertIn("const DWORD opposite", self.cpp)
         self.assertIn("GENERIC_READ", self.cpp)
@@ -208,6 +219,9 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
         self.assertIn("state.bootstrap_handles", self.cpp)
         self.assertIn("CloseHandle(original_read)", self.cpp)
         self.assertIn("CloseHandle(original_write)", self.cpp)
+        self.assertIn("closed_read", self.cpp)
+        self.assertIn("closed_write", self.cpp)
+        self.assertIn("bootstrap_transfer_fail_stop()", self.cpp)
         self.assertIn("!kRetainedExecutingSectionIdentityProven", self.cpp)
 
     def test_job_membership_is_kernel_verified_before_registry_insert(self):
@@ -256,7 +270,7 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
         self.assertLess(persist_start, operation)
         self.assertLess(operation, terminal)
         self.assertIn("journal.dispatch(capability, persist, operation)", self.cpp)
-        self.assertIn("journal.acknowledge()", self.cpp)
+        self.assertIn("bool acknowledge() const noexcept", self.cpp)
         self.assertIn("kPreDispatchFailure", self.cpp)
         self.assertIn("kDispatchedUnknown", self.cpp)
         self.assertIn("JournalState query()", self.cpp)
@@ -278,6 +292,18 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
         inventory = (ROOT / "scripts" / "test" / "run_qa.py").read_text(encoding="utf-8")
         self.assertIn('"tests/native/test_windows_supervisor_authority_static.py": "native_static"', inventory)
 
+    def test_journal_authorize_preserves_typed_outcome(self):
+        start = self.cpp.index("JournalOutcome durable_journal_authorize")
+        body = self.cpp[start:self.cpp.index("bool consume_capability", start)]
+        self.assertIn("return journal.dispatch(capability, persist, operation)", body)
+        self.assertNotIn("return outcome.status ==", body)
+        self.assertIn("DispatchStatus::kPreDispatchFailure", self.cpp)
+        self.assertIn("DispatchStatus::kDispatchedUnknown", self.cpp)
+        self.assertIn("DispatchStatus::kTerminalFailure", self.cpp)
+        self.assertIn("DispatchStatus::kTerminalSuccess", self.cpp)
+        self.assertIn("DispatchStatus::kPersistenceFailure", self.cpp)
+        self.assertIn("return JournalOutcome{DispatchStatus::kPersistenceFailure", self.cpp)
+
     def test_job_registry_cleanup_is_bounded_and_whole_tree(self):
         for token in (
             "CreateJobObjectW", "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE",
@@ -287,11 +313,20 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
         ):
             self.assertIn(token, self.cpp)
         self.assertIn("state.children.terminate_and_reap_all", self.cpp)
-        self.assertIn("if (!ok) return false", self.cpp)
+        self.assertIn("state.children.close_all()", self.cpp)
         self.assertIn("kMaxChildren = 8", self.cpp)
         self.assertIn("kMaxWaitMs = 120000", self.cpp)
         self.assertIn("create_child_job", self.cpp)
         self.assertIn("executable_identity_bound", self.cpp)
+
+    def test_reap_ignores_cancellation_after_root_termination(self):
+        start = self.cpp.index("bool terminate_and_reap_all")
+        reap = self.cpp[start:self.cpp.index("void close_all", start)]
+        self.assertIn("TerminateJobObject(root_job, 1)", reap)
+        self.assertIn("wait_reaped(child.process.get(), remaining, nullptr)", reap)
+        self.assertNotIn("wait_reaped(child.process.get(), remaining, cancellation)", reap)
+        self.assertEqual(reap.count("TerminateJobObject(root_job, 1)"), 1)
+        self.assertIn("if (!job_empty(root_job)) ok = false", reap)
 
     def test_public_header_cannot_forge_authority(self):
         self.assertNotIn("IssuedCapability", self.hpp)
@@ -302,7 +337,7 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
     def test_durable_authority_and_redacted_transport(self):
         self.assertIn("durable_journal_authorize", self.cpp)
         self.assertIn("journal.dispatch(capability, persist, operation)", self.cpp)
-        self.assertIn("journal.acknowledge()", self.cpp)
+        self.assertIn("bool acknowledge() const noexcept", self.cpp)
         self.assertIn("loopback_metadata", self.hpp)
         self.assertIn("kUnavailable, 0, false, false", self.cpp)
         for field in self.contract["forbidden_receipt_fields"]:

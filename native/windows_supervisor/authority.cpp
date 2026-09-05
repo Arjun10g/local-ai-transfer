@@ -221,6 +221,13 @@ struct Child final {
   Child& operator=(Child&&) noexcept = default;
 };
 
+// A failed inherited-handle transfer is not recoverable in-process: one
+// endpoint may already have been closed while the other remains inheritable.
+// Termination closes process-owned handles without reporting adoption.
+[[noreturn]] void bootstrap_transfer_fail_stop() noexcept {
+  std::terminate();
+}
+
 bool release_manifest_is_pinned() noexcept {
   // A future build must compare exact bounded manifest bytes to a reviewed
   // immutable digest. No manifest path or untrusted configuration is read here.
@@ -285,12 +292,13 @@ bool anonymous_pipe_handle(const PipeBinding& pipe,
     return false;
   DWORD handle_flags = 0;
   if (!GetHandleInformation(handle, &handle_flags) ||
-      (handle_flags & HANDLE_FLAG_INHERIT) == 0) return false;
+      (handle_flags & HANDLE_FLAG_INHERIT) == 0 ||
+      (handle_flags & HANDLE_FLAG_PROTECT_FROM_CLOSE) != 0) return false;
   DWORD pipe_flags = 0;
   DWORD read_bytes = 0;
   DWORD write_bytes = 0;
   if (!GetNamedPipeInfo(handle, &pipe_flags, &read_bytes, &write_bytes,
-                        nullptr) || (pipe_flags & PIPE_CLIENT_END) == 0)
+                        nullptr) || (pipe_flags & PIPE_SERVER_END) != 0)
     return false;
   DWORD server_pid = 0;
   DWORD client_pid = 0;
@@ -546,13 +554,16 @@ bool adopt_bootstrap(BootstrapProof& proof, BootstrapHandles& adopted) noexcept 
   // Inherited originals are closed only after both transfers are complete.
   const HANDLE original_read = proof.control_read.handle;
   const HANDLE original_write = proof.control_write.handle;
+  const bool closed_read =
+      !original_read || original_read == INVALID_HANDLE_VALUE ||
+      CloseHandle(original_read) != FALSE;
+  const bool closed_write =
+      !original_write || original_write == INVALID_HANDLE_VALUE ||
+      CloseHandle(original_write) != FALSE;
+  if (!closed_read || !closed_write) bootstrap_transfer_fail_stop();
   proof.control_read.handle = INVALID_HANDLE_VALUE;
   proof.control_write.handle = INVALID_HANDLE_VALUE;
   proof.inherited_only = false;
-  if (original_read && original_read != INVALID_HANDLE_VALUE)
-    CloseHandle(original_read);
-  if (original_write && original_write != INVALID_HANDLE_VALUE)
-    CloseHandle(original_write);
   return true;
 }
 
@@ -883,11 +894,14 @@ class ChildRegistry final {
                           DWORD deadline_ms, HANDLE cancellation = nullptr) noexcept {
     std::lock_guard lock(mutex_);
     if (deadline_ms > kMaxWaitMs || !root_job) return false;
+    (void)cancellation;
     const auto found = children_.find(stable_id);
     if (found == children_.end()) return false;
     Child& child = found->second;
+    // Once the root is terminated, cancellation cannot shorten mandatory
+    // whole-tree reap. The hard deadline remains the only bound.
     if (!TerminateJobObject(root_job, 1) ||
-        !wait_reaped(child.process.get(), deadline_ms, cancellation) ||
+        !wait_reaped(child.process.get(), deadline_ms, nullptr) ||
         !job_empty(root_job)) return false;
     children_.erase(found);
     return true;
@@ -897,19 +911,23 @@ class ChildRegistry final {
                               HANDLE cancellation = nullptr) noexcept {
     std::lock_guard lock(mutex_);
     if (deadline_ms > kMaxWaitMs || !root_job) return false;
+    (void)cancellation;
     const ULONGLONG end = GetTickCount64() + deadline_ms;
-    bool ok = true;
+    // Issue exactly one root termination. Repeating it per child can race the
+    // accounting query and falsely reject a tree that is still draining.
+    bool ok = TerminateJobObject(root_job, 1) != FALSE;
     for (auto& [ignored, child] : children_) {
       (void)ignored;
       const ULONGLONG now = GetTickCount64();
       const DWORD remaining = now >= end
                                   ? 0
                                   : static_cast<DWORD>(end - now);
-      if (remaining == 0 || !TerminateJobObject(root_job, 1) ||
-          !wait_reaped(child.process.get(), remaining, cancellation) ||
-          !job_empty(root_job))
+      // Cancellation is intentionally ignored during mandatory reap; returning
+      // early here would leave a kill-on-close root live.
+      if (remaining == 0 || !wait_reaped(child.process.get(), remaining, nullptr))
         ok = false;
     }
+    if (!job_empty(root_job)) ok = false;
     return ok;
   }
 
@@ -953,6 +971,7 @@ enum class DispatchStatus : std::uint8_t {
   kDispatchedUnknown,
   kTerminalFailure,
   kTerminalSuccess,
+  kPersistenceFailure,
 };
 
 struct JournalOutcome final {
@@ -990,26 +1009,41 @@ class JournalAuthority final {
         capability.operation_id == 0 || !valid_scope(capability.operation_scope))
       return outcome;
     JournalRecord start = record(capability, JournalState::kStartDurable, 0);
-    if (start.sequence == 0 || !persist(start)) {
+    if (start.sequence == 0) {
       state_ = JournalState::kUnknown;
       return outcome;
+    }
+    if (!persist(start)) {
+      state_ = JournalState::kUnknown;
+      return JournalOutcome{DispatchStatus::kPersistenceFailure, state_,
+                            start.sequence};
     }
     state_ = JournalState::kStartDurable;
     const DispatchStatus operation_status = operation(capability);
     if (operation_status == DispatchStatus::kPreDispatchFailure) {
       JournalRecord failed = record(capability, JournalState::kTerminalDurable, 1);
-      if (failed.sequence == 0 || !persist(failed)) {
+      if (failed.sequence == 0) {
         state_ = JournalState::kUnknown;
         return outcome;
+      }
+      if (!persist(failed)) {
+        state_ = JournalState::kUnknown;
+        return JournalOutcome{DispatchStatus::kPersistenceFailure, state_,
+                              failed.sequence};
       }
       state_ = JournalState::kTerminalDurable;
       return JournalOutcome{DispatchStatus::kTerminalFailure, state_, failed.sequence};
     }
     if (operation_status == DispatchStatus::kDispatchedUnknown) {
       JournalRecord unknown = record(capability, JournalState::kUnknown, 2);
-      if (unknown.sequence == 0 || !persist(unknown)) {
+      if (unknown.sequence == 0) {
         state_ = JournalState::kUnknown;
         return outcome;
+      }
+      if (!persist(unknown)) {
+        state_ = JournalState::kUnknown;
+        return JournalOutcome{DispatchStatus::kPersistenceFailure, state_,
+                              unknown.sequence};
       }
       state_ = JournalState::kUnknown;
       return JournalOutcome{DispatchStatus::kDispatchedUnknown, state_, unknown.sequence};
@@ -1017,14 +1051,20 @@ class JournalAuthority final {
     if (operation_status != DispatchStatus::kTerminalSuccess &&
         operation_status != DispatchStatus::kTerminalFailure) {
       state_ = JournalState::kUnknown;
-      return outcome;
+      return JournalOutcome{DispatchStatus::kDispatchedUnknown, state_,
+                            sequence_};
     }
     const std::uint32_t error =
         operation_status == DispatchStatus::kTerminalFailure ? 1u : 0u;
     JournalRecord completed = record(capability, JournalState::kTerminalDurable, error);
-    if (completed.sequence == 0 || !persist(completed)) {
+    if (completed.sequence == 0) {
       state_ = JournalState::kUnknown;
       return outcome;
+    }
+    if (!persist(completed)) {
+      state_ = JournalState::kUnknown;
+      return JournalOutcome{DispatchStatus::kPersistenceFailure, state_,
+                            completed.sequence};
     }
     state_ = JournalState::kTerminalDurable;
     return JournalOutcome{operation_status, state_, completed.sequence};
@@ -1134,24 +1174,23 @@ bool stop_supervisor(SupervisorState& state, DWORD deadline_ms) noexcept {
   bool ok = state.children.terminate_and_reap_all(state.root_job.get(), deadline_ms,
                                                    state.cancellation.get());
   if (state.root_job) {
-    // Closing a kill-on-close root is the final containment action, but only
-    // after all registered child jobs have been boundedly reaped.
-    if (!ok) return false;
+    // Closing a kill-on-close root is mandatory even when bounded reap reports
+    // an ambiguity. It is cleanup, never success evidence; the caller still
+    // receives failure when any child could not be proven reaped.
     state.root_job.reset();
   }
   state.children.close_all();
   return ok;
 }
 
-bool durable_journal_authorize(
+JournalOutcome durable_journal_authorize(
     JournalAuthority& journal, const IssuedCapability& capability,
     JournalPersist persist, DispatchOperation operation) noexcept {
   // The journal adapter is private and must fsync/acknowledge each record.
-  // Dispatch is impossible until the exact start record is durable; callers
-  // receive success only after a terminal record is durable as well.
-  const JournalOutcome outcome = journal.dispatch(capability, persist, operation);
-  return outcome.status == DispatchStatus::kTerminalSuccess &&
-      outcome.durable_state == JournalState::kTerminalDurable && journal.acknowledge();
+  // Preserve every typed state for recovery; callers must not receive a bool
+  // that collapses pre-dispatch failure, dispatched ambiguity, and persistence
+  // failure into the same result.
+  return journal.dispatch(capability, persist, operation);
 }
 
 bool consume_capability(SupervisorState& state, const IssuedCapability& capability,

@@ -42,6 +42,18 @@
     "secrets_in_process_arguments": false,
     "secrets_in_environment": false
   },
+  "journal": {
+    "dispatch_status_values": [
+      "pre_dispatch_failure",
+      "dispatched_unknown",
+      "terminal_failure",
+      "terminal_success",
+      "persistence_failure"
+    ],
+    "persistence_failure_is_unknown": true,
+    "durable_start_recovery": "dispatched_unknown",
+    "next_operation_requires_terminal_record": true
+  },
   "redacted_receipt_fields": [
     "schema", "status", "operation_class", "capability_scope",
     "session_bound", "journal_bound", "resource_count"
