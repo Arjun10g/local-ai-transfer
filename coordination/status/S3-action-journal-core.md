@@ -1,5 +1,23 @@
 # Status Packet
 
+## Current governance snapshot — 2026-09-05
+
+- The durable journal/controller barrier is source-merged at `65decba`, and the
+  bounded wire-protocol contract is source-merged at `3746421`.
+- Production journal availability remains false. The protocol merge adds no
+  native helper, handle-relative store, transport, key trust anchor, package
+  integration, process launch, recovery deployment, or activation.
+- Consequently Graph/browser/Copilot/process mutations remain hidden/refused
+  when production durability is required. Graph reconciliation source being
+  merged is not live-provider readiness; browser candidate `5dc2ad2` is
+  rejected and repair `fc317fce023f9364e7f19b69a700124d1936f8ca` remains
+  unmerged/unreviewed.
+- Overall action-journal/production-action state: `NOT_READY`; no formal gate is
+  approved.
+
+The interval packets below are retained as historical evidence and are
+superseded where they describe current merge or availability state.
+
 - **Session:** S3
 - **Required model:** GPT-5.6 Luna
 - **Role:** Agent/Tools — durable generic action-journal core and controller dispatch barrier
