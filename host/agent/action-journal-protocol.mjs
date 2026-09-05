@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { TextDecoder } from 'node:util';
 import { parseStrictJson } from './tool-envelope.mjs';
 
@@ -32,6 +32,11 @@ export const ACTION_JOURNAL_METHODS = Object.freeze([
   'health', 'prepare', 'authorize', 'dispatch', 'acknowledge',
   'begin_reconciliation', 'complete', 'cancel', 'fail_definitive',
   'mark_unknown', 'summary', 'detail',
+]);
+export const ACTION_JOURNAL_EVENT_ACTIONS = Object.freeze([
+  'prepare', 'authorize', 'dispatch', 'acknowledge',
+  'begin_reconciliation', 'complete', 'cancel', 'fail_definitive',
+  'mark_unknown', 'startup_recovery',
 ]);
 export const ACTION_JOURNAL_STATES = Object.freeze([
   'prepared', 'authorized', 'dispatching', 'acknowledged', 'reconciling',
@@ -92,6 +97,7 @@ const NONCE = /^[a-f0-9]{32}$/u;
 const DIGEST = /^[a-f0-9]{64}$/u;
 const TOOL_NAME = /^[a-z][a-z0-9_.-]{1,95}$/u;
 const METHODS = new Set(ACTION_JOURNAL_METHODS);
+const EVENT_ACTIONS = new Set(ACTION_JOURNAL_EVENT_ACTIONS);
 const STATES = new Set(ACTION_JOURNAL_STATES);
 const AUTHORIZATIONS = new Set(ACTION_JOURNAL_AUTHORIZATIONS);
 const RISKS = new Set(ACTION_JOURNAL_RISK_TIERS);
@@ -264,8 +270,10 @@ function validateRequestBody(method, body, operation) {
       integer(body.limit, 1, ACTION_JOURNAL_LIMITS.max_summary_records);
       break;
     case 'detail':
-      exactKeys(body, ['after_sequence', 'limit']);
+      exactKeys(body, ['after_event_digest', 'after_sequence', 'limit']);
       nullable(body.after_sequence, value => integer(value, 0, ACTION_JOURNAL_LIMITS.max_events_per_operation - 1));
+      nullable(body.after_event_digest, digest);
+      if ((body.after_sequence === null) !== (body.after_event_digest === null)) fail('invalid_request');
       integer(body.limit, 1, ACTION_JOURNAL_LIMITS.max_detail_events);
       break;
     default: fail('invalid_request');
@@ -288,6 +296,7 @@ function validateReceipt(value) {
   if (value.recovery_required !== needsRecovery) fail('invalid_request');
   const authorizationRequired = ['authorized', 'dispatching', 'acknowledged', 'reconciling', 'completed', 'unknown_manual'].includes(value.state);
   if (authorizationRequired && value.authorization_kind === null) fail('invalid_request');
+  if (value.state === 'prepared' && value.authorization_kind !== null) fail('invalid_request');
   const allowedResolutions = {
     prepared: [null], authorized: [null], dispatching: [null],
     acknowledged: ['provider_acknowledged'], reconciling: [null],
@@ -308,19 +317,71 @@ function validateError(value) {
 }
 
 function validateEvent(value) {
-  exactKeys(value, ['authorization_kind', 'receipt_digest', 'resolution', 'sequence', 'state']);
+  exactKeys(value, ['action', 'authorization_kind', 'receipt_digest', 'resolution', 'sequence', 'state']);
   integer(value.sequence, 0, ACTION_JOURNAL_LIMITS.max_events_per_operation - 1);
+  enumValue(value.action, EVENT_ACTIONS);
   enumValue(value.state, STATES);
   digest(value.receipt_digest);
   nullable(value.authorization_kind, candidate => enumValue(candidate, AUTHORIZATIONS));
   nullable(value.resolution, candidate => enumValue(candidate, RESOLUTIONS));
   validateReceipt({
-    ...value,
+    authorization_kind: value.authorization_kind,
     operation_id: 'act_00000000000000000000000000000000',
+    receipt_digest: value.receipt_digest,
     recovery_required: ['reconciling', 'unknown_manual'].includes(value.state),
     redacted: true,
+    resolution: value.resolution,
+    sequence: value.sequence,
+    state: value.state,
   });
+  if ((value.sequence === 0) !== (value.action === 'prepare') || (value.action === 'prepare' && value.state !== 'prepared')) fail('invalid_request');
+  if (value.action === 'startup_recovery') {
+    if (
+      !['cancelled', 'unknown_manual'].includes(value.state)
+      || (value.state === 'cancelled' && value.resolution !== 'startup_recovery')
+      || (value.state === 'unknown_manual' && value.resolution !== 'dispatch_ambiguous')
+    ) fail('invalid_request');
+  } else if (value.action === 'cancel' && value.resolution === 'startup_recovery') {
+    fail('invalid_request');
+  } else if (SUCCESS_STATES[value.action] !== value.state) fail('invalid_request');
   return value;
+}
+
+function validateEventTransition(previous, current) {
+  if (current.sequence !== previous.sequence + 1) fail('invalid_request');
+  let expected;
+  if (current.action === 'startup_recovery') {
+    if (!['prepared', 'authorized', 'dispatching', 'acknowledged', 'reconciling'].includes(previous.state)) fail('invalid_request');
+    const recovered = startupRecovery(previous.state);
+    if (recovered.state !== current.state || recovered.resolution !== current.resolution) fail('invalid_request');
+    expected = recovered.state;
+  } else {
+    try {
+      expected = transitionState(previous.state, current.action, current.resolution);
+    } catch (error) {
+      if (error instanceof ActionJournalProtocolError) fail('invalid_request');
+      throw error;
+    }
+  }
+  if (expected !== current.state) fail('invalid_request');
+  if (current.action === 'authorize') {
+    if (previous.authorization_kind !== null || current.authorization_kind === null) fail('invalid_request');
+  } else if (current.authorization_kind !== previous.authorization_kind) fail('invalid_request');
+}
+
+function eventMatchesReceipt(event, receipt) {
+  return event.sequence === receipt.sequence
+    && event.state === receipt.state
+    && event.authorization_kind === receipt.authorization_kind
+    && event.resolution === receipt.resolution
+    && event.receipt_digest === receipt.receipt_digest;
+}
+
+export function journalEventDigest(event) {
+  validateEvent(event);
+  return createHash('sha256')
+    .update(`${ACTION_JOURNAL_PROTOCOL}\0event\0${canonicalJson(event)}`, 'utf8')
+    .digest('hex');
 }
 
 function validateResponseBody(envelope) {
@@ -356,17 +417,18 @@ function validateResponseBody(envelope) {
   }
   if (operation === null) fail('invalid_request');
   if (method === 'detail') {
-    exactKeys(body, ['events', 'next_sequence', 'receipt', 'truncated']);
+    exactKeys(body, ['events', 'next_sequence', 'predecessor', 'receipt', 'truncated']);
     if (!Array.isArray(body.events) || body.events.length > ACTION_JOURNAL_LIMITS.max_detail_events || typeof body.truncated !== 'boolean') fail('invalid_request');
     nullable(body.next_sequence, value => integer(value, 0, ACTION_JOURNAL_LIMITS.max_events_per_operation - 1));
+    nullable(body.predecessor, validateEvent);
     if (body.truncated !== (body.next_sequence !== null)) fail('invalid_request');
     const receipt = validateReceipt(body.receipt);
     if (receipt.operation_id !== operation || state !== receipt.state) fail('invalid_request');
-    let previous = null;
+    let previous = body.predecessor;
     for (const event of body.events) {
       validateEvent(event);
-      if (previous !== null && event.sequence !== previous + 1) fail('invalid_request');
-      previous = event.sequence;
+      if (previous !== null) validateEventTransition(previous, event);
+      previous = event;
     }
     return;
   }
@@ -432,10 +494,17 @@ function validateResponseAgainstRequest(response, request, nowMs) {
     }
   }
   if (request.method === 'detail') {
-    const { events, receipt, truncated, next_sequence: nextSequence } = response.body;
+    const { events, predecessor, receipt, truncated, next_sequence: nextSequence } = response.body;
     if (events.length > request.body.limit) fail('invalid_request');
     const afterSequence = request.body.after_sequence;
     const firstExpected = afterSequence === null ? 0 : afterSequence + 1;
+    if (afterSequence === null) {
+      if (predecessor !== null || events.length === 0 || events[0].sequence !== 0 || events[0].action !== 'prepare' || events[0].state !== 'prepared') fail('invalid_request');
+    } else if (
+      predecessor === null
+      || predecessor.sequence !== afterSequence
+      || journalEventDigest(predecessor) !== request.body.after_event_digest
+    ) fail('invalid_request');
     if (afterSequence !== null && afterSequence > receipt.sequence) fail('invalid_request');
     const remaining = Math.max(0, receipt.sequence - firstExpected + 1);
     const expectedCount = Math.min(remaining, request.body.limit);
@@ -451,14 +520,8 @@ function validateResponseAgainstRequest(response, request, nowMs) {
       if (nextSequence !== null) fail('invalid_request');
       if (remaining > 0) {
         const last = events.at(-1);
-        if (
-          last.sequence !== receipt.sequence
-          || last.state !== receipt.state
-          || last.authorization_kind !== receipt.authorization_kind
-          || last.resolution !== receipt.resolution
-          || last.receipt_digest !== receipt.receipt_digest
-        ) fail('invalid_request');
-      } else if (afterSequence !== receipt.sequence) fail('invalid_request');
+        if (!eventMatchesReceipt(last, receipt)) fail('invalid_request');
+      } else if (afterSequence !== receipt.sequence || !eventMatchesReceipt(predecessor, receipt)) fail('invalid_request');
     }
   }
 }
@@ -656,6 +719,8 @@ export function transitionState(currentState, method, resolution = null) {
       ? 'manual_failed_definitive'
       : 'pre_dispatch_failure';
     if (resolution !== expected) fail('invalid_transition');
+  } else if (method === 'acknowledge') {
+    if (resolution !== 'provider_acknowledged') fail('invalid_transition');
   } else if (method === 'cancel') {
     if (!['user_denied', 'request_cancelled'].includes(resolution)) fail('invalid_transition');
   } else if (method === 'mark_unknown') {
