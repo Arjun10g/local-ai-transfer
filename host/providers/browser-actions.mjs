@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { promises as dns } from 'node:dns';
 import { createConnection, createServer, isIP } from 'node:net';
-import { makeToolResult } from '../agent/tool-envelope.mjs';
+import { makeToolResult, parseStrictJson } from '../agent/tool-envelope.mjs';
 import { ProviderToolError, boundedInteger, boundedString, checkAborted, digest, exactObject, failureResult, own, result } from './provider-common.mjs';
 
 const MAX_SESSIONS = 4;
@@ -53,6 +53,81 @@ const definitions = Object.freeze({
   'browser.session_close': { name: 'browser.session_close', version: '0.1.0', description: descriptions['browser.session_close'], risk_tier: 'T0', side_effect: 'browser_close', network: false, data_egress: 'none', requires_confirmation: false, timeout_ms: 5000, output_limit: 4096, parameters: browserSchemas['browser.session_close'], input_schema: browserSchemas['browser.session_close'] }
 });
 
+const BROWSER_PROOFS = new Set(['session_started', 'navigation_verified', 'input_verified', 'activation_verified']);
+const BROWSER_SESSION_ID = /^browser_[a-f0-9]{32}$/u;
+const BROWSER_REVISION = /^[a-f0-9]{64}$/u;
+const MAX_ACTIVATION_ATTEMPTS = 128;
+const MAX_ACTIVATION_ALIASES = 256;
+const browserAttestations = new WeakMap();
+
+function browserJournalBinding(call) {
+  const binding = call?.internal?.journal_binding;
+  if (binding === undefined) return null;
+  if (!binding || typeof binding !== 'object' || Array.isArray(binding) || Object.keys(binding).sort().join(',') !== 'arguments_digest,operation_digest,operation_id,preview_digest' || !/^act_[a-f0-9]{32}$/u.test(binding.operation_id) || !/^[a-f0-9]{64}$/u.test(binding.arguments_digest) || !/^[a-f0-9]{64}$/u.test(binding.operation_digest) || !/^[a-f0-9]{64}$/u.test(binding.preview_digest)) throw new ProviderToolError('provider_invalid_request', 'invalid internal journal binding');
+  return Object.freeze({ operation_id: binding.operation_id, operation_digest: binding.operation_digest, arguments_digest: binding.arguments_digest, preview_digest: binding.preview_digest });
+}
+
+function issueBrowserAttestation(resultValue, { call, binding, proof }) {
+  if (!binding || resultValue?.status !== 'ok' || !BROWSER_PROOFS.has(proof)) return resultValue;
+  let output = resultValue;
+  try {
+    const payload = parseBrowserPayload(resultValue);
+    if (payload && typeof payload === 'object' && payload.reconciliation !== proof) output = result(call, 'ok', { ...payload, reconciliation: proof });
+  } catch { return resultValue; }
+  const safePayloadDigest = browserSafeCompletionDigest(output);
+  if (!safePayloadDigest) return resultValue;
+  browserAttestations.set(output, Object.freeze({ provider: 'browser_actions', call_id: call.id, tool_name: call.name, operation_id: binding.operation_id, operation_digest: binding.operation_digest, arguments_digest: binding.arguments_digest, preview_digest: binding.preview_digest, proof, safe_payload_digest: safePayloadDigest }));
+  return output;
+}
+
+export const readBrowserAttestation = value => value && typeof value === 'object' ? browserAttestations.get(value) ?? null : null;
+export const transferBrowserAttestation = (source, target) => { const attestation = readBrowserAttestation(source); if (attestation && target && typeof target === 'object') browserAttestations.set(target, attestation); return target; };
+
+function safeBrowserUrl(value) {
+  if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > MAX_URL) return null;
+  try { const url = new URL(value); if (url.protocol !== 'https:' || url.username || url.password || url.hostname === '') return null; return { href: url.href, origin: url.origin }; } catch { return null; }
+}
+function safeBrowserId(value) { return typeof value === 'string' && BROWSER_SESSION_ID.test(value) ? value : null; }
+function safeBrowserRevision(value) { return typeof value === 'string' && BROWSER_REVISION.test(value) ? value : null; }
+function safeBrowserPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return {};
+  const output = { provider: 'browser_actions' };
+  if (payload.state === 'ready' || payload.state === 'closed' || payload.state === 'reconciling') output.state = payload.state;
+  for (const key of ['title', 'text']) if (typeof payload[key] === 'string') output[key] = payload[key].slice(0, key === 'text' ? MAX_PAGE_TEXT : MAX_PAGE_TITLE);
+  for (const key of ['truncated', 'text_truncated', 'controls_truncated', 'closed']) if (typeof payload[key] === 'boolean') output[key] = payload[key];
+  const sessionId = safeBrowserId(payload.browser_session_id); if (sessionId) output.browser_session_id = sessionId;
+  const pageRevision = safeBrowserRevision(payload.page_revision); if (pageRevision) output.page_revision = pageRevision;
+  const url = safeBrowserUrl(payload.url); if (url) { output.url = url.href; output.origin = url.origin; }
+  const destination = safeBrowserUrl(payload.destination); if (destination) { output.destination = destination.href; output.destination_origin = destination.origin; }
+  const egress = safeBrowserUrl(payload.egress_destination); if (egress) output.egress_destination = egress.href;
+  if (typeof payload.followed_link_id === 'string' && /^link_[a-f0-9]{24}$/u.test(payload.followed_link_id)) output.followed_link_id = payload.followed_link_id;
+  if (typeof payload.control_id === 'string' && /^control_[a-f0-9]{24}$/u.test(payload.control_id)) output.control_id = payload.control_id;
+  if (BROWSER_PROOFS.has(payload.reconciliation)) output.reconciliation = payload.reconciliation;
+  if (Array.isArray(payload.links)) output.links = payload.links.slice(0, MAX_LINKS).flatMap(link => { const href = safeBrowserUrl(link?.url); return href && typeof link?.id === 'string' && /^link_[a-f0-9]{24}$/u.test(link.id) ? [{ id: link.id, url: href.href, origin: href.origin, label: boundedText(link.label, MAX_LABEL) }] : []; });
+  if (Array.isArray(payload.controls)) output.controls = payload.controls.slice(0, MAX_CONTROLS).flatMap(control => { if (!control || typeof control !== 'object' || typeof control.id !== 'string' || !/^control_[a-f0-9]{24}$/u.test(control.id)) return []; const item = { id: control.id, kind: control.kind === 'field' || control.kind === 'control' ? control.kind : 'control', tag: boundedText(control.tag, 32), type: boundedText(control.type, 32), label: boundedText(control.label, MAX_LABEL), disabled: control.disabled === true, readonly: control.readonly === true }; const form = safeBrowserUrl(control.form_action); const href = safeBrowserUrl(control.href); if (form) { item.form_action = form.href; item.form_origin = form.origin; } if (href) { item.href = href.href; item.href_origin = href.origin; } return [item]; });
+  return output;
+}
+
+function parseBrowserPayload(resultValue) {
+  return parseStrictJson(resultValue?.content?.[0]?.text ?? '', { maxBytes: 65536, maxDepth: 6, maxString: MAX_PAGE_TEXT, maxArray: MAX_CONTROLS, maxObject: 32 });
+}
+
+export function browserSafeCompletionDigest(resultValue) {
+  try {
+    const payload = parseBrowserPayload(resultValue);
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+    return digest(safeBrowserPayload(payload));
+  } catch { return null; }
+}
+
+export function projectBrowserResult(resultValue, { controllerVerified = false, reconciliationRequired = false } = {}) {
+  let payload; try { payload = parseBrowserPayload(resultValue); } catch { payload = null; }
+  const safe = safeBrowserPayload(payload);
+  if (reconciliationRequired && controllerVerified !== true) return makeToolResult({ id: resultValue?.id, name: resultValue?.name, status: 'failed', text: JSON.stringify({ code: 'action_completion_unverified', state: 'reconciling', completion: 'controller_acknowledged', provider_completion: 'unverified' }), durationMs: resultValue?.metadata?.duration_ms ?? 0 });
+  if (reconciliationRequired) return makeToolResult({ id: resultValue.id, name: resultValue.name, status: 'ok', text: JSON.stringify({ ...safe, state: 'completed', completion: 'provider_verified', provider_completion: 'verified', accepted: true, completed: true, reconciliation: safe.reconciliation ?? null }), durationMs: resultValue.metadata?.duration_ms ?? 0 });
+  return makeToolResult({ id: resultValue?.id, name: resultValue?.name, status: resultValue?.status === 'ok' ? 'ok' : 'failed', text: JSON.stringify(safe), durationMs: resultValue?.metadata?.duration_ms ?? 0 });
+}
+
 function validate(name, input) {
   const args = exactObject(input, Object.keys(browserSchemas[name] ?? {}).length ? Object.keys(browserSchemas[name].properties) : [], browserSchemas[name]?.required ?? []);
   if (name === 'browser.session_start') boundedString(args.url, 'url', { min: 1, max: MAX_URL });
@@ -97,6 +172,16 @@ function boundedText(value, max) { return typeof value === 'string' ? value.slic
 function unsafeControl(control) { const text = `${control?.label ?? ''} ${control?.type ?? ''} ${control?.href ?? ''} ${control?.form_action ?? ''}`.toLowerCase(); return /password|file|hidden|delete|remove|purchase|buy|checkout|pay|payment|credit|card|cvv|bank|transfer|login|log in|sign in|account|security|download|upload|credential|token/u.test(text); }
 function actionField(control) { return control?.kind === 'field' && ['input', 'textarea'].includes(control.tag) && ['text', 'search', 'email', 'tel', 'url'].includes(control.type || 'text') && !control.disabled && !control.readonly && !unsafeControl(control); }
 function controlDigest(control) { return digest({ kind: control.kind, tag: control.tag, type: control.type, label: control.label, form_action: control.form_action, href: control.href, index: control.index }); }
+// The provider-observed ordinal is part of the identity. Labels and shapes are
+// not unique on ordinary pages, so reconciliation must never select the first
+// visually similar control after a page revision.
+function controlIdentity(control) { return { index: control?.index, kind: control?.kind, tag: control?.tag, type: control?.type, label: control?.label, form_action: control?.form_action, href: control?.href }; }
+function exactControls(session, expected) { return [...(session?.controls?.values?.() ?? [])].filter(candidate => candidate.index === expected?.index && digest(controlIdentity(candidate)) === digest(controlIdentity(expected))); }
+function exactControl(session, expected) { const matches = exactControls(session, expected); if (matches.length !== 1) throw new ProviderToolError('provider_action_reconciling', 'browser control identity is not unique'); return matches[0]; }
+function activationArgumentKey(args) { return digest({ browser_session_id: args.browser_session_id, page_revision: args.page_revision, control_id: args.control_id }); }
+function activationSemanticKey(session, control) { return digest({ action: 'browser.activate_control', browser_session_id: session.id, control: { index: control.index, kind: control.kind, tag: control.tag, type: control.type, label: control.label, form_action: control.form_action, href: control.href } }); }
+function mutationSemanticKey(action, sessionId, descriptor) { return digest({ action, browser_session_id: sessionId ?? null, descriptor }); }
+function mutationStatePending(attempt) { return attempt && !['verified', 'reconciled'].includes(attempt.state); }
 async function waitChildClosed(child) { if (!child || !Number.isInteger(child.pid) || child.exitCode !== null && child.exitCode !== undefined || child.signalCode) return; await withTimeout(() => new Promise(resolve => { const done = () => { child.off?.('close', done); child.off?.('exit', done); resolve(); }; child.once?.('close', done); child.once?.('exit', done); }), undefined, CLEANUP_TIMEOUT_MS).catch(() => {}); }
 async function killChild(child, killProcess, platform = process.platform) { if (!child) return; try { if (killProcess) await withTimeout(() => killProcess(child), undefined, CLEANUP_TIMEOUT_MS); else if (platform === 'win32' && Number.isInteger(child.pid)) await withTimeout(() => new Promise(resolve => { const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore' }); killer.once('close', resolve); killer.once('error', resolve); }), undefined, CLEANUP_TIMEOUT_MS); else if (Number.isInteger(child.pid) && platform !== 'win32') { try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill?.('SIGTERM'); } await waitChildClosed(child); try { process.kill(-child.pid, 'SIGKILL'); } catch { /* group may already be gone */ } } else child.kill?.('SIGTERM'); } catch { /* cleanup is best effort */ } await waitChildClosed(child); }
 function ownTempDir(directory) { return typeof directory === 'string' && basename(directory).startsWith('lae-browser-') && dirname(directory) === tmpdir(); }
@@ -120,7 +205,7 @@ export class CdpClient {
   async navigate(url, signal) { checkAborted(signal); await this.send('Page.navigate', { url: url.href }); await this.waitLoad(signal); checkAborted(signal); }
   async inspect(signal) { checkAborted(signal); const output = await this.send('Runtime.evaluate', { expression: PAGE_SCRIPT, returnByValue: true, awaitPromise: false }); const value = output?.result?.value; if (!value || typeof value !== 'object') throw new ProviderToolError('provider_invalid_response'); return value; }
   async inspectPage(signal) { return this.inspect(signal); }
-  async fillControl(index, value, signal, expected = {}) { checkAborted(signal); if (!Number.isInteger(index) || index < 0 || index >= MAX_CONTROLS) throw new ProviderToolError('browser_control_changed'); const shape = JSON.stringify({ tag: expected.tag, type: expected.type, label: expected.label, form_action: expected.form_action, href: expected.href }); const expression = `(() => { const visible = a => { const s = getComputedStyle(a); const r = a.getBoundingClientRect(); return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0; }; const all = Array.from(document.querySelectorAll('input,textarea,select,button,[role=button]')).filter(visible); const a = all[${index}]; const expected = ${shape}; const actual = a && { tag: a.tagName.toLowerCase(), type: (a.type || '').toLowerCase(), label: (a.getAttribute('aria-label') || a.innerText || a.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, ${MAX_LABEL}), form_action: a.form?.action ? a.form.action.slice(0, ${MAX_URL}) : '', href: a.href ? a.href.slice(0, ${MAX_URL}) : '' }; if (!a || JSON.stringify(actual) !== JSON.stringify(expected) || !['input','textarea','select'].includes(actual.tag) || a.disabled || a.readOnly || ['password','file','hidden'].includes(actual.type)) return false; a.focus(); a.value = ${JSON.stringify(value)}; a.dispatchEvent(new Event('input', { bubbles: true })); a.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`; const output = await this.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: false }); if (output?.result?.value !== true) throw new ProviderToolError('browser_control_changed'); }
+  async fillControl(index, value, signal, expected = {}) { checkAborted(signal); if (!Number.isInteger(index) || index < 0 || index >= MAX_CONTROLS) throw new ProviderToolError('browser_control_changed'); const shape = JSON.stringify({ index, tag: expected.tag, type: expected.type, label: expected.label, form_action: expected.form_action, href: expected.href }); const expression = `(() => { const visible = a => { const s = getComputedStyle(a); const r = a.getBoundingClientRect(); return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0; }; const all = Array.from(document.querySelectorAll('input,textarea,select,button,[role=button]')).filter(visible); const a = all[${index}]; const expected = ${shape}; const actual = a && { index: ${index}, tag: a.tagName.toLowerCase(), type: (a.type || '').toLowerCase(), label: (a.getAttribute('aria-label') || a.innerText || a.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, ${MAX_LABEL}), form_action: a.form?.action ? a.form.action.slice(0, ${MAX_URL}) : '', href: a.href ? a.href.slice(0, ${MAX_URL}) : '' }; if (!a || JSON.stringify(actual) !== JSON.stringify(expected) || !['input','textarea','select'].includes(actual.tag) || a.disabled || a.readOnly || ['password','file','hidden'].includes(actual.type)) return { matched: false }; a.focus(); a.value = ${JSON.stringify(value)}; a.dispatchEvent(new Event('input', { bubbles: true })); a.dispatchEvent(new Event('change', { bubbles: true })); return { matched: a.value === ${JSON.stringify(value)}, value: String(a.value || '') }; })()`; const output = await this.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: false }); const proof = output?.result?.value; if (!proof || proof.matched !== true || proof.value !== value) throw new ProviderToolError('browser_control_changed'); return Object.freeze({ matched: true, value }); }
   async activateControl(index, signal, expected = {}) { checkAborted(signal); if (!Number.isInteger(index) || index < 0 || index >= MAX_CONTROLS) throw new ProviderToolError('browser_control_changed'); const shape = JSON.stringify({ tag: expected.tag, type: expected.type, label: expected.label, form_action: expected.form_action, href: expected.href }); const expression = `(() => { const visible = a => { const s = getComputedStyle(a); const r = a.getBoundingClientRect(); return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0; }; const all = Array.from(document.querySelectorAll('input,textarea,select,button,[role=button]')).filter(visible); const a = all[${index}]; const expected = ${shape}; const actual = a && { tag: a.tagName.toLowerCase(), type: (a.type || '').toLowerCase(), label: (a.getAttribute('aria-label') || a.innerText || a.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, ${MAX_LABEL}), form_action: a.form?.action ? a.form.action.slice(0, ${MAX_URL}) : '', href: a.href ? a.href.slice(0, ${MAX_URL}) : '' }; if (!a || JSON.stringify(actual) !== JSON.stringify(expected) || actual.tag !== 'button' || actual.type !== 'button' || actual.form_action || actual.href || a.disabled) return false; a.click(); return true; })()`; const output = await this.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: false }); if (output?.result?.value !== true) throw new ProviderToolError('browser_control_changed'); }
   close() { const failure = new ProviderToolError('provider_cancelled'); for (const item of this.pending.values()) item.reject(failure); this.pending.clear(); for (const waiter of this.eventWaiters) waiter.reject(failure); this.eventWaiters = []; this.events = []; try { this.socket?.close(); } catch { /* cleanup */ } this.socket = null; }
 }
@@ -141,6 +226,11 @@ function normalizeActionOrigins(origins) {
 }
 
 export class BrowserActionProvider {
+  // Process-local defense in depth. The controller's durable action journal
+  // remains mandatory; these private maps do not claim restart durability.
+  #activationAttempts = new Map();
+  #activationAliases = new Map();
+  #mutationAttempts = new Map();
   constructor({ enabled = false, executable, allowlist = [], spawn: spawnImpl = spawn, killProcess, mkdtempImpl = mkdtemp, rmImpl = rm, proxyFactory = createValidatingProxy, waitDevtoolsPortImpl = waitDevtoolsPort, resolve = async host => (await dns.lookup(host, { all: true, verbatim: true })).map(item => item.address), cdpFactory, fetchImpl, WebSocketImpl, requestTimeoutMs = REQUEST_TIMEOUT_MS, platform = process.platform, experimentalMutations = false, safeActions = false, actionOrigins = [], testOnly = false } = {}) {
     if (executable !== undefined && !absoluteLocalPath(executable) || !Array.isArray(allowlist) || allowlist.length > 16 || allowlist.some(item => !absoluteLocalPath(item))) throw new TypeError('invalid browser executable/allowlist');
     if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 100 || requestTimeoutMs > 120000) throw new TypeError('invalid browser timeout');
@@ -152,18 +242,132 @@ export class BrowserActionProvider {
   async destination(raw, signal) { return withTimeout(() => publicUrl(raw, this.resolve), signal, this.requestTimeoutMs); }
   async actionDestination(raw, session, signal) { const destination = await this.destination(raw, signal); const currentUrl = session?.url ?? session?.href; if (this.safeActions && (!currentUrl || !this.actionOrigins.has(new URL(currentUrl).origin) || !this.actionOrigins.has(destination.origin))) throw new ProviderToolError('provider_destination_rejected', 'browser action origin is not configured'); return destination; }
   remember(call, args, binding = {}) { if (this.proposals.size >= 128 && !this.proposals.has(call.id)) this.proposals.delete(this.proposals.keys().next().value); this.proposals.set(call.id, { name: call.name, digest: digest(args), binding }); }
-  consumeProposal(call, args, binding = {}) { const saved = this.proposals.get(call.id); if (!saved || saved.name !== call.name || saved.digest !== digest(args) || digest(saved.binding) !== digest(binding)) throw new ProviderToolError('provider_permission_insufficient', 'browser action requires a matching preview'); this.proposals.delete(call.id); }
-  async preview(call) { const args = validate(call.name, call.arguments); const mutating = call.name === 'browser.fill_field' || call.name === 'browser.activate_control'; if (mutating && !this.experimentalMutations && !this.safeActions) throw new ProviderToolError('provider_unconfigured', 'browser mutations are disabled by default'); if (mutating) { const session = this.sessions.get(args.browser_session_id); if (!session || session.closed || session.revision !== args.page_revision) throw new ProviderToolError('browser_session_stale'); const control = session.controls?.get(args.control_id); if (!control || unsafeControl(control) || this.safeActions && call.name === 'browser.fill_field' && !actionField(control) || this.safeActions && call.name === 'browser.activate_control' && (control.kind !== 'control' || control.tag !== 'button' || control.type !== 'button' || control.form_action || control.href || control.disabled)) throw new ProviderToolError('browser_control_changed'); const destination = await this.actionDestination(control.form_action || control.href || session.url, session, call.signal); this.remember(call, args, { session_id: session.id, page_revision: session.revision, control_digest: control.digest, origin: new URL(session.url).origin, destination: destination.href }); const preview = { provider: 'browser_actions', action: call.name, browser_session_id: session.id, page_revision: session.revision, control_id: control.id, control_label: control.label, destination: destination.href, data_egress: 'external_destination' }; if (call.name === 'browser.fill_field') { preview.value_preview = boundedText(args.value, 256); preview.value_truncated = args.value.length > 256; } return preview; } const args0 = validate(call.name, call.arguments); if (call.name === 'browser.session_start') { const url = await this.destination(args0.url, call.signal); if (this.safeActions && !this.actionOrigins.has(url.origin)) throw new ProviderToolError('provider_destination_rejected', 'browser action origin is not configured'); this.remember(call, args0); return { provider: 'browser_actions', action: 'session_start', destination: url.href, data_egress: 'external_destination' }; } if (call.name === 'browser.follow_link') { const session = this.sessions.get(args0.browser_session_id); if (!session || session.closed || session.revision !== args0.page_revision) throw new ProviderToolError('browser_session_stale'); const link = session.links.get(args0.link_id); if (!link) throw new ProviderToolError('browser_link_changed'); await this.destination(link.url, call.signal); this.remember(call, args0); return { provider: 'browser_actions', action: 'follow_link', browser_session_id: session.id, page_revision: session.revision, link_id: link.id, destination: link.url, data_egress: 'external_destination' }; } return { provider: 'browser_actions', action: call.name, browser_session_id: args0.browser_session_id }; }
+  peekProposal(call, args) { const saved = this.proposals.get(call.id); if (!saved || saved.name !== call.name || saved.digest !== digest(args)) throw new ProviderToolError('provider_permission_insufficient', 'browser action requires a matching preview'); return saved; }
+  consumeProposal(call, args, binding = {}) { const saved = this.peekProposal(call, args); if (digest(saved.binding) !== digest(binding)) throw new ProviderToolError('provider_permission_insufficient', 'browser action requires a matching preview'); this.proposals.delete(call.id); return saved; }
+  mutationKey(name, session, target) { return mutationSemanticKey(name, session?.id, target); }
+  pendingMutation(sessionId, name) { return [...this.#mutationAttempts.values()].find(attempt => attempt.session_id === sessionId && attempt.action === name && mutationStatePending(attempt)) ?? null; }
+  mutationProposal(call, args, session, target, prior = null) {
+    const key = prior?.semantic_key ?? this.mutationKey(call.name, session, target);
+    const binding = prior?.proposal_binding ?? { session_id: session?.id ?? null, action: call.name, semantic_key: key, target_digest: digest(target) };
+    this.remember(call, args, binding);
+    return { key, binding, prior };
+  }
+  rememberMutation(key, attempt) {
+    const existing = this.#mutationAttempts.get(key);
+    if (existing && existing !== attempt) throw new ProviderToolError('provider_action_reconciling', 'browser mutation tombstone is immutable');
+    if (this.#mutationAttempts.size >= 128 && !existing) throw new ProviderToolError('provider_action_reconciling', 'browser mutation attempt limit reached');
+    if (!existing) this.#mutationAttempts.set(key, attempt);
+    return existing ?? attempt;
+  }
+  async reconcileMutation(call, attempt) {
+    if (!attempt || attempt.action === 'browser.session_start' || !attempt.postcondition || !attempt.payload) return failureResult(call, new ProviderToolError('provider_action_reconciling'));
+    const session = this.sessions.get(attempt.session_id); if (!session || session.closed) return failureResult(call, new ProviderToolError('browser_session_stale'));
+    try {
+      const page = await withTimeout(() => (session.cdp.inspectPage ?? session.cdp.inspect).call(session.cdp, call.signal), call.signal, this.requestTimeoutMs);
+      await this.actionDestination(page.url, session, call.signal); this.updatePage(session, page);
+      if (attempt.action === 'browser.follow_link') {
+        if (session.url !== attempt.postcondition.url || session.revision !== attempt.postcondition.page_revision) throw new ProviderToolError('provider_action_reconciling');
+      } else if (attempt.action === 'browser.fill_field') {
+        if (digest(call.arguments?.value) !== attempt.postcondition.value_digest || session.revision !== attempt.postcondition.page_revision) throw new ProviderToolError('provider_action_reconciling');
+        const requestedControl = session.controls.get(call.arguments?.control_id);
+        if (!requestedControl || digest(controlIdentity(requestedControl)) !== attempt.postcondition.control_identity_digest) throw new ProviderToolError('provider_action_reconciling');
+        const matches = [...session.controls.values()].filter(candidate => digest(controlIdentity(candidate)) === attempt.postcondition.control_identity_digest);
+        if (matches.length !== 1 || matches[0].value !== call.arguments?.value) throw new ProviderToolError('provider_action_reconciling');
+      }
+      attempt.state = 'reconciled';
+      const payload = parseBrowserPayload(attempt.payload);
+      return result(call, 'ok', payload);
+    } catch { return failureResult(call, new ProviderToolError('provider_action_reconciling')); }
+  }
+  bindActivationAlias(argumentKey, semanticKey) { const current = this.#activationAliases.get(argumentKey); if (current && current !== semanticKey) throw new ProviderToolError('provider_action_reconciling'); if (!current && this.#activationAliases.size >= MAX_ACTIVATION_ALIASES) throw new ProviderToolError('provider_action_reconciling', 'browser activation alias limit reached'); this.#activationAliases.set(argumentKey, semanticKey); }
+  async preview(call) {
+    const args = validate(call.name, call.arguments);
+    const mutating = call.name === 'browser.fill_field' || call.name === 'browser.activate_control';
+    if (mutating && !this.experimentalMutations && !this.safeActions) throw new ProviderToolError('provider_unconfigured', 'browser mutations are disabled by default');
+    if (mutating) {
+      const argumentKey = call.name === 'browser.activate_control' ? activationArgumentKey(args) : null;
+      const aliasedSemanticKey = argumentKey ? this.#activationAliases.get(argumentKey) : null;
+      const aliasedPrior = aliasedSemanticKey ? this.#activationAttempts.get(aliasedSemanticKey) : null;
+      const prior = aliasedPrior ?? null;
+      if (prior) {
+        const session = this.sessions.get(prior.session_id);
+        if (!session || session.closed || session.id !== args.browser_session_id) throw new ProviderToolError('browser_session_stale');
+        this.remember(call, args, prior.proposal_binding);
+        return { provider: 'browser_actions', action: call.name, browser_session_id: prior.session_id, page_revision: prior.pre_revision, control_id: prior.control_id, control_label: prior.control_label, destination: prior.destination, data_egress: 'external_destination', reconciliation_only: true };
+      }
+      const session = this.sessions.get(args.browser_session_id);
+      if (!session || session.closed) throw new ProviderToolError('browser_session_stale');
+      const knownSessionMutation = [...this.#mutationAttempts.values()].find(attempt => attempt.session_id === session.id && attempt.action === call.name);
+      const pendingSessionMutation = this.pendingMutation(session.id, call.name);
+      if ((knownSessionMutation || pendingSessionMutation) && session.revision !== args.page_revision) { const prior = knownSessionMutation ?? pendingSessionMutation; this.mutationProposal(call, args, session, { pending: true }, prior); return { provider: 'browser_actions', action: call.name, browser_session_id: session.id, page_revision: prior.pre_revision ?? args.page_revision, control_id: prior.control_id ?? args.control_id, control_label: prior.control_label ?? '', destination: prior.destination ?? session.url, data_egress: 'external_destination', reconciliation_only: true }; }
+      if (session.revision !== args.page_revision) throw new ProviderToolError('browser_session_stale');
+      const control = session.controls?.get(args.control_id);
+      if (!control && knownSessionMutation) { this.mutationProposal(call, args, session, { pending: true }, knownSessionMutation); return { provider: 'browser_actions', action: call.name, browser_session_id: session.id, page_revision: knownSessionMutation.pre_revision ?? session.revision, control_id: knownSessionMutation.control_id ?? args.control_id, control_label: knownSessionMutation.control_label ?? '', destination: knownSessionMutation.destination ?? session.url, data_egress: 'external_destination', reconciliation_only: true }; }
+      if (!control || unsafeControl(control) || this.safeActions && call.name === 'browser.fill_field' && !actionField(control) || this.safeActions && call.name === 'browser.activate_control' && (control.kind !== 'control' || control.tag !== 'button' || control.type !== 'button' || control.form_action || control.href || control.disabled)) throw new ProviderToolError('browser_control_changed');
+      if (call.name === 'browser.fill_field' && knownSessionMutation && digest(args.value) === knownSessionMutation.value_digest) { this.mutationProposal(call, args, session, controlIdentity(control), knownSessionMutation); return { provider: 'browser_actions', action: call.name, browser_session_id: session.id, page_revision: knownSessionMutation.pre_revision ?? session.revision, control_id: knownSessionMutation.control_id ?? control.id, control_label: knownSessionMutation.control_label ?? control.label, destination: knownSessionMutation.destination ?? session.url, data_egress: 'external_destination', reconciliation_only: true }; }
+      const pending = this.pendingMutation(session.id, call.name);
+      if (pending) {
+        this.mutationProposal(call, args, session, controlIdentity(control), pending);
+        return { provider: 'browser_actions', action: call.name, browser_session_id: session.id, page_revision: pending.pre_revision ?? session.revision, control_id: pending.control_id ?? args.control_id, control_label: pending.control_label ?? control.label, destination: pending.destination ?? session.url, data_egress: 'external_destination', reconciliation_only: true };
+      }
+      const destination = await this.actionDestination(control.form_action || control.href || session.url, session, call.signal);
+      const semanticKey = call.name === 'browser.activate_control' ? activationSemanticKey(session, control) : null;
+      const semanticPrior = semanticKey ? this.#activationAttempts.get(semanticKey) : null;
+      if (semanticKey) {
+        this.bindActivationAlias(argumentKey, semanticKey);
+        if (!semanticPrior && this.#activationAttempts.size >= MAX_ACTIVATION_ATTEMPTS) throw new ProviderToolError('provider_action_reconciling', 'browser activation attempt limit reached');
+      }
+      const target = controlIdentity(control);
+      const semanticMutationKey = semanticKey ?? this.mutationKey(call.name, session, target);
+      const existingMutation = this.#mutationAttempts.get(semanticMutationKey);
+      if (existingMutation) { this.mutationProposal(call, args, session, target, existingMutation); return { provider: 'browser_actions', action: call.name, browser_session_id: session.id, page_revision: existingMutation.pre_revision ?? session.revision, control_id: existingMutation.control_id ?? control.id, control_label: existingMutation.control_label ?? control.label, destination: existingMutation.destination ?? destination.href, data_egress: 'external_destination', reconciliation_only: true }; }
+      const proposalBinding = { session_id: session.id, page_revision: session.revision, control_digest: control.digest, control_label: control.label, origin: new URL(session.url).origin, destination: destination.href, semantic_key: semanticMutationKey, ...(semanticKey ? { activation_semantic_key: semanticKey } : {}) };
+      this.remember(call, args, semanticPrior?.proposal_binding ?? proposalBinding);
+      const preview = { provider: 'browser_actions', action: call.name, browser_session_id: session.id, page_revision: session.revision, control_id: control.id, control_label: control.label, destination: destination.href, data_egress: 'external_destination' };
+      if (semanticPrior) preview.reconciliation_only = true;
+      if (call.name === 'browser.fill_field') { preview.value_preview = boundedText(args.value, 256); preview.value_truncated = args.value.length > 256; }
+      return preview;
+    }
+    const args0 = validate(call.name, call.arguments);
+    if (call.name === 'browser.session_start') { const url = await this.destination(args0.url, call.signal); if (this.safeActions && !this.actionOrigins.has(url.origin)) throw new ProviderToolError('provider_destination_rejected', 'browser action origin is not configured'); const key = this.mutationKey(call.name, null, { url: url.href }); const prior = this.#mutationAttempts.get(key); if (prior) { this.remember(call, args0, prior.proposal_binding); return { provider: 'browser_actions', action: 'session_start', destination: url.href, data_egress: 'external_destination', reconciliation_only: true }; } this.remember(call, args0, { action: call.name, semantic_key: key, destination: url.href }); return { provider: 'browser_actions', action: 'session_start', destination: url.href, data_egress: 'external_destination' }; }
+    if (call.name === 'browser.follow_link') { const session = this.sessions.get(args0.browser_session_id); if (!session || session.closed) throw new ProviderToolError('browser_session_stale'); const pending = this.pendingMutation(session.id, call.name); if (pending && session.revision !== args0.page_revision) { this.mutationProposal(call, args0, session, { pending: true }, pending); return { provider: 'browser_actions', action: 'follow_link', browser_session_id: session.id, page_revision: pending.pre_revision ?? args0.page_revision, link_id: pending.link_id ?? args0.link_id, destination: pending.destination ?? session.url, data_egress: 'external_destination', reconciliation_only: true }; } if (session.revision !== args0.page_revision) throw new ProviderToolError('browser_session_stale'); const link = session.links.get(args0.link_id); if (!link) throw new ProviderToolError('browser_link_changed'); await this.destination(link.url, call.signal); const target = { url: link.url, label: link.label }; const key = this.mutationKey(call.name, session, target); const prior = this.#mutationAttempts.get(key) ?? pending; if (prior) { this.mutationProposal(call, args0, session, target, prior); return { provider: 'browser_actions', action: 'follow_link', browser_session_id: session.id, page_revision: prior.pre_revision ?? session.revision, link_id: prior.link_id ?? link.id, destination: prior.destination ?? link.url, data_egress: 'external_destination', reconciliation_only: true }; } this.remember(call, args0, { session_id: session.id, page_revision: session.revision, link_id: link.id, destination: link.url, semantic_key: key }); return { provider: 'browser_actions', action: 'follow_link', browser_session_id: session.id, page_revision: session.revision, link_id: link.id, destination: link.url, data_egress: 'external_destination' }; }
+    return { provider: 'browser_actions', action: call.name, browser_session_id: args0.browser_session_id };
+  }
   async authorize(call) { validate(call.name, call.arguments); return { kind: 'policy' }; }
   async execute(call) { try { const args = validate(call.name, call.arguments); return await this._execute(call, args); } catch (error) { if (error?.code === 'invalid_tool_arguments') throw error; return failureResult(call, error); } }
   async _execute(call, args) {
     checkAborted(call.signal); if ((call.name === 'browser.fill_field' || call.name === 'browser.activate_control') && !this.experimentalMutations && !this.safeActions) return failureResult(call, new ProviderToolError('provider_unconfigured')); if (this.state() === 'disabled') return failureResult(call, new ProviderToolError('provider_disabled')); if (this.state() === 'unconfigured') return failureResult(call, new ProviderToolError('provider_unconfigured'));
+    if (['browser.session_start', 'browser.follow_link', 'browser.fill_field', 'browser.activate_control'].includes(call.name)) browserJournalBinding(call);
     if (call.name === 'browser.session_close') return this.closeSession(call, args);
     if (call.name === 'browser.inspect_links') return this.inspectLinks(call, args);
     if (call.name === 'browser.inspect_page') return this.inspectPage(call, args);
-    if (call.name === 'browser.session_start') { if (call.authorization?.kind !== 'user_confirmation') return failureResult(call, new ProviderToolError('provider_permission_insufficient')); this.consumeProposal(call, args); return this.startSession(call, args); }
-    if (call.name === 'browser.follow_link') { if (call.authorization?.kind !== 'user_confirmation') return failureResult(call, new ProviderToolError('provider_permission_insufficient')); this.consumeProposal(call, args); return this.followLink(call, args); }
-    if (call.name === 'browser.fill_field' || call.name === 'browser.activate_control') { if (call.authorization?.kind !== 'user_confirmation') return failureResult(call, new ProviderToolError('provider_permission_insufficient')); const session = this.sessions.get(args.browser_session_id); const control = session?.controls?.get(args.control_id); const destination = control && await this.actionDestination(control.form_action || control.href || session.url, session, call.signal); this.consumeProposal(call, args, { session_id: session?.id, page_revision: session?.revision, control_digest: control?.digest, origin: session ? new URL(session.url).origin : null, destination: destination?.href }); return call.name === 'browser.fill_field' ? this.fillField(call, args) : this.activateControl(call, args); }
+    if (call.name === 'browser.session_start') { if (call.authorization?.kind !== 'user_confirmation') return failureResult(call, new ProviderToolError('provider_permission_insufficient')); const url = await this.destination(args.url, call.signal); const key = this.mutationKey(call.name, null, { url: url.href }); const saved = this.peekProposal(call, args); const prior = this.#mutationAttempts.get(key); if (prior) { this.consumeProposal(call, args, prior.proposal_binding); return await this.reconcileMutation(call, prior); } const proposal = this.consumeProposal(call, args, saved.binding); const attempt = { action: call.name, session_id: null, semantic_key: key, state: 'dispatched', destination: url.href, proposal_binding: structuredClone(proposal.binding), postcondition: null, payload: null }; this.rememberMutation(key, attempt); try { const output = await this.startSession(call, args); const payload = parseBrowserPayload(output); const sessionId = safeBrowserId(payload?.browser_session_id); const revision = safeBrowserRevision(payload?.page_revision); if (!sessionId || !revision) throw new ProviderToolError('provider_invalid_response'); attempt.session_id = sessionId; attempt.postcondition = Object.freeze({ browser_session_id: sessionId, page_revision: revision, url: payload.url }); attempt.payload = Object.freeze(structuredClone(output)); attempt.state = 'verified'; return issueBrowserAttestation(output, { call, binding: browserJournalBinding(call), proof: 'session_started' }); } catch (error) { attempt.state = 'unknown'; throw error; } }
+    if (call.name === 'browser.follow_link') { if (call.authorization?.kind !== 'user_confirmation') return failureResult(call, new ProviderToolError('provider_permission_insufficient')); const session = this.sessions.get(args.browser_session_id); const link = session?.links?.get(args.link_id); const target = link ? { url: link.url, label: link.label } : null; const key = target && session ? this.mutationKey(call.name, session, target) : null; const saved = this.peekProposal(call, args); const prior = (key && this.#mutationAttempts.get(key)) || (session && this.pendingMutation(session.id, call.name)); if (prior) { this.consumeProposal(call, args, prior.proposal_binding); const recovered = await this.reconcileMutation(call, prior); return issueBrowserAttestation(recovered, { call, binding: browserJournalBinding(call), proof: 'navigation_verified' }); } const proposal = this.consumeProposal(call, args, saved.binding); const attempt = { action: call.name, session_id: session?.id, semantic_key: saved.binding?.semantic_key ?? key, state: 'dispatched', pre_revision: args.page_revision, link_id: link?.id, destination: link?.url, proposal_binding: structuredClone(proposal.binding), postcondition: null, payload: null }; this.rememberMutation(attempt.semantic_key, attempt); try { const output = await this.followLink(call, args); if (output?.status !== 'ok') { attempt.state = 'unknown'; return output; } const payload = parseBrowserPayload(output); attempt.postcondition = Object.freeze({ browser_session_id: session.id, page_revision: payload.page_revision, url: payload.url }); attempt.payload = Object.freeze(structuredClone(output)); attempt.state = 'verified'; return issueBrowserAttestation(output, { call, binding: browserJournalBinding(call), proof: 'navigation_verified' }); } catch (error) { attempt.state = 'unknown'; throw error; } }
+    if (call.name === 'browser.fill_field' || call.name === 'browser.activate_control') {
+      if (call.authorization?.kind !== 'user_confirmation') return failureResult(call, new ProviderToolError('provider_permission_insufficient'));
+      if (call.name === 'browser.fill_field') {
+        const saved = this.peekProposal(call, args); const session = this.sessions.get(args.browser_session_id); if (!session || session.closed) return failureResult(call, new ProviderToolError('browser_session_stale'));
+        const pending = this.pendingMutation(session.id, call.name); const known = [...this.#mutationAttempts.values()].find(attempt => attempt.session_id === session.id && attempt.action === call.name); const control = session.controls.get(args.control_id); const target = controlIdentity(control); const key = saved.binding?.semantic_key;
+        if (known || pending) { const prior = known ?? pending; this.consumeProposal(call, args, prior.proposal_binding); const recovered = await this.reconcileMutation(call, prior); return issueBrowserAttestation(recovered, { call, binding: browserJournalBinding(call), proof: 'input_verified' }); }
+        if (!control || !/^[a-f0-9]{64}$/u.test(key ?? '')) return failureResult(call, new ProviderToolError('browser_control_changed'));
+        const proposal = this.consumeProposal(call, args, { ...saved.binding, semantic_key: key }); const attempt = { action: call.name, session_id: session.id, semantic_key: key, state: 'dispatched', pre_revision: args.page_revision, control_id: control.id, control_label: control.label, destination: control.form_action || control.href || session.url, proposal_binding: structuredClone(proposal.binding), postcondition: null, payload: null, value_digest: digest(args.value) }; this.rememberMutation(key, attempt);
+        try { const output = await this.fillField(call, args); if (output?.status !== 'ok') { attempt.state = 'unknown'; return output; } const payload = parseBrowserPayload(output); const matches = [...session.controls.values()].filter(candidate => digest(controlIdentity(candidate)) === digest(controlIdentity(control))); if (matches.length !== 1 || matches[0].value !== args.value) { attempt.state = 'unknown'; return failureResult(call, new ProviderToolError('provider_action_reconciling')); } attempt.postcondition = Object.freeze({ browser_session_id: session.id, control_identity_digest: digest(controlIdentity(control)), value_digest: digest(args.value), page_revision: payload.page_revision }); attempt.payload = Object.freeze(structuredClone(output)); attempt.state = 'verified'; return issueBrowserAttestation(output, { call, binding: browserJournalBinding(call), proof: 'input_verified' }); } catch (error) { attempt.state = 'unknown'; throw error; }
+      }
+      const saved = this.peekProposal(call, args);
+      const semanticKey = call.name === 'browser.activate_control' && /^[a-f0-9]{64}$/u.test(saved.binding?.activation_semantic_key ?? '') ? saved.binding.activation_semantic_key : null;
+      const prior = semanticKey ? this.#activationAttempts.get(semanticKey) : null;
+      let proposal;
+      if (prior) proposal = this.consumeProposal(call, args, prior.proposal_binding);
+      else {
+        const session = this.sessions.get(args.browser_session_id);
+        const control = session?.controls?.get(args.control_id);
+        const destination = control && await this.actionDestination(control.form_action || control.href || session.url, session, call.signal);
+        const exactSemanticKey = call.name === 'browser.activate_control' && session && control && destination ? activationSemanticKey(session, control) : null;
+        proposal = this.consumeProposal(call, args, { session_id: session?.id, page_revision: session?.revision, control_digest: control?.digest, control_label: control?.label, origin: session ? new URL(session.url).origin : null, destination: destination?.href, semantic_key: exactSemanticKey ?? (session && control ? this.mutationKey(call.name, session, controlIdentity(control)) : null), ...(exactSemanticKey ? { activation_semantic_key: exactSemanticKey } : {}) });
+      }
+      const output = call.name === 'browser.fill_field' ? await this.fillField(call, args) : await this.activateControl(call, args, { semanticKey, proposalBinding: proposal.binding });
+      return issueBrowserAttestation(output, { call, binding: browserJournalBinding(call), proof: call.name === 'browser.fill_field' ? 'input_verified' : 'activation_verified' });
+    }
     throw new ProviderToolError('invalid_tool_arguments');
   }
   async startSession(call, args) {
@@ -177,16 +381,56 @@ export class BrowserActionProvider {
   async inspectLinks(call, args) { const session = this.sessions.get(args.browser_session_id); if (!session || session.closed) return failureResult(call, new ProviderToolError('browser_session_stale')); const page = await withTimeout(() => session.cdp.inspect(call.signal), call.signal, this.requestTimeoutMs); const current = await this.destination(page.url, call.signal); if (current.href !== page.url) throw new ProviderToolError('browser_session_stale'); this.updatePage(session, page); const links = [...session.links.values()].slice(0, args.limit ?? MAX_LINKS); return result(call, 'ok', { provider: 'browser_actions', state: 'ready', browser_session_id: session.id, url: session.url, title: session.title, page_revision: session.revision, links, truncated: session.linkTruncated || session.links.size > links.length }); }
   async inspectPage(call, args) { const session = this.sessions.get(args.browser_session_id); if (!session || session.closed) return failureResult(call, new ProviderToolError('browser_session_stale')); const page = await withTimeout(() => (session.cdp.inspectPage ?? session.cdp.inspect).call(session.cdp, call.signal), call.signal, this.requestTimeoutMs); const current = await this.destination(page.url, call.signal); if (current.href !== page.url) throw new ProviderToolError('browser_session_stale'); this.updatePage(session, page); const controls = [...session.controls.values()].slice(0, args.max_controls ?? MAX_CONTROLS); const text = boundedText(session.text, args.max_text ?? MAX_PAGE_TEXT); return result(call, 'ok', { provider: 'browser_actions', state: 'ready', browser_session_id: session.id, url: session.url, title: session.title, page_revision: session.revision, text, controls, text_truncated: session.text.length > text.length, controls_truncated: session.controlTruncated }); }
   async refreshControlSession(call, args) { const session = this.sessions.get(args.browser_session_id); if (!session || session.closed || session.revision !== args.page_revision) throw new ProviderToolError('browser_session_stale'); const page = await withTimeout(() => (session.cdp.inspectPage ?? session.cdp.inspect).call(session.cdp, call.signal), call.signal, this.requestTimeoutMs); await this.actionDestination(page.url, session, call.signal); this.updatePage(session, page); if (session.revision !== args.page_revision) throw new ProviderToolError('browser_session_stale'); const control = session.controls.get(args.control_id); if (!control || unsafeControl(control) || this.safeActions && call.name === 'browser.fill_field' && !actionField(control) || this.safeActions && call.name === 'browser.activate_control' && (control.kind !== 'control' || control.tag !== 'button' || control.type !== 'button' || control.form_action || control.href || control.disabled)) throw new ProviderToolError('browser_control_changed'); return { session, control }; }
-  async fillField(call, args) { try { const { session, control } = await this.refreshControlSession(call, args); if (control.kind !== 'field' || ['password', 'file', 'hidden'].includes(control.type) || control.disabled || control.readonly) throw new ProviderToolError('browser_control_changed'); const destination = await this.actionDestination(control.form_action || control.href || session.url, session, call.signal); await withTimeout(() => session.cdp.fillControl(control.index, args.value, call.signal, control), call.signal, this.requestTimeoutMs); const page = await withTimeout(() => (session.cdp.inspectPage ?? session.cdp.inspect).call(session.cdp, call.signal), call.signal, this.requestTimeoutMs); const finalDestination = await this.actionDestination(page.url, session, call.signal); this.updatePage(session, page); return result(call, 'ok', { provider: 'browser_actions', state: 'ready', browser_session_id: session.id, control_id: control.id, page_revision: session.revision, destination: this.safeActions ? finalDestination.href : destination.href, ...(this.safeActions ? { egress_destination: destination.href } : {}) }); } catch (error) { return failureResult(call, error); } }
-  async activateControl(call, args) { try { const { session, control } = await this.refreshControlSession(call, args); if (control.kind !== 'control' || control.tag !== 'button' || control.type !== 'button' || control.form_action || control.href || control.disabled) throw new ProviderToolError('browser_control_changed'); const destination = await this.actionDestination(session.url, session, call.signal); await withTimeout(() => session.cdp.activateControl(control.index, call.signal, control), call.signal, this.requestTimeoutMs); const page = await withTimeout(() => (session.cdp.inspectPage ?? session.cdp.inspect).call(session.cdp, call.signal), call.signal, this.requestTimeoutMs); const finalDestination = await this.actionDestination(page.url, session, call.signal); this.updatePage(session, page); return result(call, 'ok', { provider: 'browser_actions', state: 'ready', browser_session_id: session.id, control_id: control.id, page_revision: session.revision, destination: finalDestination.href, egress_destination: destination.href }); } catch (error) { return failureResult(call, error); } }
+  async fillField(call, args) { try { const { session, control } = await this.refreshControlSession(call, args); if (control.kind !== 'field' || ['password', 'file', 'hidden'].includes(control.type) || control.disabled || control.readonly) throw new ProviderToolError('browser_control_changed'); const destination = await this.actionDestination(control.form_action || control.href || session.url, session, call.signal); const mutationProof = await withTimeout(() => session.cdp.fillControl(control.index, args.value, call.signal, control), call.signal, this.requestTimeoutMs); if (!mutationProof || mutationProof.matched !== true || mutationProof.value !== args.value) throw new ProviderToolError('provider_action_reconciling'); const page = await withTimeout(() => (session.cdp.inspectPage ?? session.cdp.inspect).call(session.cdp, call.signal), call.signal, this.requestTimeoutMs); const finalDestination = await this.actionDestination(page.url, session, call.signal); this.updatePage(session, page); const matches = exactControls(session, control); if (matches.length !== 1 || matches[0].value !== args.value) throw new ProviderToolError('provider_action_reconciling'); return result(call, 'ok', { provider: 'browser_actions', state: 'ready', browser_session_id: session.id, control_id: control.id, page_revision: session.revision, destination: this.safeActions ? finalDestination.href : destination.href, ...(this.safeActions ? { egress_destination: destination.href } : {}) }); } catch (error) { return failureResult(call, error); } }
+  async activateControl(call, args, { semanticKey, proposalBinding } = {}) {
+    try {
+      if (!/^[a-f0-9]{64}$/u.test(semanticKey ?? '')) throw new ProviderToolError('provider_permission_insufficient');
+      const prior = this.#activationAttempts.get(semanticKey);
+      if (prior) return await this.reconcileActivation(call, prior);
+      const { session, control } = await this.refreshControlSession(call, args);
+      if (control.kind !== 'control' || control.tag !== 'button' || control.type !== 'button' || control.form_action || control.href || control.disabled) throw new ProviderToolError('browser_control_changed');
+      const destination = await this.actionDestination(session.url, session, call.signal);
+      const exactBinding = { session_id: session.id, page_revision: session.revision, control_digest: control.digest, control_label: control.label, origin: new URL(session.url).origin, destination: destination.href, semantic_key: activationSemanticKey(session, control), activation_semantic_key: activationSemanticKey(session, control) };
+      if (digest(exactBinding) !== digest(proposalBinding)) throw new ProviderToolError('provider_permission_insufficient', 'browser activation changed after preview');
+      if (this.#activationAttempts.size >= MAX_ACTIVATION_ATTEMPTS) throw new ProviderToolError('provider_action_reconciling', 'browser activation attempt limit reached');
+      const attempt = { state: 'dispatched', session_id: session.id, pre_revision: args.page_revision, control_id: control.id, control_label: control.label, destination: destination.href, proposal_binding: structuredClone(exactBinding), postcondition: null, payload: null };
+      // This monotonic tombstone is installed immediately before the CDP
+      // mutation. It is never evicted while the owned session remains alive.
+      this.#activationAttempts.set(semanticKey, attempt);
+      this.rememberMutation(semanticKey, attempt);
+      await withTimeout(() => session.cdp.activateControl(control.index, call.signal, control), call.signal, this.requestTimeoutMs);
+      attempt.state = 'acknowledged';
+      const page = await withTimeout(() => (session.cdp.inspectPage ?? session.cdp.inspect).call(session.cdp, call.signal), call.signal, this.requestTimeoutMs);
+      const finalDestination = await this.actionDestination(page.url, session, call.signal);
+      this.updatePage(session, page);
+      const payload = { provider: 'browser_actions', state: 'ready', browser_session_id: session.id, control_id: control.id, page_revision: session.revision, destination: finalDestination.href, egress_destination: destination.href };
+      attempt.postcondition = Object.freeze({ browser_session_id: session.id, page_revision: session.revision, url: session.url });
+      attempt.payload = Object.freeze(structuredClone(payload));
+      attempt.state = 'verified';
+      return result(call, 'ok', payload);
+    } catch (error) { return failureResult(call, error); }
+  }
+  async reconcileActivation(call, attempt) {
+    if (!attempt?.postcondition || !attempt.payload || !['verified', 'reconciled'].includes(attempt.state)) return failureResult(call, new ProviderToolError('provider_action_reconciling'));
+    const session = this.sessions.get(attempt.session_id);
+    if (!session || session.closed) return failureResult(call, new ProviderToolError('browser_session_stale'));
+    try {
+      const page = await withTimeout(() => (session.cdp.inspectPage ?? session.cdp.inspect).call(session.cdp, call.signal), call.signal, this.requestTimeoutMs);
+      const current = await this.actionDestination(page.url, session, call.signal);
+      this.updatePage(session, page);
+      if (session.id !== attempt.postcondition.browser_session_id || session.revision !== attempt.postcondition.page_revision || current.href !== attempt.postcondition.url || session.url !== attempt.postcondition.url) return failureResult(call, new ProviderToolError('provider_action_reconciling'));
+      attempt.state = 'reconciled';
+      return result(call, 'ok', structuredClone(attempt.payload));
+    } catch { return failureResult(call, new ProviderToolError('provider_action_reconciling')); }
+  }
   async followLink(call, args) { const session = this.sessions.get(args.browser_session_id); if (!session || session.closed) return failureResult(call, new ProviderToolError('browser_session_stale')); if (session.revision !== args.page_revision) return failureResult(call, new ProviderToolError('browser_session_stale')); const link = session.links.get(args.link_id); if (!link) return failureResult(call, new ProviderToolError('browser_link_changed')); const destination = await this.destination(link.url, call.signal); try { await withTimeout(() => session.cdp.navigate(destination, call.signal), call.signal, this.requestTimeoutMs); const page = await withTimeout(() => session.cdp.inspect(call.signal), call.signal, this.requestTimeoutMs); await this.destination(page.url, call.signal); this.updatePage(session, page); return result(call, 'ok', { provider: 'browser_actions', state: 'ready', browser_session_id: session.id, url: session.url, title: session.title, page_revision: session.revision, followed_link_id: link.id }); } catch (error) { if (error?.code === 'provider_destination_rejected') return failureResult(call, error); throw error; } }
   async closeSession(call, args) { const session = this.sessions.get(args.browser_session_id); if (!session || session.closed) return failureResult(call, new ProviderToolError('browser_session_stale')); await this.closeStored(session); this.sessions.delete(session.id); return result(call, 'ok', { provider: 'browser_actions', state: 'closed', browser_session_id: session.id, closed: true }); }
   async closeStored(session) { if (!session) return; session.closed = true; await this.cleanupStored(session); }
-  async cleanupStored(session) { if (!session.cleanupPromise) session.cleanupPromise = (async () => { try { await session.cdp?.close?.(); } catch { /* continue cleanup */ } try { await killChild(session.child, this.killProcess, this.platform); } catch { /* continue cleanup */ } try { await withTimeout(() => session.proxy?.close?.(), undefined, CLEANUP_TIMEOUT_MS); } catch { /* continue cleanup */ } try { await this.removeDirectory(session.directory); } catch { /* continue cleanup */ } })(); await session.cleanupPromise; }
+  async cleanupStored(session) { if (!session.cleanupPromise) session.cleanupPromise = (async () => { try { await session.cdp?.close?.(); } catch { /* continue cleanup */ } try { await killChild(session.child, this.killProcess, this.platform); } catch { /* continue cleanup */ } try { await withTimeout(() => session.proxy?.close?.(), undefined, CLEANUP_TIMEOUT_MS); } catch { /* continue cleanup */ } try { await this.removeDirectory(session.directory); } catch { /* continue cleanup */ } finally { const removed = new Set(); for (const [key, attempt] of this.#activationAttempts) if (attempt.session_id === session.id) { this.#activationAttempts.delete(key); this.#mutationAttempts.delete(key); removed.add(key); } for (const [key, attempt] of this.#mutationAttempts) if (attempt.session_id === session.id) this.#mutationAttempts.delete(key); for (const [key, semanticKey] of this.#activationAliases) if (removed.has(semanticKey)) this.#activationAliases.delete(key); } })(); await session.cleanupPromise; }
   async removeDirectory(directory) { if (!ownTempDir(directory)) return; try { await this.rm(directory, { recursive: true, force: true }); } catch { /* cleanup remains best effort and never broadens the target */ } }
   async shutdown() { await Promise.all([...this.sessions.values()].map(session => this.closeStored(session))); this.sessions.clear(); }
 }
 
-export function createBrowserActionTools(options = {}) { const provider = options instanceof BrowserActionProvider ? options : new BrowserActionProvider(options); return Object.fromEntries(Object.entries(definitions).filter(([name]) => (provider.experimentalMutations || provider.safeActions) || !['browser.fill_field', 'browser.activate_control'].includes(name)).map(([name, definition]) => [name, { ...definition, confirmationRequired: () => definition.requires_confirmation, authorize: call => provider.authorize({ ...call, name }), preview: call => provider.preview({ ...call, name }), execute: call => provider.execute({ ...call, name }) }])); }
+export function createBrowserActionTools(options = {}) { const provider = options instanceof BrowserActionProvider ? options : new BrowserActionProvider(options); return Object.fromEntries(Object.entries(definitions).filter(([name]) => (provider.experimentalMutations || provider.safeActions) || !['browser.fill_field', 'browser.activate_control'].includes(name)).map(([name, definition]) => { const tool = { ...definition, confirmationRequired: () => definition.requires_confirmation, authorize: call => provider.authorize({ ...call, name }), preview: call => provider.preview({ ...call, name }), execute: call => provider.execute({ ...call, name }) }; return [name, tool]; })); }
 
 export { browserSchemas, definitions as browserActionDefinitions, publicAddress, publicUrl, hostIsPrivate };
