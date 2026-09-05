@@ -3,7 +3,7 @@ import { makeEvent } from './assistant-events.mjs';
 import { makeToolResult, parseToolCall, validateToolResult, EnvelopeError } from './tool-envelope.mjs';
 import { createActionBinding } from './action-journal.mjs';
 import { readGraphAttestation, transferGraphAttestation } from '../providers/microsoft-graph.mjs';
-import { projectBrowserResult, readBrowserAttestation, transferBrowserAttestation } from '../providers/browser-actions.mjs';
+import { browserSafeCompletionDigest, projectBrowserResult, readBrowserAttestation, transferBrowserAttestation } from '../providers/browser-actions.mjs';
 import { timeNowDefinition, timeNowTool } from '../tools/time-now.mjs';
 
 export const STATES = Object.freeze(['IDLE', 'BUILDING_PROMPT', 'INFERENCING', 'TOOL_PROPOSED', 'WAITING_CONFIRMATION', 'TOOL_RUNNING', 'CONTINUING_MODEL', 'COMPLETED', 'CANCELLED', 'FAILED']);
@@ -29,7 +29,8 @@ const providerAttestationMatches = (result, expectedBinding, call) => {
   let payload = null; try { payload = JSON.parse(result?.content?.[0]?.text ?? ''); } catch {}
   const safeProofs = browser ? BROWSER_PROOFS : SAFE_RECONCILIATIONS;
   const providerPayloadValid = browser || payload?.provider_completion === 'verified' && payload?.state === 'completed' && payload?.completed === true;
-  return result?.status === 'ok' && payload && typeof payload === 'object' && providerPayloadValid && payload.reconciliation === attestation?.proof && attestation?.provider === (browser ? 'browser_actions' : 'microsoft_graph') && attestation.call_id === call.id && attestation.tool_name === call.name && attestation.operation_id === expectedBinding.id && attestation.operation_digest === expectedBinding.operationDigest && attestation.arguments_digest === expectedBinding.argumentsDigest && attestation.preview_digest === expectedBinding.previewDigest && safeProofs.has(attestation.proof);
+  const safePayloadBound = !browser || attestation?.safe_payload_digest === browserSafeCompletionDigest(result);
+  return result?.status === 'ok' && payload && typeof payload === 'object' && providerPayloadValid && payload.reconciliation === attestation?.proof && attestation?.provider === (browser ? 'browser_actions' : 'microsoft_graph') && attestation.call_id === call.id && attestation.tool_name === call.name && attestation.operation_id === expectedBinding.id && attestation.operation_digest === expectedBinding.operationDigest && attestation.arguments_digest === expectedBinding.argumentsDigest && attestation.preview_digest === expectedBinding.previewDigest && safeProofs.has(attestation.proof) && safePayloadBound;
 };
 function stripPrivateJournalMetadata(value) {
   if (Array.isArray(value)) return value.map(stripPrivateJournalMetadata);
