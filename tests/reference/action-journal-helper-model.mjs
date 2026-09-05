@@ -26,6 +26,16 @@ const IDENTITY_FIELDS = Object.freeze([
   'creation_time', 'image_file_id', 'image_path', 'image_volume_serial',
   'pid', 'session_id', 'user_sid',
 ]);
+const ISSUER_FIELDS = Object.freeze([
+  'creation_time', 'image_file_id', 'image_volume_serial', 'parent_pid',
+  'pipe_server_pid', 'session_id', 'trust_anchor_digest', 'user_sid',
+]);
+const AUTHORIZATION_KINDS = new Set(['policy', 'user_confirmation', 'operator_grant']);
+const RESOLUTIONS = new Set([
+  'provider_acknowledged', 'completed', 'manual_completed', 'user_denied',
+  'request_cancelled', 'pre_dispatch_failure', 'manual_failed_definitive',
+  'dispatch_ambiguous', 'startup_recovery',
+]);
 
 export class ActionJournalHelperModelError extends Error {
   constructor(code) { super(code); this.name = 'ActionJournalHelperModelError'; this.code = code; }
@@ -52,6 +62,28 @@ function exactIdentity(value) {
 }
 function sameIdentity(left, right) {
   return IDENTITY_FIELDS.every(field => left[field] === right[field]);
+}
+function exactIssuer(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) fail('bootstrap_issuer_untrusted');
+  if (Object.keys(value).sort().join('\0') !== ISSUER_FIELDS.join('\0')) fail('bootstrap_issuer_untrusted');
+  for (const field of ['parent_pid', 'pipe_server_pid', 'session_id'])
+    if (!Number.isSafeInteger(value[field]) || value[field] < 1 || value[field] > 0xffffffff) fail('bootstrap_issuer_untrusted');
+  if (value.parent_pid !== value.pipe_server_pid) fail('bootstrap_issuer_untrusted');
+  if (typeof value.creation_time !== 'string' || !/^[0-9]{1,20}$/u.test(value.creation_time)) fail('bootstrap_issuer_untrusted');
+  if (typeof value.user_sid !== 'string' || !/^S-1-[0-9-]{3,180}$/u.test(value.user_sid)) fail('bootstrap_issuer_untrusted');
+  for (const field of ['image_file_id', 'trust_anchor_digest'])
+    if (typeof value[field] !== 'string' || !DIGEST.test(value[field])) fail('bootstrap_issuer_untrusted');
+  if (typeof value.image_volume_serial !== 'string' || !/^[a-f0-9]{16}$/u.test(value.image_volume_serial)) fail('bootstrap_issuer_untrusted');
+  return Object.freeze(clone(value));
+}
+function sameIssuer(left, right) {
+  return ISSUER_FIELDS.every(field => left[field] === right[field]);
+}
+
+export function validatePersistedAuthority(event) {
+  if (event === null || typeof event !== 'object' || Array.isArray(event)) return false;
+  return (event.authorization_kind === null || AUTHORIZATION_KINDS.has(event.authorization_kind))
+    && (event.resolution === null || RESOLUTIONS.has(event.resolution));
 }
 function keyBytes(value) {
   if (!(value instanceof Uint8Array) || value.byteLength !== 32) fail('bootstrap_invalid');
@@ -103,12 +135,13 @@ function eventFor(operationId, previous, action, body, state, authorization, res
  * device reference models and is never imported by production code.
  */
 export class ActionJournalHelperReference {
-  constructor({ device, key, nonce, expectedClient, now = () => Date.now() } = {}) {
+  constructor({ device, key, nonce, expectedClient, expectedIssuer, now = () => Date.now() } = {}) {
     if (!(device instanceof InMemoryJournalBlockDevice) || typeof now !== 'function') fail('bootstrap_invalid');
     this.device = device;
     this.key = keyBytes(key);
     this.nonce = nonceValue(nonce);
     this.expectedClient = exactIdentity(expectedClient);
+    this.expectedIssuer = exactIssuer(expectedIssuer);
     this.now = now;
     this.store = null;
     this.client = null;
@@ -119,12 +152,24 @@ export class ActionJournalHelperReference {
     this.recoveryCount = 0;
   }
 
-  async start({ onBoundary } = {}) {
+  async start({ issuer, signal, deadlineAtMs = this.now() + 15000, onBoundary, onStorageIo } = {}) {
     if (this.closed || this.store !== null) fail('bootstrap_invalid');
+    const observedIssuer = exactIssuer(issuer);
+    if (!sameIssuer(observedIssuer, this.expectedIssuer)) fail('bootstrap_issuer_untrusted');
+    const probe = async phase => {
+      if (signal?.aborted) fail('io_cancel_failed');
+      if (!Number.isSafeInteger(deadlineAtMs) || this.now() >= deadlineAtMs) fail('io_timeout');
+      if (onStorageIo) await onStorageIo(phase);
+      if (signal?.aborted) fail('io_cancel_failed');
+      if (this.now() >= deadlineAtMs) fail('io_timeout');
+    };
+    await probe('before_startup_scan');
     this.store = ActionJournalContainerReference.open(this.device);
     const initial = this.store.summary();
     for (const summary of initial.records) {
+      await probe('during_startup_scan');
       const detail = this.store.detail(summary.operation_id);
+      if (!detail.events.every(validatePersistedAuthority)) fail('container_corrupt_bank');
       const previous = detail.events.at(-1);
       const recovery = startupRecovery(previous.state);
       if (recovery.state === previous.state) continue;
@@ -138,7 +183,11 @@ export class ActionJournalHelperReference {
         recovery.resolution,
       );
       this.commitInProgress = true;
-      try { await this.store.append(summary.operation_id, event, { onBoundary }); }
+      try {
+        await probe('before_startup_recovery_append');
+        await this.store.append(summary.operation_id, event, { onBoundary });
+        await probe('after_startup_recovery_append');
+      }
       finally { this.commitInProgress = false; }
       this.recoveryCount++;
     }
@@ -292,10 +341,12 @@ export class ActionJournalHelperReference {
 }
 
 export const ACTION_JOURNAL_HELPER_LIMITS = Object.freeze({
+  authenticated_supervisor_issuer_available: false,
   max_frame_bytes: ACTION_JOURNAL_LIMITS.max_frame_bytes,
   max_buffered_frames: ACTION_JOURNAL_LIMITS.max_buffered_frames,
   max_session_frames: ACTION_JOURNAL_LIMITS.max_session_frames,
   max_pending_requests: ACTION_JOURNAL_LIMITS.max_buffered_frames,
   bootstrap_bytes: 65536,
   io_deadline_ms: 15000,
+  storage_cancel_grace_ms: 2000,
 });

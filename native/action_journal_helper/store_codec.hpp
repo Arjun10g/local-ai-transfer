@@ -52,6 +52,8 @@ enum class StoreStatus : std::uint8_t {
   kReadbackFailed,
   kHashFailed,
   kCancelled,
+  kIoTimeout,
+  kIoCancelFailed,
   kCommitNonCancellable,
   kInternal,
 };
@@ -82,6 +84,33 @@ struct CancellationProbe {
   bool cancelled() const noexcept { return check != nullptr && check(context); }
 };
 
+// `hard_deadline_tick_ms` is a monotonic GetTickCount64 deadline for every
+// storage read, write, flush, and full-bank scan.  Request cancellation is
+// honored before commit; the hard I/O deadline remains binding inside the
+// noncancellable commit section so a stalled filesystem poisons the helper
+// instead of pinning its foreground process indefinitely.
+struct StorageIoControl {
+  CancellationProbe cancellation{};
+  std::uint64_t hard_deadline_tick_ms = 0;
+  bool honor_request_cancellation = true;
+
+  bool deadline_expired() const noexcept {
+    return hard_deadline_tick_ms == 0 ||
+        GetTickCount64() >= hard_deadline_tick_ms;
+  }
+  bool cancellation_requested() const noexcept {
+    return honor_request_cancellation && cancellation.cancelled();
+  }
+  bool stop_requested() const noexcept {
+    return deadline_expired() || cancellation_requested();
+  }
+  StorageIoControl commit_control() const noexcept {
+    StorageIoControl result = *this;
+    result.honor_request_cancellation = false;
+    return result;
+  }
+};
+
 class FixedContainerStore final {
  public:
   FixedContainerStore(action_journal_storage::JournalStorageLease&& lease,
@@ -90,23 +119,26 @@ class FixedContainerStore final {
   FixedContainerStore(const FixedContainerStore&) = delete;
   FixedContainerStore& operator=(const FixedContainerStore&) = delete;
 
-  StoreStatus load_and_recover(std::uint32_t& recovery_count);
+  StoreStatus load_and_recover(StorageIoControl io,
+                               std::uint32_t& recovery_count);
   StoreStatus apply(const DecodedRequest& request,
-                    CancellationProbe cancellation,
+                    StorageIoControl io,
                     EncodedResult& result) noexcept;
 
  private:
-  StoreStatus reload();
+  StoreStatus reload(StorageIoControl io);
   StoreStatus append(const std::string& operation_id,
                      const JournalEvent& event,
-                     CancellationProbe cancellation,
+                     StorageIoControl io,
                      bool& committed);
   StoreStatus mutation(const DecodedRequest& request,
-                       CancellationProbe cancellation,
+                       StorageIoControl io,
                        EncodedResult& result);
   StoreStatus summary(const DecodedRequest& request,
+                      StorageIoControl io,
                       EncodedResult& result);
   StoreStatus detail(const DecodedRequest& request,
+                     StorageIoControl io,
                      EncodedResult& result);
 
   action_journal_storage::JournalStorageLease lease_;

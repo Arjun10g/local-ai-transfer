@@ -18,6 +18,7 @@ import {
 import {
   ACTION_JOURNAL_HELPER_PRODUCTION_AVAILABLE,
   ActionJournalHelperReference,
+  validatePersistedAuthority,
 } from '../reference/action-journal-helper-model.mjs';
 
 const KEY = Buffer.from('000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f', 'hex');
@@ -37,6 +38,16 @@ const CLIENT = Object.freeze({
   image_volume_serial: '0123456789abcdef',
   pid: 4242,
   session_id: 7,
+  user_sid: 'S-1-5-21-1000',
+});
+const ISSUER = Object.freeze({
+  creation_time: '133713371300',
+  image_file_id: '1'.repeat(64),
+  image_volume_serial: '1122334455667788',
+  parent_pid: 4000,
+  pipe_server_pid: 4000,
+  session_id: 7,
+  trust_anchor_digest: '2'.repeat(64),
   user_sid: 'S-1-5-21-1000',
 });
 
@@ -66,8 +77,8 @@ async function formattedDevice() {
 
 async function helperFor(device, options = {}) {
   const selectedDevice = device ?? await formattedDevice();
-  const helper = new ActionJournalHelperReference({ device: selectedDevice, key: options.key ?? KEY, nonce: options.nonce ?? NONCE, expectedClient: CLIENT, now: () => NOW });
-  await helper.start(options.start ?? {});
+  const helper = new ActionJournalHelperReference({ device: selectedDevice, key: options.key ?? KEY, nonce: options.nonce ?? NONCE, expectedClient: CLIENT, expectedIssuer: ISSUER, now: options.now ?? (() => NOW) });
+  await helper.start({ issuer: ISSUER, ...(options.start ?? {}) });
   helper.connect(CLIENT);
   return helper;
 }
@@ -103,10 +114,104 @@ test('helper slice is explicitly inert and machine contract has no activation pa
 
 test('helper refuses any client PID SID session creation-time path or image identity mismatch', async () => {
   for (const [field, value] of Object.entries({ pid: 4243, user_sid: 'S-1-5-21-1001', session_id: 8, creation_time: '1', image_path: 'C:\\Other\\node.exe', image_volume_serial: 'f'.repeat(16), image_file_id: 'f'.repeat(32) })) {
-    const helper = new ActionJournalHelperReference({ device: await formattedDevice(), key: KEY, nonce: NONCE, expectedClient: CLIENT, now: () => NOW });
-    await helper.start();
+    const helper = new ActionJournalHelperReference({ device: await formattedDevice(), key: KEY, nonce: NONCE, expectedClient: CLIENT, expectedIssuer: ISSUER, now: () => NOW });
+    await helper.start({ issuer: ISSUER });
     assert.throws(() => helper.connect({ ...CLIENT, [field]: value }), error => error.code === 'client_identity_mismatch');
   }
+});
+
+test('bootstrap issuer is OS-derived and exact; forged parent, pipe server, or trust anchor is refused', async () => {
+  for (const [field, value] of Object.entries({ parent_pid: 4001, pipe_server_pid: 4001, trust_anchor_digest: 'f'.repeat(64), image_file_id: 'e'.repeat(64), user_sid: 'S-1-5-21-1001' })) {
+    const helper = new ActionJournalHelperReference({
+      device: await formattedDevice(), key: KEY, nonce: NONCE,
+      expectedClient: CLIENT, expectedIssuer: ISSUER, now: () => NOW,
+    });
+    await assert.rejects(
+      helper.start({ issuer: { ...ISSUER, [field]: value } }),
+      error => error.code === 'bootstrap_issuer_untrusted',
+    );
+    assert.equal(helper.store, null);
+  }
+  const helper = new ActionJournalHelperReference({
+    device: await formattedDevice(), key: KEY, nonce: NONCE,
+    expectedClient: CLIENT, expectedIssuer: ISSUER, now: () => NOW,
+  });
+  await assert.rejects(
+    helper.start({ issuer: { ...ISSUER, pipe_server_pid: ISSUER.parent_pid + 1 } }),
+    error => error.code === 'bootstrap_issuer_untrusted',
+  );
+});
+
+test('startup scan has an exact deadline and cancellation probe before recovery access', async () => {
+  let now = NOW;
+  const device = await formattedDevice();
+  const create = () => new ActionJournalHelperReference({
+    device, key: KEY, nonce: NONCE, expectedClient: CLIENT,
+    expectedIssuer: ISSUER, now: () => now,
+  });
+  const timed = create();
+  await assert.rejects(timed.start({
+    issuer: ISSUER,
+    deadlineAtMs: NOW + 1,
+    onStorageIo() { now = NOW + 1; },
+  }), error => error.code === 'io_timeout');
+  assert.equal(timed.store, null);
+  now = NOW;
+  const cancelled = create();
+  const controller = new AbortController();
+  await assert.rejects(cancelled.start({
+    issuer: ISSUER,
+    signal: controller.signal,
+    onStorageIo() { controller.abort(); },
+  }), error => error.code === 'io_cancel_failed');
+  assert.equal(cancelled.store, null);
+});
+
+test('startup recovery rechecks its shared deadline before each durable append', async () => {
+  const device = await formattedDevice();
+  let helper = await helperFor(device); let client = new ClientSession(helper);
+  await client.exchange(client.request('prepare'));
+  helper.close();
+  let now = NOW;
+  helper = new ActionJournalHelperReference({
+    device, key: NEXT_KEY, nonce: NEXT_NONCE, expectedClient: CLIENT,
+    expectedIssuer: ISSUER, now: () => now,
+  });
+  await assert.rejects(helper.start({
+    issuer: ISSUER,
+    deadlineAtMs: NOW + 1,
+    onStorageIo(phase) {
+      if (phase === 'before_startup_recovery_append') now = NOW + 1;
+    },
+  }), error => error.code === 'io_timeout');
+  assert.equal(helper.recoveryCount, 0);
+});
+
+test('persisted authorization and resolution values are finite and unknown authority is rejected', () => {
+  const base = { authorization_kind: null, resolution: null };
+  assert.equal(validatePersistedAuthority(base), true);
+  assert.equal(validatePersistedAuthority({ ...base, authorization_kind: 'user_confirmation' }), true);
+  assert.equal(validatePersistedAuthority({ ...base, resolution: 'dispatch_ambiguous' }), true);
+  for (const event of [
+    { ...base, authorization_kind: '' },
+    { ...base, authorization_kind: 'forged_admin' },
+    { ...base, resolution: '' },
+    { ...base, resolution: 'provider_said_ok' },
+    { ...base, authorization_kind: 1 },
+  ]) assert.equal(validatePersistedAuthority(event), false);
+});
+
+test('request at the exact deadline is rejected before mutation', async () => {
+  const helper = await helperFor(); const client = new ClientSession(helper);
+  const request = client.request('prepare', null, {}, {
+    issuedAtMs: NOW - 1,
+    deadlineAtMs: NOW,
+  });
+  await assert.rejects(
+    helper.receive(encodeEnvelope(request, KEY)),
+    error => error.code === 'deadline_expired',
+  );
+  assert.equal(helper.store.summary().total, 0);
 });
 
 test('one client only and close zeroes session material and refuses reconnect', async () => {
@@ -166,8 +271,8 @@ test('startup recovery never guesses an external effect', async () => {
   await client.exchange(client.request('authorize', operation));
   await client.exchange(client.request('dispatch', operation), { dropResponse: true });
   helper.close();
-  helper = new ActionJournalHelperReference({ device, key: NEXT_KEY, nonce: NEXT_NONCE, expectedClient: CLIENT, now: () => NOW });
-  const status = await helper.start(); helper.connect(CLIENT); client = new ClientSession(helper, NEXT_KEY, NEXT_NONCE);
+  helper = new ActionJournalHelperReference({ device, key: NEXT_KEY, nonce: NEXT_NONCE, expectedClient: CLIENT, expectedIssuer: ISSUER, now: () => NOW });
+  const status = await helper.start({ issuer: ISSUER }); helper.connect(CLIENT); client = new ClientSession(helper, NEXT_KEY, NEXT_NONCE);
   assert.equal(status.recovery_count, 1);
   const detail = await client.exchange(client.request('detail', operation));
   assert.equal(detail.body.receipt.state, 'unknown_manual');
@@ -180,8 +285,8 @@ test('prepared and authorized startup recovery cancel without dispatch', async (
     const device = await formattedDevice(); let helper = await helperFor(device); let client = new ClientSession(helper);
     const prepared = await client.exchange(client.request('prepare')); const operation = prepared.operation_id;
     if (authorize) await client.exchange(client.request('authorize', operation));
-    helper.close(); helper = new ActionJournalHelperReference({ device, key: NEXT_KEY, nonce: NEXT_NONCE, expectedClient: CLIENT, now: () => NOW });
-    await helper.start(); helper.connect(CLIENT); client = new ClientSession(helper, NEXT_KEY, NEXT_NONCE);
+    helper.close(); helper = new ActionJournalHelperReference({ device, key: NEXT_KEY, nonce: NEXT_NONCE, expectedClient: CLIENT, expectedIssuer: ISSUER, now: () => NOW });
+    await helper.start({ issuer: ISSUER }); helper.connect(CLIENT); client = new ClientSession(helper, NEXT_KEY, NEXT_NONCE);
     const detail = await client.exchange(client.request('detail', operation));
     assert.equal(detail.body.receipt.state, 'cancelled'); assert.equal(detail.body.receipt.resolution, 'startup_recovery');
   }

@@ -532,7 +532,7 @@ CodecStatus ProtocolSession::decode_request(
     const auto issued = value["issued_at_ms"].get<std::uint64_t>();
     const auto deadline = value["deadline_at_ms"].get<std::uint64_t>();
     if (issued > now_ms + kMaximumFutureSkewMs) return CodecStatus::kInvalidRequest;
-    if (deadline < now_ms) return CodecStatus::kDeadlineExpired;
+    if (deadline <= now_ms) return CodecStatus::kDeadlineExpired;
     request_ids_.insert(request_id);
     ++inbound_sequence_;
     request = {request_id,

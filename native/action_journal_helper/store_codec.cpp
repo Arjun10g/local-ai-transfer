@@ -3,11 +3,16 @@
 #include <bcrypt.h>
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <new>
 #include <set>
 #include <string_view>
+#include <thread>
 #include <utility>
 
 namespace lae::action_journal_helper {
@@ -22,6 +27,7 @@ constexpr std::uint32_t kMarkerDigestOffset = 112;
 constexpr std::uint32_t kMarkerReservedOffset = 144;
 constexpr std::uint32_t kDescriptorReservedOffset = 144;
 constexpr std::uint32_t kEventDataOffset = 36;
+constexpr DWORD kStorageCancellationGraceMs = 2'000;
 constexpr char kContainerDomain[] = "lae.action-journal.container.v0.1.0";
 constexpr char kProtocolDomain[] = "lae.action-journal.v0.1.0";
 constexpr char kHelperDomain[] = "lae.action-journal.helper.v0.1.0";
@@ -103,34 +109,166 @@ bool seek(HANDLE file, std::uint64_t offset) noexcept {
   return SetFilePointerEx(file, value, nullptr, FILE_BEGIN) != FALSE;
 }
 
-bool read_exact(HANDLE file, std::uint64_t offset, std::uint8_t* output,
-                std::size_t count) noexcept {
-  if (!seek(file, offset)) return false;
-  std::size_t completed = 0;
-  while (completed < count) {
-    const DWORD requested = static_cast<DWORD>(std::min<std::size_t>(
-        count - completed, 65'536));
-    DWORD observed = 0;
-    if (!ReadFile(file, output + completed, requested, &observed, nullptr) ||
-        observed != requested) return false;
-    completed += observed;
+enum class BoundedIoStatus : std::uint8_t {
+  kOk,
+  kFailed,
+  kCancelled,
+  kTimeout,
+  kCancellationUnproven,
+};
+
+enum class SyncIoKind : std::uint8_t { kRead, kWrite, kFlush };
+
+// The merged storage lease deliberately owns a synchronous, write-through
+// handle.  Therefore this slice cannot pretend CancelIoEx makes its I/O
+// bounded.  Each operation runs on one dedicated thread so
+// CancelSynchronousIo can target that exact thread.  All buffers and a
+// duplicated file handle are heap-owned by the operation: if cancellation
+// cannot be proved within the finite grace period, the store is poisoned, the
+// worker is detached safely, and the foreground helper immediately exits.
+struct SyncIoState final {
+  ~SyncIoState() {
+    if (file != nullptr && file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    if (!bytes.empty()) SecureZeroMemory(bytes.data(), bytes.size());
   }
-  return true;
+  HANDLE file = INVALID_HANDLE_VALUE;
+  SyncIoKind kind = SyncIoKind::kRead;
+  std::uint64_t offset = 0;
+  std::vector<std::uint8_t> bytes;
+  std::mutex mutex;
+  std::condition_variable changed;
+  bool complete = false;
+  bool ok = false;
+};
+
+void run_sync_io(const std::shared_ptr<SyncIoState>& state) noexcept {
+  bool ok = false;
+  if (state->kind == SyncIoKind::kFlush) {
+    ok = FlushFileBuffers(state->file) != FALSE;
+  } else if (seek(state->file, state->offset)) {
+    std::size_t completed = 0;
+    ok = true;
+    while (completed < state->bytes.size()) {
+      const DWORD requested = static_cast<DWORD>(std::min<std::size_t>(
+          state->bytes.size() - completed, 65'536));
+      DWORD observed = 0;
+      const BOOL result = state->kind == SyncIoKind::kWrite
+          ? WriteFile(state->file, state->bytes.data() + completed, requested,
+                      &observed, nullptr)
+          : ReadFile(state->file, state->bytes.data() + completed, requested,
+                     &observed, nullptr);
+      if (!result || observed != requested) {
+        ok = false;
+        break;
+      }
+      completed += observed;
+    }
+  }
+  {
+    const std::lock_guard<std::mutex> lock(state->mutex);
+    state->ok = ok;
+    state->complete = true;
+  }
+  state->changed.notify_all();
 }
 
-bool write_exact(HANDLE file, std::uint64_t offset, const std::uint8_t* input,
-                 std::size_t count) noexcept {
-  if (!seek(file, offset)) return false;
-  std::size_t completed = 0;
-  while (completed < count) {
-    const DWORD requested = static_cast<DWORD>(std::min<std::size_t>(
-        count - completed, 65'536));
-    DWORD observed = 0;
-    if (!WriteFile(file, input + completed, requested, &observed, nullptr) ||
-        observed != requested) return false;
-    completed += observed;
+BoundedIoStatus bounded_sync_io(HANDLE file, SyncIoKind kind,
+                                std::uint64_t offset,
+                                std::uint8_t* bytes, std::size_t count,
+                                StorageIoControl control) {
+  const bool request_cancelled = control.cancellation_requested();
+  if (request_cancelled) return BoundedIoStatus::kCancelled;
+  if (control.deadline_expired()) return BoundedIoStatus::kTimeout;
+  if (file == nullptr || file == INVALID_HANDLE_VALUE ||
+      (kind != SyncIoKind::kFlush && (bytes == nullptr || count == 0)))
+    return BoundedIoStatus::kFailed;
+  auto state = std::make_shared<SyncIoState>();
+  HANDLE duplicate = INVALID_HANDLE_VALUE;
+  if (!DuplicateHandle(GetCurrentProcess(), file, GetCurrentProcess(),
+                       &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS))
+    return BoundedIoStatus::kFailed;
+  state->file = duplicate;
+  state->kind = kind;
+  state->offset = offset;
+  if (kind != SyncIoKind::kFlush) {
+    state->bytes.resize(count);
+    if (kind == SyncIoKind::kWrite)
+      std::copy_n(bytes, count, state->bytes.data());
   }
-  return true;
+  std::thread worker(run_sync_io, state);
+  bool stopped_for_request = false;
+  bool stopped_for_deadline = false;
+  {
+    std::unique_lock<std::mutex> lock(state->mutex);
+    while (!state->complete) {
+      state->changed.wait_for(lock, std::chrono::milliseconds(1));
+      if (state->complete) break;
+      stopped_for_request = control.cancellation_requested();
+      stopped_for_deadline = control.deadline_expired();
+      if (stopped_for_request || stopped_for_deadline) break;
+    }
+  }
+  if (stopped_for_request || stopped_for_deadline) {
+    const BOOL cancellation_started =
+        CancelSynchronousIo(static_cast<HANDLE>(worker.native_handle()));
+    const DWORD cancellation_error = cancellation_started
+        ? ERROR_SUCCESS : GetLastError();
+    bool settled = false;
+    {
+      std::unique_lock<std::mutex> lock(state->mutex);
+      settled = state->changed.wait_for(
+          lock, std::chrono::milliseconds(kStorageCancellationGraceMs),
+          [&state] { return state->complete; });
+    }
+    if (!settled || (!cancellation_started &&
+                     cancellation_error != ERROR_NOT_FOUND)) {
+      worker.detach();
+      return BoundedIoStatus::kCancellationUnproven;
+    }
+    worker.join();
+    return stopped_for_request ? BoundedIoStatus::kCancelled
+                               : BoundedIoStatus::kTimeout;
+  }
+  worker.join();
+  if (!state->ok) return BoundedIoStatus::kFailed;
+  if (kind == SyncIoKind::kRead)
+    std::copy_n(state->bytes.data(), count, bytes);
+  return BoundedIoStatus::kOk;
+}
+
+BoundedIoStatus read_exact(HANDLE file, std::uint64_t offset,
+                           std::uint8_t* output, std::size_t count,
+                           StorageIoControl control) {
+  return bounded_sync_io(file, SyncIoKind::kRead, offset, output, count,
+                         control);
+}
+
+BoundedIoStatus write_exact(HANDLE file, std::uint64_t offset,
+                            const std::uint8_t* input, std::size_t count,
+                            StorageIoControl control) {
+  return bounded_sync_io(file, SyncIoKind::kWrite, offset,
+                         const_cast<std::uint8_t*>(input), count, control);
+}
+
+BoundedIoStatus flush_exact(HANDLE file, StorageIoControl control) {
+  return bounded_sync_io(file, SyncIoKind::kFlush, 0, nullptr, 0, control);
+}
+
+StoreStatus read_status(BoundedIoStatus status) noexcept {
+  switch (status) {
+    case BoundedIoStatus::kOk: return StoreStatus::kOk;
+    case BoundedIoStatus::kCancelled: return StoreStatus::kCancelled;
+    case BoundedIoStatus::kTimeout: return StoreStatus::kIoTimeout;
+    case BoundedIoStatus::kCancellationUnproven:
+      return StoreStatus::kIoCancelFailed;
+    case BoundedIoStatus::kFailed: return StoreStatus::kReadFailed;
+  }
+  return StoreStatus::kInternal;
+}
+
+StoreStatus write_status(BoundedIoStatus status) noexcept {
+  const auto common = read_status(status);
+  return common == StoreStatus::kReadFailed ? StoreStatus::kWriteFailed : common;
 }
 
 bool sha256(const std::vector<std::pair<const std::uint8_t*, std::size_t>>& parts,
@@ -218,6 +356,11 @@ bool exact_keys(const nlohmann::json& value,
   return true;
 }
 
+bool one_of(std::string_view value,
+            std::initializer_list<std::string_view> allowed) noexcept {
+  return std::find(allowed.begin(), allowed.end(), value) != allowed.end();
+}
+
 bool event_json(const nlohmann::json& value, JournalEvent& result) {
   if (!exact_keys(value, {"action", "authorization_kind", "receipt_digest",
                           "resolution", "sequence", "state"}) ||
@@ -226,10 +369,18 @@ bool event_json(const nlohmann::json& value, JournalEvent& result) {
       !value["sequence"].is_number_unsigned() ||
       value["sequence"].get<std::uint64_t>() > 31 || !value["state"].is_string())
     return false;
-  auto nullable_string = [&value](const char* key) {
-    return value[key].is_null() || value[key].is_string();
-  };
-  if (!nullable_string("authorization_kind") || !nullable_string("resolution"))
+  const bool authorization_valid = value["authorization_kind"].is_null() ||
+      (value["authorization_kind"].is_string() &&
+       one_of(value["authorization_kind"].get_ref<const std::string&>(),
+              {"policy", "user_confirmation", "operator_grant"}));
+  const bool resolution_valid = value["resolution"].is_null() ||
+      (value["resolution"].is_string() &&
+       one_of(value["resolution"].get_ref<const std::string&>(),
+              {"provider_acknowledged", "completed", "manual_completed",
+               "user_denied", "request_cancelled", "pre_dispatch_failure",
+               "manual_failed_definitive", "dispatch_ambiguous",
+               "startup_recovery"}));
+  if (!authorization_valid || !resolution_valid)
     return false;
   result.action = value["action"].get<std::string>();
   result.authorization_kind = value["authorization_kind"].is_null()
@@ -627,27 +778,43 @@ FixedContainerStore::FixedContainerStore(
     : lease_(std::move(lease)), file_(lease_.retained_file_handle()),
       container_id_(container_id) {}
 
-StoreStatus FixedContainerStore::reload() {
+StoreStatus FixedContainerStore::reload(StorageIoControl io) {
   try {
     if (!lease_.valid() || file_ == INVALID_HANDLE_VALUE)
       return StoreStatus::kReadFailed;
+    if (io.stop_requested())
+      return io.cancellation_requested() ? StoreStatus::kCancelled
+                                         : StoreStatus::kIoTimeout;
     std::map<std::string, JournalRecord> next;
     std::array<bool, kSlotCount> occupied{};
     std::array<std::int8_t, kSlotCount> staged_bank{};
     staged_bank.fill(-1);
     std::uint32_t active = 0, terminal_count = 0;
+    constexpr std::size_t kScanBytes = static_cast<std::size_t>(kSlotCount) *
+        kBanksPerSlot * kBankBytes;
+    std::vector<std::uint8_t> snapshot(kScanBytes);
+    auto bounded = read_exact(file_, kHeaderBytes, snapshot.data(),
+                              snapshot.size(), io);
+    auto bounded_status = read_status(bounded);
+    if (bounded_status != StoreStatus::kOk) {
+      if (bounded_status == StoreStatus::kIoTimeout ||
+          bounded_status == StoreStatus::kIoCancelFailed)
+        poisoned_ = true;
+      return bounded_status;
+    }
     for (std::uint32_t slot = 0; slot < kSlotCount; ++slot) {
       std::array<Bank, kBanksPerSlot> banks{};
       for (std::uint32_t bank = 0; bank < kBanksPerSlot; ++bank) {
         banks[bank].index = bank;
+        const std::size_t bank_start =
+            (static_cast<std::size_t>(slot) * kBanksPerSlot + bank) * kBankBytes;
         std::array<std::uint8_t, kBankMarkerBytes> marker_bytes{};
-        if (!read_exact(file_, marker_offset(slot, bank), marker_bytes.data(),
-                        marker_bytes.size())) return StoreStatus::kReadFailed;
+        std::copy_n(snapshot.data() + bank_start + kBankBodyBytes,
+                    marker_bytes.size(), marker_bytes.data());
         if (!decode_marker(marker_bytes, slot, bank, container_id_, banks[bank].marker))
           return StoreStatus::kCorruptBank;
         std::array<std::uint8_t, kBankBodyBytes> body{};
-        if (!read_exact(file_, bank_offset(slot, bank), body.data(), body.size()))
-          return StoreStatus::kReadFailed;
+        std::copy_n(snapshot.data() + bank_start, body.size(), body.data());
         if (banks[bank].marker.state == Marker::State::kUnused) {
           if (!all_zero(body.data(), body.size())) return StoreStatus::kCorruptBank;
         } else if (banks[bank].marker.state == Marker::State::kCommitted) {
@@ -719,9 +886,14 @@ StoreStatus FixedContainerStore::reload() {
 }
 
 StoreStatus FixedContainerStore::load_and_recover(
-    std::uint32_t& recovery_count) {
+    StorageIoControl io, std::uint32_t& recovery_count) {
   recovery_count = 0;
-  StoreStatus status = reload();
+  // This is the explicit pre-availability recovery probe. A missing startup
+  // deadline is itself a refusal; no named pipe may be created afterwards.
+  if (io.stop_requested())
+    return io.cancellation_requested() ? StoreStatus::kCancelled
+                                       : StoreStatus::kIoTimeout;
+  StoreStatus status = reload(io);
   if (status != StoreStatus::kOk) return status;
   std::vector<std::string> recover;
   for (const auto& [operation, record] : records_) {
@@ -737,7 +909,7 @@ StoreStatus FixedContainerStore::load_and_recover(
         previous.authorization_kind,
         pre_dispatch ? "startup_recovery" : "dispatch_ambiguous");
     bool committed = false;
-    status = append(operation, event, {}, committed);
+    status = append(operation, event, io, committed);
     if (status != StoreStatus::kOk || !committed) return status;
     ++recovery_count;
   }
@@ -747,10 +919,10 @@ StoreStatus FixedContainerStore::load_and_recover(
 
 StoreStatus FixedContainerStore::append(const std::string& operation,
                                         const JournalEvent& event,
-                                        CancellationProbe cancellation,
+                                        StorageIoControl io,
                                         bool& committed) {
   committed = false;
-  StoreStatus status = reload();
+  StoreStatus status = reload(io);
   if (status != StoreStatus::kOk) return status;
   const auto current_it = records_.find(operation);
   const JournalRecord* current = current_it == records_.end() ? nullptr : &current_it->second;
@@ -794,40 +966,63 @@ StoreStatus FixedContainerStore::append(const std::string& operation,
                      container_id_, committed_marker)) return StoreStatus::kHashFailed;
   // This probe is the final pre-mutation boundary. The caller binds it to the
   // authenticated pipe/process lifetime and the request's absolute deadline.
-  if (cancellation.cancelled()) return StoreStatus::kCancelled;
+  if (io.stop_requested())
+    return io.cancellation_requested() ? StoreStatus::kCancelled
+                                       : StoreStatus::kIoTimeout;
   std::array<std::uint8_t, kBankMarkerBytes> marker_readback{};
   std::array<std::uint8_t, kBankBodyBytes> body_readback{};
   commit_section_ = true;  // no cancellation or response is observed below.
-  if (!write_exact(file_, marker_offset(slot, bank), staging.data(), staging.size())) {
-    poisoned_ = true;
-    return StoreStatus::kWriteFailed;
-  }
-  if (!FlushFileBuffers(file_)) { poisoned_ = true; return StoreStatus::kFlushFailed; }
-  if (!read_exact(file_, marker_offset(slot, bank), marker_readback.data(),
-                  marker_readback.size()) ||
-      !equal_bytes(staging.data(), marker_readback.data(), staging.size()))
+  const StorageIoControl commit_io = io.commit_control();
+  auto bounded = write_exact(file_, marker_offset(slot, bank), staging.data(),
+                             staging.size(), commit_io);
+  status = write_status(bounded);
+  if (status != StoreStatus::kOk) { poisoned_ = true; return status; }
+  bounded = flush_exact(file_, commit_io);
+  status = bounded == BoundedIoStatus::kFailed
+      ? StoreStatus::kFlushFailed : read_status(bounded);
+  if (status != StoreStatus::kOk) { poisoned_ = true; return status; }
+  bounded = read_exact(file_, marker_offset(slot, bank), marker_readback.data(),
+                       marker_readback.size(), commit_io);
+  status = read_status(bounded);
+  if (status != StoreStatus::kOk) { poisoned_ = true; return status; }
+  if (!equal_bytes(staging.data(), marker_readback.data(), staging.size()))
     { poisoned_ = true; return StoreStatus::kReadbackFailed; }
-  if (!write_exact(file_, bank_offset(slot, bank), body.data(), body.size())) {
-    poisoned_ = true;
-    return StoreStatus::kWriteFailed;
-  }
-  if (!FlushFileBuffers(file_)) { poisoned_ = true; return StoreStatus::kFlushFailed; }
-  if (!read_exact(file_, bank_offset(slot, bank), body_readback.data(),
-                  body_readback.size()) ||
-      !equal_bytes(body.data(), body_readback.data(), body.size()))
+  bounded = write_exact(file_, bank_offset(slot, bank), body.data(), body.size(),
+                        commit_io);
+  status = write_status(bounded);
+  if (status != StoreStatus::kOk) { poisoned_ = true; return status; }
+  bounded = flush_exact(file_, commit_io);
+  status = bounded == BoundedIoStatus::kFailed
+      ? StoreStatus::kFlushFailed : read_status(bounded);
+  if (status != StoreStatus::kOk) { poisoned_ = true; return status; }
+  bounded = read_exact(file_, bank_offset(slot, bank), body_readback.data(),
+                       body_readback.size(), commit_io);
+  status = read_status(bounded);
+  if (status != StoreStatus::kOk) { poisoned_ = true; return status; }
+  if (!equal_bytes(body.data(), body_readback.data(), body.size()))
     { poisoned_ = true; return StoreStatus::kReadbackFailed; }
-  if (!write_exact(file_, marker_offset(slot, bank), committed_marker.data(),
-                   committed_marker.size())) { poisoned_ = true; return StoreStatus::kWriteFailed; }
-  if (!FlushFileBuffers(file_)) { poisoned_ = true; return StoreStatus::kFlushFailed; }
-  if (!read_exact(file_, marker_offset(slot, bank), marker_readback.data(),
-                  marker_readback.size()) ||
-      !equal_bytes(committed_marker.data(), marker_readback.data(),
-                   committed_marker.size()) ||
-      !read_exact(file_, bank_offset(slot, bank), body_readback.data(),
-                  body_readback.size()) ||
-      !equal_bytes(body.data(), body_readback.data(), body.size()))
+  bounded = write_exact(file_, marker_offset(slot, bank), committed_marker.data(),
+                        committed_marker.size(), commit_io);
+  status = write_status(bounded);
+  if (status != StoreStatus::kOk) { poisoned_ = true; return status; }
+  bounded = flush_exact(file_, commit_io);
+  status = bounded == BoundedIoStatus::kFailed
+      ? StoreStatus::kFlushFailed : read_status(bounded);
+  if (status != StoreStatus::kOk) { poisoned_ = true; return status; }
+  bounded = read_exact(file_, marker_offset(slot, bank), marker_readback.data(),
+                       marker_readback.size(), commit_io);
+  status = read_status(bounded);
+  if (status != StoreStatus::kOk) { poisoned_ = true; return status; }
+  if (!equal_bytes(committed_marker.data(), marker_readback.data(),
+                   committed_marker.size()))
     { poisoned_ = true; return StoreStatus::kReadbackFailed; }
-  status = reload();
+  bounded = read_exact(file_, bank_offset(slot, bank), body_readback.data(),
+                       body_readback.size(), commit_io);
+  status = read_status(bounded);
+  if (status != StoreStatus::kOk) { poisoned_ = true; return status; }
+  if (!equal_bytes(body.data(), body_readback.data(), body.size()))
+    { poisoned_ = true; return StoreStatus::kReadbackFailed; }
+  status = reload(commit_io);
   if (status != StoreStatus::kOk) { poisoned_ = true; return status; }
   const auto verified = records_.find(operation);
   if (verified == records_.end() || verified->second.generation != generation ||
@@ -839,8 +1034,9 @@ StoreStatus FixedContainerStore::append(const std::string& operation,
 }
 
 StoreStatus FixedContainerStore::summary(const DecodedRequest& request,
+                                         StorageIoControl io,
                                          EncodedResult& result) {
-  StoreStatus status = reload();
+  StoreStatus status = reload(io);
   if (status != StoreStatus::kOk) return status;
   const bool include_terminal = request.body["include_terminal"].get<bool>();
   const auto limit = request.body["limit"].get<std::uint32_t>();
@@ -862,8 +1058,9 @@ StoreStatus FixedContainerStore::summary(const DecodedRequest& request,
 }
 
 StoreStatus FixedContainerStore::detail(const DecodedRequest& request,
+                                        StorageIoControl io,
                                         EncodedResult& result) {
-  StoreStatus status = reload();
+  StoreStatus status = reload(io);
   if (status != StoreStatus::kOk) return status;
   const auto found = records_.find(request.operation_id);
   if (found == records_.end()) return StoreStatus::kNotFound;
@@ -899,15 +1096,15 @@ StoreStatus FixedContainerStore::detail(const DecodedRequest& request,
 }
 
 StoreStatus FixedContainerStore::mutation(const DecodedRequest& request,
-                                          CancellationProbe cancellation,
+                                          StorageIoControl io,
                                           EncodedResult& result) {
-  if (cancellation.cancelled()) {
+  if (io.stop_requested()) {
     result = {};
     result.operation_id = request.operation_id;
     result.error_code = "deadline_expired";
     return StoreStatus::kOk;
   }
-  StoreStatus status = reload();
+  StoreStatus status = reload(io);
   if (status != StoreStatus::kOk) return status;
   std::string operation = request.operation_id;
   const JournalRecord* current = nullptr;
@@ -944,13 +1141,13 @@ StoreStatus FixedContainerStore::mutation(const DecodedRequest& request,
                        request.body, state, authorization, resolution);
   }
   bool committed = false;
-  if (cancellation.cancelled()) {
+  if (io.stop_requested()) {
     result = {};
     result.operation_id = request.operation_id;
     result.error_code = "deadline_expired";
     return StoreStatus::kOk;
   }
-  status = append(operation, event, cancellation, committed);
+  status = append(operation, event, io, committed);
   if (status == StoreStatus::kCancelled) {
     result = {};
     result.operation_id = request.operation_id;
@@ -961,13 +1158,13 @@ StoreStatus FixedContainerStore::mutation(const DecodedRequest& request,
   result.operation_id = operation;
   result.state = event.state;
   result.body = {{"receipt", receipt(operation, event)}};
-  if (cancellation.cancelled() && committed)
+  if (io.cancellation.cancelled() && committed)
     return StoreStatus::kCommitNonCancellable;
   return StoreStatus::kOk;
 }
 
 StoreStatus FixedContainerStore::apply(const DecodedRequest& request,
-                                       CancellationProbe cancellation,
+                                       StorageIoControl io,
                                        EncodedResult& result) noexcept {
   try {
     if (poisoned_) return StoreStatus::kInternal;
@@ -977,9 +1174,9 @@ StoreStatus FixedContainerStore::apply(const DecodedRequest& request,
                      {"recovery_count", recovery_count_}, {"status", "unavailable"}};
       return StoreStatus::kOk;
     }
-    if (request.method == "summary") return summary(request, result);
-    if (request.method == "detail") return detail(request, result);
-    return mutation(request, cancellation, result);
+    if (request.method == "summary") return summary(request, io, result);
+    if (request.method == "detail") return detail(request, io, result);
+    return mutation(request, io, result);
   } catch (const std::bad_alloc&) {
     return StoreStatus::kInternal;
   } catch (...) {
@@ -1005,6 +1202,8 @@ const char* store_status_name(StoreStatus status) noexcept {
     case StoreStatus::kReadbackFailed: return "internal";
     case StoreStatus::kHashFailed: return "internal";
     case StoreStatus::kCancelled: return "deadline_expired";
+    case StoreStatus::kIoTimeout: return "internal";
+    case StoreStatus::kIoCancelFailed: return "internal";
     case StoreStatus::kCommitNonCancellable: return "commit_non_cancellable";
     case StoreStatus::kInternal: return "internal";
   }

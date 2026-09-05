@@ -26,6 +26,13 @@ constexpr wchar_t kPipePrefix[] = L"\\\\.\\pipe\\LocalBMO.ActionJournal.v1.";
 constexpr std::array<std::uint8_t, 16> kBootstrapMagic = {
     'L', 'A', 'E', 'J', 'R', 'N', 'H', 'E', 'L', 'P', 'B', 'O', 'O', 'T', 0, 0};
 
+// This slice has no accepted supervisor binary or package trust anchor.  The
+// inherited-pipe provenance checks below are implemented, but the helper must
+// remain fail-closed until a later reviewed packaging slice authenticates the
+// retained supervisor image against a signed release manifest.  This constant
+// has no build override by design.
+constexpr bool kAuthenticatedSupervisorIssuerAvailable = false;
+
 class UniqueHandle final {
  public:
   UniqueHandle() noexcept = default;
@@ -73,6 +80,14 @@ struct ClientLease {
   UniqueHandle image;
   UniqueHandle token;
   std::vector<std::uint8_t> token_user;
+};
+
+struct SupervisorIssuerLease {
+  UniqueHandle bootstrap_pipe;
+  UniqueHandle process;
+  UniqueHandle token;
+  std::vector<std::uint8_t> token_user;
+  std::uint32_t pid = 0;
 };
 
 struct BootstrapScope {
@@ -223,8 +238,54 @@ bool wait_for_bootstrap_bytes(HANDLE pipe, DWORD required,
   }
 }
 
-bool read_bootstrap(BootstrapRecord& output) {
+bool authenticate_bootstrap_issuer(PSID helper_sid,
+                                   SupervisorIssuerLease& output) {
   HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+  if (input == nullptr || input == INVALID_HANDLE_VALUE ||
+      GetFileType(input) != FILE_TYPE_PIPE) return false;
+  HANDLE retained_pipe = INVALID_HANDLE_VALUE;
+  if (!DuplicateHandle(GetCurrentProcess(), input, GetCurrentProcess(),
+                       &retained_pipe, 0, FALSE, DUPLICATE_SAME_ACCESS))
+    return false;
+  output.bootstrap_pipe.reset(retained_pipe);
+  ULONG server_pid = 0;
+  if (!GetNamedPipeServerProcessId(output.bootstrap_pipe.get(), &server_pid) ||
+      server_pid == 0 || server_pid == GetCurrentProcessId()) return false;
+  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                               FALSE, server_pid);
+  if (process == nullptr) return false;
+  output.process.reset(process);
+  output.pid = server_pid;
+  if (GetProcessId(output.process.get()) != server_pid ||
+      WaitForSingleObject(output.process.get(), 0) != WAIT_TIMEOUT) return false;
+  HANDLE token = INVALID_HANDLE_VALUE;
+  if (!OpenProcessToken(output.process.get(), TOKEN_QUERY, &token)) return false;
+  output.token.reset(token);
+  DWORD size = 0;
+  GetTokenInformation(output.token.get(), TokenUser, nullptr, 0, &size);
+  if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || size == 0 || size > 65'536)
+    return false;
+  output.token_user.resize(size);
+  if (!GetTokenInformation(output.token.get(), TokenUser,
+                           output.token_user.data(), size, &size)) return false;
+  const PSID issuer_sid =
+      reinterpret_cast<TOKEN_USER*>(output.token_user.data())->User.Sid;
+  DWORD issuer_session = 0, issuer_session_size = sizeof(issuer_session);
+  DWORD helper_session = 0;
+  if (!IsValidSid(issuer_sid) || !EqualSid(issuer_sid, helper_sid) ||
+      !GetTokenInformation(output.token.get(), TokenSessionId, &issuer_session,
+                           sizeof(issuer_session), &issuer_session_size) ||
+      !ProcessIdToSessionId(GetCurrentProcessId(), &helper_session) ||
+      issuer_session != helper_session) return false;
+  // Same-user/session and kernel-reported anonymous-pipe server PID prevent a
+  // bootstrap swap, but do not authenticate which same-user program is the
+  // issuer.  No bootstrap field may fill that gap because it is attacker
+  // supplied.  Refuse until a signed package manifest pins and verifies the
+  // retained issuer process image in a separate reviewed integration slice.
+  return kAuthenticatedSupervisorIssuerAvailable;
+}
+
+bool read_bootstrap(HANDLE input, BootstrapRecord& output) {
   if (input == nullptr || input == INVALID_HANDLE_VALUE ||
       GetFileType(input) != FILE_TYPE_PIPE) return false;
   const ULONGLONG deadline = GetTickCount64() + kBootstrapDeadlineMs;
@@ -548,9 +609,19 @@ bool request_cancelled(void* raw) noexcept {
   if (context == nullptr || context->pipe == INVALID_HANDLE_VALUE ||
       context->client_process == INVALID_HANDLE_VALUE ||
       WaitForSingleObject(context->client_process, 0) != WAIT_TIMEOUT ||
-      unix_time_ms() > context->deadline_at_ms) return true;
+      unix_time_ms() >= context->deadline_at_ms) return true;
   DWORD available = 0;
   return !PeekNamedPipe(context->pipe, nullptr, 0, nullptr, &available, nullptr);
+}
+
+struct StartupCancellationContext {
+  HANDLE supervisor_process = INVALID_HANDLE_VALUE;
+};
+
+bool startup_cancelled(void* raw) noexcept {
+  const auto* context = static_cast<const StartupCancellationContext*>(raw);
+  return context == nullptr || context->supervisor_process == INVALID_HANDLE_VALUE ||
+      WaitForSingleObject(context->supervisor_process, 0) != WAIT_TIMEOUT;
 }
 
 }  // namespace
@@ -559,7 +630,13 @@ HelperStatus run_foreground_helper_from_inherited_stdin() noexcept {
   BootstrapRecord bootstrap;
   BootstrapScope bootstrap_scope(bootstrap);
   try {
-    if (!read_bootstrap(bootstrap)) return HelperStatus::kBootstrapInvalid;
+    UserIdentity user;
+    if (!current_user(user)) return HelperStatus::kBootstrapIssuerUntrusted;
+    SupervisorIssuerLease issuer;
+    if (!authenticate_bootstrap_issuer(user.sid, issuer))
+      return HelperStatus::kBootstrapIssuerUntrusted;
+    if (!read_bootstrap(issuer.bootstrap_pipe.get(), bootstrap))
+      return HelperStatus::kBootstrapInvalid;
     bootstrap_scope.locked = VirtualLock(&bootstrap, sizeof(bootstrap)) != FALSE;
     action_journal_storage::StorageRequest storage_request;
     storage_request.mode = action_journal_storage::OpenMode::kOpenExisting;
@@ -578,11 +655,17 @@ HelperStatus run_foreground_helper_from_inherited_stdin() noexcept {
     FixedContainerStore store(std::move(storage_lease),
                               bootstrap.expected_container_id);
     std::uint32_t recovery_count = 0;
-    const auto recovery = store.load_and_recover(recovery_count);
+    StartupCancellationContext startup_context{issuer.process.get()};
+    const StorageIoControl startup_io{
+        CancellationProbe{startup_cancelled, &startup_context},
+        GetTickCount64() + kIoDeadlineMs, true};
+    const auto recovery = store.load_and_recover(startup_io, recovery_count);
+    if (recovery == StoreStatus::kIoTimeout) return HelperStatus::kIoTimeout;
+    if (recovery == StoreStatus::kIoCancelFailed)
+      return HelperStatus::kIoCancelFailed;
     if (recovery != StoreStatus::kOk) return HelperStatus::kRecoveryFailed;
-    UserIdentity user;
     PipeSecurity security;
-    if (!current_user(user) || !private_pipe_security(user.sid, security))
+    if (!private_pipe_security(user.sid, security))
       return HelperStatus::kPipeSecurityFailed;
     const std::wstring pipe_name = kPipePrefix +
         std::to_wstring(GetCurrentProcessId());
@@ -634,8 +717,18 @@ HelperStatus run_foreground_helper_from_inherited_stdin() noexcept {
           pipe.get(), client.process.get(), request.deadline_at_ms};
       const CancellationProbe cancellation{request_cancelled,
                                             &cancellation_context};
-      const auto applied = store.apply(request, cancellation, result);
+      const StorageIoControl request_io{
+          cancellation, GetTickCount64() + kIoDeadlineMs, true};
+      const auto applied = store.apply(request, request_io, result);
       if (applied != StoreStatus::kOk) {
+        if (applied == StoreStatus::kIoTimeout) {
+          DisconnectNamedPipe(pipe.get());
+          return HelperStatus::kIoTimeout;
+        }
+        if (applied == StoreStatus::kIoCancelFailed) {
+          DisconnectNamedPipe(pipe.get());
+          return HelperStatus::kIoCancelFailed;
+        }
         if (!recoverable_store_status(applied)) {
           DisconnectNamedPipe(pipe.get());
           return HelperStatus::kStorageCorrupt;
@@ -663,6 +756,8 @@ const char* helper_status_name(HelperStatus status) noexcept {
     case HelperStatus::kOk: return "ok";
     case HelperStatus::kPlatformUnavailable: return "platform_unavailable";
     case HelperStatus::kBootstrapInvalid: return "bootstrap_invalid";
+    case HelperStatus::kBootstrapIssuerUntrusted:
+      return "bootstrap_issuer_untrusted";
     case HelperStatus::kBootstrapTimeout: return "bootstrap_timeout";
     case HelperStatus::kStorageUnavailable: return "storage_unavailable";
     case HelperStatus::kStorageCorrupt: return "storage_corrupt";

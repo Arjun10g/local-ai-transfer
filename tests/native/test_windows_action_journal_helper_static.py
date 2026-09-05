@@ -115,6 +115,29 @@ class WindowsActionJournalHelperStaticTests(unittest.TestCase):
         self.assertIn("argc != 1", self.main)
         self.assertNotIn("CreateFileW(bootstrap", self.pipe)
 
+    def test_bootstrap_writer_is_os_bound_but_refused_without_external_trust_anchor(self):
+        for token in (
+            "authenticate_bootstrap_issuer", "DuplicateHandle",
+            "GetNamedPipeServerProcessId", "OpenProcess(",
+            "PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE",
+            "WaitForSingleObject(output.process.get(), 0) != WAIT_TIMEOUT",
+            "OpenProcessToken", "TokenUser", "TokenSessionId", "EqualSid",
+            "kAuthenticatedSupervisorIssuerAvailable = false",
+            "HelperStatus::kBootstrapIssuerUntrusted",
+        ):
+            self.assertIn(token, self.pipe)
+        self.assertLess(
+            self.pipe.index("authenticate_bootstrap_issuer(user.sid, issuer)"),
+            self.pipe.index("read_bootstrap(issuer.bootstrap_pipe.get(), bootstrap)"),
+        )
+        self.assertLess(
+            self.pipe.index("read_bootstrap(issuer.bootstrap_pipe.get(), bootstrap)"),
+            self.pipe.index("action_journal_storage::acquire_storage"),
+        )
+        authority = self.contract["bootstrap"]["issuer_authority"]
+        self.assertIs(authority["production_gate"], False)
+        self.assertIn("not supplied in bootstrap", authority["required_activation_binding"])
+
     def test_storage_is_exact_open_existing_retained_authority_before_pipe(self):
         for token in (
             "OpenMode::kOpenExisting", "has_expected_identity = true",
@@ -216,13 +239,13 @@ class WindowsActionJournalHelperStaticTests(unittest.TestCase):
     def test_store_commit_order_is_fixed_flush_readback_and_session_poisoning(self):
         ordered = [
             "write_exact(file_, marker_offset(slot, bank), staging.data()",
-            "FlushFileBuffers(file_)",
+            "flush_exact(file_, commit_io)",
             "equal_bytes(staging.data(), marker_readback.data()",
             "write_exact(file_, bank_offset(slot, bank), body.data()",
             "equal_bytes(body.data(), body_readback.data()",
             "write_exact(file_, marker_offset(slot, bank), committed_marker.data()",
             "equal_bytes(committed_marker.data(), marker_readback.data()",
-            "status = reload()",
+            "status = reload(commit_io)",
         ]
         positions = []
         start = 0
@@ -234,6 +257,53 @@ class WindowsActionJournalHelperStaticTests(unittest.TestCase):
         self.assertGreaterEqual(self.store.count("poisoned_ = true"), 8)
         self.assertIn("if (poisoned_) return StoreStatus::kInternal", self.store)
         self.assertIn("commit_section_ = true", self.store)
+
+    def test_all_storage_io_and_complete_scans_are_bounded_cancellable_or_poisoned(self):
+        for token in (
+            "std::thread worker", "DuplicateHandle", "CancelSynchronousIo",
+            "kStorageCancellationGraceMs = 2'000", "worker.detach()",
+            "std::shared_ptr<SyncIoState>", "hard_deadline_tick_ms",
+            "GetTickCount64() >= hard_deadline_tick_ms", "flush_exact",
+            "StoreStatus::kIoTimeout", "StoreStatus::kIoCancelFailed",
+            "poisoned_ = true", "reload(StorageIoControl io)",
+        ):
+            self.assertIn(token, self.store + self.headers)
+        reload_body = self.store[
+            self.store.index("FixedContainerStore::reload"):
+            self.store.index("FixedContainerStore::load_and_recover")
+        ]
+        self.assertIn("for (std::uint32_t slot = 0; slot < kSlotCount; ++slot)", reload_body)
+        self.assertEqual(reload_body.count("read_exact("), 1)
+        self.assertIn("snapshot(kScanBytes)", reload_body)
+        self.assertNotRegex(reload_body, r"ReadFile\([^;]+nullptr\)")
+        self.assertNotIn("INFINITE", self.store)
+
+    def test_recovery_has_one_explicit_deadline_and_cancel_probe_before_pipe(self):
+        for token in (
+            "StartupCancellationContext", "startup_cancelled",
+            "GetTickCount64() + kIoDeadlineMs", "StorageIoControl startup_io",
+            "store.load_and_recover(startup_io, recovery_count)",
+        ):
+            self.assertIn(token, self.pipe)
+        self.assertLess(
+            self.pipe.index("store.load_and_recover(startup_io, recovery_count)"),
+            self.pipe.index("CreateNamedPipeW"),
+        )
+
+    def test_exact_deadline_and_persisted_authority_enums_fail_closed(self):
+        self.assertIn("if (deadline <= now_ms)", self.protocol)
+        self.assertIn("unix_time_ms() >= context->deadline_at_ms", self.pipe)
+        self.assertIn("GetTickCount64() >= hard_deadline_tick_ms", self.headers)
+        for token in (
+            '{"policy", "user_confirmation", "operator_grant"}',
+            '"provider_acknowledged", "completed", "manual_completed"',
+            '"manual_failed_definitive", "dispatch_ambiguous"',
+            '"startup_recovery"',
+        ):
+            self.assertIn(token, self.store)
+        event_decoder = self.store[self.store.index("bool event_json"):
+                                   self.store.index("bool terminal")]
+        self.assertNotIn("nullable_string", event_decoder)
 
     def test_startup_recovery_never_replays_dispatch(self):
         for token in (

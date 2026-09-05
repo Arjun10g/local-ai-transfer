@@ -58,13 +58,22 @@
     ],
     "secret_fields": ["hmac_key", "session_nonce"],
     "secret_policy": "exactly 32 key bytes and 16 nonce bytes; read once, locked where supported, zeroed after session; never argv, environment, disk, pipe name, receipt, or error",
+    "issuer_authority": {
+      "current_slice": "refused before bootstrap read because no authenticated supervisor image trust anchor is configured",
+      "os_binding": "retain the inherited anonymous-pipe read handle; GetNamedPipeServerProcessId must identify one live retained same-user same-session issuer process",
+      "required_activation_binding": "the retained issuer process image must be authenticated against a signed release manifest/trust anchor that is not supplied in bootstrap data",
+      "self_asserted_identity": "never sufficient; PID, file identity, path, key, or nonce carried in bootstrap cannot authenticate its writer",
+      "production_gate": false
+    },
     "trailing_data": "refused"
   },
   "storage": {
     "lease": "open_existing through the merged Win32 boundary before named-pipe creation and retain the complete lease for helper lifetime",
     "single_authority": "all startup scan, recovery, append, summary, and detail operations use only the retained file handle",
-    "startup": "strictly scan all 1024 slots; highest valid committed bank only; ignore one valid inactive staging bank; malformed, duplicate, over-cap, or conflicting authority fails before pipe creation",
+    "startup": "before pipe creation, a shared 15000 ms monotonic deadline and retained-supervisor liveness cancellation probe cover the complete strict 1024-slot/two-bank scan and every recovery append",
     "recovery": "prepared and authorized append startup_recovery/cancelled; dispatching, acknowledged, and reconciling append startup_recovery/unknown_manual; terminal and unknown remain unchanged",
+    "io": "synchronous retained-handle ReadFile, WriteFile, and FlushFileBuffers execute on a dedicated targeted thread; CancelSynchronousIo plus a 2000 ms settlement grace is checked, and unproved cancellation heap-retains its duplicate handle/buffer while poisoning and terminating the helper",
+    "persisted_authority": "authorization_kind and resolution are decoded only from the exact finite protocol enums; unknown, empty-string, or wrong-typed values make the bank corrupt",
     "commit": [
       "validate exact protocol event and transition plus capacity before write",
       "write full staging marker through explicit-offset handle I/O",
@@ -100,7 +109,7 @@
     "session_frames_per_direction": 1024,
     "pending_requests": 8,
     "io_deadline_ms": 15000,
-    "overlapped": "every connect/read/write uses an event-backed OVERLAPPED and CancelIoEx on deadline/cancel; incomplete cancellation or completion is fatal",
+    "overlapped": "every pipe connect/read/write uses an event-backed OVERLAPPED and CancelIoEx on deadline/cancel; storage uses separately targeted CancelSynchronousIo; incomplete cancellation or completion is fatal",
     "authentication": "HMAC-SHA256 over exact merged canonical frame bytes with constant-time comparison",
     "sequence": "independent inbound and outbound monotonic sequence beginning at zero",
     "nonce": "exact bootstrapped nonce on every frame",
@@ -110,7 +119,7 @@
     "queues": "fixed-capacity; overflow returns queue_full before mutation or closes when correlation cannot be preserved"
   },
   "cancellation": {
-    "before_commit": "cancel or expired deadline refuses before storage mutation",
+    "before_commit": "cancel or now greater than or equal to the expired deadline refuses before storage mutation",
     "commit_section": "staging/body/committed durability sequence is noncancellable once entered",
     "during_commit": "return commit_non_cancellable only after commit outcome is known when transport remains available; otherwise disconnect and require detail",
     "after_disconnect": "startup recovery/query determines durable state; no action replay"
@@ -136,6 +145,7 @@
     "ok",
     "platform_unavailable",
     "bootstrap_invalid",
+    "bootstrap_issuer_untrusted",
     "bootstrap_timeout",
     "storage_unavailable",
     "storage_corrupt",

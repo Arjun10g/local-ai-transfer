@@ -21,6 +21,7 @@ enum class HelperStatus : std::uint8_t {
   kOk,
   kPlatformUnavailable,
   kBootstrapInvalid,
+  kBootstrapIssuerUntrusted,
   kBootstrapTimeout,
   kStorageUnavailable,
   kStorageCorrupt,
