@@ -74,6 +74,13 @@ def owner_interleaving_model(*, active: bool, shutdown: bool, poisoned: bool,
     return "ok", False, shutdown, poisoned
 
 
+def latched_monitor_model(*, monitor_signaled: bool, original_closed: bool,
+                          fresh_probe: bool) -> bool:
+    """Original handle teardown cannot erase a monitor's latched signal."""
+    del original_closed, fresh_probe
+    return monitor_signaled
+
+
 class WindowsActionJournalOwnerStaticTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -123,7 +130,7 @@ class WindowsActionJournalOwnerStaticTests(unittest.TestCase):
 
     def test_owner_solely_owns_recovery_and_poison_state(self):
         self.assertIn("std::uint32_t recovery_count_ = 0;", self.owner)
-        self.assertIn("bool poisoned_ = false;", self.owner)
+        self.assertIn("std::atomic_bool poisoned_{false};", self.owner)
         self.assertNotIn("std::uint32_t recovery_count_ = 0;", self.store_header)
         self.assertNotIn("bool poisoned_ = false;", self.store_header)
         store_impl = self.store.split("const char* store_status_name", 1)[0]
@@ -168,7 +175,7 @@ class WindowsActionJournalOwnerStaticTests(unittest.TestCase):
         ):
             self.assertIn(token, self.owner + self.store)
         self.assertIn("catch (const std::bad_alloc&)", self.store)
-        self.assertIn("poisoned_ = true", self.store)
+        self.assertIn("poisoned_.store(true", self.store)
         self.assertIs(self.contract["serialization"]["writer_count"], 1)
         self.assertIn("pipe reads/writes", self.contract["borrowed_boundary"]["pipe_io"])
         self.assertIn("reads/writes remain outside", bounded_text(HELPER / "JOURNAL_AUTHORITY_OWNER.md"))
@@ -187,9 +194,17 @@ class WindowsActionJournalOwnerStaticTests(unittest.TestCase):
         )
         self.assertIn("shutting_down_ = true", shutdown)
         self.assertIn("return false;", self.store[self.store.index("bool JournalAuthorityOwner::ready"):])
-        self.assertIn("return true;", self.store[self.store.index("bool JournalAuthorityOwner::poisoned"):])
+        self.assertIn("poisoned_.load", self.store[self.store.index("bool JournalAuthorityOwner::poisoned"):])
         self.assertIn("UINT32_MAX", self.store[self.store.index("std::uint32_t JournalAuthorityOwner::recovery_count"):])
         self.assertIn("~JournalAuthorityOwner() noexcept", self.store)
+        apply = self.store[
+            self.store.index("StoreStatus JournalAuthorityOwner::apply"):
+            self.store.index("bool JournalAuthorityOwner::begin_shutdown")
+        ]
+        self.assertLess(apply.index("ActiveBorrow borrow(*this)"),
+                        apply.index("std::unique_lock<std::mutex> lock"))
+        self.assertIn("while (active_borrows_.load", self.store)
+        self.assertIn("poisoned_.store(true", apply[apply.rindex("catch (...)"):])
 
     def test_shutdown_and_exception_interleavings_latch_fail_closed(self):
         outcome, active, shutdown, poisoned = owner_interleaving_model(
@@ -221,7 +236,7 @@ class WindowsActionJournalOwnerStaticTests(unittest.TestCase):
         self.assertIn("monitored_request_cancelled", self.pipe)
         apply_at = self.pipe.index("owner->apply(request, request_io, result)")
         pre = self.pipe.rfind("request_cancelled(&cancellation_context)", 0, apply_at)
-        post = self.pipe.index("request_cancelled(&cancellation_context)", apply_at)
+        post = self.pipe.index("cancellation_monitor.cancellation_signaled()", apply_at)
         self.assertGreater(pre, -1)
         self.assertLess(pre, apply_at)
         self.assertGreater(post, apply_at)
@@ -232,6 +247,34 @@ class WindowsActionJournalOwnerStaticTests(unittest.TestCase):
         self.assertNotIn("PeekNamedPipe", monitor)
         self.assertIn("std::atomic_bool", self.pipe)
         self.assertIn("unix_time_ms() >= deadline_at_ms_", self.pipe)
+
+    def test_monitor_owns_duplicate_handles_and_latched_signal_survives_original_close(self):
+        monitor = self.pipe[
+            self.pipe.index("class RequestCancellationMonitor"):
+            self.pipe.index("bool monitored_request_cancelled")
+        ]
+        self.assertIn("DuplicateHandle", monitor)
+        self.assertIn("pipe_copy", monitor)
+        self.assertIn("process_copy", monitor)
+        self.assertIn("pipe_.reset(pipe_copy)", monitor)
+        self.assertIn("client_process_.reset(process_copy)", monitor)
+        self.assertIn("std::atomic_bool cancelled_{false};", monitor)
+        self.assertIn("cancelled_.store(true", monitor)
+        self.assertLess(monitor.index("DuplicateHandle"), monitor.index("std::thread"))
+        self.assertIn("CloseHandle(pipe_copy)", monitor)
+        self.assertIn("pipe_.get()", monitor)
+        self.assertIn("client_process_.get()", monitor)
+        self.assertNotIn("WaitForSingleObject(client_process_,", monitor)
+        self.assertNotIn("PeekNamedPipe(pipe_,", monitor)
+        self.assertIn("cancellation_monitor.cancellation_signaled()", self.pipe)
+        self.assertNotIn("request_cancelled(&cancellation_context)", self.pipe[
+            self.pipe.index("const auto applied = owner->apply"):
+            self.pipe.index("if (applied != StoreStatus::kOk)")
+        ])
+        self.assertTrue(latched_monitor_model(
+            monitor_signaled=True, original_closed=True, fresh_probe=False))
+        self.assertFalse(latched_monitor_model(
+            monitor_signaled=False, original_closed=True, fresh_probe=False))
 
     def test_corrupt_unknown_and_poisoned_owner_cannot_publish_or_mutate(self):
         for token in (

@@ -74,9 +74,11 @@ class JournalAuthorityOwner final {
   class ActiveBorrow final {
    public:
     explicit ActiveBorrow(JournalAuthorityOwner& owner) noexcept : owner_(owner) {
-      ++owner_.active_borrows_;
+      owner_.active_borrows_.fetch_add(1, std::memory_order_acq_rel);
     }
-    ~ActiveBorrow() noexcept { --owner_.active_borrows_; }
+    ~ActiveBorrow() noexcept {
+      owner_.active_borrows_.fetch_sub(1, std::memory_order_acq_rel);
+    }
     ActiveBorrow(const ActiveBorrow&) = delete;
     ActiveBorrow& operator=(const ActiveBorrow&) = delete;
 
@@ -97,12 +99,12 @@ class JournalAuthorityOwner final {
   action_journal_storage::JournalStorageLease lease_;
   FixedContainerStore store_;
   mutable std::mutex mutex_;
-  std::uint32_t active_borrows_ = 0;
+  std::atomic<std::uint32_t> active_borrows_{0};
   std::atomic_bool shutdown_requested_{false};
   bool shutting_down_ = false;
   std::uint32_t recovery_count_ = 0;
   bool recovered_ = false;
-  bool poisoned_ = false;
+  std::atomic_bool poisoned_{false};
 };
 
 const char* authority_status_name(AuthorityStatus status) noexcept;

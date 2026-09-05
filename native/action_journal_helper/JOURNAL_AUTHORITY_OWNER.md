@@ -18,8 +18,17 @@ this waits for the one active store application and prevents a new one. The
 owner destructor repeats that close-admission operation before destroying the
 borrowed store and lease. Lock failures return finite fail-closed statuses;
 poison is latched while the application lock is still held. Pipe/process
-cancellation is monitored by a separate thread and reduced to an atomic/event
-probe before it reaches storage, so the owner lock never invokes a pipe API.
+cancellation is monitored by a separate thread that owns duplicated pipe and
+client-process handles and reduces cancellation to a latched atomic/event
+probe before it reaches storage. The post-application decision reads that
+latched probe rather than reopening the original pipe, so the owner lock never
+invokes a pipe API and an original-handle close cannot erase cancellation.
+
+Each application registers an active borrow before waiting for the owner mutex;
+shutdown atomically closes admission and waits for that counter to reach zero
+before taking the mutex. Fatal statuses and lock failures atomically poison
+admission, and all later applications/getters fail closed. If the destructor
+cannot prove shutdown, it terminates rather than destroying a live store/lease.
 
 Corrupt, conflicting, unknown, poisoned, cancelled, or deadline-expired
 startup state returns a finite status and publishes no pipe. Severe storage or
