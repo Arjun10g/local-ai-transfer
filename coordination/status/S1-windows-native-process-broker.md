@@ -8,7 +8,7 @@
 - **Current phase:** Phase 3/4 safety prerequisite; source-only research lane
 - **Primary task ID:** B-005-SOURCE
 - **Secondary task ID, if any:** none
-- **Task state:** IN_PROGRESS
+- **Task state:** READY_FOR_REVIEW
 - **Base `main` commit:** `37a134f16c936849d5dd32c96fcd8c0f7d90608e`
 
 ## Objective for this work interval
@@ -74,3 +74,41 @@ join the native build, enter the release package, or claim target readiness.
 `NOT_READY`. B-005 stays open until an authenticated remote Windows build,
 independent security review, package/supervisor integration, and exact-target
 acceptance receipts all pass.
+
+## Work completed
+
+- Added a strict length-prefixed inherited-pipe protocol and duplicate/unknown
+  key rejecting request parser with no raw executable/argv/cwd/env surface.
+- Added an exact, compile-digest-pinned product manifest parser. The compiled
+  digest defaults empty and the checked-in fixture manifest cannot activate.
+- Added NTFS-only no-reparse leases for the image, manifest, cwd, runtime
+  directory, and every mutable ancestor. Image size/SHA-256/volume/file ID are
+  checked from the held handle and cooperatively honor cancellation/deadline.
+- Added fixed template rendering, explicit `lpApplicationName`, minimal
+  three-entry environment, restricted token, explicit inherited handle list,
+  suspended create, image recheck, Job assignment, then resume.
+- Added bounded stream collectors/stdin, deadline/cancel Job termination, and a
+  completion-port plus accounting proof that the whole Job—not only its primary
+  process—has zero active processes before any success receipt.
+- Added in-process bounded text clipboard handling and a Copilot fixture whose
+  prompt placement is stdin only.
+- Kept root CMake, release package, host tools, controller, server, action
+  journal, and capability advertisement unchanged.
+
+## Evidence produced
+
+- Commits: `d2f29a6` claim packet; `8b01290` source/contracts/static tests.
+- Focused test: `python3 -m unittest tests.native.test_windows_process_broker_static -v`
+  — 11/11 passed in 0.004 seconds on the local macOS development host.
+- Schema syntax: all three schemas and fixture manifest parsed with
+  `python3 -m json.tool`.
+- Hygiene: `git diff --cached --check` passed before the implementation commit.
+- No CMake configure, compile, native binary, Windows process, package, model,
+  provider, browser, account, or live action was used.
+
+## Review request
+
+S0/S4 should review the lease/share-mode invariant, strict manifest/protocol,
+restricted-token/Job ordering, whole-Job zero proof, and explicit residuals.
+Merging this source is not authorization to add it to CMake or expose Windows
+tools. B-005 and all target/full-access/release gates remain open.
