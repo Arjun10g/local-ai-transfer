@@ -83,6 +83,7 @@ TEST_INVENTORY = {
     "tests/qa/test_safe_runner.py": "safe_runner_unit",
     "tests/release/test_package_scanner.py": "release_static",
     "tests/release/test_windows_acceptance.py": "release_static",
+    "tests/release/test_windows_hardware_receipt_diagnostic.py": "release_static",
     "tests/security/permission-mode-adversarial.test.mjs": "security_fixture",
     "tests/security/test_adversarial.py": "security_fixture",
     "tests/security/tool-calling-adversarial.test.mjs": "loopback_fixture",
