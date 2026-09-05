@@ -38,8 +38,9 @@
 - Workaround: keep all external providers disabled by default and all writes
   confirmation-bound. Preserve per-generation active-tool filtering and the
   fail-closed journal barrier. Inert storage/helper source is merged through
-  `645f348`, but it has no production import, activated supervisor trust,
-  package wiring, compile, or target evidence. Complete those boundaries plus
+  `645f348`, and test-only client `dc29ced` is merged by `4b8e737`, but there
+  is no production transport/import, activated supervisor trust, package
+  wiring, compile, or target evidence. Complete those boundaries plus
   provider-owned reconciliation and executable identity pinning before any
   write-capable live test.
 - Needed from: S3 implementation, S4 independent review, and S0 gate decision.
@@ -82,7 +83,10 @@
   `8c34cca`, merged by `9f6bbb6` after 24/24 focused source checks. The rejected
   clipboard predecessor `0ba98d5` is superseded by inert repair `04d6860` and
   audited handoff `393189f`, merged by `0622713` after 26/26 focused source plus
-  2/2 inventory checks. Both merged boundaries remain unlinked, uncompiled,
+  2/2 inventory checks. Dormant supervisor-owned process transaction `64b3947`
+  is merged by `ca2d893` after 56/56 source plus 2/2 inventory checks, but its
+  durable adapter remains null/unrecovered and it has no public launch API,
+  CMake, or package path. All merged boundaries remain unlinked, uncompiled,
   activation-gated false, and explicitly unavailable for production/target use.
 - Impact: a path replacement/search-path race can change executed bytes, and a
   launched application can inherit provider credentials or other host secrets.
