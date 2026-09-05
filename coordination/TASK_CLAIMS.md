@@ -38,7 +38,7 @@ not a release or live-readiness approval. `PENDING_INDEPENDENT_AUDIT` and
 | TOOL-032 | S3 | `main` (merged from `luna/durable-action-journal-core`) | MERGED_SOURCE_PENDING_GATE | TOOL-013, TOOL-018 | S0, S4 | `55f3dfd` implementation; `65decba` merge; durable action/egress journal and controller barrier are source-merged, but independent evidence, production pathname-store availability, and gate approval remain pending |
 | TOOL-WINFS-REFUSAL | S3 | `luna/windows-fs-refusal-slice` | READY_FOR_REVIEW | B-005, TOOL-014, TOOL-015 | S0, S4 | post-rebase repair commit; explicit Windows filesystem/package NOT_READY gates, outermost refusal, preserved `local_capabilities` status, and focused zero-mutation evidence in `coordination/status/S3.md`; no helper activation; `SAFE_FOR_TARGET_EXECUTION=NO` |
 | QA-001 | S4 | `luna/qa-release` | CLAIMED | SOL-001 | S0 | pending |
-| QA-SAFE-RUNNER | S4 | `luna/qa-safe-runner` | READY_FOR_REVIEW | QA-001, SOL-003 | `569de5c`, `ec36be0`; plan-only safe runner, explicit inventory, no subprocess/model/lifecycle execution, focused mocked evidence |
+| QA-SAFE-RUNNER | S4 | `luna/qa-safe-runner` | READY_FOR_REVIEW | QA-001, SOL-003 | `4b24f30`; bounded exhaustive host/security/model Node and reviewed Python discovery, atomic identity-checked output, metadata-only safe package scan, strict TAP/status fail-closed checks; no subprocess/model/lifecycle execution; release remains BLOCKED |
 | SEC-001 | S4 | `luna/qa-release` | CLAIMED | QA-001, SOL-003 | S0 | pending |
 | RUN-019 | S1 | `main` | IN_PROGRESS | RUN-010, MODEL-004 | S0, S4 | real tool-role/template pipeline and tests pending |
 | RUN-020 | S1 | `main` | IN_PROGRESS | RUN-019, TOOL-001 | S0, S4 | structured Qwen call normalization evidence pending |
