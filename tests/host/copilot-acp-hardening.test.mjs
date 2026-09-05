@@ -14,10 +14,18 @@ test('Copilot production refuses ambient cwd and permits only explicit reviewed 
   const root = await mkdtemp(join(tmpdir(), 'lae-copilot-cwd-')); t.after(() => rm(root, { recursive: true, force: true }));
   const executable = join(root, 'copilot'); await writeFile(executable, 'fixture');
   const provider = new CopilotCliProvider({ enabled: true, executable, allowlist: [executable], version: '1.2.3', versionCheck: async () => true, cwd: root });
-  assert.equal(provider.state(), 'ready');
+  assert.equal(provider.state(), 'unconfigured');
   const preview = await provider.preview(call()); assert.equal(preview.workspace_id, 'private');
   const denied = await provider.execute({ ...call(), authorization: { kind: 'user_confirmation' } });
   assert.equal(JSON.parse(denied.content[0].text).code, 'provider_permission_insufficient');
+});
+
+test('Copilot workspace IDs are opaque lowercase identifiers', async () => {
+  const provider = new CopilotCliProvider({ testOnly: true, enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], versionCheck: async () => true, readContext: async () => ({ text: '', files: [] }) });
+  for (const workspace_id of ['../private', 'Project', 'private/path', 'private.name', '']) {
+    await assert.rejects(() => provider.preview(call({ workspace_id })), error => error.code === 'invalid_tool_arguments');
+  }
+  await provider.preview(call({ workspace_id: 'private_workspace-1' }));
 });
 
 test('Copilot environment is an explicit minimal allowlist with no ambient credential variables', () => {
@@ -60,7 +68,23 @@ test('ACP command and permission payloads are strict bounded objects', () => {
     { ...command, params: { ...command.params, update: { ...command.params.update, availableCommands: [{ description: 'missing name' }] } } },
     { ...permission, params: { options: [{ optionId: 'x', name: 'x', kind: 'x', extra: true }] } },
     { ...permission, params: { options: [{ optionId: 'x', name: 'x' }] } },
+    { ...permission, params: { options: [{ optionId: 'x', name: 'x', kind: 'execute' }] } },
   ]) assert.throws(() => parseCopilotAcpFrame(JSON.stringify(invalid)));
+});
+
+test('ACP runtime rejects permission requests outside the active session phase', async () => {
+  const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null; child.signalCode = null;
+  child.stdin = { write(line) {
+    const request = JSON.parse(line);
+    if (request.method === 'initialize') queueMicrotask(() => {
+      child.stdout.emit('data', Buffer.from(`${JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'session/request_permission', params: { sessionId: 'wrong-session', options: [] } })}\n`));
+      child.stdout.emit('data', Buffer.from(`${JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { protocolVersion: 1 } })}\n`));
+    });
+    return true;
+  }, end() {} }; child.kill = () => { child.exitCode = 1; child.emit('close', 1); };
+  const provider = new CopilotCliProvider({ testOnly: true, protocol: 'acp', enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], cwd: '/approved/workspace', versionCheck: async () => true, readContext: async () => ({ text: '', files: [] }), spawn: () => child });
+  const output = await provider.runAcp({ id: 'call_phase', name: 'coding.copilot_ask', arguments: { workspace_id: 'private' } }, 'hello');
+  assert.equal(JSON.parse(output.content[0].text).code, 'provider_failed');
 });
 
 test('production version probe and ACP spawn carry explicit cwd and never ambient env', async () => {

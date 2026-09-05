@@ -32,7 +32,10 @@ export function createExternalToolRegistry({ graph, copilot, browser, config = {
   const graphNames = [...graphProvider.configuredToolNames()];
   const copilotPlatformSafe = copilotProvider.platform !== 'win32' || copilotProvider.testOnly === true;
   const browserPlatformSafe = browserProvider.platform !== 'win32' || browserProvider.testOnly === true;
-  const copilotConfigured = copilotState === 'ready' && copilotPlatformSafe && (Array.isArray(workspaceRoots) && workspaceRoots.length > 0 || copilotProvider.testOnly && typeof copilotProvider.readContext === 'function');
+  // Node pathname checks cannot hold executable and workspace identity through
+  // spawn. Until a native broker issues both identities, Copilot is omitted on
+  // every production platform; test-only fakes remain available to fixtures.
+  const copilotConfigured = copilotProvider.testOnly === true && copilotState === 'ready' && copilotPlatformSafe && (typeof copilotProvider.readContext === 'function');
   const copilotNames = copilotConfigured ? [copilotDefinition.name] : [];
   const browserConfigured = !['disabled', 'unconfigured'].includes(browserState) && browserPlatformSafe;
   const browserNames = browserConfigured ? Object.keys(createBrowserActionTools(browserProvider)) : [];

@@ -11,11 +11,13 @@ const MAX_ATTEMPTS = 256;
 const MAX_FRAME_BYTES = 65536;
 const MAX_CWD_BYTES = 1024;
 const VERSION = /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u;
+const WORKSPACE_ID = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/u;
+const ACP_PERMISSION_KINDS = new Set(['allow_once', 'allow_always', 'reject_once', 'reject_always']);
 const PATH = (value, name = 'context_path') => boundedString(value, name, { min: 1, max: 1024, identifier: true }).replaceAll('\\', '/');
 const logicalWorkspacePath = workspaceId => `/lae/workspaces/${workspaceId}`;
-const validate = input => { const args = exactObject(input, ['prompt', 'workspace_id', 'context_paths'], ['prompt', 'workspace_id', 'context_paths']); boundedString(args.prompt, 'prompt', { min: 1, max: 8192 }); boundedString(args.workspace_id, 'workspace_id', { min: 1, max: 64, identifier: true }); boundedArray(args.context_paths, 'context_paths', { max: 8 }); const contextPaths = args.context_paths.map((value, index) => PATH(value, `context_paths[${index}]`)); if (contextPaths.some(value => value.startsWith('/') || /^[A-Za-z]:\//u.test(value) || value.split('/').some(part => !part || part === '.' || part === '..'))) throw new ProviderToolError('invalid_tool_arguments', 'context paths must be relative and contained'); return { ...structuredClone(args), context_paths: contextPaths }; };
+const validate = input => { const args = exactObject(input, ['prompt', 'workspace_id', 'context_paths'], ['prompt', 'workspace_id', 'context_paths']); boundedString(args.prompt, 'prompt', { min: 1, max: 8192 }); boundedString(args.workspace_id, 'workspace_id', { min: 1, max: 64, identifier: true }); if (!WORKSPACE_ID.test(args.workspace_id)) throw new ProviderToolError('invalid_tool_arguments', 'workspace_id must be an opaque lowercase identifier'); boundedArray(args.context_paths, 'context_paths', { max: 8 }); const contextPaths = args.context_paths.map((value, index) => PATH(value, `context_paths[${index}]`)); if (contextPaths.some(value => value.startsWith('/') || /^[A-Za-z]:\//u.test(value) || value.split('/').some(part => !part || part === '.' || part === '..'))) throw new ProviderToolError('invalid_tool_arguments', 'context paths must be relative and contained'); return { ...structuredClone(args), context_paths: contextPaths }; };
 
-const COPILOT_PARAMETERS = { type: 'object', additionalProperties: false, required: ['prompt', 'workspace_id', 'context_paths'], properties: { prompt: { type: 'string', minLength: 1, maxLength: 8192 }, workspace_id: { type: 'string', minLength: 1, maxLength: 64 }, context_paths: { type: 'array', maxItems: 8, items: { type: 'string', minLength: 1, maxLength: 1024 } } } };
+const COPILOT_PARAMETERS = { type: 'object', additionalProperties: false, required: ['prompt', 'workspace_id', 'context_paths'], properties: { prompt: { type: 'string', minLength: 1, maxLength: 8192 }, workspace_id: { type: 'string', minLength: 1, maxLength: 64, pattern: '^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$' }, context_paths: { type: 'array', maxItems: 8, items: { type: 'string', minLength: 1, maxLength: 1024 } } } };
 export const copilotDefinition = Object.freeze({ name: 'coding.copilot_ask', version: '0.1.0', description: 'Ask GitHub Copilot for a bounded prompt-only answer with explicitly selected context.', risk_tier: 'T3', side_effect: 'cloud_inference', network: true, data_egress: 'prompt_and_selected_files', requires_confirmation: true, timeout_ms: 30000, output_limit: MAX_OUTPUT, parameters: COPILOT_PARAMETERS, input_schema: COPILOT_PARAMETERS });
 
 function exactKeys(value, required, optional = []) {
@@ -39,6 +41,7 @@ function validateAvailableCommand(command) {
 function validatePermissionOption(option) {
   exactKeys(option, ['optionId', 'name', 'kind'], ['description']);
   boundedFrameString(option.optionId, 256); boundedFrameString(option.name, 512); boundedFrameString(option.kind, 128);
+  if (!ACP_PERMISSION_KINDS.has(option.kind)) throw new ProviderToolError('provider_failed');
   if (option.description !== undefined) boundedFrameString(option.description);
 }
 
@@ -53,9 +56,11 @@ function validateFrameShape(message) {
       if (typeof params.sessionId !== 'string' || params.sessionId.length < 1 || params.sessionId.length > 128 || /[\u0000-\u001f\u007f]/u.test(params.sessionId)) throw new ProviderToolError('provider_failed');
       const update = exactKeys(params.update, ['sessionUpdate'], ['content', 'availableCommands']);
       if (update.sessionUpdate === 'agent_message_chunk') {
+        if (Object.keys(update).length !== 2) throw new ProviderToolError('provider_failed');
         const content = exactKeys(update.content, ['type', 'text']);
         if (content.type !== 'text' || typeof content.text !== 'string' || Buffer.byteLength(content.text, 'utf8') > MAX_OUTPUT) throw new ProviderToolError('provider_failed');
       } else if (update.sessionUpdate === 'available_commands_update') {
+        if (Object.keys(update).length !== 2) throw new ProviderToolError('provider_failed');
         const commands = exactKeys(update, ['sessionUpdate', 'availableCommands']);
         if (!Array.isArray(commands.availableCommands) || commands.availableCommands.length > 128) throw new ProviderToolError('provider_failed');
         commands.availableCommands.forEach(validateAvailableCommand);
@@ -86,7 +91,11 @@ export function parseCopilotAcpFrame(line) {
 }
 
 function sameIdentity(left, right) {
-  return Boolean(left && right && left.canonicalPath === right.canonicalPath && left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mtimeMs === right.mtimeMs && left.nlink === right.nlink && left.uid === right.uid && left.mode === right.mode && left.brokerIssued === right.brokerIssued);
+  return Boolean(left && right && left.canonicalPath === right.canonicalPath && left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mtimeMs === right.mtimeMs && left.nlink === right.nlink && left.uid === right.uid && left.mode === right.mode && left.brokerIssued === right.brokerIssued && left.workspace_id === right.workspace_id);
+}
+
+function workspaceIdentity(identity, workspaceId) {
+  return identity?.brokerIssued === true && identity.workspace_id === workspaceId;
 }
 
 async function filesystemIdentity(path, { directory = false } = {}) {
@@ -99,7 +108,7 @@ async function filesystemIdentity(path, { directory = false } = {}) {
   if (directory && (typeof current.uid !== 'number' || typeof process.getuid !== 'function' || current.uid !== process.getuid() || (current.mode & 0o777) !== 0o700)) throw new ProviderToolError('copilot_policy_denied');
   // Path-based stat cannot hold an identity through spawn. A future broker
   // may issue brokerIssued=true; this fallback is intentionally non-authorizing.
-  return Object.freeze({ canonicalPath, dev: current.dev, ino: current.ino, size: current.size, mtimeMs: current.mtimeMs, nlink: current.nlink, uid: current.uid, mode: current.mode & 0o777, brokerIssued: false });
+  return Object.freeze({ canonicalPath, dev: current.dev, ino: current.ino, size: current.size, mtimeMs: current.mtimeMs, nlink: current.nlink, uid: current.uid, mode: current.mode & 0o777, brokerIssued: false, workspace_id: null });
 }
 
 function validateBinding(binding) {
@@ -151,13 +160,14 @@ function minimalEnvironment(environment = {}) {
 }
 
 function waitForClose(child, timeoutMs) {
-  if ((child.exitCode !== null && child.exitCode !== undefined) || (child.signalCode !== null && child.signalCode !== undefined)) return Promise.resolve();
+  if ((child.exitCode !== null && child.exitCode !== undefined) || (child.signalCode !== null && child.signalCode !== undefined)) return Promise.resolve(true);
   return new Promise(resolve => {
     let settled = false;
-    const finish = () => { if (settled) return; settled = true; clearTimeout(timer); child.removeListener?.('close', finish); resolve(); };
-    const timer = setTimeout(finish, timeoutMs);
+    const finish = value => { if (settled) return; settled = true; clearTimeout(timer); child.removeListener?.('close', onClose); resolve(value); };
+    const onClose = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
     timer.unref?.();
-    child.once?.('close', finish);
+    child.once?.('close', onClose);
   });
 }
 
@@ -166,8 +176,8 @@ export async function killCopilotProcessTree(child, { platform = process.platfor
   if (platform === 'win32') {
     let killer;
     try { killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore' }); } catch { try { child.kill(); } catch {} }
-    if (killer) await waitForClose(killer, Math.min(5000, Math.max(100, graceMs)));
-    await waitForClose(child, Math.min(5000, Math.max(100, graceMs)));
+    if (killer && !await waitForClose(killer, Math.min(5000, Math.max(100, graceMs)))) throw new ProviderToolError('provider_cleanup_unknown');
+    if (!await waitForClose(child, Math.min(5000, Math.max(100, graceMs)))) throw new ProviderToolError('provider_cleanup_unknown');
     return;
   }
   try { process.kill(-child.pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch {} }
@@ -175,7 +185,21 @@ export async function killCopilotProcessTree(child, { platform = process.platfor
   // A detached leader can exit while a descendant keeps the process group
   // alive, so always issue the bounded final group kill after the grace wait.
   try { process.kill(-child.pid, 'SIGKILL'); } catch { if (child.exitCode === null && child.signalCode === null) { try { child.kill('SIGKILL'); } catch {} } }
-  await waitForClose(child, Math.min(5000, Math.max(100, graceMs)));
+  if (!await waitForClose(child, Math.min(5000, Math.max(100, graceMs)))) throw new ProviderToolError('provider_cleanup_unknown');
+}
+
+async function boundedCleanup(provider, child, wasClosed = () => false) {
+  let timer;
+  try {
+    await Promise.race([
+      Promise.resolve().then(() => provider.killProcess(child)),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new ProviderToolError('provider_cleanup_unknown')), 7000);
+        timer.unref?.();
+      }),
+    ]);
+  } finally { clearTimeout(timer); }
+  if (!provider.testOnly && !wasClosed() && child.exitCode === null && child.exitCode === undefined && child.signalCode === null && child.signalCode === undefined) throw new ProviderToolError('provider_cleanup_unknown');
 }
 
 export function createCopilotVersionCheck({ expectedVersion, spawn = spawnProcess, environment = {}, timeoutMs = 5000, platform = process.platform, requireCwd = false } = {}) {
@@ -189,14 +213,16 @@ export function createCopilotVersionCheck({ expectedVersion, spawn = spawnProces
     let child;
     try { child = spawn(executable, ['--no-auto-update', '--no-color', 'version'], { ...(cwd ? { cwd } : {}), shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], env: minimalEnvironment(environment) }); } catch { return false; }
     const matched = await new Promise(resolve => {
-      let settled = false; let output = ''; let oversized = false;
+      let settled = false; let stopping = false; let output = ''; let oversized = false;
       const finish = value => { if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort); resolve(value); };
-      const abort = () => { try { child.kill(); } catch {} finish(false); };
-      const timer = setTimeout(() => { try { child.kill(); } catch {} finish(false); }, boundedTimeout);
+      const stop = async () => { if (stopping || settled) return; stopping = true; try { await killCopilotProcessTree(child, { platform, spawn, graceMs: 250 }); } catch {} finish(false); };
+      const abort = () => { void stop(); };
+      const timer = setTimeout(() => { void stop(); }, boundedTimeout);
       timer.unref?.();
-      child.stdout?.on('data', chunk => { const bytes = Buffer.from(chunk); if (Buffer.byteLength(output, 'utf8') + bytes.length > 4096) { oversized = true; try { child.kill(); } catch {} return; } output += bytes.toString('utf8'); });
-      child.once('error', () => finish(false));
+      child.stdout?.on('data', chunk => { const bytes = Buffer.from(chunk); if (Buffer.byteLength(output, 'utf8') + bytes.length > 4096) { oversized = true; void stop(); return; } output += bytes.toString('utf8'); });
+      child.once('error', () => { void stop(); });
       child.once('close', code => {
+        if (stopping) return finish(false);
         const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
         finish(code === 0 && !oversized && new RegExp(`(?:^|[^0-9A-Za-z])v?${escaped}(?:$|[^0-9A-Za-z])`, 'u').test(output));
       });
@@ -219,11 +245,11 @@ export class CopilotCliProvider {
     if (cwdIdentity !== undefined && !isTest) throw new TypeError('cwd identity injection is test-only');
     this.enabled = enabled === true; Object.defineProperty(this, 'testOnly', { value: isTest, enumerable: false }); this.executable = executable; this.allowlist = new Set(allowlist); this.version = version; this.versionCheck = versionCheck; this.readContext = readContext; this.protocol = protocol; this.cwd = selectedCwd; this.spawn = spawn; this.killProcess = killProcess ?? (child => killCopilotProcessTree(child, { platform, spawn })); this.timeoutMs = timeoutMs; this.maxOutput = maxOutput; this.environment = environment; this.platform = platform; this.executableIdentity = executableIdentity ?? (isTest ? async value => ({ canonicalPath: value }) : value => filesystemIdentity(value)); this.cwdIdentity = cwdIdentity ?? (isTest ? async value => ({ canonicalPath: value }) : value => filesystemIdentity(value, { directory: true })); this.proposals = new Map(); this.attempts = new Map(); this.probeIdentity = null;
   }
-  state() { if (!this.enabled) return 'disabled'; if (!this.cwd || typeof this.executable !== 'string' || !this.executable || !this.versionCheck) return 'unconfigured'; if (!this.allowlist.has(this.executable)) return 'unconfigured'; return 'ready'; }
+  state() { if (!this.enabled) return 'disabled'; if (!this.testOnly) return 'unconfigured'; if (!this.cwd || typeof this.executable !== 'string' || !this.executable || !this.versionCheck) return 'unconfigured'; if (!this.allowlist.has(this.executable)) return 'unconfigured'; return 'ready'; }
   validate(input) { return validate(input); }
   async preview(call) { const args = validate(call.arguments); const context = await this.context(args); const contextBytes = Buffer.byteLength(context.text, 'utf8'); const promptBytes = Buffer.byteLength(args.prompt, 'utf8'); const separatorBytes = context.text ? Buffer.byteLength('\n\nSelected context:\n', 'utf8') : 0; const bytes = promptBytes + separatorBytes + contextBytes; if (bytes > 65536) throw new ProviderToolError('invalid_tool_arguments', 'prompt and selected context exceed egress bound'); let executableIdentity = null; let reviewedCwdIdentity = null; try { executableIdentity = await this.executableIdentity(this.executable); } catch { if (this.testOnly) executableIdentity = { canonicalPath: this.executable }; } try { reviewedCwdIdentity = await this.cwdIdentity(this.cwd); } catch { if (this.testOnly) reviewedCwdIdentity = { canonicalPath: this.cwd }; } const proposal = { digest: digest(args), name: call.name, workspace_id: args.workspace_id, context_digest: digest({ text: context.text, files: context.files }), context_bytes: contextBytes, egress_bytes: bytes, executable_identity: executableIdentity, cwd_identity: reviewedCwdIdentity }; putBounded(this.proposals, call.id, proposal, 128); return { provider: 'github_copilot', destination: 'GitHub Copilot cloud', action: 'prompt_only', workspace_id: args.workspace_id, context_paths: args.context_paths, context_files: context.files, egress_bytes: bytes, data_categories: ['prompt', ...(args.context_paths.length ? ['selected_workspace_files'] : [])], disclosure: 'Selected prompt/context is sent to GitHub Copilot; output is untrusted.' }; }
   async execute(call) {
-    let args; try { args = validate(call.arguments); const saved = this.proposals.get(call.id); if (!saved || saved.name !== call.name || saved.digest !== digest(args) || !saved.executable_identity || !saved.cwd_identity) throw new ProviderToolError('copilot_policy_denied'); if (!call.authorization || typeof call.authorization !== 'object' || Array.isArray(call.authorization) || call.authorization.kind !== 'user_confirmation' || Object.keys(call.authorization).length !== 1) throw new ProviderToolError('provider_permission_insufficient'); if (!this.enabled) throw new ProviderToolError('copilot_cli_unavailable'); if (!this.executable || !this.versionCheck || !this.allowlist.has(this.executable)) throw new ProviderToolError('copilot_policy_denied'); const binding = call.internal?.journal_binding; if (!this.testOnly) validateBinding(binding); const probeBefore = await this.executableIdentity(this.executable); if (!sameIdentity(probeBefore, saved.executable_identity) || !this.testOnly && probeBefore.brokerIssued !== true) throw new ProviderToolError('copilot_policy_denied'); const cwdBefore = await this.cwdIdentity(this.cwd); if (!sameIdentity(cwdBefore, saved.cwd_identity) || !this.testOnly && cwdBefore.brokerIssued !== true) throw new ProviderToolError('copilot_policy_denied'); if (!await this.versionCheck(probeBefore.canonicalPath, call.signal, this.cwd)) throw new ProviderToolError('copilot_policy_denied'); const probeAfter = await this.executableIdentity(this.executable); if (!sameIdentity(probeBefore, probeAfter) || !this.testOnly && probeAfter.brokerIssued !== true) throw new ProviderToolError('copilot_policy_denied'); const context = await this.context(args); const contextBytes = Buffer.byteLength(context.text, 'utf8'); if (digest({ text: context.text, files: context.files }) !== saved.context_digest || contextBytes !== saved.context_bytes) throw new ProviderToolError('copilot_policy_denied', 'selected context changed after preview'); const prompt = context.text ? `${args.prompt}\n\nSelected context:\n${context.text}` : args.prompt; if (Buffer.byteLength(prompt, 'utf8') !== saved.egress_bytes || Buffer.byteLength(prompt, 'utf8') > 65536) throw new ProviderToolError('copilot_policy_denied'); const attemptKey = `${binding?.operation_digest ?? `${call.id}:${digest(args)}`}`; if (this.attempts.has(attemptKey)) return this.attempts.get(attemptKey); putBounded(this.attempts, attemptKey, failureResult(call, new ProviderToolError('provider_request_already_attempted')), MAX_ATTEMPTS); let output; try { output = await this.run(call, args, prompt, probeAfter.canonicalPath, binding); } catch (error) { output = failureResult(call, error); } this.attempts.set(attemptKey, output); return output; } catch (error) { if (error?.code === 'invalid_tool_arguments') throw error; return failureResult(call, error); }
+    let args; try { args = validate(call.arguments); const saved = this.proposals.get(call.id); if (!saved || saved.name !== call.name || saved.digest !== digest(args) || !saved.executable_identity || !saved.cwd_identity) throw new ProviderToolError('copilot_policy_denied'); if (!call.authorization || typeof call.authorization !== 'object' || Array.isArray(call.authorization) || call.authorization.kind !== 'user_confirmation' || Object.keys(call.authorization).length !== 1) throw new ProviderToolError('provider_permission_insufficient'); if (!this.enabled) throw new ProviderToolError('copilot_cli_unavailable'); if (!this.executable || !this.versionCheck || !this.allowlist.has(this.executable)) throw new ProviderToolError('copilot_policy_denied'); const binding = call.internal?.journal_binding; if (!this.testOnly) validateBinding(binding); const probeBefore = await this.executableIdentity(this.executable); if (!sameIdentity(probeBefore, saved.executable_identity) || !this.testOnly && (!workspaceIdentity(probeBefore, args.workspace_id))) throw new ProviderToolError('copilot_policy_denied'); const cwdBefore = await this.cwdIdentity(this.cwd, args.workspace_id); if (!sameIdentity(cwdBefore, saved.cwd_identity) || !this.testOnly && (!workspaceIdentity(cwdBefore, args.workspace_id))) throw new ProviderToolError('copilot_policy_denied'); if (!await this.versionCheck(probeBefore.canonicalPath, call.signal, this.cwd)) throw new ProviderToolError('copilot_policy_denied'); const probeAfter = await this.executableIdentity(this.executable); if (!sameIdentity(probeBefore, probeAfter) || !this.testOnly && (!workspaceIdentity(probeAfter, args.workspace_id))) throw new ProviderToolError('copilot_policy_denied'); const context = await this.context(args); const contextBytes = Buffer.byteLength(context.text, 'utf8'); if (digest({ text: context.text, files: context.files }) !== saved.context_digest || contextBytes !== saved.context_bytes) throw new ProviderToolError('copilot_policy_denied', 'selected context changed after preview'); const prompt = context.text ? `${args.prompt}\n\nSelected context:\n${context.text}` : args.prompt; if (Buffer.byteLength(prompt, 'utf8') !== saved.egress_bytes || Buffer.byteLength(prompt, 'utf8') > 65536) throw new ProviderToolError('copilot_policy_denied'); const attemptKey = `${binding?.operation_digest ?? `${call.id}:${digest(args)}`}`; if (this.attempts.has(attemptKey)) return this.attempts.get(attemptKey); putBounded(this.attempts, attemptKey, failureResult(call, new ProviderToolError('provider_request_already_attempted')), MAX_ATTEMPTS); let output; try { output = await this.run(call, args, prompt, probeAfter.canonicalPath, binding); } catch (error) { output = failureResult(call, error); } this.attempts.set(attemptKey, output); return output; } catch (error) { if (error?.code === 'invalid_tool_arguments') throw error; return failureResult(call, error); }
   }
   async context(args) {
     if (!args.context_paths.length) return { text: '', files: [] };
@@ -253,13 +279,14 @@ async function hardenedRunAcp(call, prompt, executable = this.executable, bindin
   checkAborted(call.signal);
   const env = this.safeEnvironment();
   if (this.platform === 'win32' && !env.SystemRoot && !env.WINDIR) return failureResult(call, new ProviderToolError('copilot_policy_denied'));
-  const child = this.spawn(executable, ['--acp', '--stdio', '--no-auto-update', '--no-color', '--no-custom-instructions', '--no-experimental', '--no-remote', '--no-remote-export', '--disable-builtin-mcps', '--available-tools='], { cwd: this.cwd, shell: false, windowsHide: true, detached: true, stdio: ['pipe', 'pipe', 'pipe'], env });
-  const started = Date.now(); const pending = new Map(); let nextId = 1; let phase = 'boot'; let sessionId = null; let output = ''; let lineBuffer = ''; let stdoutBytes = 0; let promptDone = false; let settled = false; let stopping = false; let timer;
+  let child;
+  try { child = this.spawn(executable, ['--acp', '--stdio', '--no-auto-update', '--no-color', '--no-custom-instructions', '--no-experimental', '--no-remote', '--no-remote-export', '--disable-builtin-mcps', '--available-tools='], { cwd: this.cwd, shell: false, windowsHide: true, detached: true, stdio: ['pipe', 'pipe', 'pipe'], env }); } catch { return failureResult(call, new ProviderToolError('copilot_cli_unavailable')); }
+  const started = Date.now(); const pending = new Map(); const serverRequestIds = new Set(); let nextId = 1; let phase = 'boot'; let sessionId = null; let output = ''; let lineBuffer = ''; let stdoutBytes = 0; let promptDone = false; let settled = false; let stopping = false; let observedClose = false; let timer;
   const decoder = new TextDecoder('utf-8', { fatal: true });
   const finish = value => { if (settled) return; settled = true; clearTimeout(timer); call.signal?.removeEventListener('abort', abort); returnValue(value); };
   let returnValue;
   const completed = new Promise(resolve => { returnValue = resolve; });
-  const stop = async code => { if (stopping || settled) return; stopping = true; const error = new ProviderToolError(code); for (const item of pending.values()) item.reject(error); pending.clear(); let cleanupFailed = false; try { await this.killProcess(child); } catch { cleanupFailed = true; } finish(failureResult(call, cleanupFailed ? new ProviderToolError('provider_failed') : error)); };
+  const stop = async code => { if (stopping || settled) return; stopping = true; const error = new ProviderToolError(code); for (const item of pending.values()) item.reject(error); pending.clear(); let cleanupFailed = false; try { await boundedCleanup(this, child, () => observedClose); } catch { cleanupFailed = true; } finish(failureResult(call, cleanupFailed ? new ProviderToolError('provider_failed') : error)); };
   const abort = () => { void stop('provider_cancelled'); };
   const request = message => new Promise((resolve, reject) => { if (pending.size >= 8 || phase === 'complete') { reject(new ProviderToolError('provider_failed')); return; } const id = nextId++; pending.set(id, { method: message.method, resolve, reject }); try { child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, ...message })}\n`); } catch { pending.delete(id); reject(new ProviderToolError('provider_failed')); void stop('provider_failed'); } });
   const handle = line => {
@@ -269,12 +296,12 @@ async function hardenedRunAcp(call, prompt, executable = this.executable, bindin
       if (message.params.update.sessionUpdate === 'agent_message_chunk') { const text = message.params.update.content.text; const bytes = Buffer.byteLength(text, 'utf8'); if (Buffer.byteLength(output, 'utf8') + bytes > this.maxOutput) { void stop('provider_response_too_large'); return; } output += text; }
       return;
     }
-    if (message.method === 'session/request_permission') { try { child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { outcome: { outcome: 'cancelled' } } })}\n`); } catch { void stop('provider_failed'); } return; }
+    if (message.method === 'session/request_permission') { if (phase !== 'prompting' || message.params.sessionId !== sessionId || serverRequestIds.has(message.id)) { void stop('provider_failed'); return; } if (serverRequestIds.size >= 8) { void stop('provider_response_too_large'); return; } serverRequestIds.add(message.id); try { child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { outcome: { outcome: 'cancelled' } } })}\n`); } catch { void stop('provider_failed'); } return; }
     const item = pending.get(message.id); if (!item) { void stop('provider_failed'); return; } pending.delete(message.id);
     if (message.error) { item.reject(new ProviderToolError('provider_failed')); return; }
     try {
       if (item.method === 'initialize') { exactKeys(message.result, ['protocolVersion'], ['agentCapabilities', 'authMethods', 'agentInfo']); if (message.result.protocolVersion !== 1 || phase !== 'boot') throw new ProviderToolError('provider_failed'); phase = 'initialized'; }
-      else if (item.method === 'session/new') { exactKeys(message.result, ['sessionId']); if (typeof message.result.sessionId !== 'string' || message.result.sessionId.length < 1 || message.result.sessionId.length > 128 || /[\u0000-\u001f\u007f]/u.test(message.result.sessionId)) throw new ProviderToolError('provider_failed'); sessionId = message.result.sessionId; phase = 'session_open'; }
+      else if (item.method === 'session/new') { exactKeys(message.result, ['sessionId']); if (phase !== 'initialized' || typeof message.result.sessionId !== 'string' || message.result.sessionId.length < 1 || message.result.sessionId.length > 128 || /[\u0000-\u001f\u007f]/u.test(message.result.sessionId)) throw new ProviderToolError('provider_failed'); sessionId = message.result.sessionId; phase = 'session_open'; }
       else if (item.method === 'session/prompt') { exactKeys(message.result, ['stopReason']); if (message.result.stopReason !== 'end_turn' || phase !== 'prompting') throw new ProviderToolError('provider_failed'); promptDone = true; phase = 'complete'; }
       else throw new ProviderToolError('provider_failed');
       item.resolve(message.result);
@@ -283,8 +310,8 @@ async function hardenedRunAcp(call, prompt, executable = this.executable, bindin
   child.stdout?.on('data', chunk => { if (settled || stopping) return; const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk); stdoutBytes += bytes.length; if (stdoutBytes > 524288) { void stop('provider_response_too_large'); return; } try { lineBuffer += decoder.decode(bytes, { stream: true }); } catch { void stop('provider_failed'); return; } let split; while ((split = lineBuffer.indexOf('\n')) >= 0) { const line = lineBuffer.slice(0, split).replace(/\r$/u, ''); lineBuffer = lineBuffer.slice(split + 1); if (Buffer.byteLength(line, 'utf8') > MAX_FRAME_BYTES) { void stop('provider_response_too_large'); return; } handle(line); } if (Buffer.byteLength(lineBuffer, 'utf8') > MAX_FRAME_BYTES) void stop('provider_response_too_large'); });
   child.stdout?.on('end', () => { try { lineBuffer += decoder.decode(); } catch { void stop('provider_failed'); return; } if (lineBuffer) handle(lineBuffer); });
   child.stderr?.on('data', () => {}); child.once('error', error => { void stop(error.code === 'ENOENT' ? 'copilot_cli_unavailable' : 'provider_failed'); });
-  child.once('close', code => { if (settled || stopping) return; if (!promptDone || pending.size || code !== 0) { void stop('provider_failed'); return; } const outputResult = result(call, 'ok', { provider: 'github_copilot', state: 'ready', stdout: output, exit_class: 'ok', truncated: false, duration_ms: Date.now() - started, cli_version: this.version, egress_bytes: Buffer.byteLength(prompt, 'utf8'), idempotency: 'new' }); finish(issueCopilotAttestation(outputResult, { call, binding })); });
-  timer = setTimeout(() => { void stop('provider_timeout'); }, this.timeoutMs); timer.unref?.(); call.signal?.addEventListener('abort', abort, { once: true });
+  child.once('close', code => { observedClose = true; if (settled || stopping) return; if (!promptDone || pending.size || code !== 0) { void stop('provider_failed'); return; } void (async () => { try { await boundedCleanup(this, child, () => observedClose); const outputResult = result(call, 'ok', { provider: 'github_copilot', state: 'ready', stdout: output, exit_class: 'ok', truncated: false, duration_ms: Date.now() - started, cli_version: this.version, egress_bytes: Buffer.byteLength(prompt, 'utf8'), idempotency: 'new' }); finish(issueCopilotAttestation(outputResult, { call, binding })); } catch { finish(failureResult(call, new ProviderToolError('provider_failed'))); } })(); });
+  timer = setTimeout(() => { void stop('provider_timeout'); }, this.timeoutMs); timer.unref?.(); call.signal?.addEventListener('abort', abort, { once: true }); child.stdin?.once?.('error', () => { void stop('provider_failed'); });
   (async () => { try { await request({ method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'local-assistant-engine', version: '0.1.0' } } }); await request({ method: 'session/new', params: { cwd: logicalWorkspacePath(call.arguments.workspace_id), mcpServers: [] } }); phase = 'prompting'; await request({ method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: prompt }] } }); try { child.stdin.end(); } catch {} } catch { void stop('provider_failed'); } })();
   return completed;
 }
