@@ -92,14 +92,14 @@ test('ACP initialize rejects unknown optional object fields', async () => {
 
 test('ACP runtime rejects permission requests outside the active session phase', async () => {
   const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null; child.signalCode = null;
-  child.stdin = { write(line) {
+  child.stdin = Object.assign(new EventEmitter(), { write(line) {
     const request = JSON.parse(line);
     if (request.method === 'initialize') queueMicrotask(() => {
       child.stdout.emit('data', Buffer.from(`${JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'session/request_permission', params: { sessionId: 'wrong-session', options: [] } })}\n`));
       child.stdout.emit('data', Buffer.from(`${JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { protocolVersion: 1 } })}\n`));
     });
     return true;
-  }, end() {} }; child.kill = () => { child.exitCode = 1; child.emit('close', 1); };
+  }, end() {} }); child.kill = () => { child.exitCode = 1; child.emit('close', 1); };
   const provider = new CopilotCliProvider({ testOnly: true, protocol: 'acp', enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], cwd: '/approved/workspace', versionCheck: async () => true, readContext: async () => ({ text: '', files: [] }), spawn: () => child });
   const output = await provider.runAcp({ id: 'call_phase', name: 'coding.copilot_ask', arguments: { workspace_id: 'private' } }, 'hello');
   assert.equal(JSON.parse(output.content[0].text).code, 'provider_failed');
@@ -107,7 +107,7 @@ test('ACP runtime rejects permission requests outside the active session phase',
 
 test('production version probe and ACP spawn carry explicit cwd and never ambient env', async () => {
   let versionOptions; let acpOptions; let acpArgs;
-  const versionChild = { stdout: { on(_event, handler) { queueMicrotask(() => { handler(Buffer.from('v1.2.3')); }); } }, once(event, handler) { if (event === 'close') queueMicrotask(() => handler(0)); }, kill() {} };
+  const versionChild = { treeReaped: true, stdout: { on(_event, handler) { queueMicrotask(() => { handler(Buffer.from('v1.2.3')); }); } }, once(event, handler) { if (event === 'close') queueMicrotask(() => handler(0)); }, kill() {} };
   const check = createCopilotVersionCheck({ expectedVersion: '1.2.3', spawn(_exe, _args, options) { versionOptions = options; return versionChild; } });
   assert.equal(await check('/approved/copilot', undefined, '/reviewed/workspace'), true); assert.equal(versionOptions.cwd, '/reviewed/workspace'); assert.deepEqual(versionOptions.env, {}); assert.equal('SECRET_TOKEN' in versionOptions.env, false);
   const provider = new CopilotCliProvider({ testOnly: true, enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], version: '1.2.3', cwd: '/reviewed/workspace', versionCheck: async () => true, readContext: async () => ({ text: '', files: [] }), spawn(_exe, args, options) {
@@ -130,4 +130,41 @@ test('ACP cleanup ambiguity fails closed after cancellation/timeout', async () =
   const provider = new CopilotCliProvider({ testOnly: true, enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], cwd: '/reviewed/workspace', versionCheck: async () => true, readContext: async () => ({ text: '', files: [] }), timeoutMs: 100, spawn: () => child, killProcess: async () => { throw new Error('tree state unknown'); } });
   const output = await provider.runAcp({ id: 'cleanup_call', name: 'coding.copilot_ask' }, 'hello');
   assert.equal(JSON.parse(output.content[0].text).code, 'provider_failed');
+});
+
+test('ACP cleanup does not trust a true kill result without leader close and tree proof', async () => {
+  const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.stdin = { write() {}, end() {} }; child.exitCode = null; child.signalCode = null;
+  const provider = new CopilotCliProvider({ testOnly: false, protocol: 'acp', enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], cwd: '/reviewed/workspace', timeoutMs: 100, versionCheck: async () => true, spawn: () => child, killProcess: async () => true });
+  const output = await provider.runAcp({ id: 'cleanup_proof', name: 'coding.copilot_ask', arguments: { workspace_id: 'private' } }, 'hello');
+  assert.equal(JSON.parse(output.content[0].text).code, 'provider_failed');
+});
+
+test('ACP asynchronous stdin EPIPE cannot produce an attested completion', async () => {
+  const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null; child.signalCode = null;
+  child.stdin = Object.assign(new EventEmitter(), { write(line) {
+    const request = JSON.parse(line);
+    queueMicrotask(() => {
+      if (request.method === 'initialize') child.stdout.emit('data', Buffer.from(`${JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { protocolVersion: 1 } })}\n`));
+      else if (request.method === 'session/new') child.stdout.emit('data', Buffer.from(`${JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { sessionId: 'stdin-error' } })}\n`));
+      else if (request.method === 'session/prompt') { child.stdout.emit('data', Buffer.from(`${JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { stopReason: 'end_turn' } })}\n`)); child.exitCode = 0; child.emit('close', 0); }
+    }); return true;
+  }, end() { queueMicrotask(() => child.stdin.emit('error', Object.assign(new Error('EPIPE'), { code: 'EPIPE' }))); } });
+  const provider = new CopilotCliProvider({ testOnly: true, protocol: 'acp', enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], cwd: '/reviewed/workspace', versionCheck: async () => true, readContext: async () => ({ text: '', files: [] }), spawn: () => child });
+  const output = await provider.runAcp({ id: 'stdin_error', name: 'coding.copilot_ask', arguments: { workspace_id: 'private' } }, 'hello');
+  assert.equal(JSON.parse(output.content[0].text).code, 'provider_failed');
+  assert.equal(readCopilotAttestation(output), null);
+});
+
+test('legacy stdin end failure is definitive and cannot attest', async () => {
+  const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.stdin = { end() { throw Object.assign(new Error('EPIPE'), { code: 'EPIPE' }); } };
+  const provider = new CopilotCliProvider({ testOnly: true, protocol: 'legacy_stdin', enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], cwd: '/reviewed/workspace', versionCheck: async () => true, readContext: async () => ({ text: '', files: [] }), spawn: () => child, killProcess: async () => {} });
+  const output = await provider.run({ id: 'sync_stdin_error', name: 'coding.copilot_ask' }, { prompt: 'hello', workspace_id: 'private', context_paths: [] }, 'hello');
+  assert.equal(JSON.parse(output.content[0].text).code, 'provider_failed');
+  assert.equal(readCopilotAttestation(output), null);
+});
+
+test('version success without descendant proof is cleanup-unknown, not mismatch', async () => {
+  const versionChild = { stdout: { on(_event, handler) { queueMicrotask(() => handler(Buffer.from('v1.2.3'))); } }, once(event, handler) { if (event === 'close') queueMicrotask(() => handler(0)); } };
+  const check = createCopilotVersionCheck({ expectedVersion: '1.2.3', spawn: () => versionChild });
+  await assert.rejects(() => check('/approved/copilot'), error => error.code === 'provider_cleanup_unknown');
 });

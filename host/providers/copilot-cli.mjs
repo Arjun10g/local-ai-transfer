@@ -179,31 +179,44 @@ function minimalEnvironment(environment = {}) {
 }
 
 function waitForClose(child, timeoutMs) {
-  if ((child.exitCode !== null && child.exitCode !== undefined) || (child.signalCode !== null && child.signalCode !== undefined)) return Promise.resolve(true);
+  if (child?.__laeCloseObserved === true) return Promise.resolve(true);
   return new Promise(resolve => {
     let settled = false;
     const finish = value => { if (settled) return; settled = true; clearTimeout(timer); child.removeListener?.('close', onClose); resolve(value); };
-    const onClose = () => finish(true);
+    const onClose = () => { try { child.__laeCloseObserved = true; } catch {} finish(true); };
     const timer = setTimeout(() => finish(false), timeoutMs);
     timer.unref?.();
     child.once?.('close', onClose);
   });
 }
 
+function endInput(stream, chunk, onClosed, onError) {
+  if (!stream || typeof stream.end !== 'function') return onClosed();
+  try {
+    // Real Writable streams expose the callback form. Tiny test doubles often
+    // do not; retain their synchronous contract while still observing error
+    // events installed by the caller.
+    if (stream.end.length >= 3) stream.end(chunk, 'utf8', error => error ? onError(error) : onClosed());
+    else { stream.end(chunk, 'utf8'); queueMicrotask(onClosed); }
+  } catch (error) { onError(error); }
+}
+
 export async function killCopilotProcessTree(child, { platform = process.platform, spawn = nodeSpawn, graceMs = 1000 } = {}) {
-  if (!child || !Number.isInteger(child.pid) || child.pid <= 0 || (child.exitCode !== null && child.exitCode !== undefined) || (child.signalCode !== null && child.signalCode !== undefined)) return child?.treeReaped === true;
+  if (!child || !Number.isInteger(child.pid) || child.pid <= 0 || child.__laeCloseObserved === true) return child?.treeReaped === true && child?.__laeCloseObserved === true;
   if (platform === 'win32') {
+    const childClose = waitForClose(child, Math.min(5000, Math.max(100, graceMs) * 2));
     let killer; try { killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore' }); } catch { throw new ProviderToolError('provider_cleanup_unknown'); }
-    if (!killer || !await waitForClose(killer, Math.min(5000, Math.max(100, graceMs)))) throw new ProviderToolError('provider_cleanup_unknown');
-    if (!await waitForClose(child, Math.min(5000, Math.max(100, graceMs)))) throw new ProviderToolError('provider_cleanup_unknown');
+    if (!killer || !await waitForClose(killer, Math.min(5000, Math.max(100, graceMs))) || killer.exitCode !== 0 || killer.signalCode !== null && killer.signalCode !== undefined) throw new ProviderToolError('provider_cleanup_unknown');
+    if (!await childClose) throw new ProviderToolError('provider_cleanup_unknown');
     return child.treeReaped === true;
   }
+  const childClose = waitForClose(child, Math.min(5000, Math.max(100, graceMs) * 2));
   try { process.kill(-child.pid, 'SIGTERM'); } catch { throw new ProviderToolError('provider_cleanup_unknown'); }
-  await waitForClose(child, Math.min(5000, Math.max(100, graceMs)));
+  await childClose;
   // A detached leader can exit while a descendant keeps the process group
   // alive, so always issue the bounded final group kill after the grace wait.
   try { process.kill(-child.pid, 'SIGKILL'); } catch { throw new ProviderToolError('provider_cleanup_unknown'); }
-  if (!await waitForClose(child, Math.min(5000, Math.max(100, graceMs)))) throw new ProviderToolError('provider_cleanup_unknown');
+  if (!child.__laeCloseObserved) throw new ProviderToolError('provider_cleanup_unknown');
   return child.treeReaped === true;
 }
 
@@ -219,7 +232,10 @@ async function boundedCleanup(provider, child, wasClosed = () => false) {
       }),
     ]);
   } finally { clearTimeout(timer); }
-  if (!provider.testOnly && (treeProof !== true || !wasClosed() && child.exitCode === null && child.exitCode === undefined && child.signalCode === null && child.signalCode === undefined)) throw new ProviderToolError('provider_cleanup_unknown');
+  // A successful kill callback is not itself evidence that the leader closed
+  // or that descendants are gone. Production callers require both the
+  // observed close event and the broker's explicit descendant proof.
+  if (!provider.testOnly && (treeProof !== true || wasClosed() !== true || child.__laeCloseObserved !== true)) throw new ProviderToolError('provider_cleanup_unknown');
 }
 
 export function createCopilotVersionCheck({ expectedVersion, spawn = spawnProcess, environment = {}, timeoutMs = 5000, platform = process.platform, requireCwd = false } = {}) {
@@ -231,25 +247,33 @@ export function createCopilotVersionCheck({ expectedVersion, spawn = spawnProces
     if (requireCwd && (typeof cwd !== 'string' || !isAbsolute(cwd))) return false;
     if (platform === 'win32' && !environment?.SystemRoot && !environment?.WINDIR) return false;
     let child;
-    try { child = spawn(executable, ['--no-auto-update', '--no-color', 'version'], { ...(cwd ? { cwd } : {}), shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], env: minimalEnvironment(environment) }); } catch { return false; }
-    const matched = await new Promise(resolve => {
+    try { child = spawn(executable, ['--no-auto-update', '--no-color', 'version'], { ...(cwd ? { cwd } : {}), shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], env: minimalEnvironment(environment) }); } catch { throw new ProviderToolError('copilot_cli_unavailable'); }
+    return await new Promise((resolve, reject) => {
       let settled = false; let stopping = false; let output = ''; let oversized = false;
-      const finish = value => { if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort); resolve(value); };
-      const stop = async () => { if (stopping || settled) return; stopping = true; try { await killCopilotProcessTree(child, { platform, spawn, graceMs: 250 }); } catch {} finish(false); };
-      const abort = () => { void stop(); };
-      const timer = setTimeout(() => { void stop(); }, boundedTimeout);
+      const finish = (value, error) => { if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort); if (error) reject(error); else resolve(value); };
+      const stop = async code => {
+        if (stopping || settled) return;
+        stopping = true;
+        try { const proof = await killCopilotProcessTree(child, { platform, spawn, graceMs: 250 }); if (proof !== true) throw new ProviderToolError('provider_cleanup_unknown'); finish(false, new ProviderToolError(code)); }
+        catch { finish(false, new ProviderToolError('provider_cleanup_unknown')); }
+      };
+      const abort = () => { void stop('provider_cancelled'); };
+      const timer = setTimeout(() => { void stop('provider_timeout'); }, boundedTimeout);
       timer.unref?.();
-      child.stdout?.on('data', chunk => { const bytes = Buffer.from(chunk); if (Buffer.byteLength(output, 'utf8') + bytes.length > 4096) { oversized = true; void stop(); return; } output += bytes.toString('utf8'); });
-      child.once('error', () => { void stop(); });
+      child.stdout?.on('data', chunk => { const bytes = Buffer.from(chunk); if (Buffer.byteLength(output, 'utf8') + bytes.length > 4096) { oversized = true; void stop('provider_response_too_large'); return; } output += bytes.toString('utf8'); });
+      child.once('error', () => { void stop('provider_failed'); });
       child.once('close', code => {
-        if (stopping) return finish(false);
+        child.__laeCloseObserved = true;
+        if (stopping) return;
+        // A normal exit is only usable when the broker supplied proof that no
+        // descendant remains. A pathname child with no such proof is refused,
+        // never misreported as a version mismatch.
+        if (child.treeReaped !== true) return finish(false, new ProviderToolError('provider_cleanup_unknown'));
         const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
         finish(code === 0 && !oversized && new RegExp(`(?:^|[^0-9A-Za-z])v?${escaped}(?:$|[^0-9A-Za-z])`, 'u').test(output));
       });
       signal?.addEventListener('abort', abort, { once: true });
     });
-    checkAborted(signal);
-    return matched;
   };
 }
 
@@ -278,13 +302,13 @@ export class CopilotCliProvider {
   }
   async run(call, args, prompt, executable = this.executable, binding = null) {
     if (this.protocol === 'acp') return this.runAcp(call, prompt, executable, binding);
-    checkAborted(call.signal); const started = Date.now(); const child = this.spawn(executable, ['-s', '--no-auto-update', '--no-color', '--no-custom-instructions', '--no-experimental', '--no-remote', '--no-remote-export', '--no-ask-user', '--disable-builtin-mcps', '--disallow-temp-dir', '--log-level=none', '--available-tools='], { cwd: this.cwd, shell: false, windowsHide: true, detached: true, stdio: ['pipe', 'pipe', 'pipe'], env: this.safeEnvironment() }); let output = ''; let truncated = false; const outputDecoder = new TextDecoder();
+    checkAborted(call.signal); const started = Date.now(); const child = this.spawn(executable, ['-s', '--no-auto-update', '--no-color', '--no-custom-instructions', '--no-experimental', '--no-remote', '--no-remote-export', '--no-ask-user', '--disable-builtin-mcps', '--disallow-temp-dir', '--log-level=none', '--available-tools='], { cwd: this.cwd, shell: false, windowsHide: true, detached: true, stdio: ['pipe', 'pipe', 'pipe'], env: this.safeEnvironment() }); let output = ''; let truncated = false; let inputClosed = false; let childClosed = false; let closeCode; const outputDecoder = new TextDecoder();
     const collect = (current, chunk, decoder, final = false) => { const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8'); const text = decoder.decode(bytes, { stream: !final }); const room = this.maxOutput - Buffer.byteLength(current, 'utf8'); if (room <= 0) { truncated = true; return current; } const textBytes = Buffer.from(text, 'utf8'); if (textBytes.length > room) { truncated = true; let bounded = new TextDecoder().decode(textBytes.subarray(0, room)); while (bounded.endsWith('\uFFFD')) bounded = bounded.slice(0, -1); return current + bounded; } return current + text; };
     const stop = async () => { try { await this.killProcess(child); } catch {} };
     let outputOverflow = false;
     return await new Promise((resolve) => {
-      let settled = false; let forcedCode = null; let killBackstop; const finish = value => { if (!settled) { settled = true; clearTimeout(timer); clearTimeout(killBackstop); call.signal?.removeEventListener('abort', abort); resolve(value); } }; const stopAndFinish = code => { if (forcedCode) return; forcedCode = code; killBackstop = setTimeout(() => finish(failureResult(call, new ProviderToolError(code))), 6000); killBackstop.unref?.(); void stop().finally(() => finish(failureResult(call, new ProviderToolError(code)))); }; const abort = () => stopAndFinish('provider_cancelled'); const timer = setTimeout(() => stopAndFinish('provider_timeout'), this.timeoutMs); timer.unref?.();
-      child.stdout?.on('data', chunk => { const before = Buffer.byteLength(output, 'utf8'); output = collect(output, chunk, outputDecoder); if (Buffer.byteLength(output, 'utf8') >= this.maxOutput && Buffer.byteLength(chunk) + before > this.maxOutput && !outputOverflow) { outputOverflow = true; stopAndFinish('provider_response_too_large'); } }); child.stderr?.on('data', () => {}); child.once('error', error => stopAndFinish(error.code === 'ENOENT' ? 'copilot_cli_unavailable' : 'provider_failed')); child.once('close', code => { if (forcedCode) return; output = collect(output, Buffer.alloc(0), outputDecoder, true); const exitClass = code === 0 ? 'ok' : code === null ? 'cancelled' : 'failed'; const outputResult = result(call, code === 0 ? 'ok' : 'failed', { provider: 'github_copilot', state: 'ready', stdout: output, exit_class: exitClass, truncated, duration_ms: Date.now() - started, cli_version: this.version, egress_bytes: Buffer.byteLength(prompt, 'utf8'), idempotency: 'new' }); finish(issueCopilotAttestation(outputResult, { call, binding })); }); call.signal?.addEventListener('abort', abort, { once: true }); child.stdin?.once?.('error', () => stopAndFinish('provider_failed')); child.stdin?.end(prompt, 'utf8');
+      let settled = false; let forcedCode = null; let killBackstop; const finish = value => { if (!settled) { settled = true; clearTimeout(timer); clearTimeout(killBackstop); call.signal?.removeEventListener('abort', abort); resolve(value); } }; const stopAndFinish = code => { if (forcedCode) return; forcedCode = code; killBackstop = setTimeout(() => finish(failureResult(call, new ProviderToolError(code))), 6000); killBackstop.unref?.(); void stop().finally(() => finish(failureResult(call, new ProviderToolError(code)))); }; const complete = () => { if (!childClosed || !inputClosed || forcedCode || settled) return; const code = closeCode; output = collect(output, Buffer.alloc(0), outputDecoder, true); const exitClass = code === 0 ? 'ok' : code === null ? 'cancelled' : 'failed'; const outputResult = result(call, code === 0 ? 'ok' : 'failed', { provider: 'github_copilot', state: 'ready', stdout: output, exit_class: exitClass, truncated, duration_ms: Date.now() - started, cli_version: this.version, egress_bytes: Buffer.byteLength(prompt, 'utf8'), idempotency: 'new' }); finish(issueCopilotAttestation(outputResult, { call, binding })); }; const abort = () => stopAndFinish('provider_cancelled'); const timer = setTimeout(() => stopAndFinish('provider_timeout'), this.timeoutMs); timer.unref?.();
+      child.stdout?.on('data', chunk => { if (childClosed || forcedCode) return; const before = Buffer.byteLength(output, 'utf8'); output = collect(output, chunk, outputDecoder); if (Buffer.byteLength(output, 'utf8') >= this.maxOutput && Buffer.byteLength(chunk) + before > this.maxOutput && !outputOverflow) { outputOverflow = true; stopAndFinish('provider_response_too_large'); } }); child.stderr?.on('data', () => {}); child.once('error', error => stopAndFinish(error.code === 'ENOENT' ? 'copilot_cli_unavailable' : 'provider_failed')); child.once('close', code => { if (forcedCode) return; childClosed = true; closeCode = code; queueMicrotask(complete); }); call.signal?.addEventListener('abort', abort, { once: true }); child.stdin?.once?.('error', () => stopAndFinish('provider_failed')); endInput(child.stdin, prompt, () => { inputClosed = true; queueMicrotask(complete); }, () => stopAndFinish('provider_failed'));
     });
   }
 
@@ -301,7 +325,7 @@ async function hardenedRunAcp(call, prompt, executable = this.executable, bindin
   if (this.platform === 'win32' && !env.SystemRoot && !env.WINDIR) return failureResult(call, new ProviderToolError('copilot_policy_denied'));
   let child;
   try { child = this.spawn(executable, ['--acp', '--stdio', '--no-auto-update', '--no-color', '--no-custom-instructions', '--no-experimental', '--no-remote', '--no-remote-export', '--disable-builtin-mcps', '--available-tools='], { cwd: this.cwd, shell: false, windowsHide: true, detached: true, stdio: ['pipe', 'pipe', 'pipe'], env }); } catch { return failureResult(call, new ProviderToolError('copilot_cli_unavailable')); }
-  const started = Date.now(); const pending = new Map(); const serverRequestIds = new Set(); let nextId = 1; let phase = 'boot'; let sessionId = null; let output = ''; let lineBuffer = ''; let stdoutBytes = 0; let promptDone = false; let settled = false; let stopping = false; let observedClose = false; let timer;
+  const started = Date.now(); const pending = new Map(); const serverRequestIds = new Set(); let nextId = 1; let phase = 'boot'; let sessionId = null; let output = ''; let lineBuffer = ''; let stdoutBytes = 0; let promptDone = false; let settled = false; let stopping = false; let observedClose = false; let inputClosed = false; let closeCode = null; let timer;
   const decoder = new TextDecoder('utf-8', { fatal: true });
   const finish = value => { if (settled) return; settled = true; clearTimeout(timer); call.signal?.removeEventListener('abort', abort); returnValue(value); };
   let returnValue;
@@ -327,12 +351,13 @@ async function hardenedRunAcp(call, prompt, executable = this.executable, bindin
       item.resolve(message.result);
     } catch { item.reject(new ProviderToolError('provider_failed')); void stop('provider_failed'); }
   };
-  child.stdout?.on('data', chunk => { if (settled || stopping) return; const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk); stdoutBytes += bytes.length; if (stdoutBytes > 524288) { void stop('provider_response_too_large'); return; } try { lineBuffer += decoder.decode(bytes, { stream: true }); } catch { void stop('provider_failed'); return; } let split; while ((split = lineBuffer.indexOf('\n')) >= 0) { const line = lineBuffer.slice(0, split).replace(/\r$/u, ''); lineBuffer = lineBuffer.slice(split + 1); if (Buffer.byteLength(line, 'utf8') > MAX_FRAME_BYTES) { void stop('provider_response_too_large'); return; } handle(line); } if (Buffer.byteLength(lineBuffer, 'utf8') > MAX_FRAME_BYTES) void stop('provider_response_too_large'); });
+  child.stdout?.on('data', chunk => { if (settled || stopping || observedClose) return; const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk); stdoutBytes += bytes.length; if (stdoutBytes > 524288) { void stop('provider_response_too_large'); return; } try { lineBuffer += decoder.decode(bytes, { stream: true }); } catch { void stop('provider_failed'); return; } let split; while ((split = lineBuffer.indexOf('\n')) >= 0) { const line = lineBuffer.slice(0, split).replace(/\r$/u, ''); lineBuffer = lineBuffer.slice(split + 1); if (Buffer.byteLength(line, 'utf8') > MAX_FRAME_BYTES) { void stop('provider_response_too_large'); return; } handle(line); } if (Buffer.byteLength(lineBuffer, 'utf8') > MAX_FRAME_BYTES) void stop('provider_response_too_large'); });
   child.stdout?.on('end', () => { try { lineBuffer += decoder.decode(); } catch { void stop('provider_failed'); return; } if (lineBuffer) handle(lineBuffer); });
   child.stderr?.on('data', () => {}); child.once('error', error => { void stop(error.code === 'ENOENT' ? 'copilot_cli_unavailable' : 'provider_failed'); });
-  child.once('close', code => { observedClose = true; if (settled || stopping) return; if (!promptDone || pending.size || code !== 0) { void stop('provider_failed'); return; } void (async () => { try { await boundedCleanup(this, child, () => observedClose); const outputResult = result(call, 'ok', { provider: 'github_copilot', state: 'ready', stdout: output, exit_class: 'ok', truncated: false, duration_ms: Date.now() - started, cli_version: this.version, egress_bytes: Buffer.byteLength(prompt, 'utf8'), idempotency: 'new' }); finish(issueCopilotAttestation(outputResult, { call, binding })); } catch { finish(failureResult(call, new ProviderToolError('provider_failed'))); } })(); });
+  const complete = () => { if (!observedClose || !inputClosed || settled || stopping) return; if (!promptDone || pending.size || closeCode !== 0) { void stop('provider_failed'); return; } void (async () => { try { await boundedCleanup(this, child, () => observedClose); const outputResult = result(call, 'ok', { provider: 'github_copilot', state: 'ready', stdout: output, exit_class: 'ok', truncated: false, duration_ms: Date.now() - started, cli_version: this.version, egress_bytes: Buffer.byteLength(prompt, 'utf8'), idempotency: 'new' }); finish(issueCopilotAttestation(outputResult, { call, binding })); } catch { finish(failureResult(call, new ProviderToolError('provider_failed'))); } })(); };
+  child.once('close', code => { child.__laeCloseObserved = true; observedClose = true; closeCode = code; queueMicrotask(complete); });
   timer = setTimeout(() => { void stop('provider_timeout'); }, this.timeoutMs); timer.unref?.(); call.signal?.addEventListener('abort', abort, { once: true }); child.stdin?.once?.('error', () => { void stop('provider_failed'); });
-  (async () => { try { await request({ method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'local-assistant-engine', version: '0.1.0' } } }); await request({ method: 'session/new', params: { cwd: logicalWorkspacePath(call.arguments.workspace_id), mcpServers: [] } }); phase = 'prompting'; await request({ method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: prompt }] } }); try { child.stdin.end(); } catch {} } catch { void stop('provider_failed'); } })();
+  (async () => { try { await request({ method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'local-assistant-engine', version: '0.1.0' } } }); await request({ method: 'session/new', params: { cwd: logicalWorkspacePath(call.arguments.workspace_id), mcpServers: [] } }); phase = 'prompting'; await request({ method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: prompt }] } }); endInput(child.stdin, undefined, () => { inputClosed = true; queueMicrotask(complete); }, () => { void stop('provider_failed'); }); } catch { void stop('provider_failed'); } })();
   return completed;
 }
 

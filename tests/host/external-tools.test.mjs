@@ -827,7 +827,7 @@ test('browser action startup rejects an unsafe redirect before recording a sessi
 });
 
 class FakeChild extends EventEmitter {
-  constructor({ finish = true } = {}) { super(); this.stdout = new EventEmitter(); this.stderr = new EventEmitter(); this.input = ''; this.finish = finish; this.stdin = { end: (text) => { this.input = text; if (this.finish) queueMicrotask(() => { this.stdout.emit('data', Buffer.from('copilot response')); this.emit('close', 0); }); } }; }
+  constructor({ finish = true } = {}) { super(); this.stdout = new EventEmitter(); this.stderr = new EventEmitter(); this.input = ''; this.finish = finish; this.treeReaped = true; this.stdin = { end: (text) => { this.input = text; if (this.finish) queueMicrotask(() => { this.stdout.emit('data', Buffer.from('copilot response')); this.emit('close', 0); }); } }; }
   kill() { this.emit('close', null); }
 }
 
@@ -929,6 +929,12 @@ test('Copilot Windows cleanup never falls back to leader-only kill', async () =>
   const child = new FakeChild({ finish: false }); child.pid = 4322; child.exitCode = null; child.signalCode = null; let leaderKill = 0;
   await assert.rejects(() => killCopilotProcessTree(child, { platform: 'win32', graceMs: 100, spawn: () => { throw new Error('taskkill unavailable'); } }), error => error.code === 'provider_cleanup_unknown');
   child.kill = () => { leaderKill += 1; }; assert.equal(leaderKill, 0);
+});
+
+test('Copilot Windows cleanup rejects a failed taskkill even when the leader closes', async () => {
+  const child = new FakeChild({ finish: false }); child.pid = 4323; child.exitCode = null; child.signalCode = null;
+  await assert.rejects(() => killCopilotProcessTree(child, { platform: 'win32', graceMs: 100, spawn: () => { const killer = new FakeChild({ finish: false }); killer.exitCode = 1; queueMicrotask(() => killer.emit('close', 1)); return killer; } }), error => error.code === 'provider_cleanup_unknown');
+  assert.equal(child.exitCode, null);
 });
 
 test('Copilot provider rejects unsafe lifecycle bounds', () => {
