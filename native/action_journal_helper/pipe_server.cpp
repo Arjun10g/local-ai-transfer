@@ -3,8 +3,10 @@
 #include <aclapi.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <limits>
+#include <thread>
 #include <new>
 #include <utility>
 #include <vector>
@@ -640,6 +642,74 @@ bool request_cancelled(void* raw) noexcept {
   return !PeekNamedPipe(context->pipe, nullptr, 0, nullptr, &available, nullptr);
 }
 
+// Pipe/process probes run on this monitor thread, never from the owner lock.
+// The storage codec sees only the immutable event/atomic snapshot below.
+class RequestCancellationMonitor final {
+ public:
+  RequestCancellationMonitor(HANDLE pipe, HANDLE client_process,
+                             std::uint64_t deadline_at_ms) noexcept
+      : pipe_(pipe), client_process_(client_process),
+        deadline_at_ms_(deadline_at_ms) {}
+  ~RequestCancellationMonitor() noexcept {
+    stopping_.store(true, std::memory_order_release);
+    if (worker_.joinable()) worker_.join();
+  }
+  RequestCancellationMonitor(const RequestCancellationMonitor&) = delete;
+  RequestCancellationMonitor& operator=(const RequestCancellationMonitor&) = delete;
+
+  bool start() noexcept {
+    event_.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    if (!event_) return false;
+    try {
+      worker_ = std::thread([this] { monitor(); });
+    } catch (...) {
+      event_.reset();
+      return false;
+    }
+    return true;
+  }
+
+  bool cancellation_signaled() const noexcept {
+    if (cancelled_.load(std::memory_order_acquire)) return true;
+    return event_ && WaitForSingleObject(event_.get(), 0) == WAIT_OBJECT_0;
+  }
+
+ private:
+  void signal() noexcept {
+    cancelled_.store(true, std::memory_order_release);
+    if (event_) SetEvent(event_.get());
+  }
+
+  void monitor() noexcept {
+    while (!stopping_.load(std::memory_order_acquire)) {
+      if (unix_time_ms() >= deadline_at_ms_ ||
+          WaitForSingleObject(client_process_, 0) != WAIT_TIMEOUT) {
+        signal();
+        return;
+      }
+      DWORD available = 0;
+      if (!PeekNamedPipe(pipe_, nullptr, 0, nullptr, &available, nullptr)) {
+        signal();
+        return;
+      }
+      Sleep(1);
+    }
+  }
+
+  HANDLE pipe_ = INVALID_HANDLE_VALUE;
+  HANDLE client_process_ = INVALID_HANDLE_VALUE;
+  std::uint64_t deadline_at_ms_ = 0;
+  UniqueHandle event_;
+  std::atomic_bool stopping_{false};
+  std::atomic_bool cancelled_{false};
+  std::thread worker_;
+};
+
+bool monitored_request_cancelled(void* raw) noexcept {
+  const auto* monitor = static_cast<const RequestCancellationMonitor*>(raw);
+  return monitor == nullptr || monitor->cancellation_signaled();
+}
+
 struct StartupCancellationContext {
   HANDLE supervisor_process = INVALID_HANDLE_VALUE;
 };
@@ -738,11 +808,28 @@ HelperStatus run_foreground_helper_from_inherited_stdin() noexcept {
       EncodedResult result;
       RequestCancellationContext cancellation_context{
           pipe.get(), client.process.get(), request.deadline_at_ms};
-      const CancellationProbe cancellation{request_cancelled,
-                                            &cancellation_context};
+      // Probe the transport before admission. Once admitted, the monitor is
+      // the only cancellation callback visible to the owner/store: it polls
+      // pipe/process handles on its own thread and publishes an atomic/event
+      // result, so no pipe API executes while the owner mutex is held.
+      if (unix_time_ms() >= request.deadline_at_ms)
+        return HelperStatus::kDeadlineExpired;
+      if (request_cancelled(&cancellation_context))
+        return HelperStatus::kTransportClosed;
+      RequestCancellationMonitor cancellation_monitor(
+          pipe.get(), client.process.get(), request.deadline_at_ms);
+      if (!cancellation_monitor.start()) return HelperStatus::kInternal;
+      const CancellationProbe cancellation{monitored_request_cancelled,
+                                            &cancellation_monitor};
       const StorageIoControl request_io{
           cancellation, GetTickCount64() + kIoDeadlineMs, true};
       const auto applied = owner->apply(request, request_io, result);
+      // Do not encode or return a result after the transport stopped during
+      // the owner-locked store application.
+      if (request_cancelled(&cancellation_context)) {
+        return unix_time_ms() >= request.deadline_at_ms
+            ? HelperStatus::kDeadlineExpired : HelperStatus::kTransportClosed;
+      }
       if (applied != StoreStatus::kOk) {
         if (applied == StoreStatus::kIoTimeout) {
           DisconnectNamedPipe(pipe.get());

@@ -13,6 +13,14 @@ pipe reads/writes remain outside that lock. The owner and store are destroyed
 after the protocol/session and pipe have settled, so the retained lease remains
 valid for every store operation.
 
+Shutdown first publishes an atomic admission stop, then takes the owner mutex;
+this waits for the one active store application and prevents a new one. The
+owner destructor repeats that close-admission operation before destroying the
+borrowed store and lease. Lock failures return finite fail-closed statuses;
+poison is latched while the application lock is still held. Pipe/process
+cancellation is monitored by a separate thread and reduced to an atomic/event
+probe before it reaches storage, so the owner lock never invokes a pipe API.
+
 Corrupt, conflicting, unknown, poisoned, cancelled, or deadline-expired
 startup state returns a finite status and publishes no pipe. Severe storage or
 I/O failures poison the owner and prevent subsequent mutation. The existing

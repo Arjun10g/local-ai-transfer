@@ -59,6 +59,21 @@ def startup_model(*, owner_opened: bool, recovered: bool, pipe_requested: bool):
     return pipe_requested, trace
 
 
+def owner_interleaving_model(*, active: bool, shutdown: bool, poisoned: bool,
+                             event: str):
+    """Small lock/admission model for adversarial ordering only."""
+    if event == "complete_after_shutdown":
+        return "internal", False, True, poisoned
+    if shutdown or poisoned:
+        return "internal", active, shutdown, poisoned
+    if event == "shutdown":
+        # Publishing admission stop precedes waiting for the active borrow.
+        return "waiting" if active else "closed", active, True, poisoned
+    if event == "exception":
+        return "internal", False, shutdown, True
+    return "ok", False, shutdown, poisoned
+
+
 class WindowsActionJournalOwnerStaticTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -148,14 +163,75 @@ class WindowsActionJournalOwnerStaticTests(unittest.TestCase):
         for token in (
             "std::mutex", "std::lock_guard<std::mutex>",
             "const auto status = store_.apply(request, io, result)",
-            "poison_for(status)", "if (poisoned_) return StoreStatus::kInternal",
+            "poison_for(status)", "if (shutdown_requested_.load",
             "std::lock_guard<std::mutex> lock(mutex_)",
         ):
             self.assertIn(token, self.owner + self.store)
+        self.assertIn("catch (const std::bad_alloc&)", self.store)
+        self.assertIn("poisoned_ = true", self.store)
         self.assertIs(self.contract["serialization"]["writer_count"], 1)
         self.assertIn("pipe reads/writes", self.contract["borrowed_boundary"]["pipe_io"])
         self.assertIn("reads/writes remain outside", bounded_text(HELPER / "JOURNAL_AUTHORITY_OWNER.md"))
         self.assertIn("return StoreStatus::kInternal", self.store)
+
+    def test_shutdown_closes_admission_waits_store_and_getters_fail_closed(self):
+        self.assertIn("bool begin_shutdown() noexcept", self.owner)
+        self.assertIn("shutdown_requested_.store(true", self.store)
+        shutdown = self.store[
+            self.store.index("bool JournalAuthorityOwner::begin_shutdown"):
+            self.store.index("bool JournalAuthorityOwner::ready")
+        ]
+        self.assertLess(
+            shutdown.index("shutdown_requested_.store(true"),
+            shutdown.index("std::lock_guard<std::mutex>"),
+        )
+        self.assertIn("shutting_down_ = true", shutdown)
+        self.assertIn("return false;", self.store[self.store.index("bool JournalAuthorityOwner::ready"):])
+        self.assertIn("return true;", self.store[self.store.index("bool JournalAuthorityOwner::poisoned"):])
+        self.assertIn("UINT32_MAX", self.store[self.store.index("std::uint32_t JournalAuthorityOwner::recovery_count"):])
+        self.assertIn("~JournalAuthorityOwner() noexcept", self.store)
+
+    def test_shutdown_and_exception_interleavings_latch_fail_closed(self):
+        outcome, active, shutdown, poisoned = owner_interleaving_model(
+            active=True, shutdown=False, poisoned=False, event="shutdown")
+        self.assertEqual((outcome, active, shutdown, poisoned),
+                         ("waiting", True, True, False))
+        outcome, active, shutdown, poisoned = owner_interleaving_model(
+            active=True, shutdown=True, poisoned=False,
+            event="complete_after_shutdown")
+        self.assertEqual((outcome, active, shutdown, poisoned),
+                         ("internal", False, True, False))
+        outcome, active, shutdown, poisoned = owner_interleaving_model(
+            active=True, shutdown=False, poisoned=False, event="exception")
+        self.assertEqual((outcome, active, shutdown, poisoned),
+                         ("internal", False, False, True))
+        outcome, *_ = owner_interleaving_model(
+            active=False, shutdown=False, poisoned=True, event="apply")
+        self.assertEqual(outcome, "internal")
+
+    def test_owner_lock_never_executes_pipe_io_and_pipe_probes_are_outside_apply(self):
+        apply = self.store[
+            self.store.index("StoreStatus JournalAuthorityOwner::apply"):
+            self.store.index("bool JournalAuthorityOwner::begin_shutdown")
+        ]
+        for token in ("PeekNamedPipe", "ReadFile", "WriteFile", "DisconnectNamedPipe",
+                      "ConnectNamedPipe", "CreateNamedPipeW"):
+            self.assertNotIn(token, apply)
+        self.assertIn("RequestCancellationMonitor", self.pipe)
+        self.assertIn("monitored_request_cancelled", self.pipe)
+        apply_at = self.pipe.index("owner->apply(request, request_io, result)")
+        pre = self.pipe.rfind("request_cancelled(&cancellation_context)", 0, apply_at)
+        post = self.pipe.index("request_cancelled(&cancellation_context)", apply_at)
+        self.assertGreater(pre, -1)
+        self.assertLess(pre, apply_at)
+        self.assertGreater(post, apply_at)
+        monitor = self.pipe[
+            self.pipe.index("bool monitored_request_cancelled"):
+            self.pipe.index("struct StartupCancellationContext")
+        ]
+        self.assertNotIn("PeekNamedPipe", monitor)
+        self.assertIn("std::atomic_bool", self.pipe)
+        self.assertIn("unix_time_ms() >= deadline_at_ms_", self.pipe)
 
     def test_corrupt_unknown_and_poisoned_owner_cannot_publish_or_mutate(self):
         for token in (

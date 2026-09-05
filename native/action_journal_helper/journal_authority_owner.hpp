@@ -16,6 +16,7 @@
 #include <windows.h>
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <memory>
@@ -49,7 +50,7 @@ class JournalAuthorityOwner final {
       AuthorityStatus& status,
       action_journal_storage::StorageReceipt& receipt) noexcept;
 
-  ~JournalAuthorityOwner() = default;
+  ~JournalAuthorityOwner() noexcept;
   JournalAuthorityOwner(const JournalAuthorityOwner&) = delete;
   JournalAuthorityOwner& operator=(const JournalAuthorityOwner&) = delete;
   JournalAuthorityOwner(JournalAuthorityOwner&&) = delete;
@@ -61,11 +62,28 @@ class JournalAuthorityOwner final {
   StoreStatus apply(const DecodedRequest& request,
                     StorageIoControl io,
                     EncodedResult& result) noexcept;
-  bool ready() const noexcept;
-  bool poisoned() const noexcept;
-  std::uint32_t recovery_count() const noexcept;
+  // Closes admission and waits for the current owner-locked application to
+  // settle.  The atomic admission bit is published before taking the mutex,
+  // so a concurrent caller cannot enter while shutdown is waiting.
+  bool begin_shutdown() noexcept;
+  bool ready() const;
+  bool poisoned() const;
+  std::uint32_t recovery_count() const;
 
  private:
+  class ActiveBorrow final {
+   public:
+    explicit ActiveBorrow(JournalAuthorityOwner& owner) noexcept : owner_(owner) {
+      ++owner_.active_borrows_;
+    }
+    ~ActiveBorrow() noexcept { --owner_.active_borrows_; }
+    ActiveBorrow(const ActiveBorrow&) = delete;
+    ActiveBorrow& operator=(const ActiveBorrow&) = delete;
+
+   private:
+    JournalAuthorityOwner& owner_;
+  };
+
   JournalAuthorityOwner(action_journal_storage::JournalStorageLease&& lease,
                         const std::array<std::uint8_t, 32>& container_id) noexcept;
 
@@ -79,6 +97,9 @@ class JournalAuthorityOwner final {
   action_journal_storage::JournalStorageLease lease_;
   FixedContainerStore store_;
   mutable std::mutex mutex_;
+  std::uint32_t active_borrows_ = 0;
+  std::atomic_bool shutdown_requested_{false};
+  bool shutting_down_ = false;
   std::uint32_t recovery_count_ = 0;
   bool recovered_ = false;
   bool poisoned_ = false;

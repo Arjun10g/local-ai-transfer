@@ -1248,6 +1248,13 @@ JournalAuthorityOwner::JournalAuthorityOwner(
     const std::array<std::uint8_t, 32>& container_id) noexcept
     : lease_(std::move(lease)), store_(lease_, container_id) {}
 
+JournalAuthorityOwner::~JournalAuthorityOwner() noexcept {
+  // Normal helper scope destroys ProtocolSession/client/pipe locals before
+  // this owner.  Close admission first anyway, so direct test-only owners and
+  // exceptional paths cannot race a store call with lease destruction.
+  (void)begin_shutdown();
+}
+
 AuthorityStatus JournalAuthorityOwner::map_open_status(
     action_journal_storage::StorageStatus status) noexcept {
   switch (status) {
@@ -1331,6 +1338,7 @@ std::unique_ptr<JournalAuthorityOwner> JournalAuthorityOwner::open(
       // Recovery is a store call too: serialize it under the same owner lock
       // used after publication, while keeping all pipe/session I/O outside.
       const std::lock_guard<std::mutex> lock(owner->mutex_);
+      ActiveBorrow borrow(*owner);
       const auto recovery = owner->store_.load_and_recover(
           io, owner->recovery_count_);
       if (recovery != StoreStatus::kOk) {
@@ -1359,39 +1367,83 @@ std::unique_ptr<JournalAuthorityOwner> JournalAuthorityOwner::open(
 StoreStatus JournalAuthorityOwner::apply(const DecodedRequest& request,
                                          StorageIoControl io,
                                          EncodedResult& result) noexcept {
+  std::unique_lock<std::mutex> lock;
   try {
-    const std::lock_guard<std::mutex> lock(mutex_);
-    if (!recovered_) return StoreStatus::kInternal;
-    if (poisoned_) return StoreStatus::kInternal;
-    const auto status = store_.apply(request, io, result);
-    poison_for(status);
-    if (status == StoreStatus::kOk && request.method == "health" &&
-        result.body.is_object()) {
-      result.body["recovery_count"] = recovery_count_;
+    lock = std::unique_lock<std::mutex>(mutex_);
+    if (shutdown_requested_.load(std::memory_order_acquire) ||
+        shutting_down_ || !recovered_ || poisoned_)
+      return StoreStatus::kInternal;
+    ActiveBorrow borrow(*this);
+    try {
+      const auto status = store_.apply(request, io, result);
+      poison_for(status);
+      if (status == StoreStatus::kOk && request.method == "health" &&
+          result.body.is_object()) {
+        result.body["recovery_count"] = recovery_count_;
+      }
+      // Shutdown may publish its admission bit while store I/O is in flight;
+      // never return a successful result after that linearization point.
+      if (shutdown_requested_.load(std::memory_order_acquire))
+        return StoreStatus::kInternal;
+      return status;
+    } catch (const std::bad_alloc&) {
+      poisoned_ = true;
+      return StoreStatus::kInternal;
+    } catch (...) {
+      // Keep the lock alive while latching poison.  The owner cannot be
+      // observed as healthy between the exception and this state transition.
+      poisoned_ = true;
+      return StoreStatus::kInternal;
     }
-    return status;
-  } catch (const std::bad_alloc&) {
-    poisoned_ = true;
-    return StoreStatus::kInternal;
   } catch (...) {
-    poisoned_ = true;
+    // A lock acquisition failure cannot safely claim ownership of the store;
+    // return a finite fail-closed status rather than terminating noexcept.
     return StoreStatus::kInternal;
   }
 }
 
-bool JournalAuthorityOwner::ready() const noexcept {
-  const std::lock_guard<std::mutex> lock(mutex_);
-  return recovered_ && !poisoned_;
+bool JournalAuthorityOwner::begin_shutdown() noexcept {
+  shutdown_requested_.store(true, std::memory_order_release);
+  try {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    shutting_down_ = true;
+    return true;
+  } catch (...) {
+    // Admission is already closed atomically.  The caller must treat false as
+    // an unproven shutdown and retain the owner for fail-stop handling.
+    return false;
+  }
 }
 
-bool JournalAuthorityOwner::poisoned() const noexcept {
-  const std::lock_guard<std::mutex> lock(mutex_);
-  return poisoned_;
+bool JournalAuthorityOwner::ready() const {
+  try {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return !shutdown_requested_.load(std::memory_order_acquire) &&
+        !shutting_down_ && recovered_ && !poisoned_;
+  } catch (...) {
+    return false;
+  }
 }
 
-std::uint32_t JournalAuthorityOwner::recovery_count() const noexcept {
-  const std::lock_guard<std::mutex> lock(mutex_);
-  return recovery_count_;
+bool JournalAuthorityOwner::poisoned() const {
+  try {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return shutdown_requested_.load(std::memory_order_acquire) ||
+        shutting_down_ || poisoned_;
+  } catch (...) {
+    return true;
+  }
+}
+
+std::uint32_t JournalAuthorityOwner::recovery_count() const {
+  try {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (shutdown_requested_.load(std::memory_order_acquire) || shutting_down_)
+      return UINT32_MAX;
+    return recovery_count_;
+  } catch (...) {
+    return UINT32_MAX;
+  }
 }
 
 const char* authority_status_name(AuthorityStatus status) noexcept {

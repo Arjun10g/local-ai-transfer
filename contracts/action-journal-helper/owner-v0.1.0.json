@@ -23,11 +23,12 @@
     "recovered record/slot state",
     "poison state",
     "recovery count",
+    "shutdown admission and one active store borrow counter",
     "one-writer mutex"
   ],
   "borrowed_boundary": {
     "pipe_server": "borrows one owner for decoded request application",
-    "pipe_io": "ProtocolSession and pipe reads/writes remain outside owner lock",
+    "pipe_io": "ProtocolSession and pipe reads/writes remain outside owner lock; a separate monitor may probe transport and publishes only an atomic/event cancellation result",
     "session_secrets": "HMAC key and nonce remain ProtocolSession-owned",
     "supervisor_bridge": "absent in this phase"
   },
@@ -51,7 +52,8 @@
   },
   "lifecycle": {
     "startup": "recover the complete fixed container before CreateNamedPipeW",
-    "shutdown": "settle protocol/session and pipe before owner destruction closes lease",
+    "shutdown": "close admission, wait the mutex-held store application, settle protocol/session and pipe, then owner destruction closes lease",
+    "shutdown_failure": "atomic admission remains closed; no reuse or new store call",
     "unknown_or_corrupt_state": "no owner and no published pipe",
     "second_store_or_lease": "forbidden"
   },
