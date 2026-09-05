@@ -9,7 +9,7 @@ Terminal alternatives are `cancelled` and `failed_definitive`; an action whose p
 ## Storage contract
 
 - `LAE_ACTION_JOURNAL_DIR` is optional, but every durable action is hidden from model advertisement and fails closed if the journal is absent or unhealthy.
-- On POSIX, the directory must already exist at its canonical absolute path, be owned by the current user, and have mode `0700`. The core will not create or chmod an unverified path. Record files are owner-only `0600`, opened with `O_NOFOLLOW` where the platform exposes it, and checked by device/inode/size around bounded I/O. Directory identity is rechecked around mutations.
+- Production durable dispatch is currently unavailable on POSIX: Node's built-in promises API does not provide the handle-relative `openat`/`unlinkat` primitives needed to survive an ancestor swap. The pathname implementation is retained only behind an explicit `testOnly` seam. That seam requires a precreated canonical current-user `0700` directory, owner-only `0600` records, `O_NOFOLLOW` where exposed, single-link regular files, and device/inode/size checks around bounded I/O; it never authorizes a model action.
 - Windows is deliberately unavailable. Node mode bits cannot establish Windows ACL or reparse-point safety; enabling Windows requires a native handle-relative, identity-pinned protected store.
 - Each JSONL event is at most 64 KiB, each operation has at most 16 events, and at most 256 operations may remain active. Terminal records are durably pruned oldest-first to keep the store bounded; pruning never removes active or unresolved records.
 - Torn lines, malformed/extra fields, bad transitions, invalid modes, identity changes, hash-chain mismatches, and limit violations block the journal and therefore block further actions.
@@ -18,7 +18,7 @@ Receipts store only tool/risk/side-effect metadata, timestamps, state, authoriza
 
 ## Classification and completion
 
-Durability follows side effects, not risk tier. File writes, clipboard writes, application/process launches, external/browser navigation and input, Graph mutations, and confirmed Copilot `cloud_inference` egress use the barrier. Pure local/provider/browser reads and browser-session cleanup do not. Unknown T1–T4 side effects fail classification.
+Risk/effect combinations are an explicit fail-closed contract: T4 is prohibited; T0 is limited to recognized non-action effects; T1 permits recognized reads/launch/navigation; T2 permits bounded local mutations/draft and navigation effects; T3 permits sends, process/cloud egress, and browser input/activation. Unknown effects, missing fields, and tier mismatches fail classification. Durable file/clipboard writes, launches, external/browser navigation and input, Graph mutations, and confirmed Copilot `cloud_inference` egress use the barrier. Pure local/provider/browser reads and browser-session cleanup do not. Host status reports whether the journal is bound to the controller; a split journal injection is never write-ready.
 
 Local synchronous actions may reach `completed` after a valid successful tool result. Graph/browser provider acknowledgements remain `reconciling`; the controller exposes `action_completion_unverified` instead of representing them as complete. Provider-specific idempotency keys, completion proof, and reconciliation are required follow-on work. The Copilot egress lane is journaled and crash-bound here, but provider-specific egress auditing remains follow-on work.
 

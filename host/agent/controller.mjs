@@ -10,6 +10,13 @@ const CANCELLED_CONFIRMATION = Symbol('cancelled-confirmation');
 const sessionIdPattern = /^[A-Za-z0-9_-]{8,96}$/;
 const DURABLE_ACTION_EFFECTS = new Set(['create', 'replace', 'write_sensitive', 'launch', 'external_navigation', 'process_execution', 'cloud_inference', 'create_draft', 'send_mail', 'modify_mail', 'send_teams', 'browser_navigation', 'browser_input', 'browser_activation']);
 const NON_ACTION_EFFECTS = new Set(['none', 'read_sensitive', 'read_mail', 'read_teams', 'browser_read', 'browser_close']);
+const EFFECT_TIERS = Object.freeze({
+  none: ['T0'], browser_close: ['T0'],
+  read_sensitive: ['T1'], read_mail: ['T1'], read_teams: ['T1'], browser_read: ['T1'],
+  launch: ['T1'], external_navigation: ['T1'], browser_navigation: ['T1', 'T2'],
+  create: ['T2'], replace: ['T2'], write_sensitive: ['T2'], create_draft: ['T2'], modify_mail: ['T2'],
+  process_execution: ['T3'], cloud_inference: ['T3'], send_mail: ['T3'], send_teams: ['T3'], browser_input: ['T3'], browser_activation: ['T3']
+});
 const RECONCILIATION_REQUIRED_EFFECTS = new Set(['create_draft', 'send_mail', 'modify_mail', 'send_teams', 'browser_navigation', 'browser_input', 'browser_activation']);
 function digestEvidence(value) { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
 
@@ -73,9 +80,14 @@ function validateToolArgumentShape(tool, call) {
 function publicToolCall(call) { return { id: call.id, name: call.name }; }
 
 export function requiresDurableAction(tool) {
-  if (DURABLE_ACTION_EFFECTS.has(tool?.side_effect)) return true;
-  if (NON_ACTION_EFFECTS.has(tool?.side_effect)) return false;
-  if (['T1', 'T2', 'T3', 'T4'].includes(tool?.risk_tier)) throw Object.assign(new Error('tool side effect is not classified'), { code: 'action_journal_classification_required' });
+  const tier = tool?.risk_tier; const effect = tool?.side_effect;
+  if (tier === 'T4') throw Object.assign(new Error('T4 tools are prohibited'), { code: 'action_journal_risk_prohibited' });
+  if (!['T0', 'T1', 'T2', 'T3'].includes(tier)) throw Object.assign(new Error('tool risk tier is not classified'), { code: 'action_journal_classification_required' });
+  if (typeof effect !== 'string' || !Object.hasOwn(EFFECT_TIERS, effect)) throw Object.assign(new Error('tool side effect is not classified'), { code: 'action_journal_classification_required' });
+  if (!EFFECT_TIERS[effect].includes(tier)) throw Object.assign(new Error('tool risk and side effect do not match'), { code: 'action_journal_classification_required' });
+  if (NON_ACTION_EFFECTS.has(effect)) return false;
+  if (DURABLE_ACTION_EFFECTS.has(effect)) return true;
+  if (tier === 'T2' || tier === 'T3') throw Object.assign(new Error('mutable tool must use a durable side effect'), { code: 'action_journal_classification_required' });
   return false;
 }
 
@@ -217,7 +229,7 @@ export class ConversationController {
             if (activeJournalOperation.reconcile) {
               await this.actionJournal.beginReconciliation(activeJournalOperation.id);
               const responseDigest = digestEvidence({ status: result.status, content: result.content.map(item => ({ type: item.type, text_digest: digestEvidence(item.text) })) });
-              result = makeToolResult({ id: call.id, name: call.name, status: 'failed', text: JSON.stringify({ code: 'action_completion_unverified', operation_id: activeJournalOperation.id, state: 'reconciling', completion: 'controller_acknowledged', provider_completion: 'unverified', evidence: { operation_digest: activeJournalOperation.operationDigest, precondition_digest: activeJournalOperation.previewDigest, resource_digest: null, response_digest: responseDigest, arguments_digest: activeJournalOperation.argumentsDigest } }) });
+              result = makeToolResult({ id: call.id, name: call.name, status: 'failed', text: JSON.stringify({ code: 'action_completion_unverified', operation_id: activeJournalOperation.id, state: 'reconciling', completion: 'controller_acknowledged', provider_completion: 'unverified', evidence: { operation_digest: activeJournalOperation.operationDigest, preview_digest: activeJournalOperation.previewDigest, resource_digest: null, response_digest: responseDigest, arguments_digest: activeJournalOperation.argumentsDigest } }) });
             } else await this.actionJournal.complete(activeJournalOperation.id);
           }
           else await this.actionJournal.markUnknown(activeJournalOperation.id);

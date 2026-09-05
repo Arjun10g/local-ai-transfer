@@ -58,19 +58,19 @@ test('receipt Qwen XML grammar parses at every byte boundary and assigns host co
     '<tool_call><function=system.get_info><parameter=x><nested/></parameter></function></tool_call>',
     '<tool_call><function=system.get_info></function></tool_call>suffix'
   ]) assert.throws(() => parseToolCall(malformed), EnvelopeError);
-  const unknownArgument = new ConversationController({ engine: { async *generate() { yield { kind: 'tool_call_chunk', text: '<tool_call><function=system.get_info><parameter=x>1</parameter></function></tool_call>' }; } }, toolRegistry: { 'system.get_info': { name: 'system.get_info', execute: async () => { throw new Error('must not execute'); } } } });
+  const unknownArgument = new ConversationController({ engine: { async *generate() { yield { kind: 'tool_call_chunk', text: '<tool_call><function=system.get_info><parameter=x>1</parameter></function></tool_call>' }; } }, toolRegistry: { 'system.get_info': { name: 'system.get_info', risk_tier: 'T0', side_effect: 'none', execute: async () => { throw new Error('must not execute'); } } } });
   assert.equal((await unknownArgument.runTurn({ sessionId: 'ses_xmlbad', requestId: 'req_xmlbad', message: 'bad arg' })).error, 'invalid_tool_arguments');
 });
 
 test('receipt Qwen XML parameters normalize safely and controller bounds tool results', async () => {
   const parsed = parseToolCall('<tool_call>\n<function=time.now>\n<parameter=format>\nlocal\n</parameter>\n</function>\n</tool_call>');
   assert.equal(parsed.name, 'time.now'); assert.deepEqual(parsed.arguments, { format: 'local' }); assert.match(parsed.id, /^call_/);
-  const badResult = new ConversationController({ engine: { async *generate() { yield { kind: 'tool_call_chunk', text: JSON.stringify({ id: 'call_badresult', name: 'test.bad', arguments: {} }) }; } }, toolRegistry: { 'test.bad': { name: 'test.bad', timeout_ms: 100, execute: async () => ({ id: 'call_badresult', name: 'test.bad', content: [] }) } } });
+  const badResult = new ConversationController({ engine: { async *generate() { yield { kind: 'tool_call_chunk', text: JSON.stringify({ id: 'call_badresult', name: 'test.bad', arguments: {} }) }; } }, toolRegistry: { 'test.bad': { name: 'test.bad', risk_tier: 'T1', side_effect: 'read_sensitive', timeout_ms: 100, execute: async () => ({ id: 'call_badresult', name: 'test.bad', content: [] }) } } });
   assert.equal((await badResult.runTurn({ sessionId: 'ses_badres', requestId: 'req_badres', message: 'bad' })).error, 'invalid_tool_result');
-  const timed = new ConversationController({ engine: { async *generate() { yield { kind: 'tool_call_chunk', text: JSON.stringify({ id: 'call_timeout', name: 'test.slow', arguments: {} }) }; } }, toolRegistry: { 'test.slow': { name: 'test.slow', timeout_ms: 5, execute: async () => new Promise(resolve => setTimeout(resolve, 50)) } } });
+  const timed = new ConversationController({ engine: { async *generate() { yield { kind: 'tool_call_chunk', text: JSON.stringify({ id: 'call_timeout', name: 'test.slow', arguments: {} }) }; } }, toolRegistry: { 'test.slow': { name: 'test.slow', risk_tier: 'T1', side_effect: 'read_sensitive', timeout_ms: 5, execute: async () => new Promise(resolve => setTimeout(resolve, 50)) } } });
   assert.equal((await timed.runTurn({ sessionId: 'ses_timeout', requestId: 'req_timeout', message: 'slow' })).error, 'tool_timeout');
   let executed = false;
-  const previewTimed = new ConversationController({ engine: { async *generate() { yield { kind: 'tool_call_chunk', text: JSON.stringify({ id: 'call_preview', name: 'test.preview', arguments: {} }) }; } }, toolRegistry: { 'test.preview': { name: 'test.preview', timeout_ms: 5, preview: async () => new Promise(resolve => setTimeout(resolve, 50)), execute: async () => { executed = true; return makeToolResult({ id: 'call_preview', name: 'test.preview' }); } } } });
+  const previewTimed = new ConversationController({ engine: { async *generate() { yield { kind: 'tool_call_chunk', text: JSON.stringify({ id: 'call_preview', name: 'test.preview', arguments: {} }) }; } }, toolRegistry: { 'test.preview': { name: 'test.preview', risk_tier: 'T1', side_effect: 'read_sensitive', timeout_ms: 5, preview: async () => new Promise(resolve => setTimeout(resolve, 50)), execute: async () => { executed = true; return makeToolResult({ id: 'call_preview', name: 'test.preview' }); } } } });
   assert.equal((await previewTimed.runTurn({ sessionId: 'ses_preview', requestId: 'req_preview', message: 'preview' })).error, 'tool_timeout'); assert.equal(executed, false);
   const literal = parseToolCall('<tool_call><function=browser.open_url><parameter=url>https://example.test/a?x=1&amp;raw=2</parameter></function></tool_call>'.replace('&amp;', '&'));
   assert.equal(literal.arguments.url, 'https://example.test/a?x=1&raw=2');
@@ -106,7 +106,7 @@ test('controller propagates complete tool schema and ordered tool result correla
     yield { kind: 'text_delta', text: 'done' }; yield { kind: 'done', finish_reason: 'stop' };
   } };
   const controller = new ConversationController({ engine, toolRegistry: {
-    'test.echo': { name: 'test.echo', description: 'Echo a value.', parameters: { type: 'object', properties: { value: { type: 'string', maxLength: 64 } }, required: ['value'], additionalProperties: false }, execute: async ({ id, name, arguments: args }) => ({ id, name, status: 'ok', content: [{ type: 'text', text: args.value }], metadata: { truncated: false, duration_ms: 0 } }) }
+    'test.echo': { name: 'test.echo', description: 'Echo a value.', risk_tier: 'T1', side_effect: 'read_sensitive', parameters: { type: 'object', properties: { value: { type: 'string', maxLength: 64 } }, required: ['value'], additionalProperties: false }, execute: async ({ id, name, arguments: args }) => ({ id, name, status: 'ok', content: [{ type: 'text', text: args.value }], metadata: { truncated: false, duration_ms: 0 } }) }
   } });
   const result = await controller.runTurn({ sessionId: 'ses_xml01', requestId: 'req_xml01', message: 'use echo' });
   assert.equal(result.state, 'COMPLETED'); assert.equal(result.text, 'done'); assert.equal(seen.length, 2);
@@ -117,7 +117,7 @@ test('controller propagates complete tool schema and ordered tool result correla
 
 test('controller rejects text mixed with a tool frame before preview or execution', async () => {
   let executed = false;
-  const controller = new ConversationController({ engine: { async *generate() { yield { kind: 'text_delta', text: 'leaked answer' }; yield { kind: 'tool_call_chunk', text: JSON.stringify({ id: 'call_mix01', name: 'test.mix', arguments: {} }) }; } }, toolRegistry: { 'test.mix': { name: 'test.mix', execute: async () => { executed = true; return makeToolResult({ id: 'call_mix01', name: 'test.mix' }); } } } });
+  const controller = new ConversationController({ engine: { async *generate() { yield { kind: 'text_delta', text: 'leaked answer' }; yield { kind: 'tool_call_chunk', text: JSON.stringify({ id: 'call_mix01', name: 'test.mix', arguments: {} }) }; } }, toolRegistry: { 'test.mix': { name: 'test.mix', risk_tier: 'T1', side_effect: 'read_sensitive', execute: async () => { executed = true; return makeToolResult({ id: 'call_mix01', name: 'test.mix' }); } } } });
   const result = await controller.runTurn({ sessionId: 'ses_mix01', requestId: 'req_mix01', message: 'mixed' });
   assert.equal(result.error, 'mixed_tool_call_output'); assert.equal(executed, false);
 });
@@ -126,7 +126,7 @@ test('controller enforces every fs.apply_patch base/payload combination', async 
   for (const [base, payload] of [['base_sha256', 'replacement'], ['base_sha256', 'patch'], ['base_hash', 'replacement'], ['base_hash', 'patch']]) {
     const args = { workspace_id: 'project', path: 'x', [base]: 'a'.repeat(64), [payload]: 'body' };
     const engine = { async *generate({ messages }) { if (!messages.some(m => m.role === 'tool')) { yield { kind: 'tool_call_chunk', text: JSON.stringify({ id: 'call_combo01', name: 'fs.apply_patch', arguments: args }) }; return; } yield { kind: 'text_delta', text: 'ok' }; } };
-    const controller = new ConversationController({ engine, toolRegistry: { 'fs.apply_patch': { name: 'fs.apply_patch', execute: async ({ id, name }) => ({ id, name, status: 'ok', content: [{ type: 'text', text: 'ok' }], metadata: { truncated: false, duration_ms: 0 } }) } } });
+    const controller = new ConversationController({ engine, toolRegistry: { 'fs.apply_patch': { name: 'fs.apply_patch', risk_tier: 'T1', side_effect: 'read_sensitive', execute: async ({ id, name }) => ({ id, name, status: 'ok', content: [{ type: 'text', text: 'ok' }], metadata: { truncated: false, duration_ms: 0 } }) } } });
     assert.equal((await controller.runTurn({ sessionId: `ses_${payload}${base.slice(-2)}`, requestId: `req_${payload}${base.slice(-2)}`, message: 'patch' })).state, 'COMPLETED');
   }
 });
@@ -218,7 +218,7 @@ test('authenticated operator grant API grants, projects, revokes, and rejects wi
 
 test('pending confirmation cancellation resolves immediately and cannot replay', async () => {
   const engine = { async *generate({ messages }) { if (!messages.some(m => m.role === 'tool')) { yield { kind: 'tool_call_chunk', text: '{"id":"call_cancel1","name":"test.confirm","arguments":{}}' }; return; } yield { kind: 'text_delta', text: 'unexpected continuation' }; } };
-  const controller = new ConversationController({ engine, confirmationTimeoutMs: 10000, toolRegistry: { 'test.confirm': { name: 'test.confirm', risk_tier: 'T2', side_effect: 'none', requires_confirmation: true, execute: async () => { throw new Error('must not execute'); } } } });
+  const controller = new ConversationController({ engine, confirmationTimeoutMs: 10000, toolRegistry: { 'test.confirm': { name: 'test.confirm', risk_tier: 'T1', side_effect: 'read_sensitive', requires_confirmation: true, execute: async () => { throw new Error('must not execute'); } } } });
   const events = []; const promise = controller.runTurn({ sessionId: 'ses_wait01', requestId: 'req_wait01', message: 'confirm', onEvent: event => events.push(event) });
   while (!events.some(e => e.event === 'tool.confirmation_required')) await new Promise(resolve => setTimeout(resolve, 1));
   const required = events.find(e => e.event === 'tool.confirmation_required'); assert.equal(controller.cancel('req_wait01'), true);
@@ -234,7 +234,7 @@ test('asset containment helper is separator-safe and connection cap is explicit'
 
 test('confirmation is request/call bound and denial continues as a safe tool result', async () => {
   const engine = { async *generate({ messages }) { if (!messages.some(m => m.role === 'tool')) { yield { kind: 'tool_call_chunk', text: '{"id":"call_safe1","name":"test.confirm","arguments":{}}' }; return; } yield { kind: 'text_delta', text: 'Denied safely.' }; yield { kind: 'done', finish_reason: 'stop' }; } };
-  const controller = new ConversationController({ engine, confirmationTimeoutMs: 1000, toolRegistry: { 'test.confirm': { name: 'test.confirm', risk_tier: 'T2', side_effect: 'none', requires_confirmation: true, execute: async () => { throw new Error('must not execute'); } } } });
+  const controller = new ConversationController({ engine, confirmationTimeoutMs: 1000, toolRegistry: { 'test.confirm': { name: 'test.confirm', risk_tier: 'T1', side_effect: 'read_sensitive', requires_confirmation: true, execute: async () => { throw new Error('must not execute'); } } } });
   const events = []; const promise = controller.runTurn({ sessionId: 'ses_confirm', requestId: 'req_confirm', message: 'do it', onEvent: event => events.push(event) });
   while (!events.some(e => e.event === 'tool.confirmation_required')) await new Promise(resolve => setTimeout(resolve, 1));
   const required = events.find(e => e.event === 'tool.confirmation_required'); assert.equal(controller.confirm(required.data.confirmation_id, true), false); assert.equal(controller.confirm(required.data.confirmation_id, true, { requestId: 'req_confirm' }), false); assert.equal(controller.confirm(required.data.confirmation_id, true, { callId: 'call_safe1' }), false); assert.equal(controller.confirm(required.data.confirmation_id, true, { requestId: 'req_other', callId: 'call_safe1' }), false); assert.equal(controller.confirm(required.data.confirmation_id, false, { requestId: 'req_confirm', callId: 'call_safe1' }), true);

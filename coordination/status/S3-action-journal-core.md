@@ -79,9 +79,15 @@ S0/S4 should independently review `host/agent/action-journal.mjs`, controller tr
   The UI reports unavailable durable actions, and safely renders failed
   `tool.completed`/`action_completion_unverified` operation and state fields.
 - Reconciliation results are explicitly controller-acknowledged/provider-
-  unverified and carry only bounded digest evidence (operation, precondition,
+  unverified and carry only bounded digest evidence (operation, preview,
   arguments, resource-null, and response digests); no provider completion is
   claimed.
+- Risk/effect classification now uses an explicit allowed-tier map: T4 is
+  prohibited, T0 is non-action-only, and T2/T3 cannot downgrade to `none` or
+  another read effect. HostServer derives its effective journal from the
+  controller and reports split/missing bindings as not write-ready. Operator
+  grants retain `operator_grant` authorization in durable receipts; a dispatch
+  fsync fault is tested to execute zero provider calls.
 - Focused checks: `node --check` for journal/controller/HostServer; `node
   --test tests/host/action-journal.test.mjs` (20 pass); `node --test
   tests/host/local-tools.test.mjs` (11 pass); selected external/tool-chain
@@ -89,3 +95,21 @@ S0/S4 should independently review `host/agent/action-journal.mjs`, controller tr
   provider, browser, native, account, or external-network execution.
 - Remaining: native handle-relative journal implementation, Windows readiness,
   provider reconciliation/completion proof, and all real external behavior.
+
+## Action-journal follow-up repair evidence (2026-09-05)
+
+- Risk/effect combinations are enforced by an explicit allowed-tier map before
+  dispatch: T4 is prohibited, T0 is non-action-only, T2/T3 cannot claim
+  `none`/read effects, and missing/unknown fields fail classification.
+- HostServer rejects distinct controller/host journal objects and derives the
+  effective journal from the controller when supplied there. Status includes
+  `bound_to_controller`; durable dispatch is false for missing or split state.
+- Operator-grant authorization is preserved as `operator_grant` in the
+  durable `authorized` receipt. A dispatch fsync fault produces zero provider
+  executions; successful operator-grant dispatch is covered separately.
+- Unverified evidence uses `preview_digest` (not `precondition_digest`) and
+  remains digest-only/provider-agnostic.
+- Additional focused checks: `node --test tests/security/permission-mode-
+  adversarial.test.mjs` (16 pass); `node --test tests/security/tool-calling-
+  adversarial.test.mjs tests/host/fixture-host.test.mjs` (43 pass, 1 existing
+  TODO); action-journal targeted checks and syntax/diff checks remain green.
