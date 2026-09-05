@@ -2,6 +2,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import re
 import unittest
 
 from qa.windows_acceptance.hardware_receipt_diagnostic import (
@@ -146,20 +147,22 @@ def synchronize(value):
     adapters = observed["gpu_adapters"]
     if len({(item["pnp_device_id"] or "").casefold() for item in adapters}) != len(adapters):
         reasons.add("duplicate_gpu_device")
-    if len(adapters) > 1 and any(
-        not isinstance(item["pnp_device_id"], str)
-        or not item["pnp_device_id"].startswith("PCI\\VEN_")
-        or len(item["pnp_device_id"]) != len(PNP)
-        for item in adapters
-    ):
-        reasons.add("discrete_gpu_absence_unproven")
+    for item in adapters:
+        pnp = item["pnp_device_id"]
+        integrated = item["integrated"]
+        if not isinstance(pnp, str) or not re.fullmatch(r"PCI\\VEN_[0-9A-F]{4}&DEV_[0-9A-F]{4}", pnp):
+            reasons.add("discrete_gpu_absence_unproven")
+        if integrated is False:
+            reasons.add("separate_gpu_detected")
+        elif integrated is not True:
+            reasons.add("discrete_gpu_absence_unproven")
+    if sum(item["integrated"] is True for item in adapters) != 1:
+        reasons.add("integrated_gpu_unproven")
     intel = [item for item in adapters if isinstance(item["pnp_device_id"], str) and item["pnp_device_id"].casefold().startswith("pci\\ven_8086&dev_") and "intel" in (item["name"] or "").casefold() and item["driver_version"] == "32.0.101.8247"]
     if len(intel) != 1:
         reasons.add("intel_gpu_identity_mismatch")
     elif intel[0]["integrated"] is not True:
         reasons.add("integrated_gpu_unproven")
-    if any(isinstance(item["pnp_device_id"], str) and item["pnp_device_id"].upper().startswith("PCI\\") and "VEN_8086" not in item["pnp_device_id"].upper() for item in adapters):
-        reasons.add("separate_gpu_detected")
     drivers = observed["display_drivers"]
     if len({(item["pnp_device_id"] or "").casefold() for item in drivers}) != len(drivers):
         reasons.add("duplicate_display_driver")
@@ -247,6 +250,49 @@ class WindowsHardwareReceiptTests(unittest.TestCase):
             validate_hardware_receipt(value)["reason_codes"],
         )
 
+    def test_canonical_intel_arc_discrete_adapter_is_separate_gpu(self):
+        value = receipt_fixture()
+        arc = copy.deepcopy(value["observed"]["gpu_adapters"][0])
+        arc.update({
+            "slot_index": 1,
+            "name": "Intel Arc A370M Graphics",
+            "pnp_device_id": "PCI\\VEN_8086&DEV_5696",
+            "integrated": False,
+        })
+        value["observed"]["gpu_adapters"].append(arc)
+        synchronize(value)
+        reasons = validate_hardware_receipt(value)["reason_codes"]
+        self.assertIn("separate_gpu_detected", reasons)
+
+    def test_canonical_adapter_with_unknown_integration_blocks_discrete_absence(self):
+        value = receipt_fixture()
+        unknown = copy.deepcopy(value["observed"]["gpu_adapters"][0])
+        unknown.update({
+            "slot_index": 1,
+            "name": "Intel Arc A370M Graphics",
+            "pnp_device_id": "PCI\\VEN_8086&DEV_5696",
+            "integrated": None,
+        })
+        value["observed"]["gpu_adapters"].append(unknown)
+        synchronize(value)
+        reasons = validate_hardware_receipt(value)["reason_codes"]
+        self.assertIn("discrete_gpu_absence_unproven", reasons)
+
+    def test_multiple_explicit_integrated_adapters_are_not_collapsed_to_one_igpu(self):
+        value = receipt_fixture()
+        second = copy.deepcopy(value["observed"]["gpu_adapters"][0])
+        second.update({
+            "slot_index": 1,
+            "name": "Intel(R) Secondary Graphics",
+            "pnp_device_id": "PCI\\VEN_8086&DEV_1234",
+            "integrated": True,
+        })
+        value["observed"]["gpu_adapters"].append(second)
+        synchronize(value)
+        reasons = validate_hardware_receipt(value)["reason_codes"]
+        self.assertIn("integrated_gpu_unproven", reasons)
+        self.assertNotIn("separate_gpu_detected", reasons)
+
     def test_spoofed_pnp_and_unsigned_driver_fail(self):
         value = receipt_fixture()
         value["observed"]["gpu_adapters"][0]["pnp_device_id"] = "PCI\\VEN_10DE&DEV_1234"
@@ -254,7 +300,7 @@ class WindowsHardwareReceiptTests(unittest.TestCase):
         synchronize(value)
         reasons = validate_hardware_receipt(value)["reason_codes"]
         self.assertIn("intel_gpu_identity_mismatch", reasons)
-        self.assertIn("separate_gpu_detected", reasons)
+        self.assertNotIn("separate_gpu_detected", reasons)
 
     def test_board_memory_cpu_driver_and_runtime_mismatches(self):
         value = receipt_fixture()

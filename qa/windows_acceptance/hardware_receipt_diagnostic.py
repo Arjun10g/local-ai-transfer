@@ -493,22 +493,27 @@ def _hardware_reason_codes(receipt: dict[str, Any]) -> list[str]:
     adapters = observed["gpu_adapters"]
     if len({_case(item["pnp_device_id"]) for item in adapters}) != len(adapters):
         reasons.add("duplicate_gpu_device")
-    if len(adapters) > 1 and any(
-        not isinstance(item["pnp_device_id"], str)
-        or PCI_TUPLE.fullmatch(item["pnp_device_id"]) is None
-        for item in adapters
-    ):
-        # An additional adapter without a canonical identity cannot be
-        # classified as integrated, discrete, or an excluded software device.
-        # Do not infer absence of a discrete GPU from that incomplete record.
-        reasons.add("discrete_gpu_absence_unproven")
+    # Every additional adapter must be classified from explicit, canonical
+    # evidence.  Vendor/name heuristics are not enough: an explicit discrete
+    # flag is a separate-GPU observation, while null/missing/unknown
+    # integration state cannot prove discrete absence.  Exactly one explicit
+    # integrated adapter is the only profile that can avoid these blockers.
+    for item in adapters:
+        pnp = item["pnp_device_id"]
+        integrated = item["integrated"]
+        if not isinstance(pnp, str) or PCI_TUPLE.fullmatch(pnp) is None:
+            reasons.add("discrete_gpu_absence_unproven")
+        if integrated is False:
+            reasons.add("separate_gpu_detected")
+        elif integrated is not True:
+            reasons.add("discrete_gpu_absence_unproven")
+    if sum(item["integrated"] is True for item in adapters) != 1:
+        reasons.add("integrated_gpu_unproven")
     intel = [item for item in adapters if PNP_INTEL.fullmatch(item["pnp_device_id"] or "") and GPU_NAME.search(item["name"] or "") and item["driver_version"] == TARGET_GPU_DRIVER]
     if len(intel) != 1:
         reasons.add("intel_gpu_identity_mismatch")
     elif intel[0]["integrated"] is not True:
         reasons.add("integrated_gpu_unproven")
-    if any(isinstance(item["pnp_device_id"], str) and item["pnp_device_id"].upper().startswith("PCI\\") and "VEN_8086" not in item["pnp_device_id"].upper() for item in adapters):
-        reasons.add("separate_gpu_detected")
     drivers = observed["display_drivers"]
     if len({_case(item["pnp_device_id"]) for item in drivers}) != len(drivers):
         reasons.add("duplicate_display_driver")
