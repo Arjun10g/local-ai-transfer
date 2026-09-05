@@ -99,6 +99,13 @@ class ToolCallEvaluatorTests(unittest.TestCase):
             malformed["tools"][11]["function"]["parameters"]["oneOf"] = replacement
             with self.subTest(replacement=repr(replacement)), self.assertRaises(ValueError):
                 validate_fixture(malformed)
+        nested_scope_escape = json.loads(json.dumps(valid))
+        nested_scope_escape["tools"][11]["function"]["parameters"]["properties"]["nested"] = {
+            "type": "object", "properties": {"child": {"type": "string"}},
+            "required": ["action_id"], "additionalProperties": False,
+        }
+        with self.assertRaisesRegex(ValueError, "fixture_required_invalid"):
+            validate_fixture(nested_scope_escape)
 
     def test_integer_schema_matches_javascript_number_is_integer(self):
         tools = [{"type": "function", "function": {"name": "test.integer", "description": "typed", "parameters": {"type": "object", "properties": {"value": {"type": "integer"}}, "required": ["value"], "additionalProperties": False}}}]

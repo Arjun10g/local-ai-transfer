@@ -220,7 +220,11 @@ def _validate_schema_fragment(schema: Any, *, inherited_properties: set[str] | N
     for key, nested in properties.items():
         if not isinstance(key, str) or not ID.fullmatch(key):
             raise ValueError("fixture_property_invalid")
-        _validate_schema_fragment(nested, inherited_properties=set(properties), depth=depth + 1)
+        # A direct property's required/properties scope starts at that nested
+        # object. Parent and sibling names must not leak into it. Combinator
+        # branches below are the only fragments that inherit this location's
+        # property names.
+        _validate_schema_fragment(nested, depth=depth + 1)
     required = schema.get("required", [])
     if not isinstance(required, list) or len(required) > 32 or len(set(required)) != len(required) or any(not isinstance(item, str) or not ID.fullmatch(item) or item not in property_names for item in required):
         raise ValueError("fixture_required_invalid")
