@@ -16,6 +16,7 @@ retains a historical task without making it current authority;
 | GOV-TRUTH-001 | S3 | `main` (merged from `luna/governance-truth-final`) | MERGED_SOURCE_PENDING_GATE | `main@3746421`, SOL-003 | S0, S4 | corrected source `ff900b7`, merge `2491f45`; docs-only authoritative governance refresh; no gate or readiness change |
 | GOV-TRUTH-002 | Luna docs | `main` (merged from `luna/current-truth-refresh-post-native`) | MERGED_SOURCE_PENDING_GATE | `main@2ec9c44`, SOL-003 | S0, S4 | claim `98ec6c8`, implementation `3eda442`, handoff `03a21bc`, merge `e10b58a`; docs-only reconciliation; no source, configuration, availability, or gate change |
 | GOV-TRUTH-003 | Luna docs | `luna/governance-supervisor-clipboard-truth` | PENDING_INDEPENDENT_AUDIT | `main@0622713`, SOL-003 | S0, S4 | claim `9d8f940`; docs-only current-truth candidate records accepted inert supervisor/clipboard merges and false activation/production/target gates; no source, configuration, availability, phase, or release-gate change |
+| GOV-TRUTH-004 | Luna docs | `luna/current-truth-fa5` | CLAIMED | `main@fa5aa38`, SOL-003 | S0, S4 | docs-only current-truth refresh for merged journal client, process transaction, hardware diagnostic, and expanded default-off compile harness; no source, configuration, availability, phase, or release-gate change |
 | RUN-001 | S1 | `luna/runtime` | CLAIMED | SOL-002 | S0, S3, S4 | pending |
 | RUN-002 | S1 | `luna/runtime` | CLAIMED | RUN-001 | S0, S3, S4 | pending |
 | MODEL-001 | S2 | `luna/model-performance` | CLAIMED | SOL-002 | S0, S1, S4 | pending |
