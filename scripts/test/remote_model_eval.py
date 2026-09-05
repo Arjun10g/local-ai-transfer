@@ -83,6 +83,7 @@ FIXTURE_MAX_BYTES = 256 * 1024
 MAX_RECEIPT_BYTES = 64 * 1024
 MAX_METADATA_BYTES = 256 * 1024
 MAX_EVAL_CASES = 64
+MAX_OUTPUT_RESERVE_TOKENS = 256
 EVAL_TOTAL_TIMEOUT = 480.0
 CLEANUP_RESERVE_SECONDS = 30.0
 MODEL_PREFLIGHT_RECEIPT_SCHEMA = "local_bmo.j1m.startup-preflight-receipt.v1"
@@ -770,6 +771,9 @@ def _validate_quality_diagnostics(value: Any, *, expected_failed: int, expected_
 
 
 def _validate_canary(value: Any, *, expected_tool_count: int = 11, expected_context_tokens: int = 2048, expected_output_reserve_tokens: int = 64) -> dict[str, Any]:
+    if (isinstance(expected_output_reserve_tokens, bool) or not isinstance(expected_output_reserve_tokens, int) or
+            not 1 <= expected_output_reserve_tokens <= MAX_OUTPUT_RESERVE_TOKENS):
+        raise ValueError("evaluator_canary_invalid")
     if not isinstance(value, dict) or set(value) != {"attempted", "passed", "error_code", "tool_count", "message_chars", "prompt_tokens", "context_tokens", "output_reserve_tokens"} or value.get("attempted") is not True:
         raise ValueError("evaluator_canary_invalid")
     if (not isinstance(value.get("passed"), bool) or value.get("tool_count") != expected_tool_count or

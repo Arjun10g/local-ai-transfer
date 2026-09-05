@@ -29,6 +29,7 @@ from scripts.test.evaluate_tool_calls import (
     validate_endpoint,
 )
 from scripts.test import remote_model_eval
+from scripts import j1m_orchestrator
 
 
 class ToolCallEvaluatorTests(unittest.TestCase):
@@ -85,6 +86,30 @@ class ToolCallEvaluatorTests(unittest.TestCase):
                     self.assertIn(value, prompt)
                 if case["category"] in {"tool_selection", "confirmation_sensitive"}:
                     self.assertNotIn(call["name"], prompt)
+
+    def test_remote_and_orchestrator_canary_reject_output_reserve_257(self):
+        canary = {
+            "attempted": True, "passed": True, "error_code": None,
+            "tool_count": 28, "message_chars": 2400, "prompt_tokens": 513,
+            "context_tokens": 8192, "output_reserve_tokens": 257,
+        }
+        with self.assertRaisesRegex(ValueError, "canary"):
+            remote_model_eval._validate_canary(canary, expected_tool_count=28, expected_context_tokens=8192, expected_output_reserve_tokens=257)
+        with self.assertRaisesRegex(ValueError, "canary"):
+            j1m_orchestrator._verify_eval_canary(canary, expected_tool_count=28, expected_context_tokens=8192, expected_output_reserve_tokens=257)
+
+    def test_runtime_oneof_conflict_has_finite_schema_diagnostic(self):
+        tools = load_fixture(Path(__file__).with_name("production_tool_call_eval.json"))["tools"]
+        conflicting = (
+            "<tool_call><function=fs.apply_patch>"
+            "<parameter=workspace_id>project</parameter>"
+            "<parameter=path>README.md</parameter>"
+            "<parameter=base_sha256>" + "0" * 64 + "</parameter>"
+            "<parameter=replacement>one</parameter><parameter=patch>two</parameter>"
+            "</function></tool_call>"
+        )
+        with self.assertRaisesRegex(ValueError, "argument_value_mismatch"):
+            parse_tool_call(conflicting, tools)
 
     def test_fixture_is_bounded_and_covers_required_categories(self):
         fixture = load_fixture()

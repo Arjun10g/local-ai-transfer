@@ -51,6 +51,10 @@ int main() {
   assert(parsed.generation.messages[1].content == "say \"hi\"");
   assert(parsed.generation.messages[2].name == "time.now");
   assert(parsed.stream && parsed.generation.max_tokens == 4 && !parsed.generation.enable_thinking);
+  ChatRequest output_boundary;
+  assert(parse_chat_request(R"({"model":"fixture","messages":[{"role":"user","content":"ok"}],"max_tokens":256})", output_boundary, parse_error));
+  assert(output_boundary.generation.max_tokens == 256);
+  assert(!parse_chat_request(R"({"model":"fixture","messages":[{"role":"user","content":"ok"}],"max_tokens":257})", output_boundary, parse_error));
   ChatRequest tools_request;
   assert(parse_chat_request(R"({"model":"fixture","messages":[{"role":"user","content":"use tool"}],"tools":[{"type":"function","function":{"name":"time.now","description":"Return time","parameters":{"type":"object","properties":{"format":{"type":"string"}},"required":["format"]}}}]})", tools_request, parse_error));
   assert(tools_request.generation.tools.size() == 1);

@@ -35,6 +35,7 @@ _EVAL_FIXTURE_MAX_BYTES = 256 * 1024
 _EVAL_RECEIPT_MAX_BYTES = 64 * 1024
 _EVAL_ARTIFACT_RECEIPT_MAX_BYTES = 8 * 1024
 _PREFLIGHT_RECEIPT_MAX_BYTES = 1024
+_MAX_OUTPUT_RESERVE_TOKENS = 256
 _DELETION_RESERVE_SECONDS = 480.0
 # This is source-controlled acceptance data, not a value supplied by a run
 # configuration.  The config repeats it for operator visibility/parity checks,
@@ -521,6 +522,9 @@ def _verify_eval_quality_diagnostics(value: Any, *, failed: int, categories: set
 
 
 def _verify_eval_canary(value: Any, *, expected_tool_count: int = 11, expected_context_tokens: int = 2048, expected_output_reserve_tokens: int = 64) -> dict[str, Any]:
+    if (isinstance(expected_output_reserve_tokens, bool) or not isinstance(expected_output_reserve_tokens, int) or
+            not 1 <= expected_output_reserve_tokens <= _MAX_OUTPUT_RESERVE_TOKENS):
+        raise ValueError("eval receipt canary invalid")
     if not isinstance(value, dict) or set(value) != {"attempted", "passed", "error_code", "tool_count", "message_chars", "prompt_tokens", "context_tokens", "output_reserve_tokens"} or value.get("attempted") is not True:
         raise ValueError("eval receipt canary invalid")
     if (not isinstance(value.get("passed"), bool) or value.get("tool_count") != expected_tool_count or

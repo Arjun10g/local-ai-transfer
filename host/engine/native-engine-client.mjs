@@ -66,7 +66,13 @@ export class NativeEngineClient {
     if (!Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > 256) throw new NativeEngineError('invalid_engine_max_tokens', 'native maxTokens must be 1-256');
     this.token = token; this.model = model; this.backend = backend; this.timeoutMs = timeoutMs; this.maxTokens = maxTokens; this.sessions = new Map(); this.active = new Map(); this.closed = false;
   }
-  headers(extra = {}) { return { authorization: `Bearer ${this.token}`, ...extra }; }
+  headers(extra = {}) {
+    // Never allow a caller-provided case variant to replace the launch token.
+    const safeExtra = extra && typeof extra === 'object'
+      ? Object.fromEntries(Object.entries(extra).filter(([name]) => name.toLowerCase() !== 'authorization'))
+      : {};
+    return { ...safeExtra, authorization: `Bearer ${this.token}` };
+  }
   async request(path, options = {}, { signal, timeoutMs = this.timeoutMs } = {}) {
     if (this.closed) throw new NativeEngineError('engine_client_closed', 'native engine client is closed');
     if (typeof options.body === 'string' && new TextEncoder().encode(options.body).byteLength > MAX_REQUEST_JSON_BYTES)
@@ -92,8 +98,21 @@ export class NativeEngineClient {
     return { ready: data.lifecycle === 'READY' || data.lifecycle === 'BUSY', engine: build.engine_version ?? 'native-0.1.0', backend: build.backend ?? this.backend, model: build.model ?? this.model, lifecycle: data.lifecycle ?? 'UNKNOWN' };
   }
   async buildInfo() { const response = await this.request('/build-info', {}, { timeoutMs: 10000 }); return readJson(response); }
-  async ready() { const response = await this.request('/readyz'); const data = await readJson(response); return { ready: data.ready === true, lifecycle: data.lifecycle ?? 'UNKNOWN' }; }
-  async waitReady({ timeoutMs = this.timeoutMs, intervalMs = 25 } = {}) { const deadline = Date.now() + timeoutMs; while (Date.now() < deadline) { try { const status = await this.ready(); if (status.ready) return status; } catch (error) { if (!(error instanceof NativeEngineError) || !['engine_timeout', 'http_503', 'not_ready'].includes(error.code)) throw error; } await delay(intervalMs); } throw new NativeEngineError('engine_not_ready', 'native engine readiness timed out'); }
+  async ready({ timeoutMs = this.timeoutMs, signal } = {}) { const response = await this.request('/readyz', {}, { timeoutMs, signal }); const data = await readJson(response); return { ready: data.ready === true, lifecycle: data.lifecycle ?? 'UNKNOWN' }; }
+  async waitReady({ timeoutMs = this.timeoutMs, intervalMs = 25, signal } = {}) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const remaining = Math.max(1, deadline - Date.now());
+      try {
+        const status = await this.ready({ timeoutMs: Math.min(this.timeoutMs, remaining), signal });
+        if (status.ready) return status;
+      } catch (error) {
+        if (!(error instanceof NativeEngineError) || !['engine_timeout', 'http_503', 'not_ready'].includes(error.code)) throw error;
+      }
+      await delay(Math.min(intervalMs, Math.max(1, deadline - Date.now())), undefined, { signal });
+    }
+    throw new NativeEngineError('engine_not_ready', 'native engine readiness timed out');
+  }
   async ensureSession(hostSessionId, signal) {
     if (!REQUEST_ID.test(hostSessionId)) throw new NativeEngineError('invalid_session_id', 'host session id is invalid');
     const existing = this.sessions.get(hostSessionId); if (existing) return existing;
