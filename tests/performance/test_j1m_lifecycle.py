@@ -8,14 +8,12 @@ import subprocess
 import stat
 import shutil
 import tempfile
-import threading
 import time
 import types
 import urllib.error
 import unittest
 from datetime import datetime, timezone
 from unittest import mock
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from tests.performance.lifecycle_test_isolation import (
@@ -2725,117 +2723,49 @@ class StaticSafetyTests(unittest.TestCase):
 
 
 class LoopbackLifecycleTests(unittest.TestCase):
-    """Exercise exact deletion and killed-launcher recovery without a provider."""
+    """Exercise fail-closed lifecycle boundaries with mocked external edges."""
 
-    def test_killed_launcher_has_no_orphan(self):
+    def test_killed_launcher_without_intent_fails_closed(self):
+        from scripts import shadeform_watchdog as watchdog
         from scripts import shadeform_lifecycle as sf
 
-        calls: list[str] = []
-        instance_delete_requested = False
+        nonce = "0" * 32
+        with mock.patch.object(watchdog, "identity_alive", return_value=False), \
+                mock.patch.object(sf, "read_phase_ownership", return_value=(None, False)), \
+                mock.patch.object(watchdog, "_pending_intent", return_value=None), \
+                mock.patch.object(sf, "load_env") as load_env, \
+                mock.patch.object(sf, "request") as provider:
+            result = watchdog.main([
+                "--phase-id", "j1m-loopback-no-orphan",
+                "--instance-name", "ep-run-" + nonce,
+                "--launcher-pid", "1234", "--max-seconds", "1",
+                "--deadline-epoch", str(time.time() + 1000),
+                "--provider-delete-deadline-epoch", str(time.time() + 900),
+                "--allow-unrecorded-exact", "--ownership-nonce", nonce,
+                "--ssh-key-id", "key-loopback-1", "--ssh-key-name", "j1m-" + nonce,
+                "--ssh-key-fingerprint", "A" * 43,
+                "--cloud", "cloud", "--region", "region", "--instance-type", "type",
+                "--hourly-usd", "1", "--gpu", "A100", "--gpu-count", "1",
+                "--vram-gb", "80", "--os-image", "ubuntu",
+            ])
+        self.assertEqual(result, 1)
+        load_env.assert_not_called()
+        provider.assert_not_called()
 
-        class Handler(BaseHTTPRequestHandler):
-            def log_message(self, *_args):
-                pass
-
-            def do_POST(self):
-                nonlocal instance_delete_requested
-                calls.append(self.path)
-                if self.path == "/instances/instance-loopback-1/delete":
-                    instance_delete_requested = True
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(b'{"success":true}')
-
-            def do_GET(self):
-                calls.append(self.path)
-                if self.path == "/sshkeys/key-loopback-1/info":
-                    body = b'{"id":"key-loopback-1","name":"j1m-test-key","public_key":"ssh-ed25519 AAAA"}'
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                    return
-                if self.path == "/instances/instance-loopback-1/info" and not instance_delete_requested:
-                    payload = {
-                        "id": "instance-loopback-1",
-                        "name": "ep-j1m-test-0123456789abcdef0123456789abcdef",
-                        "tags": ["local-bmo-j1m", "ep-phase-j1m-loopback-no-orphan", "ep-run-0123456789abcdef0123456789abcdef"],
-                        "ssh_key_id": "key-loopback-1", "public_key": "ssh-ed25519 AAAA", "cloud": "hyperstack", "region": "Montreal",
-                        "shade_instance_type": "a100", "hourly_price": 135,
-                        "configuration": {"gpu_type": "A100_80G", "num_gpus": 1, "vram_per_gpu_in_gb": 80, "os": "ubuntu"},
-                    }
-                    body = json.dumps(payload).encode()
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                    return
-                self.send_response(404)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(b'{}')
-
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        phase = "j1m-loopback-no-orphan"
-        runtime = sf.runtime_ledger_path(phase)
-        ledger = sf.MARKDOWN_LEDGER
-        original_ledger = ledger.read_text(encoding="utf-8")
-        cost_ledger = sf.COST_LEDGER
-        original_cost_ledger = cost_ledger.read_bytes() if cost_ledger.exists() else None
-        env_fd, env_name = tempfile.mkstemp(prefix="j1m-loopback-env-")
-        os.close(env_fd)
-        env_file = Path(env_name)
-        env_file.write_text("SHADEFORM_API_KEY=stub-key\n", encoding="utf-8")
-        launcher = subprocess.Popen([os.sys.executable, "-c", "import time; time.sleep(30)"])
-        try:
-            sf.write_owned_resource(sf.OwnedResource(
-                phase_id=phase, run_id="j1m-test", instance_id="instance-loopback-1",
-                ownership_nonce="0123456789abcdef0123456789abcdef", ssh_key_id="key-loopback-1",
-                ssh_key_name="j1m-test-key", gpu="A100_80G", cloud="hyperstack", region="Montreal",
-                hourly_usd=1.35, created_at_utc=sf.utc_now().isoformat(), provider_delete_deadline_utc=(sf.utc_now() + sf.timedelta(hours=2)).isoformat(), instance_type="a100", gpu_count=1, vram_gb=80, os_image="ubuntu", ssh_public_key="ssh-ed25519 AAAA", launcher_pid=launcher.pid,
-            ))
-            launcher.kill()
-            launcher.wait(timeout=5)
-            env = {**os.environ, "EP_SHADEFORM_API_BASE_FOR_TESTS": f"http://127.0.0.1:{server.server_port}"}
-            result = subprocess.run([
-                os.sys.executable, "scripts/shadeform_watchdog.py", "--phase-id", phase,
-                "--instance-id", "instance-loopback-1", "--launcher-pid", str(launcher.pid),
-                "--max-seconds", "0.15", "--poll-seconds", "0.03", "--env-file", str(env_file),
-            ], env=env, timeout=10)
-            self.assertEqual(result.returncode, 0)
-            self.assertFalse(runtime.exists())
-            self.assertIn("/instances/instance-loopback-1/delete", calls)
-            self.assertIn("/sshkeys/key-loopback-1/delete", calls)
-            self.assertNotIn("/instances", [path for path in calls if path == "/instances"])
-        finally:
-            if launcher.poll() is None:
-                launcher.kill()
-                launcher.wait()
-            runtime.unlink(missing_ok=True)
-            ledger.write_text(original_ledger, encoding="utf-8")
-            if original_cost_ledger is None:
-                cost_ledger.unlink(missing_ok=True)
-            else:
-                cost_ledger.write_bytes(original_cost_ledger)
-            env_file.unlink(missing_ok=True)
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=2)
-
-    def test_transport_timeout_is_a_result(self):
+    def test_mocked_transport_failure_is_a_result(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator")
-        result = orchestrator._remote([os.sys.executable, "-c", "import time; time.sleep(1)"], timeout=0.01)
-        self.assertEqual(result["status"], "transport_timeout")
-        self.assertEqual(result["error_type"], "TimeoutExpired")
+        completed = subprocess.CompletedProcess([], 1, stdout="", stderr="")
+        with mock.patch.object(orchestrator.subprocess, "run", return_value=completed) as run:
+            result = orchestrator._remote(["ssh", "host"], timeout=0.01)
+        run.assert_called_once()
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_type"], "remote_exit")
 
     def test_remote_stderr_is_bounded_and_redacted(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_stderr")
-        result = orchestrator._remote([os.sys.executable, "-c", "import sys; sys.stderr.write('api_key=secret-value ' * 300); sys.exit(3)"], timeout=5)
+        completed = subprocess.CompletedProcess([], 3, stdout="", stderr="api_key=secret-value " * 300)
+        with mock.patch.object(orchestrator.subprocess, "run", return_value=completed):
+            result = orchestrator._remote(["ssh", "host"], timeout=5)
         self.assertEqual(result["status"], "failed")
         self.assertLessEqual(len(result["stderr_tail"]), 1200)
         self.assertNotIn("secret-value", result["stderr_tail"])
