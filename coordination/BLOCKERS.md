@@ -25,9 +25,10 @@
   and the reviewed secret-free action-journal/controller barrier is source-
   merged (`55f3dfd`, merge `65decba`). This source status is not independent
   evidence or gate approval. However, its Node pathname store deliberately refuses every production
-  action until a native handle-relative protected store exists. Graph provider
-  reconciliation tip `4332e1a` remains unmerged and pending independent audit;
-  browser/Copilot proposal state remains memory-only, and browser/Copilot
+  action until a native handle-relative protected store exists. Microsoft Graph
+  reconciliation source is merged at `b4702a5` after two independent source
+  audits, but has no live-provider evidence or approval; browser/Copilot
+  proposal state remains memory-only, and browser/Copilot
   executable paths are not bound to immutable file identity across preview and
   spawn.
 - Impact: a passing model score or mocked provider run cannot establish safe

@@ -22,9 +22,10 @@
 - The external lifecycle line at `e5` was rejected; its repair is pending and
   remote execution remains disabled. No new provider or target evidence is
   claimed.
-- Graph source tip `4332e1a` remains on the separate
-  `luna/graph-action-reconciliation` branch pending independent audit. It is
-  not merged and does not establish live Graph readiness.
+- Graph reconciliation source `b4702a5` is merged on `main` after two
+  independent source-safety approvals and a 96-pass mocked integration run.
+  This does not establish live Graph readiness; production action dispatch and
+  live-provider evidence remain unavailable.
 
 ## Check-in cadence
 
