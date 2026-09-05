@@ -19,13 +19,27 @@ const EFFECT_TIERS = Object.freeze({
 });
 const RECONCILIATION_REQUIRED_EFFECTS = new Set(['create_draft', 'send_mail', 'modify_mail', 'send_teams', 'browser_navigation', 'browser_input', 'browser_activation']);
 const digestShape = value => typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value);
-const providerVerified = result => {
+const PRIVATE_JOURNAL_KEYS = new Set(['operation_id', 'operation_digest', 'arguments_digest', 'preview_digest', 'response_digest', 'resource_digest']);
+const providerVerified = (result, expectedBinding) => {
   if (!result || result.status !== 'ok' || !Array.isArray(result.content) || result.content.length !== 1 || result.content[0]?.type !== 'text') return false;
   try {
     const payload = JSON.parse(result.content[0].text);
-    return payload && payload.provider_completion === 'verified' && payload.state === 'completed' && payload.completed === true && payload.evidence && digestShape(payload.evidence.operation_digest) && digestShape(payload.evidence.arguments_digest) && digestShape(payload.evidence.preview_digest) && digestShape(payload.evidence.response_digest) && (payload.evidence.resource_digest === null || digestShape(payload.evidence.resource_digest));
+    const evidence = payload?.evidence;
+    return payload && payload.provider_completion === 'verified' && payload.state === 'completed' && payload.completed === true && evidence && evidence.operation_digest === expectedBinding.operationDigest && evidence.arguments_digest === expectedBinding.argumentsDigest && evidence.preview_digest === expectedBinding.previewDigest && digestShape(evidence.response_digest) && (evidence.resource_digest === null || digestShape(evidence.resource_digest));
   } catch { return false; }
 };
+function stripPrivateJournalMetadata(value) {
+  if (Array.isArray(value)) return value.map(stripPrivateJournalMetadata);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !PRIVATE_JOURNAL_KEYS.has(key)).map(([key, item]) => [key, stripPrivateJournalMetadata(item)]));
+}
+function modelVisibleToolResult(result) {
+  if (!result?.content || !Array.isArray(result.content)) return result;
+  return { ...result, content: result.content.map(item => {
+    if (item?.type !== 'text' || typeof item.text !== 'string') return item;
+    try { return { ...item, text: JSON.stringify(stripPrivateJournalMetadata(JSON.parse(item.text))) }; } catch { return item; }
+  }) };
+}
 function digestEvidence(value) { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
 
 // The model sees only the OpenAI-compatible function schema. Execution and
@@ -235,7 +249,7 @@ export class ConversationController {
         if (activeJournalOperation) {
           if (result.status === 'ok') {
             await this.actionJournal.acknowledge(activeJournalOperation.id);
-            if (activeJournalOperation.reconcile && !providerVerified(result)) {
+            if (activeJournalOperation.reconcile && !providerVerified(result, activeJournalOperation)) {
               await this.actionJournal.beginReconciliation(activeJournalOperation.id);
               const responseDigest = digestEvidence({ status: result.status, content: result.content.map(item => ({ type: item.type, text_digest: digestEvidence(item.text) })) });
               result = makeToolResult({ id: call.id, name: call.name, status: 'failed', text: JSON.stringify({ code: 'action_completion_unverified', operation_id: activeJournalOperation.id, state: 'reconciling', completion: 'controller_acknowledged', provider_completion: 'unverified', evidence: { operation_digest: activeJournalOperation.operationDigest, preview_digest: activeJournalOperation.previewDigest, resource_digest: null, response_digest: responseDigest, arguments_digest: activeJournalOperation.argumentsDigest } }) });
@@ -244,9 +258,10 @@ export class ConversationController {
           else await this.actionJournal.markUnknown(activeJournalOperation.id);
           activeJournalOperation = null;
         }
+        const modelResult = modelVisibleToolResult(result);
         emit('tool.completed', { result });
         this._appendHistory(session, { role: 'assistant', content: callText });
-        this._appendHistory(session, { role: 'tool', name: call.name, tool_call_id: call.id, content: result.content[0]?.text ?? '' });
+        this._appendHistory(session, { role: 'tool', name: call.name, tool_call_id: call.id, content: modelResult.content[0]?.text ?? '' });
         session.state = 'CONTINUING_MODEL'; text = '';
       }
     } catch (caught) {
