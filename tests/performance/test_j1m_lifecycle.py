@@ -13,6 +13,7 @@ import time
 import types
 import urllib.error
 import unittest
+from datetime import datetime, timezone
 from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -177,7 +178,7 @@ class J1MConfigTests(unittest.TestCase):
         fingerprint = sf.ssh_public_key_fingerprint(public_key)
         with mock.patch.object(sf, "request", return_value={"ssh_keys": [{"id": "key-123456", "name": name, "public_key": public_key}]}):
             reconciled = sf.reconcile_ssh_key("api", "j1m-key-test", expected_name=name, expected_fingerprint=fingerprint)
-        self.assertEqual(reconciled, "key-123456")
+            self.assertEqual(reconciled, "key-123456")
         with mock.patch.object(sf, "request", return_value={"deleted": True}) as delete_request:
             self.assertEqual(sf.delete_ssh_key("api", "j1m-key-test", reconciled), {"deleted": True})
         self.assertEqual(delete_request.call_args.args[2], "/sshkeys/key-123456/delete")
@@ -190,6 +191,35 @@ class J1MConfigTests(unittest.TestCase):
         ]}):
             with self.assertRaises(sf.AmbiguousProviderOutcome):
                 sf.reconcile_ssh_key("api", "j1m-key-test", expected_name=name, expected_public_key=public_key)
+
+    def test_reconciliation_requests_honor_hard_deadline(self):
+        from scripts import shadeform_lifecycle as sf
+        nonce = "0123456789abcdef0123456789abcdef"
+        public_key = "ssh-ed25519 AAAA"
+        request_timeouts = []
+
+        def request(*args, **kwargs):
+            request_timeouts.append(kwargs["timeout"])
+            if args[2] == "/sshkeys":
+                return {"ssh_keys": [{"id": "key-recon-1", "name": f"j1m-{nonce}", "public_key": public_key}]}
+            if args[2] == "/sshkeys/key-recon-1/info":
+                return {"id": "key-recon-1", "name": f"j1m-{nonce}", "public_key": public_key}
+            if args[2] == "/instances":
+                return {"instances": [{"id": "instance-recon-1", "name": f"ep-run-{nonce}", "tags": ["local-bmo-j1m", "ep-phase-phase-a", f"ep-run-{nonce}"]}]}
+            if args[2] == "/instances/instance-recon-1/info":
+                return {"id": "instance-recon-1", "name": f"ep-run-{nonce}", "tags": ["local-bmo-j1m", "ep-phase-phase-a", f"ep-run-{nonce}"], "ssh_key_id": "key-recon-1", "cloud": "hyperstack", "region": "r", "shade_instance_type": "a100", "hourly_price": 100, "configuration": {"gpu_type": "A100", "num_gpus": 1, "vram_per_gpu_in_gb": 80, "os": "ubuntu"}}
+            raise AssertionError(args[2])
+
+        with mock.patch.object(sf, "request", side_effect=request), mock.patch.object(sf.time, "monotonic", return_value=100.0):
+            self.assertEqual(sf.reconcile_ssh_key("api", "phase-a", expected_name=f"j1m-{nonce}", expected_public_key=public_key, deadline=105.0), "key-recon-1")
+            self.assertEqual(sf.reconcile_instance_by_nonce(
+                "api", "phase-a", expected_name=f"ep-run-{nonce}", nonce=nonce,
+                ssh_key_id="key-recon-1", expected_cloud="hyperstack", expected_region="r",
+                expected_instance_type="a100", expected_hourly_usd=1.0, expected_gpu="A100",
+                expected_gpu_count=1, expected_vram_gb=80, expected_os_image="ubuntu", deadline=105.0,
+            ), "instance-recon-1")
+        self.assertTrue(request_timeouts)
+        self.assertLessEqual(max(request_timeouts), 5.0)
 
     def test_ssh_key_create_transport_or_schema_failure_is_ambiguous(self):
         from scripts import shadeform_lifecycle as sf
@@ -533,7 +563,7 @@ class StaticSafetyTests(unittest.TestCase):
             finally:
                 sf.RUNTIME_ROOT = original_root
 
-    def test_cost_bookkeeping_failure_still_revokes_key_after_confirmed_delete(self):
+    def test_cost_bookkeeping_failure_retains_key_for_exact_retry(self):
         from scripts import shadeform_lifecycle as sf
         from scripts import shadeform_teardown as teardown
         phase = "cost-bookkeeping-key-cleanup"
@@ -547,7 +577,7 @@ class StaticSafetyTests(unittest.TestCase):
             sf.write_owned_resource(sf.OwnedResource(
                 phase_id=phase, run_id="test", instance_id="instance-cost-1", ownership_nonce="0123456789abcdef0123456789abcdef",
                 ssh_key_id="key-cost-1", ssh_key_name="key", gpu="A100", cloud="hyperstack", region="r", hourly_usd=1.0,
-                created_at_utc=sf.utc_now().isoformat(), instance_type="a100", gpu_count=1,
+                created_at_utc=sf.utc_now().isoformat(), provider_delete_deadline_utc=(sf.utc_now() + sf.timedelta(hours=2)).isoformat(), instance_type="a100", gpu_count=1,
                 vram_gb=80, os_image="ubuntu", ssh_public_key="ssh-ed25519 AAAA",
             ))
             try:
@@ -557,12 +587,280 @@ class StaticSafetyTests(unittest.TestCase):
                         mock.patch.object(teardown.shadeform, "append_cost_event", side_effect=ValueError("ledger shape")), \
                         mock.patch.object(teardown.shadeform, "delete_ssh_key", return_value={"success": True}) as key_delete:
                     receipt = teardown.teardown_exact(phase, "instance-cost-1", env_file=env)
-                key_delete.assert_called_once_with("stub-api", phase, "key-cost-1")
+                key_delete.assert_not_called()
                 self.assertEqual(receipt["cost_bookkeeping_error_type"], "ValueError")
+                self.assertTrue(receipt["key_cleanup_deferred"])
             finally:
                 sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = originals
 
-    def test_teardown_deletes_after_salvage_failure_and_revokes_key_on_delete_failure(self):
+    def test_post_key_receipt_failure_retains_owned_record_for_manual_retry(self):
+        from scripts import shadeform_lifecycle as sf
+        from scripts import shadeform_teardown as teardown
+        phase = "post-key-receipt-failure"
+        nonce = "0123456789abcdef0123456789abcdef"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            originals = (sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER)
+            sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = root / "runtime", root / "ledger.md", root / "cost.jsonl"
+            sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
+            env = root / "env"
+            env.write_text("SHADEFORM_API_KEY=stub-api\n", encoding="utf-8")
+            record = sf.OwnedResource(
+                phase_id=phase, run_id="test", instance_id="instance-post-receipt-1", ownership_nonce=nonce,
+                ssh_key_id="key-post-receipt-1", ssh_key_name="key", gpu="A100", cloud="hyperstack", region="r",
+                hourly_usd=1.0, created_at_utc=sf.utc_now().isoformat(), provider_delete_deadline_utc=(sf.utc_now() + sf.timedelta(hours=2)).isoformat(), instance_type="a100", gpu_count=1,
+                vram_gb=80, os_image="ubuntu", ssh_public_key="ssh-ed25519 AAAA",
+            )
+            try:
+                sf.write_owned_resource(record)
+                real_receipt = teardown._write_deletion_receipt
+                receipt_calls = 0
+
+                def receipt_with_second_write_failure(*args, **kwargs):
+                    nonlocal receipt_calls
+                    receipt_calls += 1
+                    if receipt_calls == 2:
+                        raise OSError("post-key receipt barrier failed")
+                    return real_receipt(*args, **kwargs)
+
+                with mock.patch.object(teardown.shadeform, "verify_owned_instance_before_delete", return_value={}), \
+                        mock.patch.object(teardown.shadeform, "_delete_instance", return_value={"success": True}), \
+                        mock.patch.object(teardown.shadeform, "append_cost_event"), \
+                        mock.patch.object(teardown.shadeform, "verify_owned_ssh_key_before_delete", return_value={}), \
+                        mock.patch.object(teardown.shadeform, "delete_ssh_key", return_value={"success": True}) as key_delete, \
+                        mock.patch.object(teardown, "_write_deletion_receipt", side_effect=receipt_with_second_write_failure), \
+                        mock.patch.object(teardown.shadeform, "clear_owned_resource") as clear:
+                    with self.assertRaises(RuntimeError):
+                        teardown.teardown_exact(phase, record.instance_id, env_file=env)
+                key_delete.assert_called_once()
+                clear.assert_not_called()
+                self.assertIsNotNone(sf.read_owned_resource(phase))
+                self.assertGreaterEqual(receipt_calls, 2)
+            finally:
+                sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = originals
+
+    def test_delete_dispatch_requires_durable_intent_before_provider_call(self):
+        from scripts import shadeform_lifecycle as sf
+        from scripts import shadeform_teardown as teardown
+        phase = "dispatch-intent-required"
+        record = sf.OwnedResource(
+            phase_id=phase, run_id="test", instance_id="instance-intent-1", ownership_nonce="0123456789abcdef0123456789abcdef",
+            ssh_key_id="key-intent-1", ssh_key_name="key", gpu="A100", cloud="hyperstack", region="r", hourly_usd=1.0,
+            created_at_utc=sf.utc_now().isoformat(), provider_delete_deadline_utc=(sf.utc_now() + sf.timedelta(hours=2)).isoformat(), instance_type="a100", gpu_count=1, vram_gb=80, os_image="ubuntu",
+            ssh_public_key="ssh-ed25519 AAAA",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            originals = (sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER)
+            sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = root / "runtime", root / "ledger.md", root / "cost.jsonl"
+            sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
+            env = root / "env"
+            env.write_text("SHADEFORM_API_KEY=stub-api\n", encoding="utf-8")
+            try:
+                sf.write_owned_resource(record)
+                with mock.patch.object(teardown.shadeform, "verify_owned_instance_before_delete", return_value={}), \
+                        mock.patch.object(teardown, "_write_deletion_intent", side_effect=OSError("intent fsync failed")), \
+                        mock.patch.object(teardown.shadeform, "_delete_instance") as delete:
+                    with self.assertRaises(RuntimeError):
+                        teardown.teardown_exact(phase, record.instance_id, env_file=env)
+                delete.assert_not_called()
+            finally:
+                sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = originals
+
+    def test_lifecycle_persistence_uses_directory_barriers(self):
+        from scripts import shadeform_lifecycle as sf
+        phase = "persistence-directory-barrier"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            originals = (sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER, sf.INCIDENTS)
+            sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER, sf.INCIDENTS = root / "runtime", root / "ledger.md", root / "cost.jsonl", root / "incidents.jsonl"
+            sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
+            record = sf.OwnedResource(
+                phase_id=phase, run_id="test", instance_id="instance-barrier-1", ownership_nonce="fedcba9876543210fedcba9876543210",
+                ssh_key_id="key-barrier-1", ssh_key_name="key", gpu="A100", cloud="hyperstack", region="r", hourly_usd=1.0,
+                created_at_utc=sf.utc_now().isoformat(), provider_delete_deadline_utc=(sf.utc_now() + sf.timedelta(hours=2)).isoformat(), instance_type="a100", gpu_count=1, vram_gb=80, os_image="ubuntu",
+                ssh_public_key="ssh-ed25519 AAAA",
+            )
+            barriers = []
+            try:
+                with mock.patch.object(sf, "_fsync_directory", side_effect=lambda path: barriers.append(Path(path))):
+                    sf.write_owned_resource(record)
+                    sf.append_cost_event({"instance_id": record.instance_id, "phase_id": phase, "status": "settled", "actual_cost_usd": 0.0})
+                    sf.append_incident({"incident": "barrier-test", "phase_id": phase})
+                self.assertGreaterEqual(len(barriers), 4)
+                self.assertTrue(all(path == root / "runtime" or path == root for path in barriers))
+            finally:
+                sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER, sf.INCIDENTS = originals
+
+    def test_confirmed_delete_retry_skips_provider_delete(self):
+        from scripts import shadeform_lifecycle as sf
+        from scripts import shadeform_teardown as teardown
+        phase = "confirmed-delete-retry"
+        nonce = "fedcba9876543210fedcba9876543210"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            originals = (sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER)
+            sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = root / "runtime", root / "ledger.md", root / "cost.jsonl"
+            sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
+            env = root / "env"
+            env.write_text("SHADEFORM_API_KEY=stub-api\n", encoding="utf-8")
+            record = sf.OwnedResource(
+                phase_id=phase, run_id="test", instance_id="instance-retry-1", ownership_nonce=nonce,
+                ssh_key_id="key-retry-1", ssh_key_name="key", gpu="A100", cloud="hyperstack", region="r",
+                hourly_usd=1.0, created_at_utc=sf.utc_now().isoformat(), provider_delete_deadline_utc=(sf.utc_now() + sf.timedelta(hours=2)).isoformat(), instance_type="a100", gpu_count=1,
+                vram_gb=80, os_image="ubuntu", ssh_public_key="ssh-ed25519 AAAA",
+            )
+            try:
+                sf.write_owned_resource(record)
+                delete = mock.Mock(return_value={"success": True})
+                with mock.patch.object(teardown.shadeform, "verify_owned_instance_before_delete", return_value={}), \
+                        mock.patch.object(teardown.shadeform, "_delete_instance", delete), \
+                        mock.patch.object(teardown.shadeform, "append_cost_event", side_effect=OSError("ledger unavailable")), \
+                        mock.patch.object(teardown.shadeform, "delete_ssh_key") as key_delete:
+                    first = teardown.teardown_exact(phase, record.instance_id, env_file=env)
+                self.assertTrue(first["retry_required"])
+                key_delete.assert_not_called()
+                with mock.patch.object(teardown.shadeform, "append_cost_event"), \
+                        mock.patch.object(teardown.shadeform, "verify_owned_instance_before_delete") as verify, \
+                        mock.patch.object(teardown.shadeform, "delete_ssh_key", return_value={"success": True}):
+                    second = teardown.teardown_exact(phase, record.instance_id, env_file=env)
+                self.assertTrue(second["actual_cost_usd"] >= 0)
+                delete.assert_called_once()
+                verify.assert_not_called()
+            finally:
+                sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = originals
+
+    def test_dispatched_delete_intent_reconciles_exact_404_only(self):
+        from scripts import shadeform_lifecycle as sf
+        from scripts import shadeform_teardown as teardown
+        phase = "dispatch-intent-reconcile"
+        nonce = "00112233445566778899aabbccddeeff"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            originals = (sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER)
+            sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = root / "runtime", root / "ledger.md", root / "cost.jsonl"
+            sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
+            env = root / "env"
+            env.write_text("SHADEFORM_API_KEY=stub-api\n", encoding="utf-8")
+            record = sf.OwnedResource(
+                phase_id=phase, run_id="test", instance_id="instance-dispatch-1", ownership_nonce=nonce,
+                ssh_key_id="key-dispatch-1", ssh_key_name="key", gpu="A100", cloud="hyperstack", region="r",
+                hourly_usd=1.0, created_at_utc=sf.utc_now().isoformat(), provider_delete_deadline_utc=(sf.utc_now() + sf.timedelta(hours=2)).isoformat(), instance_type="a100", gpu_count=1,
+                vram_gb=80, os_image="ubuntu", ssh_public_key="ssh-ed25519 AAAA",
+            )
+            try:
+                sf.write_owned_resource(record)
+                delete = mock.Mock(side_effect=RuntimeError("connection lost after dispatch"))
+                with mock.patch.object(teardown.shadeform, "verify_owned_instance_before_delete", return_value={}), \
+                        mock.patch.object(teardown.shadeform, "_delete_instance", delete):
+                    with self.assertRaises(RuntimeError):
+                        teardown.teardown_exact(phase, record.instance_id, env_file=env)
+                intent = json.loads(teardown._deletion_intent_path(phase).read_text(encoding="utf-8"))
+                self.assertEqual(intent["status"], "dispatched")
+                with mock.patch.object(teardown.shadeform, "instance_info", side_effect=sf.ShadeformHTTPError(404, "gone")), \
+                        mock.patch.object(teardown.shadeform, "_delete_instance") as second_delete, \
+                        mock.patch.object(teardown.shadeform, "append_cost_event"), \
+                        mock.patch.object(teardown.shadeform, "verify_owned_ssh_key_before_delete", return_value={}), \
+                        mock.patch.object(teardown.shadeform, "delete_ssh_key", return_value={"success": True}):
+                    result = teardown.teardown_exact(phase, record.instance_id, env_file=env)
+                self.assertTrue(result["deletion"]["reconciled_from_deletion_intent"])
+                second_delete.assert_not_called()
+            finally:
+                sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = originals
+
+    def test_teardown_settles_attempt_reservation_before_key_cleanup(self):
+        from scripts import shadeform_lifecycle as sf
+        from scripts import shadeform_teardown as teardown
+        phase = "attempt-settlement-order"
+        nonce = "0123456789abcdef0123456789abcdef"
+        record = sf.OwnedResource(
+            phase_id=phase, run_id="test", instance_id="instance-order-1",
+            ownership_nonce=nonce, ssh_key_id="key-order-1", ssh_key_name="key",
+            gpu="A100", cloud="hyperstack", region="r", hourly_usd=1.0,
+            created_at_utc=sf.utc_now().isoformat(), provider_delete_deadline_utc=(sf.utc_now() + sf.timedelta(hours=2)).isoformat(), instance_type="a100",
+            gpu_count=1, vram_gb=80, os_image="ubuntu",
+            ssh_public_key="ssh-ed25519 AAAA",
+        )
+        calls = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            originals = (sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER)
+            sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = root / "runtime", root / "ledger.md", root / "cost.jsonl"
+            sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
+            env = root / "env"
+            env.write_text("SHADEFORM_API_KEY=stub-api\n", encoding="utf-8")
+            try:
+                with mock.patch.object(teardown.shadeform, "read_owned_resource", return_value=record), \
+                        mock.patch.object(teardown.shadeform, "verify_owned_instance_before_delete", return_value={}), \
+                        mock.patch.object(teardown.shadeform, "_delete_instance", return_value={"success": True}), \
+                        mock.patch.object(teardown.shadeform, "append_cost_event", side_effect=lambda event: calls.append(("cost", event["instance_id"]))), \
+                        mock.patch.object(teardown.shadeform, "write_owned_resource", side_effect=lambda value: calls.append(("record", value.status))), \
+                        mock.patch.object(teardown.shadeform, "verify_owned_ssh_key_before_delete", side_effect=lambda *args, **kwargs: calls.append(("key-verify", args[2]))), \
+                        mock.patch.object(teardown.shadeform, "delete_ssh_key", side_effect=lambda *args, **kwargs: calls.append(("key-delete", args[2]))), \
+                        mock.patch.object(teardown, "_write_deletion_receipt", side_effect=lambda *args, **kwargs: calls.append(("receipt", args[1]["instance_id"]))), \
+                        mock.patch.object(teardown.shadeform, "clear_owned_resource"):
+                    receipt = teardown.teardown_exact(phase, record.instance_id, env_file=env)
+                self.assertTrue(receipt["attempt_reservation_settled"])
+                self.assertLess(calls.index(("cost", record.instance_id)), calls.index(("cost", f"attempt-{nonce}")))
+                self.assertLess(
+                    calls.index(("cost", f"attempt-{nonce}")),
+                    next(index for index, item in enumerate(calls) if item[0] == "key-verify"),
+                )
+            finally:
+                sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = originals
+
+    def test_teardown_retains_key_when_attempt_or_record_persistence_fails(self):
+        from scripts import shadeform_lifecycle as sf
+        from scripts import shadeform_teardown as teardown
+        phase = "teardown-bookkeeping-faults"
+        nonce = "fedcba9876543210fedcba9876543210"
+        record = sf.OwnedResource(
+            phase_id=phase, run_id="test", instance_id="instance-bookkeeping-1",
+            ownership_nonce=nonce, ssh_key_id="key-bookkeeping-1", ssh_key_name="key",
+            gpu="A100", cloud="hyperstack", region="r", hourly_usd=1.0,
+            created_at_utc=sf.utc_now().isoformat(), provider_delete_deadline_utc=(sf.utc_now() + sf.timedelta(hours=2)).isoformat(), instance_type="a100",
+            gpu_count=1, vram_gb=80, os_image="ubuntu",
+            ssh_public_key="ssh-ed25519 AAAA",
+        )
+        for fault in ("attempt", "record", "receipt"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                originals = (sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER)
+                sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = root / "runtime", root / "ledger.md", root / "cost.jsonl"
+                sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
+                env = root / "env"
+                env.write_text("SHADEFORM_API_KEY=stub-api\n", encoding="utf-8")
+                append_calls = []
+                try:
+                    def append_cost(event):
+                        append_calls.append(event)
+                        if fault == "attempt" and len(append_calls) == 2:
+                            raise OSError("attempt ledger unavailable")
+
+                    with mock.patch.object(teardown.shadeform, "read_owned_resource", return_value=record), \
+                            mock.patch.object(teardown.shadeform, "verify_owned_instance_before_delete", return_value={}), \
+                            mock.patch.object(teardown.shadeform, "_delete_instance", return_value={"success": True}), \
+                            mock.patch.object(teardown.shadeform, "append_cost_event", side_effect=append_cost), \
+                            mock.patch.object(teardown.shadeform, "write_owned_resource", side_effect=OSError("record persistence unavailable") if fault == "record" else None), \
+                            mock.patch.object(teardown.shadeform, "verify_owned_ssh_key_before_delete", return_value={}), \
+                            mock.patch.object(teardown.shadeform, "delete_ssh_key") as key_delete, \
+                            mock.patch.object(teardown, "_write_deletion_receipt", side_effect=OSError("receipt persistence unavailable") if fault == "receipt" else None):
+                        if fault == "receipt":
+                            with self.assertRaises(RuntimeError):
+                                teardown.teardown_exact(phase, record.instance_id, env_file=env)
+                            receipt = None
+                        else:
+                            receipt = teardown.teardown_exact(phase, record.instance_id, env_file=env)
+                    key_delete.assert_not_called()
+                    if receipt is not None:
+                        self.assertTrue(receipt["retry_required"])
+                        self.assertIn(receipt["ssh_key_cleanup_error_type"], {
+                            "DeferredUntilAttemptSettlement", "DeferredUntilOwnedRecordPersistence",
+                        })
+                finally:
+                    sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = originals
+
+    def test_teardown_retains_key_on_unconfirmed_delete_failure(self):
         from scripts import shadeform_lifecycle as sf
         from scripts import shadeform_teardown as teardown
         originals = (sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER)
@@ -580,7 +878,7 @@ class StaticSafetyTests(unittest.TestCase):
             salvage_source = root / "receipt.json"
             salvage_source.write_text("receipt", encoding="utf-8")
             sf.write_owned_resource(sf.OwnedResource(
-                phase_id=phase, run_id="test", instance_id="instance-fail-1", ownership_nonce="0123456789abcdef0123456789abcdef", ssh_key_id="key-fail-1", ssh_key_name="key", gpu="A100", cloud="hyperstack", region="r", hourly_usd=1.0, created_at_utc=sf.utc_now().isoformat(), instance_type="a100", gpu_count=1, vram_gb=80, os_image="ubuntu", ssh_public_key="ssh-ed25519 AAAA", launcher_pid=None,
+                phase_id=phase, run_id="test", instance_id="instance-fail-1", ownership_nonce="0123456789abcdef0123456789abcdef", ssh_key_id="key-fail-1", ssh_key_name="key", gpu="A100", cloud="hyperstack", region="r", hourly_usd=1.0, created_at_utc=sf.utc_now().isoformat(), provider_delete_deadline_utc=(sf.utc_now() + sf.timedelta(hours=2)).isoformat(), instance_type="a100", gpu_count=1, vram_gb=80, os_image="ubuntu", ssh_public_key="ssh-ed25519 AAAA", launcher_pid=None,
             ))
             with mock.patch.object(teardown.shadeform, "verify_owned_instance_before_delete", return_value={}), \
                     mock.patch.object(teardown.shadeform, "verify_owned_ssh_key_before_delete", return_value={}), \
@@ -588,7 +886,7 @@ class StaticSafetyTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     teardown.teardown_exact(phase, "instance-fail-1", env_file=env, salvage=salvage_source, salvage_destination=bad_destination)
             delete.assert_called_once()
-            key_delete.assert_called_once_with("stub-api", phase, "key-fail-1")
+            key_delete.assert_not_called()
             self.assertTrue(sf.runtime_ledger_path(phase).exists())
         sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = originals
 
@@ -745,7 +1043,7 @@ class StaticSafetyTests(unittest.TestCase):
 
     def test_teardown_failure_keeps_watchdog_for_exact_retry(self):
         source = (ROOT / "scripts" / "j1m_orchestrator.py").read_text(encoding="utf-8")
-        cleanup = source[source.index("if instance_id is not None:") : source.index("if attempt_reserved and settle_attempt_after_cleanup:")]
+        cleanup = source[source.index("if instance_id is not None:") : source.index("if attempt_reserved and settle_attempt_after_cleanup and not attempt_settled_during_cleanup:")]
         self.assertIn("lifecycle[\"deletion\"] = teardown_exact", cleanup)
         self.assertNotIn("finally:\n                        #", cleanup)
         self.assertIn("if deletion_confirmed():\n                stop_watchdog()", cleanup)
@@ -754,6 +1052,218 @@ class StaticSafetyTests(unittest.TestCase):
     def test_watchdog_is_prearmed_before_ssh_key_mutation(self):
         source = (ROOT / "scripts" / "j1m_orchestrator.py").read_text(encoding="utf-8")
         self.assertLess(source.index("watchdog = subprocess.Popen(watchdog_command)"), source.index("key_id = sf.add_ssh_key"))
+
+    def test_watchdog_settles_instance_and_attempt_before_key_failure(self):
+        watchdog = load(ROOT / "scripts/shadeform_watchdog.py", "j1m_watchdog_key_failure_order")
+        from scripts import shadeform_lifecycle as sf
+        phase = "watchdog-key-failure-order"
+        nonce = "0123456789abcdef0123456789abcdef"
+        now = time.time()
+        intent = {
+            "phase_id": phase, "ownership_nonce": nonce,
+            "instance_id": "attempt-" + nonce, "instance_create_intent": True,
+            "intent_schema": sf.INSTANCE_CREATE_INTENT_SCHEMA,
+            "status": "pending", "estimated_cost_usd": 1.35,
+            "reservation": "instance-create-intent", "instance_name": "ep-name",
+            "ssh_key_id": "key-123456",
+            "create_started_at_utc": "2026-09-04T00:00:00+00:00",
+            "recorded_at_utc": "2026-09-04T00:00:00+00:00",
+            "hourly_usd": 1.35, "backstop_hours": 1.0,
+            "provider_delete_deadline_utc": datetime.fromtimestamp(now + 3600, timezone.utc).isoformat(),
+        }
+        info = {"id": "instance-reconciled", "name": "ep-name"}
+        events = []
+        order = []
+        with mock.patch.object(watchdog, "identity_alive", return_value=False), \
+                mock.patch.object(watchdog, "_pending_intent", return_value=intent), \
+                mock.patch.object(sf, "load_env", return_value={"SHADEFORM_API_KEY": "api"}), \
+                mock.patch.object(sf, "require_env", return_value="api"), \
+                mock.patch.object(sf, "reconcile_instance_by_nonce", return_value="instance-reconciled"), \
+                mock.patch.object(sf, "instance_info", return_value=info), \
+                mock.patch.object(sf, "verify_instance_ownership"), \
+                mock.patch.object(sf, "_delete_instance", return_value={"success": True}), \
+                mock.patch.object(sf, "append_cost_event", side_effect=lambda event: events.append(event)), \
+                mock.patch.object(sf, "verify_ssh_key_fingerprint", side_effect=lambda *args, **kwargs: order.append("key-verify")), \
+                mock.patch.object(sf, "delete_ssh_key", side_effect=RuntimeError("key cleanup unavailable")), \
+                mock.patch.object(sf, "append_incident", side_effect=lambda event: order.append(event["incident"])), \
+                mock.patch("scripts.shadeform_teardown.teardown_recovered_exact", return_value={"status": "complete", "retry_required": False}) as shared, \
+                mock.patch.object(watchdog.time, "sleep", return_value=None):
+            result = watchdog.main([
+                "--phase-id", phase, "--launcher-pid", str(os.getpid()),
+                "--max-seconds", "0.01", "--deadline-epoch", str(now + 700),
+                "--provider-delete-deadline-epoch", str(now + 3600),
+                "--allow-unrecorded-exact", "--precreate-recovery",
+                "--ownership-nonce", nonce, "--instance-name", "ep-name",
+                "--ssh-key-id", "key-123456", "--ssh-key-name", "ep-key",
+                "--ssh-key-fingerprint", "SHA256:abc", "--cloud", "hyperstack",
+                "--region", "montreal-canada-2", "--instance-type", "A100_80G",
+                "--hourly-usd", "1.35", "--gpu", "A100_80G", "--gpu-count", "1",
+                "--vram-gb", "80", "--os-image", "ubuntu22.04_cuda12.2_shade_os",
+            ])
+        self.assertEqual(result, 0)
+        recovered = shared.call_args.args[0]
+        self.assertEqual(recovered.instance_id, "instance-reconciled")
+        self.assertEqual(recovered.provider_delete_deadline_utc, intent["provider_delete_deadline_utc"])
+        self.assertEqual(events, [])
+
+    def test_watchdog_cost_failure_keeps_key_recovery_pending(self):
+        watchdog = load(ROOT / "scripts/shadeform_watchdog.py", "j1m_watchdog_cost_failure_order")
+        from scripts import shadeform_lifecycle as sf
+        phase = "watchdog-cost-failure-order"
+        nonce = "fedcba9876543210fedcba9876543210"
+        now = time.time()
+        intent = {
+            "phase_id": phase, "ownership_nonce": nonce,
+            "instance_id": "attempt-" + nonce, "instance_create_intent": True,
+            "intent_schema": sf.INSTANCE_CREATE_INTENT_SCHEMA,
+            "status": "pending", "estimated_cost_usd": 1.35,
+            "reservation": "instance-create-intent", "instance_name": "ep-name",
+            "ssh_key_id": "key-123456",
+            "create_started_at_utc": "2026-09-04T00:00:00+00:00",
+            "recorded_at_utc": "2026-09-04T00:00:00+00:00",
+            "hourly_usd": 1.35, "backstop_hours": 1.0,
+            "provider_delete_deadline_utc": datetime.fromtimestamp(now + 3600, timezone.utc).isoformat(),
+        }
+        info = {"id": "instance-cost-failure", "name": "ep-name"}
+        incidents = []
+        cost_calls = []
+        def append_cost(event):
+            cost_calls.append(event)
+            if event["status"] == "settled":
+                raise RuntimeError("ledger unavailable")
+        with mock.patch.object(watchdog, "identity_alive", return_value=False), \
+                mock.patch.object(watchdog, "_pending_intent", return_value=intent), \
+                mock.patch.object(sf, "load_env", return_value={"SHADEFORM_API_KEY": "api"}), \
+                mock.patch.object(sf, "require_env", return_value="api"), \
+                mock.patch.object(sf, "reconcile_instance_by_nonce", return_value="instance-cost-failure"), \
+                mock.patch.object(sf, "instance_info", return_value=info), \
+                mock.patch.object(sf, "verify_instance_ownership"), \
+                mock.patch.object(sf, "_delete_instance", return_value={"success": True}), \
+                mock.patch.object(sf, "append_cost_event", side_effect=append_cost), \
+                mock.patch.object(sf, "append_incident", side_effect=lambda event: incidents.append(event)), \
+                mock.patch.object(sf, "verify_ssh_key_fingerprint") as key_verify, \
+                mock.patch.object(sf, "delete_ssh_key") as key_delete, \
+                mock.patch("scripts.shadeform_teardown.teardown_recovered_exact", side_effect=RuntimeError("cost recovery pending")), \
+                mock.patch.object(watchdog.time, "sleep", return_value=None):
+            result = watchdog.main([
+                "--phase-id", phase, "--launcher-pid", str(os.getpid()),
+                "--max-seconds", "0.01", "--deadline-epoch", str(now + 700),
+                "--provider-delete-deadline-epoch", str(now + 3600),
+                "--allow-unrecorded-exact", "--precreate-recovery",
+                "--ownership-nonce", nonce, "--instance-name", "ep-name",
+                "--ssh-key-id", "key-123456", "--ssh-key-name", "ep-key",
+                "--ssh-key-fingerprint", "SHA256:abc", "--cloud", "hyperstack",
+                "--region", "montreal-canada-2", "--instance-type", "A100_80G",
+                "--hourly-usd", "1.35", "--gpu", "A100_80G", "--gpu-count", "1",
+                "--vram-gb", "80", "--os-image", "ubuntu22.04_cuda12.2_shade_os",
+            ])
+        self.assertEqual(result, 1)
+        self.assertEqual(incidents, [])
+        key_verify.assert_not_called()
+        key_delete.assert_not_called()
+
+    def test_watchdog_attempt_settlement_failure_keeps_key(self):
+        watchdog = load(ROOT / "scripts/shadeform_watchdog.py", "j1m_watchdog_attempt_failure_order")
+        from scripts import shadeform_lifecycle as sf
+        phase = "watchdog-attempt-failure-order"
+        nonce = "00112233445566778899aabbccddeeff"
+        now = time.time()
+        intent = {
+            "phase_id": phase, "ownership_nonce": nonce,
+            "instance_id": "attempt-" + nonce, "instance_create_intent": True,
+            "intent_schema": sf.INSTANCE_CREATE_INTENT_SCHEMA,
+            "status": "pending", "estimated_cost_usd": 1.35,
+            "reservation": "instance-create-intent", "instance_name": "ep-name",
+            "ssh_key_id": "key-123456",
+            "create_started_at_utc": "2026-09-04T00:00:00+00:00",
+            "recorded_at_utc": "2026-09-04T00:00:00+00:00",
+            "hourly_usd": 1.35, "backstop_hours": 1.0,
+            "provider_delete_deadline_utc": datetime.fromtimestamp(now + 3600, timezone.utc).isoformat(),
+        }
+        events = []
+        def append_cost(event):
+            events.append(event)
+            if event["status"] == "settled" and event["instance_id"].startswith("attempt-"):
+                raise OSError("attempt ledger unavailable")
+        with mock.patch.object(watchdog, "identity_alive", return_value=False), \
+                mock.patch.object(watchdog, "_pending_intent", return_value=intent), \
+                mock.patch.object(sf, "load_env", return_value={"SHADEFORM_API_KEY": "api"}), \
+                mock.patch.object(sf, "require_env", return_value="api"), \
+                mock.patch.object(sf, "reconcile_instance_by_nonce", return_value="instance-attempt-failure"), \
+                mock.patch.object(sf, "instance_info", return_value={"id": "instance-attempt-failure", "name": "ep-name"}), \
+                mock.patch.object(sf, "verify_instance_ownership"), \
+                mock.patch.object(sf, "_delete_instance", return_value={"success": True}), \
+                mock.patch.object(sf, "append_cost_event", side_effect=append_cost), \
+                mock.patch.object(sf, "append_incident"), \
+                mock.patch.object(sf, "verify_ssh_key_fingerprint") as key_verify, \
+                mock.patch.object(sf, "delete_ssh_key") as key_delete, \
+                mock.patch("scripts.shadeform_teardown.teardown_recovered_exact", side_effect=OSError("attempt recovery pending")), \
+                mock.patch.object(watchdog.time, "sleep", return_value=None):
+            result = watchdog.main([
+                "--phase-id", phase, "--launcher-pid", str(os.getpid()),
+                "--max-seconds", "0.01", "--deadline-epoch", str(now + 700),
+                "--provider-delete-deadline-epoch", str(now + 3600),
+                "--allow-unrecorded-exact", "--precreate-recovery",
+                "--ownership-nonce", nonce, "--instance-name", "ep-name",
+                "--ssh-key-id", "key-123456", "--ssh-key-name", "ep-key",
+                "--ssh-key-fingerprint", "SHA256:abc", "--cloud", "hyperstack",
+                "--region", "montreal-canada-2", "--instance-type", "A100_80G",
+                "--hourly-usd", "1.35", "--gpu", "A100_80G", "--gpu-count", "1",
+                "--vram-gb", "80", "--os-image", "ubuntu22.04_cuda12.2_shade_os",
+            ])
+        self.assertEqual(result, 1)
+        self.assertEqual(events, [])
+        key_verify.assert_not_called()
+        key_delete.assert_not_called()
+
+    def test_watchdog_key_only_settles_attempt_before_key(self):
+        watchdog = load(ROOT / "scripts/shadeform_watchdog.py", "j1m_watchdog_key_only_order")
+        from scripts import shadeform_lifecycle as sf
+        phase = "watchdog-key-only-order"
+        nonce = "11223344556677889900aabbccddeeff"
+        now = time.time()
+        intent = {
+            "phase_id": phase, "ownership_nonce": nonce,
+            "instance_id": "attempt-" + nonce, "instance_create_intent": False,
+            "create_started_at_utc": "2026-09-04T00:00:00+00:00",
+            "hourly_usd": 1.35, "backstop_hours": 1.0,
+            "provider_delete_deadline_utc": datetime.fromtimestamp(now + 3600, timezone.utc).isoformat(),
+        }
+        events = []
+        order = []
+        with mock.patch.object(watchdog, "identity_alive", return_value=False), \
+                mock.patch.object(watchdog, "_pending_intent", return_value=intent), \
+                mock.patch.object(sf, "load_env", return_value={"SHADEFORM_API_KEY": "api"}), \
+                mock.patch.object(sf, "require_env", return_value="api"), \
+                mock.patch.object(sf, "reconcile_ssh_key", return_value="key-key-only"), \
+                mock.patch.object(sf, "reconcile_instance_by_nonce", return_value=None), \
+                mock.patch.object(sf, "append_cost_event", side_effect=lambda event: events.append(event)), \
+                mock.patch.object(sf, "append_incident", side_effect=lambda event: order.append(event["incident"])), \
+                mock.patch.object(sf, "verify_ssh_key_fingerprint", side_effect=lambda *args, **kwargs: order.append("key-verify")), \
+                mock.patch.object(sf, "delete_ssh_key", side_effect=lambda *args, **kwargs: order.append("key-delete")), \
+                mock.patch.object(watchdog.time, "sleep", return_value=None):
+            result = watchdog.main([
+                "--phase-id", phase, "--launcher-pid", str(os.getpid()),
+                "--max-seconds", "0.01", "--deadline-epoch", str(now + 700),
+                "--provider-delete-deadline-epoch", str(now + 3600),
+                "--allow-unrecorded-exact", "--precreate-recovery", "--key-only-recovery",
+                "--ownership-nonce", nonce, "--instance-name", "ep-name",
+                "--ssh-key-name", "ep-key", "--ssh-key-fingerprint", "SHA256:abc",
+                "--cloud", "hyperstack", "--region", "montreal-canada-2",
+                "--instance-type", "A100_80G", "--hourly-usd", "1.35",
+                "--gpu", "A100_80G", "--gpu-count", "1", "--vram-gb", "80",
+                "--os-image", "ubuntu22.04_cuda12.2_shade_os",
+            ])
+        self.assertEqual(result, 0)
+        self.assertEqual(events[0]["instance_id"], "attempt-" + nonce)
+        self.assertLess(order.index("watchdog-key-recovery-settled"), order.index("key-verify"))
+        self.assertLess(order.index("key-verify"), order.index("key-delete"))
+
+    def test_j1m_definitive_failure_settles_attempt_before_key_cleanup(self):
+        source = (ROOT / "scripts" / "j1m_orchestrator.py").read_text(encoding="utf-8")
+        definitive = source[source.index("elif key_id is not None and not ambiguous_create:"):source.index("# Keep the watchdog alive", source.index("elif key_id is not None and not ambiguous_create:"))]
+        self.assertLess(definitive.index("sf.append_cost_event"), definitive.index("sf.verify_ssh_key_ownership"))
+        self.assertIn("attempt reservation settlement was not confirmed", definitive)
 
     def test_execute_captures_teardown_failure_before_final_persistence(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_teardown_behavior")
@@ -812,6 +1322,123 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertTrue(persisted)
         self.assertEqual(progress[-1], "failed")
         self.assertIsNotNone(teardown_mock.call_args.kwargs.get("deadline"))
+
+    def test_no_ledger_fallback_verifies_then_settles_exact_instance_before_key_delete(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_unrecorded_settlement")
+        from scripts import shadeform_lifecycle as sf
+        candidate = sf.Candidate("A100_80G", "hyperstack", "montreal-canada-2", "A100_80G", 1.35, 80, "ubuntu22.04_cuda12.2_shade_os", False)
+        events = []
+        order = []
+        progress = []
+
+        class Watchdog:
+            pid = 42
+            def poll(self): return None
+            def terminate(self): order.append("watchdog-stop")
+            def wait(self, timeout): return 0
+
+        provider_info = {
+            "id": "instance-123456", "name": "ep-test-placeholder",
+            "tags": ["local-bmo-j1m", "ep-phase-unrecorded-fallback", "ep-run-placeholder"],
+            "ssh_key_id": "key-123456", "cloud": "hyperstack", "region": "montreal-canada-2",
+            "shade_instance_type": "A100_80G", "hourly_price": 135,
+            "configuration": {"gpu_type": "A100_80G", "num_gpus": 1, "vram_per_gpu_in_gb": 80, "os": "ubuntu22.04_cuda12.2_shade_os"},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            identity = Path(directory) / "id_ed25519"
+            identity.write_text("private", encoding="utf-8")
+            with contextlib.ExitStack() as stack:
+                patches = [
+                    mock.patch.object(orchestrator.sf, "load_env", return_value={"SHADEFORM_API_KEY": "api"}),
+                    mock.patch.object(orchestrator.sf, "require_env", return_value="api"),
+                    mock.patch.object(orchestrator.sf, "list_candidates", return_value=[candidate]),
+                    mock.patch.object(orchestrator.sf, "create_ephemeral_ssh_key", return_value=(identity, "ssh-ed25519 AAAA")),
+                    mock.patch.object(orchestrator.sf, "reserve_create_attempt", return_value="attempt-x"),
+                    mock.patch.object(orchestrator.sf, "add_ssh_key", return_value="key-123456"),
+                    mock.patch.object(orchestrator.sf, "verify_ssh_key_ownership", return_value={}),
+                    mock.patch.object(orchestrator.sf, "append_instance_create_intent"),
+                    mock.patch.object(orchestrator.sf, "create_instance", return_value="instance-123456"),
+                    mock.patch.object(orchestrator.sf, "process_start_marker", return_value=None),
+                    mock.patch.object(orchestrator.sf, "write_owned_resource", side_effect=OSError("owned record crash")),
+                    mock.patch.object(orchestrator.sf, "append_cost_event", side_effect=lambda event: events.append(event)),
+                    mock.patch.object(orchestrator.sf, "instance_info", side_effect=lambda *args, **kwargs: order.append("instance-info") or provider_info),
+                    mock.patch.object(orchestrator.sf, "verify_instance_ownership", side_effect=lambda *args, **kwargs: order.append("instance-verify")),
+                    mock.patch.object(orchestrator.sf, "_delete_instance", side_effect=lambda *args, **kwargs: order.append("instance-delete") or {"success": True}),
+                    mock.patch.object(orchestrator.sf, "delete_ssh_key", side_effect=lambda *args, **kwargs: order.append("key-delete") or {"success": True}),
+                    mock.patch.object(orchestrator, "_persist_lifecycle"),
+                    mock.patch.object(orchestrator, "_progress", side_effect=lambda path, event, **details: progress.append(event)),
+                    mock.patch.object(orchestrator.j1m_runner, "write_progress"),
+                    mock.patch.object(orchestrator.subprocess, "Popen", return_value=Watchdog()),
+                    mock.patch.object(orchestrator, "_salvage", return_value=[]),
+                ]
+                for patcher in patches:
+                    stack.enter_context(patcher)
+                with self.assertRaises(OSError):
+                    orchestrator.execute(
+                        Path(directory) / "env", config_path=ROOT / "model/conversion/j1m-config.json",
+                        phase_id="unrecorded-fallback", run_id="test", artifact_destination=Path(directory) / "artifacts", mode="prove",
+                    )
+        self.assertEqual([event["instance_id"] for event in events], ["instance-123456", "instance-123456", "instance-123456", "attempt-x"])
+        self.assertLess(order.index("instance-info"), order.index("instance-delete"))
+        self.assertLess(order.index("instance-delete"), order.index("key-delete"))
+
+    def test_no_ledger_fallback_attempt_failure_retains_key(self):
+        orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_unrecorded_attempt_failure")
+        from scripts import shadeform_lifecycle as sf
+        candidate = sf.Candidate("A100_80G", "hyperstack", "montreal-canada-2", "A100_80G", 1.35, 80, "ubuntu22.04_cuda12.2_shade_os", False)
+        events = []
+        provider_info = {
+            "id": "instance-654321", "name": "ep-test-placeholder",
+            "tags": ["local-bmo-j1m", "ep-phase-unrecorded-attempt", "ep-run-placeholder"],
+            "ssh_key_id": "key-654321", "cloud": "hyperstack", "region": "montreal-canada-2",
+            "shade_instance_type": "A100_80G", "hourly_price": 135,
+            "configuration": {"gpu_type": "A100_80G", "num_gpus": 1, "vram_per_gpu_in_gb": 80, "os": "ubuntu22.04_cuda12.2_shade_os"},
+        }
+        class Watchdog:
+            pid = 42
+            def poll(self): return None
+            def terminate(self): pass
+            def wait(self, timeout): return 0
+        def append_cost(event):
+            events.append(event)
+            if event["instance_id"] == "attempt-x":
+                raise OSError("attempt settlement unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            identity = Path(directory) / "id_ed25519"
+            identity.write_text("private", encoding="utf-8")
+            with contextlib.ExitStack() as stack:
+                key_delete = stack.enter_context(mock.patch.object(orchestrator.sf, "delete_ssh_key"))
+                for patcher in [
+                    mock.patch.object(orchestrator.sf, "load_env", return_value={"SHADEFORM_API_KEY": "api"}),
+                    mock.patch.object(orchestrator.sf, "require_env", return_value="api"),
+                    mock.patch.object(orchestrator.sf, "list_candidates", return_value=[candidate]),
+                    mock.patch.object(orchestrator.sf, "create_ephemeral_ssh_key", return_value=(identity, "ssh-ed25519 AAAA")),
+                    mock.patch.object(orchestrator.sf, "reserve_create_attempt", return_value="attempt-x"),
+                    mock.patch.object(orchestrator.sf, "add_ssh_key", return_value="key-654321"),
+                    mock.patch.object(orchestrator.sf, "verify_ssh_key_ownership", return_value={}),
+                    mock.patch.object(orchestrator.sf, "append_instance_create_intent"),
+                    mock.patch.object(orchestrator.sf, "create_instance", return_value="instance-654321"),
+                    mock.patch.object(orchestrator.sf, "process_start_marker", return_value=None),
+                    mock.patch.object(orchestrator.sf, "write_owned_resource", side_effect=OSError("owned record crash")),
+                    mock.patch.object(orchestrator.sf, "append_cost_event", side_effect=append_cost),
+                    mock.patch.object(orchestrator.sf, "instance_info", return_value=provider_info),
+                    mock.patch.object(orchestrator.sf, "verify_instance_ownership"),
+                    mock.patch.object(orchestrator.sf, "_delete_instance", return_value={"success": True}),
+                    mock.patch.object(orchestrator.sf, "append_incident"),
+                    mock.patch.object(orchestrator, "_persist_lifecycle"),
+                    mock.patch.object(orchestrator, "_progress"),
+                    mock.patch.object(orchestrator.j1m_runner, "write_progress"),
+                    mock.patch.object(orchestrator.subprocess, "Popen", return_value=Watchdog()),
+                    mock.patch.object(orchestrator, "_salvage", return_value=[]),
+                ]:
+                    stack.enter_context(patcher)
+                with self.assertRaises(OSError):
+                    orchestrator.execute(
+                        Path(directory) / "env", config_path=ROOT / "model/conversion/j1m-config.json",
+                        phase_id="unrecorded-attempt", run_id="test", artifact_destination=Path(directory) / "artifacts", mode="prove",
+                    )
+            key_delete.assert_not_called()
+            self.assertEqual(events[-1]["instance_id"], "attempt-x")
 
     def test_execute_reservation_failure_restores_signal_and_terminalizes(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_reservation_behavior")
@@ -929,10 +1556,14 @@ class StaticSafetyTests(unittest.TestCase):
             with mock.patch.object(orchestrator.sf, "_preflight"), mock.patch.object(orchestrator.sf, "scp_base", return_value=["scp"]), mock.patch.object(orchestrator, "_remote", side_effect=lambda command, timeout: {"status": "completed", "timeout": timeout}) as remote:
                 result = orchestrator._salvage(info, identity, known_hosts, destination, ["Qwen3.5-9B-Q4_K_M.gguf"], q4_expected_gib=6, deadline=time.monotonic() + 1000)
             self.assertEqual(result[0]["status"], "completed")
-            self.assertGreaterEqual(remote.call_args.kwargs["timeout"], 360)
+            # The 6 GiB size-aware floor is clipped by the 660 second cleanup
+            # reserve when only 1,000 seconds remain (about 340 seconds).
+            self.assertGreaterEqual(remote.call_args.kwargs["timeout"], 300)
             with mock.patch.object(orchestrator.sf, "_preflight"), mock.patch.object(orchestrator.sf, "scp_base", return_value=["scp"]), mock.patch.object(orchestrator, "_remote", side_effect=lambda command, timeout: {"status": "completed", "timeout": timeout}) as remote:
                 orchestrator._salvage(info, identity, known_hosts, destination, ["Qwen3.5-9B-Q4_K_M.gguf"], q4_expected_gib=6, deadline=time.monotonic() + 500)
-            self.assertLessEqual(remote.call_args.kwargs["timeout"], 80)
+            # Only 500 seconds remain, below the 660 second cleanup reserve;
+            # no transfer may start once deletion cannot be protected.
+            remote.assert_not_called()
 
     def test_salvage_stops_without_scp_when_only_deletion_reserve_remains(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_salvage_reserve")
@@ -1824,7 +2455,7 @@ class LoopbackLifecycleTests(unittest.TestCase):
                 phase_id=phase, run_id="j1m-test", instance_id="instance-loopback-1",
                 ownership_nonce="0123456789abcdef0123456789abcdef", ssh_key_id="key-loopback-1",
                 ssh_key_name="j1m-test-key", gpu="A100_80G", cloud="hyperstack", region="Montreal",
-                hourly_usd=1.35, created_at_utc=sf.utc_now().isoformat(), instance_type="a100", gpu_count=1, vram_gb=80, os_image="ubuntu", ssh_public_key="ssh-ed25519 AAAA", launcher_pid=launcher.pid,
+                hourly_usd=1.35, created_at_utc=sf.utc_now().isoformat(), provider_delete_deadline_utc=(sf.utc_now() + sf.timedelta(hours=2)).isoformat(), instance_type="a100", gpu_count=1, vram_gb=80, os_image="ubuntu", ssh_public_key="ssh-ed25519 AAAA", launcher_pid=launcher.pid,
             ))
             launcher.kill()
             launcher.wait(timeout=5)

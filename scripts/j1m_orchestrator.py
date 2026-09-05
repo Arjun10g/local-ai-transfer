@@ -27,7 +27,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts import j1m_runner, shadeform_lifecycle as sf
-from scripts.shadeform_teardown import teardown_exact
+from scripts.shadeform_teardown import teardown_exact, teardown_recovered_exact
 
 ROOT = Path(__file__).resolve().parents[1]
 _STDERR_TAIL_LIMIT = 1200
@@ -111,10 +111,10 @@ def _persist_lifecycle(phase_id: str, lifecycle: dict[str, Any]) -> None:
     """Durably retain bounded local failure/progress evidence before teardown."""
 
     path = sf.runtime_ledger_path(phase_id).with_name(f"{phase_id}.lifecycle-receipt.json")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(json.dumps({"schema": "local_bmo.j1m.lifecycle-receipt.v1", **lifecycle}, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    payload = (json.dumps({"schema": "local_bmo.j1m.lifecycle-receipt.v1", **lifecycle}, sort_keys=True) + "\n").encode("utf-8")
+    if len(payload) > MAX_RECEIPT_BYTES:
+        raise ValueError("lifecycle receipt exceeds bound")
+    sf._durable_atomic_write(path, payload)
 
 
 def _progress(path: Path, event: str, **details: Any) -> None:
@@ -885,7 +885,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
     # Validate the effective provider backstop before even reading the live
     # candidate catalogue. A too-short ceiling must not reach key generation,
     # key upload, or instance creation.
-    sf._auto_delete(env, runtime)
+    auto_delete = sf._auto_delete(env, runtime)
     # Candidate selection is policy- and budget-bound; identity is checked
     # again before create so a catalogue reorder cannot change the target.
     candidates = sf.list_candidates(api_key, env, phase_id=phase_id, min_vram_gb=80, max_runtime_hours=runtime)
@@ -905,6 +905,8 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
         key_ambiguity_unresolved = False
         attempt_reserved = False
         settle_attempt_after_cleanup = False
+        attempt_settled_during_cleanup = False
+        attempt_cleanup_receipt_ok = True
         recorded = False
         record: sf.OwnedResource | None = None
         known_hosts = temp_root / "known_hosts"
@@ -984,6 +986,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 "--phase-id", phase_id, "--launcher-pid", str(launcher_pid),
                 "--max-seconds", str(watchdog_seconds),
                 "--deadline-epoch", str(time.time() + execution_deadline - time.monotonic()),
+                "--provider-delete-deadline-epoch", str(datetime.fromisoformat(str(auto_delete["date_threshold"])).timestamp()),
                 "--env-file", str(env_file), "--ownership-nonce", nonce,
                 "--ssh-key-name", f"j1m-{nonce}", "--ssh-key-fingerprint", key_fingerprint,
                 "--allow-unrecorded-exact", "--key-only-recovery",
@@ -1049,10 +1052,11 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 phase_id, nonce, instance_name=expected_instance_name, ssh_key_id=key_id,
                 hourly_usd=candidate.hourly_usd,
                 backstop_hours=float(config["modes"][mode]["provider_backstop_hours"]),
+                provider_delete_deadline_utc=str(auto_delete["date_threshold"]),
                 started_at_utc=create_intent_started,
             )
             try:
-                instance_id = sf.create_instance(api_key, env, phase_id=phase_id, run_id=run_id, candidate=candidate, ssh_key_id=key_id, nonce=nonce, max_runtime_hours=runtime)
+                instance_id = sf.create_instance(api_key, env, phase_id=phase_id, run_id=run_id, candidate=candidate, ssh_key_id=key_id, nonce=nonce, max_runtime_hours=runtime, auto_delete_contract=auto_delete)
             except Exception as exc:
                 incident = {
                     "phase_id": phase_id,
@@ -1078,12 +1082,16 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 raise
             lifecycle["instance_id"] = instance_id
             activation_seconds = int(config["modes"][mode].get("activation_timeout_seconds", 1800))
-            record = sf.OwnedResource(phase_id=phase_id, run_id=run_id, instance_id=instance_id, ownership_nonce=nonce, ssh_key_id=key_id, ssh_key_name=f"j1m-{nonce}", gpu=candidate.gpu, cloud=candidate.cloud, region=candidate.region, hourly_usd=candidate.hourly_usd, created_at_utc=sf.utc_now().isoformat(), active_deadline_utc=(sf.utc_now() + sf.timedelta(seconds=activation_seconds)).isoformat(), run_deadline_utc=(sf.utc_now() + sf.timedelta(hours=runtime)).isoformat(), instance_type=candidate.instance_type, gpu_count=1, vram_gb=candidate.vram_gb, os_image=candidate.os_image, ssh_public_key=public_key, launcher_pid=launcher_pid, launcher_start_marker=launcher_start_marker, ssh_public_key_fingerprint=key_fingerprint)
+            record = sf.OwnedResource(phase_id=phase_id, run_id=run_id, instance_id=instance_id, instance_name=expected_instance_name, ownership_nonce=nonce, ssh_key_id=key_id, ssh_key_name=f"j1m-{nonce}", gpu=candidate.gpu, cloud=candidate.cloud, region=candidate.region, hourly_usd=candidate.hourly_usd, created_at_utc=create_intent_started, provider_delete_deadline_utc=str(auto_delete["date_threshold"]), active_deadline_utc=(sf.utc_now() + sf.timedelta(seconds=activation_seconds)).isoformat(), run_deadline_utc=(sf.utc_now() + sf.timedelta(hours=runtime)).isoformat(), instance_type=candidate.instance_type, gpu_count=1, vram_gb=candidate.vram_gb, os_image=candidate.os_image, ssh_public_key=public_key, launcher_pid=launcher_pid, launcher_start_marker=launcher_start_marker, ssh_public_key_fingerprint=key_fingerprint)
+            # Bind the exact instance cost before the owned record. The
+            # pre-armed watchdog plus durable create intent covers a crash in
+            # either write, while the no-ledger fallback can reconcile the
+            # exact ID and settle before key cleanup.
+            sf.append_cost_event({"instance_id": instance_id, "phase_id": phase_id, "ownership_nonce": nonce, "create_started_at_utc": create_intent_started, "status": "pending", "estimated_cost_usd": round(candidate.hourly_usd * float(config["modes"][mode]["provider_backstop_hours"]), 6)})
             # Ownership record is written before any poll/upload. If this
             # fails, the fallback below still deletes the exact returned ID.
             sf.write_owned_resource(record)
             recorded = True
-            sf.append_cost_event({"instance_id": instance_id, "phase_id": phase_id, "ownership_nonce": nonce, "create_started_at_utc": create_intent_started, "status": "pending", "estimated_cost_usd": round(candidate.hourly_usd * float(config["modes"][mode]["provider_backstop_hours"]), 6)})
             # The instance reservation is now superseded by its exact
             # ownership/billing row. Keep the pre-create reservation history
             # but settle it to zero only after both durable writes and the
@@ -1298,52 +1306,64 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                         except Exception:
                             pass
                 else:
-                    # Ledger write failed: exact ID is still known, so delete
-                    # it before attempting any key/bookkeeping cleanup.
+                    fallback_deadline = execution_deadline if "execution_deadline" in locals() else None
                     try:
-                        lifecycle["deletion"] = sf._delete_instance(
-                            api_key, phase_id, instance_id,
-                            deadline=execution_deadline
-                            if "execution_deadline" in locals() else None,
+                        if record is None:
+                            raise RuntimeError("unrecorded instance lacks its full owner record")
+                        lifecycle["deletion"] = teardown_recovered_exact(
+                            record, env_file=env_file, deadline=fallback_deadline,
                         )
+                        if not deletion_confirmed():
+                            raise RuntimeError("recovered teardown did not confirm exact deletion")
                     except Exception as exc:
-                        lifecycle["deletion"] = {"success": False, "error_type": type(exc).__name__}
-                        try:
-                            sf.append_incident({"phase_id": phase_id, "incident": "post-instance-delete-failed", "instance_id": instance_id, "ssh_key_id": key_id, "nonce": nonce, "error_type": type(exc).__name__})
-                        except Exception:
-                            pass
-                    finally:
-                        if key_id is not None:
-                            try:
-                                sf.verify_ssh_key_ownership(api_key, phase_id, key_id, expected_name=f"j1m-{nonce}", expected_public_key=public_key)
-                                lifecycle["key_cleanup"] = sf.delete_ssh_key(api_key, phase_id, key_id)
-                            except Exception as exc:
-                                lifecycle["key_cleanup"] = {"status": "failed", "error_type": type(exc).__name__}
-                                try:
-                                    sf.append_incident({"phase_id": phase_id, "incident": "post-instance-key-delete-failed", "instance_id": instance_id, "ssh_key_id": key_id, "nonce": nonce, "error_type": type(exc).__name__})
-                                except Exception:
-                                    pass
-                    if not deletion_confirmed():
-                        cleanup_failure = RuntimeError("exact instance deletion was not confirmed")
+                        lifecycle["deletion"] = {
+                            "status": "delete-failed", "retry_required": True,
+                            "error_type": type(exc).__name__,
+                        }
+                        cleanup_failure = RuntimeError("exact recovered teardown was not confirmed")
                         lifecycle["status"] = "failed"
             elif key_id is not None and not ambiguous_create:
                 # Key creation succeeded but instance creation did not.
-                try:
-                    sf.verify_ssh_key_ownership(api_key, phase_id, key_id, expected_name=f"j1m-{nonce}", expected_public_key=public_key)
-                    lifecycle["key_cleanup"] = sf.delete_ssh_key(api_key, phase_id, key_id)
-                except Exception as exc:
-                    lifecycle["key_cleanup"] = {"status": "failed", "error_type": type(exc).__name__}
+                if attempt_reserved and settle_attempt_after_cleanup:
                     try:
-                        sf.append_incident({"phase_id": phase_id, "incident": "create-key-delete-failed", "ssh_key_id": key_id, "nonce": nonce, "error_type": type(exc).__name__})
-                    except Exception:
-                        pass
+                        sf.append_cost_event({"instance_id": attempt_id, "phase_id": phase_id, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
+                        attempt_settled_during_cleanup = True
+                        try:
+                            sf.append_incident({
+                                "phase_id": phase_id,
+                                "incident": "attempt-reservation-reconciled",
+                                "nonce": nonce,
+                                "retry_required": False,
+                            })
+                        except Exception as receipt_exc:
+                            attempt_cleanup_receipt_ok = False
+                            cleanup_failure = RuntimeError("attempt settlement receipt was not confirmed")
+                            lifecycle["attempt_reservation_receipt_error_type"] = type(receipt_exc).__name__
+                    except Exception as exc:
+                        lifecycle["attempt_reservation_error_type"] = type(exc).__name__
+                        lifecycle["attempt_reservation_retry_required"] = True
+                        cleanup_failure = RuntimeError("attempt reservation settlement was not confirmed")
+                        try:
+                            sf.append_incident({"phase_id": phase_id, "incident": "attempt-reservation-settlement-failed", "nonce": nonce, "error_type": type(exc).__name__})
+                        except Exception:
+                            pass
+                if not settle_attempt_after_cleanup or (attempt_settled_during_cleanup and attempt_cleanup_receipt_ok):
+                    try:
+                        sf.verify_ssh_key_ownership(api_key, phase_id, key_id, expected_name=f"j1m-{nonce}", expected_public_key=public_key)
+                        lifecycle["key_cleanup"] = sf.delete_ssh_key(api_key, phase_id, key_id)
+                    except Exception as exc:
+                        lifecycle["key_cleanup"] = {"status": "failed", "error_type": type(exc).__name__}
+                        try:
+                            sf.append_incident({"phase_id": phase_id, "incident": "create-key-delete-failed", "ssh_key_id": key_id, "nonce": nonce, "error_type": type(exc).__name__})
+                        except Exception:
+                            pass
             # Keep the watchdog alive through salvage and exact instance
             # deletion. It is stopped only after the provider explicitly
             # confirms deletion; an unconfirmed/raised cleanup leaves it
             # running for its own exact retry path.
             if deletion_confirmed():
                 stop_watchdog()
-            if attempt_reserved and settle_attempt_after_cleanup:
+            if attempt_reserved and settle_attempt_after_cleanup and not attempt_settled_during_cleanup:
                 try:
                     sf.append_cost_event({"instance_id": attempt_id, "phase_id": phase_id, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
                 except Exception as exc:

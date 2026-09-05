@@ -153,6 +153,14 @@ class OwnedResource:
     ssh_public_key: str | None = None
     launcher_start_marker: str | None = None
     ssh_public_key_fingerprint: str | None = None
+    # Recovery-only records may not retain the original run ID.  Preserve the
+    # exact provider name independently so a watchdog can still perform the
+    # same full-profile proof as the launcher.
+    instance_name: str | None = None
+    # Exact provider-side auto-delete threshold committed before creation.
+    # A late 404 is conservatively billed through this timestamp, never the
+    # retry wall clock and never only the DELETE polling window.
+    provider_delete_deadline_utc: str | None = None
 
 
 def utc_now() -> datetime:
@@ -241,7 +249,7 @@ def phase_cleanup_lock(phase_id: str):
     """Serialize launcher/watchdog teardown for one phase without account scope."""
 
     path = RUNTIME_ROOT / f"{validate_phase_id(phase_id)}.cleanup.lock"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_durable_directory(path.parent)
     with path.open("a+b") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
@@ -252,14 +260,17 @@ def phase_cleanup_lock(phase_id: str):
 
 def read_owned_resource(phase_id: str) -> OwnedResource | None:
     path = runtime_ledger_path(phase_id)
-    if not path.exists():
-        return None
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            raise ValueError("ledger payload is not an object")
+        payload = strict_json_object(
+            bounded_stable_bytes(path, 65_536, label="phase ownership ledger"),
+            label="phase ownership ledger",
+        )
+        if set(payload) != set(OwnedResource.__dataclass_fields__):
+            raise ValueError("phase ownership ledger has unknown or missing fields")
         record = OwnedResource(**payload)
         _validate_owned_resource(record)
+    except FileNotFoundError:
+        return None
     except (OSError, json.JSONDecodeError, TypeError, ValueError, OverflowError) as exc:
         raise ShadeformError(f"malformed phase ledger: {path}") from exc
     if record.phase_id != validate_phase_id(phase_id):
@@ -304,12 +315,14 @@ def _validate_owned_resource(record: OwnedResource) -> None:
         raise ValueError("ledger launcher_pid is invalid")
     for value, field in ((record.provider_status, "provider status"),
                          (record.instance_type, "instance type"),
-                         (record.launcher_start_marker, "launcher start marker")):
+                         (record.launcher_start_marker, "launcher start marker"),
+                         (record.instance_name, "instance name")):
         if value is not None and (not isinstance(value, str) or len(value) > 256 or
                                    any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)):
             raise ValueError(f"ledger {field} is invalid")
     for value, field in ((record.active_deadline_utc, "active deadline"),
-                         (record.run_deadline_utc, "run deadline")):
+                         (record.run_deadline_utc, "run deadline"),
+                         (record.provider_delete_deadline_utc, "provider delete deadline")):
         if value is not None:
             if not isinstance(value, str) or len(value) > 64:
                 raise ValueError(f"ledger {field} is invalid")
@@ -341,21 +354,189 @@ def _validate_owned_resource(record: OwnedResource) -> None:
             raise ValueError("ledger SSH public-key fingerprint does not match key material")
 
 
+def _fsync_directory(path: Path) -> None:
+    """Durably flush a directory entry after replace/unlink operations."""
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        # Windows does not expose a portable directory-fsync primitive. The
+        # caller still has file fsync and atomic replace semantics; production
+        # Windows acceptance must provide an equivalent platform barrier.
+        if os.name == "nt":
+            return
+        raise
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _ensure_durable_directory(path: Path) -> None:
+    """Create a directory hierarchy and fsync every newly linked entry."""
+
+    missing: list[Path] = []
+    cursor = path
+    while not cursor.exists():
+        missing.append(cursor)
+        if cursor == cursor.parent:
+            break
+        cursor = cursor.parent
+    if not cursor.is_dir() or cursor.is_symlink():
+        raise OSError("durable directory ancestor is not a real directory")
+    for directory in reversed(missing):
+        try:
+            directory.mkdir()
+        except FileExistsError:
+            pass
+        if not directory.is_dir() or directory.is_symlink():
+            raise OSError("durable directory path changed during creation")
+        # Flush the directory itself and, critically, the parent entry that
+        # names a newly-created directory.  Fsyncing only the new directory is
+        # insufficient after power loss on POSIX filesystems.
+        _fsync_directory(directory)
+        _fsync_directory(directory.parent)
+
+
+def bounded_stable_bytes(path: Path, limit: int, *, label: str) -> bytes:
+    """Read one bounded regular-file descriptor and reject path replacement."""
+
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        raise ValueError("bounded read limit must be positive")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise ShadeformError(f"{label} is unavailable") from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > limit:
+            raise ShadeformError(f"{label} is not bounded regular data")
+        chunks: list[bytes] = []
+        total = 0
+        while total <= limit:
+            chunk = os.read(descriptor, min(65_536, limit + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > limit:
+                raise ShadeformError(f"{label} exceeds its byte bound")
+        after = os.fstat(descriptor)
+        current = os.stat(path, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or after.st_nlink != 1
+            or current.st_nlink != 1
+            or (before.st_dev, before.st_ino, before.st_size)
+            != (after.st_dev, after.st_ino, after.st_size)
+            or (after.st_dev, after.st_ino, after.st_size)
+            != (current.st_dev, current.st_ino, current.st_size)
+            or total != after.st_size
+        ):
+            raise ShadeformError(f"{label} changed during bounded read")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def strict_json_object(data: bytes, *, label: str) -> dict[str, Any]:
+    """Decode strict UTF-8 JSON while rejecting duplicate/non-finite values."""
+
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ShadeformError(f"{label} contains duplicate keys")
+            result[key] = value
+        return result
+
+    def finite_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ShadeformError(f"{label} contains a non-finite number")
+        return parsed
+
+    try:
+        payload = json.loads(
+            data.decode("utf-8"),
+            object_pairs_hook=reject_duplicates,
+            parse_float=finite_float,
+            parse_constant=lambda _value: (_ for _ in ()).throw(
+                ShadeformError(f"{label} contains a non-finite number")
+            ),
+        )
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ShadeformError(f"{label} is not strict UTF-8 JSON") from exc
+    if not isinstance(payload, dict):
+        raise ShadeformError(f"{label} is not an object")
+    return payload
+
+
+def _durable_atomic_write(path: Path, payload: bytes) -> None:
+    """Write bounded bytes with file and parent-directory durability."""
+
+    if not isinstance(payload, bytes):
+        raise TypeError("durable atomic payload must be bytes")
+    _ensure_durable_directory(path.parent)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, path)
+        _fsync_directory(path.parent)
+        if bounded_stable_bytes(path, max(1, len(payload)), label="durable atomic output") != payload:
+            raise OSError("durable atomic output verification mismatch")
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            durable_unlink(Path(temporary_name))
+
+
+def durable_create_new(path: Path, payload: bytes) -> None:
+    """Create one new regular file and durably publish its directory entry."""
+
+    if not isinstance(payload, bytes):
+        raise TypeError("durable create payload must be bytes")
+    _ensure_durable_directory(path.parent)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _fsync_directory(path.parent)
+        if bounded_stable_bytes(path, max(1, len(payload)), label="durable create output") != payload:
+            raise OSError("durable create output verification mismatch")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def durable_unlink(path: Path) -> None:
+    """Remove one file and durably flush the containing directory entry."""
+
+    path.unlink()
+    _fsync_directory(path.parent)
+
+
 def write_owned_resource(record: OwnedResource) -> None:
     _validate_owned_resource(record)
     path = runtime_ledger_path(record.phase_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(asdict(record), handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_name, path)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(temp_name)
+    payload = (json.dumps(asdict(record), indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if len(payload) > 65_536:
+        raise ShadeformError("phase ownership ledger exceeds its byte bound")
+    _durable_atomic_write(path, payload)
     update_markdown_ledger(record)
 
 
@@ -365,7 +546,76 @@ def clear_owned_resource(phase_id: str, instance_id: str) -> None:
         return
     if current.instance_id != validate_resource_id(instance_id):
         raise ShadeformError("refusing to clear a ledger for a different instance")
-    runtime_ledger_path(phase_id).unlink()
+    path = runtime_ledger_path(phase_id)
+    durable_unlink(path)
+
+
+RECOVERY_OWNED_SCHEMA = "local_bmo.shadeform.recovery-owned-resource.v1"
+INSTANCE_CREATE_INTENT_SCHEMA = "local_bmo.shadeform.instance-create-intent.v1"
+
+
+def recovery_owned_resource_path(phase_id: str) -> Path:
+    return RUNTIME_ROOT / f"{validate_phase_id(phase_id)}.recovery-owned.json"
+
+
+def write_recovery_owned_resource(record: OwnedResource) -> None:
+    """Durably retain an exact resource when the normal ledger cannot publish."""
+
+    _validate_owned_resource(record)
+    path = recovery_owned_resource_path(record.phase_id)
+    payload = {
+        "schema": RECOVERY_OWNED_SCHEMA,
+        "record": asdict(record),
+    }
+    data = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    if len(data) > 65_536:
+        raise ShadeformError("recovery ownership record exceeds its byte bound")
+    existing = read_recovery_owned_resource(record.phase_id)
+    if existing is not None:
+        if asdict(existing) != asdict(record):
+            raise ShadeformError("refusing to replace a different recovery ownership record")
+        return
+    try:
+        durable_create_new(path, data)
+    except FileExistsError:
+        existing = read_recovery_owned_resource(record.phase_id)
+        if existing is None or asdict(existing) != asdict(record):
+            raise ShadeformError("a different recovery ownership record raced publication")
+
+
+def read_recovery_owned_resource(phase_id: str) -> OwnedResource | None:
+    path = recovery_owned_resource_path(phase_id)
+    try:
+        data = bounded_stable_bytes(path, 65_536, label="recovery ownership record")
+    except FileNotFoundError:
+        return None
+    payload = strict_json_object(
+        data,
+        label="recovery ownership record",
+    )
+    if set(payload) != {"schema", "record"} or payload.get("schema") != RECOVERY_OWNED_SCHEMA:
+        raise ShadeformError("recovery ownership record has an unexpected schema")
+    raw_record = payload.get("record")
+    if not isinstance(raw_record, dict) or set(raw_record) != set(OwnedResource.__dataclass_fields__):
+        raise ShadeformError("recovery ownership record has unknown or missing fields")
+    try:
+        record = OwnedResource(**raw_record)
+        _validate_owned_resource(record)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ShadeformError("recovery ownership record is malformed") from exc
+    if record.phase_id != validate_phase_id(phase_id):
+        raise ShadeformError("recovery ownership record is bound to another phase")
+    return record
+
+
+def clear_recovery_owned_resource(phase_id: str, instance_id: str) -> None:
+    current = read_recovery_owned_resource(phase_id)
+    if current is None:
+        return
+    if current.instance_id != validate_resource_id(instance_id):
+        raise ShadeformError("refusing to clear a different recovery ownership record")
+    path = recovery_owned_resource_path(phase_id)
+    durable_unlink(path)
 
 
 def _ledger_row(record: OwnedResource) -> str:
@@ -492,7 +742,7 @@ def append_cost_event(event: dict[str, Any]) -> None:
             raise ValueError("pending cost event requires a finite nonnegative estimate only")
     elif "estimated_cost_usd" in event or not _valid_cost(event.get("actual_cost_usd")):
         raise ValueError("settled cost event requires a finite nonnegative actual only")
-    COST_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_durable_directory(COST_LEDGER.parent)
     lock_path = COST_LEDGER.with_suffix(".lock")
     with lock_path.open("a+b") as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
@@ -500,6 +750,7 @@ def append_cost_event(event: dict[str, Any]) -> None:
             handle.write(json.dumps({**event, "recorded_at_utc": utc_now().isoformat()}, sort_keys=True) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+        _fsync_directory(COST_LEDGER.parent)
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
 
@@ -544,6 +795,7 @@ def append_instance_create_intent(
     ssh_key_id: str,
     hourly_usd: float,
     backstop_hours: float,
+    provider_delete_deadline_utc: str,
     started_at_utc: str | None = None,
 ) -> str:
     """Persist the exact instance POST intent immediately before dispatch."""
@@ -560,9 +812,21 @@ def append_instance_create_intent(
         parsed = datetime.fromisoformat(started)
     except (TypeError, ValueError) as exc:
         raise ValueError("instance create intent timestamp is invalid") from exc
-    if parsed.tzinfo is None:
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError("instance create intent timestamp must be timezone-aware")
+    try:
+        provider_deadline = datetime.fromisoformat(provider_delete_deadline_utc)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("instance create intent provider deadline is invalid") from exc
+    if (
+        provider_deadline.tzinfo is None
+        or provider_deadline.utcoffset() is None
+        or not parsed < provider_deadline
+        or (provider_deadline - parsed).total_seconds() > 259_200
+    ):
+        raise ValueError("instance create intent provider deadline is outside its bounded window")
     append_cost_event({
+        "intent_schema": INSTANCE_CREATE_INTENT_SCHEMA,
         "instance_id": f"attempt-{nonce}",
         "phase_id": phase_id,
         "ownership_nonce": nonce,
@@ -575,6 +839,7 @@ def append_instance_create_intent(
         "hourly_usd": float(hourly_usd),
         "backstop_hours": float(backstop_hours),
         "create_started_at_utc": parsed.isoformat(),
+        "provider_delete_deadline_utc": provider_deadline.isoformat(),
     })
     return f"attempt-{nonce}"
 
@@ -584,7 +849,7 @@ def append_incident(event: dict[str, Any]) -> None:
 
     if not isinstance(event, dict) or not event.get("incident") or not event.get("phase_id"):
         raise ValueError("incident requires incident and phase_id")
-    INCIDENTS.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_durable_directory(INCIDENTS.parent)
     lock_path = INCIDENTS.with_suffix(".lock")
     with lock_path.open("a+b") as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
@@ -592,6 +857,7 @@ def append_incident(event: dict[str, Any]) -> None:
             handle.write(json.dumps({**event, "recorded_at_utc": utc_now().isoformat()}, sort_keys=True) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+        _fsync_directory(INCIDENTS.parent)
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
 
@@ -615,7 +881,7 @@ def update_markdown_ledger(record: OwnedResource) -> None:
     refuses to touch it; nothing here can ever rewrite a different resource's row.
     """
 
-    RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
+    _ensure_durable_directory(RUNTIME_ROOT)
     lock_path = RUNTIME_ROOT / "markdown-ledger.lock"
     with lock_path.open("a+b") as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
@@ -658,9 +924,10 @@ def update_markdown_ledger(record: OwnedResource) -> None:
                     handle.flush()
                     os.fsync(handle.fileno())
                 os.replace(temp_name, MARKDOWN_LEDGER)
+                _fsync_directory(MARKDOWN_LEDGER.parent)
             finally:
                 with contextlib.suppress(FileNotFoundError):
-                    os.unlink(temp_name)
+                    durable_unlink(Path(temp_name))
         finally:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
@@ -1092,7 +1359,15 @@ def ssh_public_key_fingerprint(value: object) -> str:
     return base64.b64encode(hashlib.sha256(decoded).digest()).decode("ascii").rstrip("=")
 
 
-def reconcile_ssh_key(api_key: str, phase_id: str, *, expected_name: str, expected_public_key: str | None = None, expected_fingerprint: str | None = None) -> str:
+def reconcile_ssh_key(
+    api_key: str,
+    phase_id: str,
+    *,
+    expected_name: str,
+    expected_public_key: str | None = None,
+    expected_fingerprint: str | None = None,
+    deadline: float | None = None,
+) -> str:
     """Reconcile one ambiguous key create, then return only an exact unique ID.
 
     The list is bounded and used only to identify a key with both the nonce-bound
@@ -1106,7 +1381,10 @@ def reconcile_ssh_key(api_key: str, phase_id: str, *, expected_name: str, expect
         expected_fingerprint = calculated_fingerprint
     if expected_fingerprint is None or re.fullmatch(r"[A-Za-z0-9+/]{43}", expected_fingerprint) is None:
         raise ValueError("SSH key reconciliation requires a bounded fingerprint")
-    response = request(api_key, "GET", "/sshkeys", phase_id=phase_id)
+    timeout = 90.0 if deadline is None else min(90.0, deadline - time.monotonic())
+    if timeout < 1.0:
+        raise TimeoutError("SSH key reconciliation deadline exhausted")
+    response = request(api_key, "GET", "/sshkeys", phase_id=phase_id, timeout=timeout)
     entries = response.get("ssh_keys") if isinstance(response, dict) else None
     if not isinstance(entries, list) or len(entries) > 256:
         raise AmbiguousProviderOutcome("SSH key reconciliation response is unavailable or unbounded")
@@ -1127,7 +1405,13 @@ def reconcile_ssh_key(api_key: str, phase_id: str, *, expected_name: str, expect
     if len(matches) != 1:
         raise AmbiguousProviderOutcome("SSH key reconciliation did not identify exactly one nonce-bound key")
     if expected_public_key is not None:
-        verify_ssh_key_ownership(api_key, phase_id, matches[0], expected_name=expected_name, expected_public_key=expected_public_key)
+        verify_timeout = 90.0 if deadline is None else min(90.0, deadline - time.monotonic())
+        if verify_timeout < 1.0:
+            raise TimeoutError("SSH key reconciliation verification deadline exhausted")
+        verify_ssh_key_ownership(
+            api_key, phase_id, matches[0], expected_name=expected_name,
+            expected_public_key=expected_public_key, timeout=verify_timeout,
+        )
     return matches[0]
 
 
@@ -1261,11 +1545,31 @@ def create_instance(
     ssh_key_id: str,
     nonce: str,
     max_runtime_hours: float,
+    auto_delete_contract: dict[str, str] | None = None,
 ) -> str:
     if read_owned_resource(phase_id) is not None:
         raise ShadeformError("phase already owns a recorded instance; reuse or clean it first")
     validate_nonce(nonce)
     name = owned_instance_name(run_id, nonce)
+    auto_delete = (
+        _auto_delete(env, max_runtime_hours)
+        if auto_delete_contract is None
+        else auto_delete_contract
+    )
+    if not isinstance(auto_delete, dict) or set(auto_delete) != {"date_threshold", "spend_threshold"}:
+        raise ShadeformError("provider auto-delete contract is invalid")
+    try:
+        provider_deadline = datetime.fromisoformat(auto_delete["date_threshold"])
+    except (TypeError, ValueError) as exc:
+        raise ShadeformError("provider auto-delete deadline is invalid") from exc
+    if (
+        provider_deadline.tzinfo is None
+        or provider_deadline.utcoffset() is None
+        or provider_deadline <= utc_now()
+        or not isinstance(auto_delete["spend_threshold"], str)
+        or re.fullmatch(r"[0-9]+(?:\.[0-9]{1,2})?", auto_delete["spend_threshold"]) is None
+    ):
+        raise ShadeformError("provider auto-delete contract is invalid")
     payload = {
         "cloud": candidate.cloud,
         "region": candidate.region,
@@ -1279,7 +1583,7 @@ def create_instance(
             f"ep-phase-{phase_id}",
             f"ep-run-{nonce}",
         ],
-        "auto_delete": _auto_delete(env, max_runtime_hours),
+        "auto_delete": dict(auto_delete),
     }
     try:
         response = request(
@@ -1325,6 +1629,7 @@ def reconcile_instance_by_nonce(
     expected_gpu_count: int | None = None, expected_vram_gb: int | None = None,
     expected_os_image: str | None = None,
     allow_absent: bool = False,
+    deadline: float | None = None,
 ) -> str | None:
     """Find exactly one instance with the phase/name/nonce ownership tuple.
 
@@ -1343,10 +1648,13 @@ def reconcile_instance_by_nonce(
         expected_os_image,
     )):
         raise ValueError("exact instance reconciliation requires the complete approved profile")
+    timeout = 90.0 if deadline is None else min(90.0, deadline - time.monotonic())
+    if timeout < 1.0:
+        raise TimeoutError("instance reconciliation deadline exhausted")
     response = request(
         api_key, "GET", "/instances",
         {"name": expected_name, "tag": f"ep-run-{nonce}"},
-        phase_id=phase_id, timeout=90,
+        phase_id=phase_id, timeout=timeout,
     )
     if not isinstance(response, dict):
         raise AmbiguousProviderOutcome("instance reconciliation response is malformed")
@@ -1373,7 +1681,12 @@ def reconcile_instance_by_nonce(
     # A list response is only a locator.  Before deletion, bind the exact ID
     # through the provider's authoritative info response and the full approved
     # profile; never delete from a name/tag match alone.
-    info = instance_info(api_key, phase_id, matches[0])
+    info = instance_info(
+        api_key,
+        phase_id,
+        matches[0],
+        timeout=90.0 if deadline is None else min(90.0, deadline - time.monotonic()),
+    )
     verify_instance_ownership(
         info, instance_id=matches[0], phase_id=phase_id, nonce=nonce,
         expected_name=expected_name, ssh_key_id=ssh_key_id,
@@ -1481,7 +1794,7 @@ def verify_owned_instance_before_delete(
         instance_id=record.instance_id,
         phase_id=phase_id,
         nonce=record.ownership_nonce,
-        expected_name=owned_instance_name(record.run_id, record.ownership_nonce),
+        expected_name=record.instance_name or owned_instance_name(record.run_id, record.ownership_nonce),
         ssh_key_id=record.ssh_key_id,
         expected_cloud=record.cloud,
         expected_region=record.region,
@@ -1502,19 +1815,28 @@ def verify_owned_ssh_key_before_delete(
     deadline: float | None = None,
 ) -> dict[str, Any]:
     _validate_owned_resource(record)
-    if record.ssh_public_key is None:
-        raise ShadeformError("owned record lacks SSH public-key material for deletion proof")
     timeout = 90.0 if deadline is None else min(90.0, deadline - time.monotonic())
     if timeout < 1.0:
         raise TimeoutError("SSH key ownership verification deadline exhausted")
-    return verify_ssh_key_ownership(
-        api_key,
-        phase_id,
-        record.ssh_key_id,
-        expected_name=record.ssh_key_name,
-        expected_public_key=record.ssh_public_key,
-        timeout=timeout,
-    )
+    if record.ssh_public_key is not None:
+        return verify_ssh_key_ownership(
+            api_key,
+            phase_id,
+            record.ssh_key_id,
+            expected_name=record.ssh_key_name,
+            expected_public_key=record.ssh_public_key,
+            timeout=timeout,
+        )
+    if record.ssh_public_key_fingerprint is not None:
+        return verify_ssh_key_fingerprint(
+            api_key,
+            phase_id,
+            record.ssh_key_id,
+            expected_name=record.ssh_key_name,
+            expected_fingerprint=record.ssh_public_key_fingerprint,
+            timeout=timeout,
+        )
+    raise ShadeformError("owned record lacks SSH key material for deletion proof")
 
 
 def wait_active(

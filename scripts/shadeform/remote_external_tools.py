@@ -189,17 +189,10 @@ def _persist_lifecycle(phase_id: str, lifecycle: dict[str, object]) -> None:
     if len(payload) > MAX_LIFECYCLE_BYTES:
         raise RunnerError("lifecycle receipt exceeds byte bound")
     path = _lifecycle_path(phase_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(temporary)
+        shadeform._durable_atomic_write(path, payload)
+    except (OSError, TypeError, ValueError) as exc:
+        raise RunnerError("lifecycle receipt durability failed") from exc
 
 
 def _bounded_file(path: Path, limit: int) -> bytes:
@@ -739,7 +732,7 @@ def _salvage_receipt(
         parent = destination.parent.resolve()
         if root != parent and root not in parent.parents:
             raise RunnerError("receipt destination escapes the results root")
-        parent.mkdir(parents=True, exist_ok=True)
+        shadeform._ensure_durable_directory(parent)
         if destination.exists() or destination.is_symlink():
             raise RunnerError("receipt destination already exists")
         temporary = parent / f".{destination.name}.{os.getpid()}.incoming"
@@ -762,31 +755,24 @@ def _salvage_receipt(
         return {"status": "verified", "transport": projection, "receipt": verified}
     except BaseException as exc:
         return {"status": "salvage_failed", "code": _safe_failure_code(exc)}
-    finally:
-        with contextlib.suppress(UnboundLocalError, FileNotFoundError):
-            temporary.unlink()
 
 
 def _publish_receipt_no_replace(temporary: Path, destination: Path) -> None:
-    """Publish through a directory FD without replacing an existing target."""
+    """Durably copy a bounded receipt without replacement or hard links."""
 
-    flags = os.O_RDONLY
-    if hasattr(os, "O_DIRECTORY"):
-        flags |= os.O_DIRECTORY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    parent_fd = os.open(destination.parent, flags)
     try:
-        os.link(
-            temporary.name, destination.name,
-            src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
-            follow_symlinks=False,
+        payload = shadeform.bounded_stable_bytes(
+            temporary, MAX_RECEIPT_BYTES, label="temporary external-tools receipt",
         )
+        shadeform.durable_create_new(destination, payload)
+        published = shadeform.bounded_stable_bytes(
+            destination, MAX_RECEIPT_BYTES, label="published external-tools receipt",
+        )
+        if published != payload:
+            raise RunnerError("published receipt bytes changed")
     except FileExistsError as exc:
         raise RunnerError("receipt destination already exists") from exc
-    finally:
-        os.close(parent_fd)
-    temporary.unlink()
+    shadeform.durable_unlink(temporary)
 
 
 def _deletion_confirmed(value: object) -> bool:
@@ -803,8 +789,12 @@ def _deletion_confirmed(value: object) -> bool:
 def _teardown_complete(value: object) -> bool:
     """Require deletion plus cost/key/receipt bookkeeping to be complete."""
 
-    return _deletion_confirmed(value) and isinstance(value, dict) and not any(
-        key.endswith("_error_type") for key in value
+    return (
+        _deletion_confirmed(value)
+        and isinstance(value, dict)
+        and value.get("status") == "complete"
+        and value.get("retry_required") is False
+        and not any(value.get(key) is not None for key in value if key.endswith("_error_type"))
     )
 
 
@@ -838,13 +828,10 @@ def execute(args: argparse.Namespace) -> dict[str, object]:
     info: dict[str, Any] | None = None
     ssh: list[str] | None = None
     scp: list[str] | None = None
-    exact_created_at: float | None = None
     execution_deadline: float | None = None
     execution_deadline_epoch: float | None = None
     primary_failure: BaseException | None = None
     cleanup_failure: BaseException | None = None
-    direct_cost_settled = False
-    direct_key_cleanup_ok = False
     persistence_failure: BaseException | None = None
     remote_root = str(plan["remote_root"])
     receipt_local = _safe_receipt_destination(args.output or (RESULTS_ROOT / f"{args.run_id}.remote-external-tools.json"))
@@ -904,6 +891,7 @@ def execute(args: argparse.Namespace) -> dict[str, object]:
                 sys.executable, str(ROOT / "scripts" / "shadeform_watchdog.py"),
                 "--phase-id", args.phase_id, "--launcher-pid", str(launcher_pid),
                 "--max-seconds", str(watchdog_seconds), "--deadline-epoch", str(execution_deadline_epoch),
+                "--provider-delete-deadline-epoch", str(provider_deadline_epoch),
                 "--env-file", str(args.env_file), "--ownership-nonce", nonce,
                 "--ssh-key-name", key_name, "--ssh-key-fingerprint", key_fingerprint,
                 "--allow-unrecorded-exact", "--key-only-recovery",
@@ -967,11 +955,11 @@ def execute(args: argparse.Namespace) -> dict[str, object]:
                 ssh_key_id=key_id,
                 hourly_usd=candidate.hourly_usd,
                 backstop_hours=provider_backstop_hours,
+                provider_delete_deadline_utc=str(auto_delete["date_threshold"]),
                 started_at_utc=create_intent_started,
             )
             try:
-                instance_id = shadeform.create_instance(api_key, env, phase_id=args.phase_id, run_id=args.run_id, candidate=candidate, ssh_key_id=key_id, nonce=nonce, max_runtime_hours=args.runtime_hours)
-                exact_created_at = time.monotonic()
+                instance_id = shadeform.create_instance(api_key, env, phase_id=args.phase_id, run_id=args.run_id, candidate=candidate, ssh_key_id=key_id, nonce=nonce, max_runtime_hours=args.runtime_hours, auto_delete_contract=auto_delete)
                 lifecycle["instance_id"] = instance_id
                 lifecycle["deadline"] = {
                     "work_seconds": round(_remaining_before_cleanup(execution_deadline), 3),
@@ -989,7 +977,7 @@ def execute(args: argparse.Namespace) -> dict[str, object]:
                 with contextlib.suppress(Exception):
                     shadeform.append_incident({"phase_id": args.phase_id, "incident": "create-response-ambiguous" if ambiguous_create else "create-definitive-failure", "nonce": nonce, "ssh_key_id": key_id, "error_type": _safe_failure_code(exc)})
                 raise
-            record = shadeform.OwnedResource(phase_id=args.phase_id, run_id=args.run_id, instance_id=instance_id, ownership_nonce=nonce, ssh_key_id=key_id, ssh_key_name=key_name, gpu=candidate.gpu, cloud=candidate.cloud, region=candidate.region, hourly_usd=candidate.hourly_usd, created_at_utc=shadeform.utc_now().isoformat(), active_deadline_utc=(shadeform.utc_now() + shadeform.timedelta(seconds=ACTIVATION_TIMEOUT_SECONDS)).isoformat(), run_deadline_utc=(shadeform.utc_now() + shadeform.timedelta(seconds=min(provider_backstop_seconds, args.runtime_hours * 3600.0))).isoformat(), instance_type=candidate.instance_type, gpu_count=1, vram_gb=candidate.vram_gb, os_image=candidate.os_image, ssh_public_key=public_key, launcher_pid=launcher_pid, launcher_start_marker=launcher_marker, ssh_public_key_fingerprint=key_fingerprint)
+            record = shadeform.OwnedResource(phase_id=args.phase_id, run_id=args.run_id, instance_id=instance_id, instance_name=expected_instance_name, ownership_nonce=nonce, ssh_key_id=key_id, ssh_key_name=key_name, gpu=candidate.gpu, cloud=candidate.cloud, region=candidate.region, hourly_usd=candidate.hourly_usd, created_at_utc=create_intent_started, provider_delete_deadline_utc=str(auto_delete["date_threshold"]), active_deadline_utc=(shadeform.utc_now() + shadeform.timedelta(seconds=ACTIVATION_TIMEOUT_SECONDS)).isoformat(), run_deadline_utc=(shadeform.utc_now() + shadeform.timedelta(seconds=min(provider_backstop_seconds, args.runtime_hours * 3600.0))).isoformat(), instance_type=candidate.instance_type, gpu_count=1, vram_gb=candidate.vram_gb, os_image=candidate.os_image, ssh_public_key=public_key, launcher_pid=launcher_pid, launcher_start_marker=launcher_marker, ssh_public_key_fingerprint=key_fingerprint)
             # Arm the watchdog before the owned-resource write.  The durable
             # create reservation plus exact instance ID lets it recover the
             # narrow crash window between provider success and ledger record.
@@ -1069,83 +1057,61 @@ def execute(args: argparse.Namespace) -> dict[str, object]:
                         cleanup_failure = RunnerError("exact instance teardown was not confirmed")
                 else:
                     try:
-                        remaining = execution_deadline - time.monotonic() if execution_deadline is not None else 90.0
-                        if remaining < 1.0:
-                            raise TimeoutError("instance ownership verification deadline exhausted")
-                        info_before_delete = shadeform.instance_info(
-                            api_key, args.phase_id, instance_id,
-                            timeout=min(90.0, remaining),
-                        )
-                        shadeform.verify_instance_ownership(
-                            info_before_delete,
-                            instance_id=instance_id,
+                        recovery_record = shadeform.OwnedResource(
                             phase_id=args.phase_id,
-                            nonce=nonce,
-                            expected_name=shadeform.owned_instance_name(args.run_id, nonce),
+                            run_id=args.run_id,
+                            instance_id=instance_id,
+                            instance_name=expected_instance_name,
+                            ownership_nonce=nonce,
                             ssh_key_id=key_id,
-                            expected_cloud=candidate.cloud,
-                            expected_region=candidate.region,
-                            expected_instance_type=candidate.instance_type,
-                            expected_hourly_usd=candidate.hourly_usd,
-                            expected_gpu=candidate.gpu,
-                            expected_gpu_count=1,
-                            expected_vram_gb=candidate.vram_gb,
-                            expected_os_image=candidate.os_image,
+                            ssh_key_name=key_name,
+                            ssh_public_key=public_key,
+                            ssh_public_key_fingerprint=key_fingerprint,
+                            gpu=candidate.gpu,
+                            cloud=candidate.cloud,
+                            region=candidate.region,
+                            instance_type=candidate.instance_type,
+                            gpu_count=1,
+                            vram_gb=candidate.vram_gb,
+                            os_image=candidate.os_image,
+                            hourly_usd=candidate.hourly_usd,
+                            created_at_utc=create_intent_started,
+                            provider_delete_deadline_utc=str(auto_delete["date_threshold"]),
+                            launcher_pid=launcher_pid,
+                            launcher_start_marker=launcher_marker,
                         )
-                        lifecycle["deletion"] = shadeform._delete_instance(api_key, args.phase_id, instance_id, deadline=execution_deadline)
+                        lifecycle["deletion"] = shadeform_teardown_recovered(
+                            recovery_record, args.env_file, deadline=execution_deadline,
+                        )
+                        if not _teardown_complete(lifecycle["deletion"]):
+                            raise RunnerError("recovered exact teardown bookkeeping was not confirmed")
                     except BaseException as exc:
-                        lifecycle["deletion"] = {"success": False, "code": _safe_failure_code(exc)}
-                    if not _deletion_confirmed(lifecycle["deletion"]):
+                        lifecycle["deletion"] = {
+                            "status": "delete_failed", "retry_required": True,
+                            "code": _safe_failure_code(exc),
+                        }
                         cleanup_failure = RunnerError("exact instance deletion was not confirmed")
-                    else:
-                        # A failed pending append after a successful create
-                        # must not erase the incurred cost. A direct exact
-                        # cleanup appends a settled event even when no prior
-                        # instance row made it to disk.
-                        if exact_created_at is not None:
-                            try:
-                                shadeform.append_cost_event({"instance_id": instance_id, "phase_id": args.phase_id, "status": "settled", "actual_cost_usd": round(candidate.hourly_usd * max(0.0, time.monotonic() - exact_created_at) / 3600.0, 6)})
-                                direct_cost_settled = True
-                            except BaseException as exc:
-                                cleanup_failure = RunnerError("instance cost settlement was not persisted")
-                                lifecycle["cost_settlement"] = {"status": "failed", "code": _safe_failure_code(exc)}
-                        if key_id is not None:
-                            try:
-                                key_timeout = min(90.0, execution_deadline - time.monotonic())
-                                if key_timeout < 1.0:
-                                    raise TimeoutError("SSH key ownership verification deadline exhausted")
-                                shadeform.verify_ssh_key_ownership(
-                                    api_key, args.phase_id, key_id,
-                                    expected_name=key_name, expected_public_key=public_key,
-                                    timeout=key_timeout,
-                                )
-                                shadeform.delete_ssh_key(api_key, args.phase_id, key_id, deadline=execution_deadline)
-                                lifecycle["key_cleanup"] = {"status": "deleted"}
-                                direct_key_cleanup_ok = True
-                            except BaseException as exc:
-                                cleanup_failure = RunnerError("exact SSH key deletion was not confirmed")
-                                lifecycle["key_cleanup"] = {"status": "failed", "code": _safe_failure_code(exc)}
-                        if direct_cost_settled and direct_key_cleanup_ok:
-                            # A provider POST can succeed before the runtime
-                            # ownership file is durably written (for example,
-                            # when Markdown bookkeeping fails).  Remove only
-                            # a matching partial record; never clear a guessed
-                            # or mismatched phase record.
-                            try:
-                                partial = shadeform.read_owned_resource(args.phase_id)
-                                if partial is not None:
-                                    if partial.instance_id != instance_id:
-                                        raise RunnerError("partial ownership record does not match deleted instance")
-                                    shadeform.clear_owned_resource(args.phase_id, instance_id)
-                                    lifecycle["partial_ownership"] = {"status": "cleared_after_confirmed_deletion"}
-                            except BaseException as exc:
-                                cleanup_failure = RunnerError("partial ownership record could not be safely cleared")
-                                lifecycle["partial_ownership"] = {"status": "cleanup_failed", "code": _safe_failure_code(exc)}
                 if _teardown_complete(lifecycle.get("deletion")) and cleanup_failure is None:
                     _stop_watchdog(watchdog)
                     if isinstance(lifecycle.get("watchdog"), dict):
                         lifecycle["watchdog"]["status"] = "stopped_after_confirmed_deletion"
             elif key_id is not None and not ambiguous_create and not key_ambiguity_unresolved:
+                if attempt_reserved and not attempt_settled:
+                    try:
+                        shadeform.append_cost_event({"instance_id": attempt_id, "phase_id": args.phase_id, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
+                        attempt_settled = True
+                        shadeform.append_incident({
+                            "phase_id": args.phase_id,
+                            "incident": "remote-key-only-recovery-settled",
+                            "nonce": nonce,
+                            "retry_required": False,
+                        })
+                    except BaseException as exc:
+                        cleanup_failure = RunnerError("create-attempt settlement receipt was not persisted")
+                        lifecycle["attempt_settlement"] = {"status": "failed", "code": _safe_failure_code(exc)}
+                if cleanup_failure is not None:
+                    key_id = None
+            if instance_id is None and key_id is not None and not ambiguous_create and not key_ambiguity_unresolved and cleanup_failure is None:
                 try:
                     key_timeout = min(90.0, execution_deadline - time.monotonic()) if execution_deadline is not None else 90.0
                     if key_timeout < 1.0:
@@ -1206,6 +1172,11 @@ def execute(args: argparse.Namespace) -> dict[str, object]:
 def shadeform_teardown(phase_id: str, instance_id: str, env_file: Path, *, deadline: float | None) -> dict[str, object]:
     from scripts.shadeform_teardown import teardown_exact
     return teardown_exact(phase_id, instance_id, env_file=env_file, deadline=deadline)
+
+
+def shadeform_teardown_recovered(record: shadeform.OwnedResource, env_file: Path, *, deadline: float | None) -> dict[str, object]:
+    from scripts.shadeform_teardown import teardown_recovered_exact
+    return teardown_recovered_exact(record, env_file=env_file, deadline=deadline)
 
 
 def _parse(argv: list[str]) -> argparse.Namespace:

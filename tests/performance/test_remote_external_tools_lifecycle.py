@@ -189,10 +189,16 @@ class RemoteExternalToolsReceiptTests(unittest.TestCase):
             result = self.module.shadeform.append_instance_create_intent(
                 "qa-remote-tools", "a" * 32, instance_name="ep-run-" + "a" * 32,
                 ssh_key_id="key-123456", hourly_usd=candidate.hourly_usd,
-                backstop_hours=0.3125, started_at_utc="2026-09-05T00:00:00+00:00",
+                backstop_hours=0.3125,
+                provider_delete_deadline_utc="2026-09-05T00:18:45+00:00",
+                started_at_utc="2026-09-05T00:00:00+00:00",
             )
         self.assertEqual(result, "attempt-" + "a" * 32)
         self.assertEqual(events[0]["reservation"], "instance-create-intent")
+        self.assertEqual(
+            events[0]["intent_schema"],
+            self.module.shadeform.INSTANCE_CREATE_INTENT_SCHEMA,
+        )
         self.assertEqual(events[0]["instance_name"], "ep-run-" + "a" * 32)
         self.assertEqual(events[0]["ssh_key_id"], "key-123456")
 
@@ -239,7 +245,9 @@ class RemoteExternalToolsLifecycleTests(unittest.TestCase):
 
     def run_lifecycle(self, *, activation_error=None, checked_error=None, job_result=None,
                       job_error=None, salvage=None, deletion_error=None, deletion_receipt=None,
-                      create_error=None, instance_pending_error=False):
+                      create_error=None, instance_pending_error=False,
+                      direct_cost_error=False, direct_attempt_error=False,
+                      record_persistence_error=False):
         events = []
         persisted = []
         teardown_deadlines = []
@@ -254,6 +262,10 @@ class RemoteExternalToolsLifecycleTests(unittest.TestCase):
                     event.get("instance_id") == "instance-123456" and event.get("status") == "pending"):
                 failed_pending = True
                 raise OSError("cost ledger unavailable")
+            if direct_cost_error and event.get("instance_id") == "instance-123456" and event.get("status") == "settled":
+                raise OSError("direct cost ledger unavailable")
+            if direct_attempt_error and event.get("instance_id") == "attempt-" + "a" * 32 and event.get("status") == "settled":
+                raise OSError("direct attempt ledger unavailable")
             events.append(dict(event))
 
         def teardown(*_args, **_kwargs):
@@ -261,7 +273,21 @@ class RemoteExternalToolsLifecycleTests(unittest.TestCase):
             if deletion_error is not None:
                 raise deletion_error
             append_event({"instance_id": "instance-123456", "phase_id": self.args.phase_id, "status": "settled", "actual_cost_usd": 0.01})
-            return deletion_receipt or {"deletion": {"success": True}, "status": "deleted"}
+            return deletion_receipt or {
+                "deletion": {"success": True}, "status": "complete",
+                "retry_required": False,
+            }
+
+        def recovered_teardown(record, *_args, **_kwargs):
+            teardown_deadlines.append(_kwargs.get("deadline"))
+            if deletion_error is not None:
+                raise deletion_error
+            append_event({"instance_id": record.instance_id, "phase_id": self.args.phase_id, "status": "settled", "actual_cost_usd": 0.01})
+            append_event({"instance_id": "attempt-" + "a" * 32, "phase_id": self.args.phase_id, "status": "settled", "actual_cost_usd": 0.0})
+            return deletion_receipt or {
+                "deletion": {"success": True}, "status": "complete",
+                "retry_required": False,
+            }
 
         def checked(*_args, **kwargs):
             stage = kwargs["stage"]
@@ -317,7 +343,9 @@ class RemoteExternalToolsLifecycleTests(unittest.TestCase):
             direct_delete = patch(mock.patch.object(self.module.shadeform, "_delete_instance", return_value={"success": True, "status": "deleted"}))
             delete_key = patch(mock.patch.object(self.module.shadeform, "delete_ssh_key", return_value={"status": "deleted"}))
             patch(mock.patch.object(self.module.shadeform, "append_cost_event", side_effect=append_event))
-            patch(mock.patch.object(self.module.shadeform, "write_owned_resource"))
+            patch(mock.patch.object(self.module.shadeform, "write_owned_resource", side_effect=OSError("owned record unavailable") if record_persistence_error else None))
+            if record_persistence_error:
+                patch(mock.patch.object(self.module.shadeform, "read_owned_resource", return_value=types.SimpleNamespace(instance_id="instance-123456", status="created", cost_usd=None)))
             patch(mock.patch.object(self.module.shadeform, "process_start_marker", return_value="marker"))
             patch(mock.patch.object(self.module.subprocess, "Popen", side_effect=popen))
             patch(mock.patch.object(self.module.shadeform, "wait_active", side_effect=activation_error or [info]))
@@ -329,6 +357,7 @@ class RemoteExternalToolsLifecycleTests(unittest.TestCase):
             patch(mock.patch.object(self.module, "run_argv", side_effect=run_job))
             patch(mock.patch.object(self.module, "_salvage_receipt", return_value=salvage or {"status": "verified", "receipt": {"status": "PASS", "run_id": "test-run", "secret_free": True, "passed": 1, "failed": 0, "case_count": 1}}))
             patch(mock.patch.object(self.module, "shadeform_teardown", side_effect=teardown))
+            recovered = patch(mock.patch.object(self.module, "shadeform_teardown_recovered", side_effect=recovered_teardown))
             patch(mock.patch.object(self.module, "_persist_lifecycle", side_effect=persist))
             try:
                 result = self.module.execute(self.args)
@@ -336,7 +365,7 @@ class RemoteExternalToolsLifecycleTests(unittest.TestCase):
             except BaseException as exc:
                 result = None
                 raised = exc
-        return types.SimpleNamespace(result=result, raised=raised, events=events, persisted=persisted, watchdog=watchdog, reserve_calls=reserve_calls, add_key=add_key, delete_key=delete_key, direct_delete=direct_delete, teardown_deadlines=teardown_deadlines, watchdog_commands=watchdog_commands)
+        return types.SimpleNamespace(result=result, raised=raised, events=events, persisted=persisted, watchdog=watchdog, reserve_calls=reserve_calls, add_key=add_key, delete_key=delete_key, direct_delete=direct_delete, recovered_teardown=recovered, teardown_deadlines=teardown_deadlines, watchdog_commands=watchdog_commands)
 
     def assert_no_pending(self, outcome):
         latest = {event["instance_id"]: event["status"] for event in outcome.events}
@@ -418,10 +447,30 @@ class RemoteExternalToolsLifecycleTests(unittest.TestCase):
     def test_failed_instance_pending_append_still_deletes_and_settles_exact_cost(self):
         outcome = self.run_lifecycle(instance_pending_error=True)
         self.assertIsInstance(outcome.raised, OSError)
-        outcome.direct_delete.assert_called_once()
+        outcome.direct_delete.assert_not_called()
+        outcome.recovered_teardown.assert_called_once()
         latest = {event["instance_id"]: event["status"] for event in outcome.events}
         self.assertEqual(latest["instance-123456"], "settled")
         self.assertEqual(latest["attempt-" + "a" * 32], "settled")
+
+    def test_direct_cost_failure_retains_key(self):
+        outcome = self.run_lifecycle(instance_pending_error=True, direct_cost_error=True)
+        self.assertIsInstance(outcome.raised, self.module.RunnerError)
+        outcome.delete_key.assert_not_called()
+        self.assertFalse(outcome.watchdog.terminated)
+
+    def test_direct_attempt_failure_retains_key(self):
+        outcome = self.run_lifecycle(instance_pending_error=True, direct_attempt_error=True)
+        self.assertIsInstance(outcome.raised, self.module.RunnerError)
+        outcome.delete_key.assert_not_called()
+        self.assertFalse(outcome.watchdog.terminated)
+
+    def test_owned_record_persistence_failure_uses_durable_recovery_teardown(self):
+        outcome = self.run_lifecycle(record_persistence_error=True)
+        self.assertIsInstance(outcome.raised, OSError)
+        outcome.direct_delete.assert_not_called()
+        outcome.recovered_teardown.assert_called_once()
+        self.assertTrue(outcome.watchdog.terminated)
 
     def test_execution_flag_still_blocks_before_credentials(self):
         with mock.patch.object(self.module.shadeform, "load_env") as load_env:
@@ -433,6 +482,7 @@ class RemoteExternalToolsLifecycleTests(unittest.TestCase):
         outcome = self.run_lifecycle()
         command = outcome.watchdog_commands[0]
         self.assertIn("--deadline-epoch", command)
+        self.assertIn("--provider-delete-deadline-epoch", command)
         self.assertIn("--allow-unrecorded-exact", command)
         self.assertIn("--ownership-nonce", command)
         self.assertIn("--key-only-recovery", command)
