@@ -11,7 +11,7 @@
 
 #include "../action_journal_storage/windows_storage.hpp"
 #include "protocol_codec.hpp"
-#include "store_codec.hpp"
+#include "journal_authority_owner.hpp"
 
 namespace lae::action_journal_helper {
 namespace {
@@ -602,6 +602,28 @@ bool recoverable_store_status(StoreStatus status) noexcept {
       status == StoreStatus::kCommitNonCancellable;
 }
 
+HelperStatus authority_status(AuthorityStatus status) noexcept {
+  switch (status) {
+    case AuthorityStatus::kStorageUnavailable:
+      return HelperStatus::kStorageUnavailable;
+    case AuthorityStatus::kStorageCorrupt:
+      return HelperStatus::kStorageCorrupt;
+    case AuthorityStatus::kIoTimeout:
+      return HelperStatus::kIoTimeout;
+    case AuthorityStatus::kIoCancelFailed:
+      return HelperStatus::kIoCancelFailed;
+    case AuthorityStatus::kRecoveryFailed:
+      return HelperStatus::kRecoveryFailed;
+    case AuthorityStatus::kReady:
+      return HelperStatus::kOk;
+    case AuthorityStatus::kNotReady:
+    case AuthorityStatus::kPoisoned:
+    case AuthorityStatus::kInternal:
+      return HelperStatus::kInternal;
+  }
+  return HelperStatus::kInternal;
+}
+
 struct RequestCancellationContext {
   HANDLE pipe = INVALID_HANDLE_VALUE;
   HANDLE client_process = INVALID_HANDLE_VALUE;
@@ -650,24 +672,16 @@ HelperStatus run_foreground_helper_from_inherited_stdin() noexcept {
         bootstrap.expected_storage_volume_serial;
     storage_request.expected_identity.file_id = bootstrap.expected_storage_file_id;
     storage_request.expected_identity.container_id = bootstrap.expected_container_id;
-    action_journal_storage::JournalStorageLease storage_lease;
     action_journal_storage::StorageReceipt storage_receipt;
-    if (action_journal_storage::acquire_storage(
-            storage_request, storage_lease, storage_receipt) !=
-        action_journal_storage::StorageStatus::kOkOpened)
-      return HelperStatus::kStorageUnavailable;
-    FixedContainerStore store(std::move(storage_lease),
-                              bootstrap.expected_container_id);
-    std::uint32_t recovery_count = 0;
     StartupCancellationContext startup_context{issuer.process.get()};
     const StorageIoControl startup_io{
         CancellationProbe{startup_cancelled, &startup_context},
         GetTickCount64() + kIoDeadlineMs, true};
-    const auto recovery = store.load_and_recover(startup_io, recovery_count);
-    if (recovery == StoreStatus::kIoTimeout) return HelperStatus::kIoTimeout;
-    if (recovery == StoreStatus::kIoCancelFailed)
-      return HelperStatus::kIoCancelFailed;
-    if (recovery != StoreStatus::kOk) return HelperStatus::kRecoveryFailed;
+    AuthorityStatus owner_status = AuthorityStatus::kInternal;
+    auto owner = JournalAuthorityOwner::open(
+        storage_request, bootstrap.expected_container_id, startup_io,
+        owner_status, storage_receipt);
+    if (!owner) return authority_status(owner_status);
     PipeSecurity security;
     if (!private_pipe_security(user.sid, security))
       return HelperStatus::kPipeSecurityFailed;
@@ -728,7 +742,7 @@ HelperStatus run_foreground_helper_from_inherited_stdin() noexcept {
                                             &cancellation_context};
       const StorageIoControl request_io{
           cancellation, GetTickCount64() + kIoDeadlineMs, true};
-      const auto applied = store.apply(request, request_io, result);
+      const auto applied = owner->apply(request, request_io, result);
       if (applied != StoreStatus::kOk) {
         if (applied == StoreStatus::kIoTimeout) {
           DisconnectNamedPipe(pipe.get());

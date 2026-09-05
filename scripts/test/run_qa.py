@@ -67,6 +67,7 @@ TEST_INVENTORY = {
     "tests/native/runtime_tests.cpp": "native_build",
     "tests/native/test_windows_action_journal_storage_static.py": "native_static",
     "tests/native/test_windows_action_journal_helper_static.py": "native_static",
+    "tests/native/test_windows_action_journal_owner_static.py": "native_static",
     "tests/native/test_windows_hardware_attestor_static.py": "native_static",
     "tests/native/test_windows_clipboard_static.py": "native_static",
     "tests/native/test_windows_inert_compile_harness_static.py": "native_static",

@@ -1,7 +1,8 @@
 #pragma once
 
-// Source-only fixed-container codec. It owns the complete validated storage
-// lease so no operation can fall back to a pathname-selected authority.
+// Source-only fixed-container codec. It borrows the complete validated
+// storage lease retained by JournalAuthorityOwner; it has no independent
+// authority and cannot fall back to a pathname-selected store.
 #ifndef _WIN32
 #error "The ActionJournal helper source is Windows-only"
 #endif
@@ -23,6 +24,8 @@
 #include "protocol_codec.hpp"
 
 namespace lae::action_journal_helper {
+
+class JournalAuthorityOwner;
 
 inline constexpr std::uint32_t kSlotCount = 1'024;
 inline constexpr std::uint32_t kBanksPerSlot = 2;
@@ -113,11 +116,13 @@ struct StorageIoControl {
 
 class FixedContainerStore final {
  public:
-  FixedContainerStore(action_journal_storage::JournalStorageLease&& lease,
-                      const std::array<std::uint8_t, 32>& container_id) noexcept;
   ~FixedContainerStore() = default;
   FixedContainerStore(const FixedContainerStore&) = delete;
   FixedContainerStore& operator=(const FixedContainerStore&) = delete;
+
+ private:
+  FixedContainerStore(action_journal_storage::JournalStorageLease& lease,
+                      const std::array<std::uint8_t, 32>& container_id) noexcept;
 
   StoreStatus load_and_recover(StorageIoControl io,
                                std::uint32_t& recovery_count);
@@ -125,7 +130,6 @@ class FixedContainerStore final {
                     StorageIoControl io,
                     EncodedResult& result) noexcept;
 
- private:
   StoreStatus reload(StorageIoControl io);
   StoreStatus append(const std::string& operation_id,
                      const JournalEvent& event,
@@ -141,7 +145,7 @@ class FixedContainerStore final {
                      StorageIoControl io,
                      EncodedResult& result);
 
-  action_journal_storage::JournalStorageLease lease_;
+  action_journal_storage::JournalStorageLease* lease_ = nullptr;
   HANDLE file_ = INVALID_HANDLE_VALUE;
   std::array<std::uint8_t, 32> container_id_{};
   std::map<std::string, JournalRecord> records_;
@@ -149,9 +153,9 @@ class FixedContainerStore final {
   std::array<std::int8_t, kSlotCount> staged_bank_{};
   std::uint32_t active_count_ = 0;
   std::uint32_t terminal_count_ = 0;
-  std::uint32_t recovery_count_ = 0;
   bool commit_section_ = false;
-  bool poisoned_ = false;
+
+  friend class JournalAuthorityOwner;
 };
 
 const char* store_status_name(StoreStatus status) noexcept;
