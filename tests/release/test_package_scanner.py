@@ -13,7 +13,7 @@ from qa.clean_machine.package import (
     scan_binary_dependencies,
     scan_tree,
 )
-from qa.clean_machine.package_runner import PACKAGE_BUILD_BLOCKER, build_package
+from qa.clean_machine.package_runner import PACKAGE_BUILD_BLOCKER, PACKAGE_READINESS, build_package
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -47,6 +47,7 @@ class PackageScannerTests(unittest.TestCase):
         with mock.patch.dict(scan_tree.__globals__, {"_tree_entries": mock.Mock(side_effect=AssertionError("enumerated"))}):
             result = scan_tree(ExplodingPath(), require_runtime=True)
         self.assertEqual("FAIL", result["status"])
+        self.assertEqual(PACKAGE_READINESS, result["readiness"])
         self.assertEqual("NONE", result["authorization"])
         self.assertEqual(["secure-handle-relative-package-scan-unavailable"], result["findings"])
 
@@ -56,6 +57,7 @@ class PackageScannerTests(unittest.TestCase):
         self.assertEqual(
             {
                 "status": "FAIL",
+                "readiness": PACKAGE_READINESS,
                 "stage": "safety-unavailable",
                 "findings": [PACKAGE_BUILD_BLOCKER],
                 "output_created": False,

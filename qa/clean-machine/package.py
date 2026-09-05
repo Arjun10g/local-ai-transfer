@@ -173,6 +173,7 @@ def scan_tree(root: str | Path, *, require_runtime: bool = False) -> dict[str, o
     if require_runtime:
         return {
             "status": "FAIL",
+            "readiness": "NOT_READY",
             "files": [],
             "findings": ["secure-handle-relative-package-scan-unavailable"],
             "dependencies": "SKIP-package-scan-refused",

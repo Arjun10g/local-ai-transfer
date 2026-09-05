@@ -6,10 +6,10 @@ import { makeToolResult } from '../../agent/tool-envelope.mjs';
 import { WorkspaceError } from './workspace-policy.mjs';
 import { validateToolArguments } from './argument-validation.mjs';
 import { applyOperatorGrantPolicy } from '../../providers/operator-tool-policy.mjs';
+import { filesystemSafetyError } from './platform-safety.mjs';
 
 const MAX_READ = 65536; const MAX_SEARCH_FILES = 200; const MAX_SEARCH_MATCHES = 500;
 const NOFOLLOW = fsConstants.O_NOFOLLOW;
-const PLATFORM_SAFETY_ERROR = 'filesystem tools require descriptor-safe path operations; Windows support is fail-closed until handle-relative reparse-safe primitives are available';
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const result = (call, status, text, truncated = false, durationMs = 0) => makeToolResult({ id: call.id, name: call.name, status, text, truncated, durationMs });
 const boundedInt = (value, fallback, min, max) => Number.isInteger(value) ? Math.min(max, Math.max(min, value)) : fallback;
@@ -29,7 +29,7 @@ async function boundedFile(policy, call, { maxBytes = MAX_READ } = {}) {
 }
 
 function assertPlatformSafe(platform) {
-  if (platform === 'win32' || typeof NOFOLLOW !== 'number') throw new WorkspaceError('platform_path_safety_unavailable', PLATFORM_SAFETY_ERROR);
+  if (platform === 'win32' || typeof NOFOLLOW !== 'number') throw filesystemSafetyError();
 }
 
 async function closeQuietly(handle) { await handle?.close().catch(() => {}); }

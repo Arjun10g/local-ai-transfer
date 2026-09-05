@@ -3,6 +3,7 @@ import { createFilesystemTools, filesystemDefinitions } from './filesystem.mjs';
 import { createSystemTools, systemDefinitions } from './system-tools.mjs';
 import { timeNowDefinition, timeNowTool } from '../time-now.mjs';
 import { createProcessRunTools, ProcessRunProvider, processDefinition } from './process-run.mjs';
+import { WINDOWS_FILESYSTEM_STATUS } from './platform-safety.mjs';
 
 const LOCAL_TOOL_NAMES = Object.freeze([
   'time.now', 'system.get_info', 'clipboard.read', 'clipboard.write', 'app.open', 'browser.open_url',
@@ -22,6 +23,10 @@ function workspaceSets(workspaces) {
     if (entry?.write === true || typeof item === 'string') writable.add(entry.id);
   });
   return { readable, writable };
+}
+
+function filesystemCapability(advertised, reason, notReady) {
+  return Object.freeze(notReady ? { ...WINDOWS_FILESYSTEM_STATUS, advertised, reason } : { advertised, reason });
 }
 
 // Schema/evaluation catalog only. Production must use
@@ -56,11 +61,11 @@ export function createLocalToolRegistry({ workspaces = [], applications = {}, pr
     'clipboard.write': Object.freeze({ advertised: false, reason: effectivePlatform === 'win32' ? 'unsafe_subprocess_boundary' : 'platform_unsupported' }),
     'app.open': Object.freeze({ advertised: effectivePlatform !== 'win32' && Object.keys(applications).length > 0, reason: effectivePlatform === 'win32' ? 'unsafe_subprocess_boundary' : Object.keys(applications).length ? 'allowlist_configured' : 'allowlist_absent' }),
     'browser.open_url': Object.freeze({ advertised: effectivePlatform !== 'win32' && networkProvider === 'browser_open', reason: effectivePlatform === 'win32' ? 'unsafe_subprocess_boundary' : networkProvider === 'browser_open' ? 'provider_configured' : 'provider_disabled' }),
-    'fs.list': Object.freeze({ advertised: Boolean(filesystem['fs.list'] && readable.size), reason: !filesystemSupported ? 'platform_unsupported' : readable.size ? 'workspace_configured' : 'workspace_unconfigured' }),
-    'fs.read_text': Object.freeze({ advertised: Boolean(filesystem['fs.read_text'] && readable.size), reason: !filesystemSupported ? 'platform_unsupported' : readable.size ? 'workspace_configured' : 'workspace_unconfigured' }),
-    'fs.search_text': Object.freeze({ advertised: Boolean(filesystem['fs.search_text'] && readable.size), reason: !filesystemSupported ? 'platform_unsupported' : readable.size ? 'workspace_configured' : 'workspace_unconfigured' }),
-    'fs.write_new': Object.freeze({ advertised: Boolean(filesystem['fs.write_new'] && writable.size), reason: !filesystemSupported ? 'platform_unsupported' : writable.size ? 'writable_workspace_configured' : 'writable_workspace_unconfigured' }),
-    'fs.apply_patch': Object.freeze({ advertised: Boolean(filesystem['fs.apply_patch'] && patchable.size), reason: !filesystemSupported ? 'platform_unsupported' : patchable.size ? 'readable_writable_workspace_configured' : 'readable_writable_workspace_unconfigured' }),
+    'fs.list': filesystemCapability(Boolean(filesystem['fs.list'] && readable.size), !filesystemSupported ? WINDOWS_FILESYSTEM_STATUS.reason : readable.size ? 'workspace_configured' : 'workspace_unconfigured', !filesystemSupported),
+    'fs.read_text': filesystemCapability(Boolean(filesystem['fs.read_text'] && readable.size), !filesystemSupported ? WINDOWS_FILESYSTEM_STATUS.reason : readable.size ? 'workspace_configured' : 'workspace_unconfigured', !filesystemSupported),
+    'fs.search_text': filesystemCapability(Boolean(filesystem['fs.search_text'] && readable.size), !filesystemSupported ? WINDOWS_FILESYSTEM_STATUS.reason : readable.size ? 'workspace_configured' : 'workspace_unconfigured', !filesystemSupported),
+    'fs.write_new': filesystemCapability(Boolean(filesystem['fs.write_new'] && writable.size), !filesystemSupported ? WINDOWS_FILESYSTEM_STATUS.reason : writable.size ? 'writable_workspace_configured' : 'writable_workspace_unconfigured', !filesystemSupported),
+    'fs.apply_patch': filesystemCapability(Boolean(filesystem['fs.apply_patch'] && patchable.size), !filesystemSupported ? WINDOWS_FILESYSTEM_STATUS.reason : patchable.size ? 'readable_writable_workspace_configured' : 'readable_writable_workspace_unconfigured', !filesystemSupported),
     'process.run_allowlisted': Object.freeze({ advertised: processConfigured, reason: effectivePlatform === 'win32' ? 'unsafe_subprocess_boundary' : processConfigured ? 'actions_configured' : processActions.enabled === true ? 'actions_or_writable_workspace_unconfigured' : 'provider_disabled' })
   };
   Object.defineProperty(registry, 'capabilitySnapshot', { enumerable: false, value: freezeCapabilitySnapshot(effectivePlatform, states), writable: false, configurable: false });
