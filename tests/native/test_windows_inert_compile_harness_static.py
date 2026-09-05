@@ -36,6 +36,13 @@ TARGET_SOURCES = {
     "lae_compilecheck_windows_release_verifier": {
         "windows_release_verifier/windows_release_verifier.cpp",
     },
+    "lae_compilecheck_windows_supervisor": {
+        "windows_supervisor/authority.cpp",
+        "windows_supervisor/process_transaction.inc",
+    },
+    "lae_compilecheck_windows_clipboard": {
+        "windows_clipboard/windows_clipboard.cpp",
+    },
 }
 TARGET_LIBRARIES = {
     "lae_compilecheck_action_journal_helper": {"advapi32", "bcrypt"},
@@ -53,6 +60,16 @@ TARGET_LIBRARIES = {
         "advapi32",
         "bcrypt",
         "ntdll",
+    },
+    "lae_compilecheck_windows_supervisor": {
+        "advapi32",
+        "bcrypt",
+        "wintrust",
+    },
+    "lae_compilecheck_windows_clipboard": {
+        "advapi32",
+        "bcrypt",
+        "user32",
     },
 }
 
@@ -82,6 +99,56 @@ TARGET_LIBRARY_API_MARKERS = {
         "bcrypt": ("BCryptOpenAlgorithmProvider(",),
         "ntdll": ("NtOpenFile", "NtQueryDirectoryFile"),
     },
+    "lae_compilecheck_windows_supervisor": {
+        "advapi32": (
+            "OpenProcessToken(",
+            "CreateRestrictedToken(",
+            "CreateProcessAsUserW(",
+        ),
+        "bcrypt": ("BCryptOpenAlgorithmProvider(", "BCryptGenRandom("),
+        "wintrust": ("WinVerifyTrust(",),
+    },
+    "lae_compilecheck_windows_clipboard": {
+        "advapi32": ("OpenProcessToken(", "GetSecurityDescriptorControl("),
+        "bcrypt": ("BCryptOpenAlgorithmProvider(",),
+        "user32": (
+            "OpenClipboard(",
+            "GetUserObjectSecurity(",
+            "CreateWindowExW(",
+        ),
+    },
+}
+
+# Reverse closure for non-default import libraries. Kernel32 and the MSVC
+# runtime remain part of the Windows/MSVC platform baseline; every other API
+# family used by these exact sources must have an explicit target declaration.
+REQUIRED_LIBRARY_API_MARKERS = {
+    "advapi32": (
+        "AllocateAndInitializeSid(",
+        "CreateProcessAsUserW(",
+        "CreateRestrictedToken(",
+        "GetSecurityDescriptorControl(",
+        "GetSecurityInfo(",
+        "OpenProcessToken(",
+        "RegCloseKey(",
+        "RegGetValueW(",
+    ),
+    "bcrypt": ("BCrypt",),
+    "crypt32": ("CertCloseStore(", "CryptQueryObject("),
+    "dxgi": ("CreateDXGIFactory1(",),
+    "ntdll": ("NtOpenFile", "NtQueryDirectoryFile", "RtlGetVersion("),
+    "setupapi": ("SetupDi",),
+    "user32": (
+        "CloseClipboard(",
+        "CreateWindowExW(",
+        "EmptyClipboard(",
+        "GetClipboardData(",
+        "GetUserObjectInformationW(",
+        "GetUserObjectSecurity(",
+        "OpenClipboard(",
+        "SetClipboardData(",
+    ),
+    "wintrust": ("WinVerifyTrust(",),
 }
 
 
@@ -134,6 +201,9 @@ class WindowsInertCompileHarnessStaticTests(unittest.TestCase):
         cls.readme = bounded_text(README)
 
     def test_option_is_off_and_include_is_inside_windows_msvc_guards(self):
+        self.assertEqual(self.native.count(f"option({OPTION}"), 1)
+        self.assertNotIn(f"set({OPTION} ON", self.native + self.harness)
+        self.assertNotIn(f"CACHE BOOL", self.harness)
         option = re.search(
             rf"option\({OPTION}\s+\"[^\"]+\"\s+OFF\)", self.native, re.S
         )
@@ -182,14 +252,21 @@ class WindowsInertCompileHarnessStaticTests(unittest.TestCase):
         for target in TARGET_SOURCES:
             self.assertNotIn(target, prefix)
 
-    def test_exact_four_boundary_targets_and_source_closure(self):
-        declared = set(
-            re.findall(r"add_library\((lae_compilecheck_[a-z_]+)\s+STATIC", self.harness)
+    def test_exact_six_boundary_targets_and_source_closure(self):
+        declared_list = re.findall(
+            r"add_library\((lae_compilecheck_[a-z_]+)\s+STATIC", self.harness
         )
-        self.assertEqual(declared, set(TARGET_SOURCES))
+        self.assertEqual(len(declared_list), len(set(declared_list)))
+        self.assertEqual(len(declared_list), 6)
+        self.assertEqual(set(declared_list), set(TARGET_SOURCES))
         for target, expected in TARGET_SOURCES.items():
             block = cmake_block(self.harness, "add_library", target)
-            observed = set(re.findall(r'\$\{_LAE_INERT_NATIVE_ROOT\}/([^\"]+\.cpp)', block))
+            observed = set(
+                re.findall(
+                    r'\$\{_LAE_INERT_NATIVE_ROOT\}/([^\"]+\.(?:cpp|inc))',
+                    block,
+                )
+            )
             self.assertEqual(observed, expected, target)
             for relative in expected:
                 path = ROOT / "native" / relative
@@ -205,16 +282,34 @@ class WindowsInertCompileHarnessStaticTests(unittest.TestCase):
                 ROOT / "native/windows_hardware_attestor",
                 ROOT / "native/windows_readonly_fs",
                 ROOT / "native/windows_release_verifier",
+                ROOT / "native/windows_supervisor",
+                ROOT / "native/windows_clipboard",
             )
-            for path in directory.glob("*.cpp")
+            for pattern in ("*.cpp", "*.inc")
+            for path in directory.glob(pattern)
         }
         self.assertEqual(discovered, set().union(*TARGET_SOURCES.values()))
+
+        supervisor = cmake_block(
+            self.harness, "add_library", "lae_compilecheck_windows_supervisor"
+        )
+        self.assertIn("process_transaction.inc", supervisor)
+        included = bounded_text(
+            ROOT / "native/windows_supervisor/authority.cpp"
+        )
+        self.assertIn('#include "process_transaction.inc"', included)
+        header_only = cmake_block(
+            self.harness,
+            "set_source_files_properties",
+            '"${_LAE_INERT_NATIVE_ROOT}/windows_supervisor/process_transaction.inc"',
+        )
+        self.assertIn("PROPERTIES HEADER_FILE_ONLY TRUE", header_only)
 
     def test_rejected_and_product_sources_are_absent(self):
         for forbidden in (
             "windows_broker/",
-            "windows_supervisor/",
-            "windows_clipboard/",
+            "windows_process_broker/",
+            "windows_supervisor_broker/",
             "windows_hardware_probe/",
             "native/main.cpp",
             "model_validation/",
@@ -280,6 +375,8 @@ class WindowsInertCompileHarnessStaticTests(unittest.TestCase):
                 ROOT / "native/windows_hardware_attestor/trust_anchor.hpp",
                 ROOT / "native/action_journal_helper/pipe_server.cpp",
                 ROOT / "native/windows_release_verifier/windows_release_verifier.cpp",
+                ROOT / "native/windows_supervisor/authority.hpp",
+                ROOT / "native/windows_clipboard/trust_anchor.hpp",
             )
         )
         for marker in (
@@ -292,6 +389,12 @@ class WindowsInertCompileHarnessStaticTests(unittest.TestCase):
             "kCompiledManifestIdentityTrusted = false",
             "kAuthenticodePolicyTrusted = false",
             "kCancellableNativeIoTrusted = false",
+            "kSupervisorOwnedProcessTransactionAccepted = false",
+            "kSupervisorIdentityAvailable = false",
+            "kAuthenticatedCapabilityIssuerAvailable = false",
+            "kCancellableClipboardIoAvailable = false",
+            "kDurableJournalAvailable = false",
+            "kTargetAcceptancePassed = false",
         ):
             self.assertIn(marker, anchors)
         for sources in TARGET_SOURCES.values():
@@ -331,6 +434,20 @@ class WindowsInertCompileHarnessStaticTests(unittest.TestCase):
                     f"{target}:{library} lacks a source API justification",
                 )
 
+    def test_every_observed_nondefault_api_family_has_its_required_library(self):
+        for target, sources in TARGET_SOURCES.items():
+            source = "\n".join(
+                bounded_text(ROOT / "native" / relative)
+                for relative in sorted(sources)
+            )
+            for library, markers in REQUIRED_LIBRARY_API_MARKERS.items():
+                if any(marker in source for marker in markers):
+                    self.assertIn(
+                        library,
+                        TARGET_LIBRARIES[target],
+                        f"{target} imports {library} API without link closure",
+                    )
+
     def test_no_download_install_package_executable_or_product_coupling(self):
         for forbidden in (
             r"\bFetchContent",
@@ -354,6 +471,14 @@ class WindowsInertCompileHarnessStaticTests(unittest.TestCase):
             self.assertNotIn("lae_compilecheck_", text)
             self.assertNotIn(META_TARGET, text)
 
+    def test_static_targets_have_no_runtime_or_archive_destination_override(self):
+        self.assertNotIn("RUNTIME_OUTPUT", self.harness)
+        self.assertNotIn("ARCHIVE_OUTPUT", self.harness)
+        self.assertNotIn("LIBRARY_OUTPUT", self.harness)
+        self.assertNotIn("OUTPUT_NAME", self.harness)
+        self.assertNotIn("EXPORT", self.harness)
+        self.assertNotRegex(self.harness, r"\badd_executable\s*\(")
+
     def test_meta_target_depends_on_all_and_docs_remain_not_ready(self):
         dependencies = cmake_block(self.harness, "add_custom_target", META_TARGET)
         self.assertEqual(
@@ -362,6 +487,7 @@ class WindowsInertCompileHarnessStaticTests(unittest.TestCase):
         )
         for marker in (
             "`OFF` by default",
+            "six isolated, non-installed static-library checks",
             "compilation evidence, not activation evidence",
             "does not authorize packaging or execution",
             "Local or target-laptop configuration/build remains prohibited",

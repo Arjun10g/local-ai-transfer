@@ -162,7 +162,7 @@ endif()
 
 # Source-review boundaries are deliberately absent from the product graph.
 # This opt-in graph exists only so an approved remote Windows SDK worker can
-# compile and statically analyze the four independently audited inert slices.
+# compile and statically analyze the six independently audited inert slices.
 # OFF is the immutable product/default posture; nothing below is installed,
 # packaged, imported by lae_runtime, or linked into lae-engine.
 option(LAE_ENABLE_INERT_WINDOWS_COMPILE_CHECKS
