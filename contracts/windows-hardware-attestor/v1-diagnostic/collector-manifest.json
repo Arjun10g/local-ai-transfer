@@ -1,0 +1,11 @@
+{
+  "schema": "local_bmo.windows-hardware-collector-diagnostic-manifest.v1",
+  "manifest_id": "windows-hardware-source-1.2.0-diagnostic",
+  "status": "source-only-not-activated",
+  "script_name": "Get-HardwareReceipt.ps1",
+  "script_sha256": "113ccf2e7239908ec61d2718d5817fab9c867386ae02d72a680c9b2dbe33d82f",
+  "authenticode_required_for_target_evidence": true,
+  "authenticode_signature_present": false,
+  "execution_identity_bound": false,
+  "target_evidence_accepted": false
+}

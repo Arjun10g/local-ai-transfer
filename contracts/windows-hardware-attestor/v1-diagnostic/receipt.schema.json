@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local-assistant-engine.invalid/contracts/windows-hardware-attestor/v1-diagnostic/receipt.schema.json",
+  "title": "Bounded diagnostic Windows hardware receipt (non-acceptance)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "receipt_kind", "generated_at_utc", "executed_on_target", "fixture", "collector", "collection", "expected", "observed", "checks", "verdict"],
+  "properties": {
+    "schema_version": {"const": "1.2.0-diagnostic"},
+    "receipt_kind": {"const": "windows-hardware-diagnostic-receipt"},
+    "generated_at_utc": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$", "maxLength": 32},
+    "executed_on_target": {"type": "boolean"},
+    "fixture": {"type": "boolean"},
+    "collector": {"$ref": "#/$defs/collector"},
+    "collection": {"$ref": "#/$defs/collection"},
+    "expected": {"$ref": "#/$defs/expected"},
+    "observed": {"$ref": "#/$defs/observed"},
+    "checks": {"$ref": "#/$defs/checks"},
+    "verdict": {"$ref": "#/$defs/verdict"}
+  },
+  "$defs": {
+    "nullableString": {"type": ["string", "null"], "maxLength": 512},
+    "collector": {
+      "type": "object", "additionalProperties": false,
+      "required": ["manifest_id", "script_sha256", "expected_script_sha256", "authenticode_required", "authenticode_status", "authenticode_revocation_policy", "signer_subject_sha256", "execution_identity_bound", "cim_materialization_bound_proven"],
+      "properties": {
+        "manifest_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"},
+        "script_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "expected_script_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "authenticode_required": {"type": "boolean"},
+        "authenticode_status": {"enum": ["Valid", "NotSigned", "HashMismatch", "Unavailable", "Error"]},
+        "authenticode_revocation_policy": {"const": "offline-no-revocation-check"},
+        "signer_subject_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "execution_identity_bound": {"type": "boolean"},
+        "cim_materialization_bound_proven": {"type": "boolean"}
+      }
+    },
+    "collection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["read_only", "offline", "stdout_only", "admin_required", "wmi_mutation", "downloads", "installs", "model_loaded", "secrets_collected"],
+      "properties": {
+        "read_only": {"type": "boolean"}, "offline": {"type": "boolean"}, "stdout_only": {"type": "boolean"},
+        "admin_required": {"type": "boolean"}, "wmi_mutation": {"type": "boolean"}, "downloads": {"type": "boolean"},
+        "installs": {"type": "boolean"}, "model_loaded": {"type": "boolean"}, "secrets_collected": {"type": "boolean"}
+      }
+    },
+    "expected": {
+      "type": "object", "additionalProperties": false,
+      "required": ["profile_id", "computer_manufacturer", "cpu_family", "vpro_enterprise", "gpu_name", "gpu_vendor_id", "gpu_driver_version", "integrated_gpu", "separate_discrete_gpu", "memory_bytes", "memory_type", "memory_speed_mts", "board_product", "board_revision", "os_architecture"],
+      "properties": {
+        "profile_id": {"const": "dell-039nng-a00-core-ultra-7-vpro-intel-graphics"},
+        "computer_manufacturer": {"const": "Dell Inc."}, "cpu_family": {"const": "Intel Core Ultra 7"}, "vpro_enterprise": {"const": true},
+        "gpu_name": {"const": "Intel Graphics"}, "gpu_vendor_id": {"const": "VEN_8086"}, "gpu_driver_version": {"const": "32.0.101.8247"},
+        "integrated_gpu": {"const": true}, "separate_discrete_gpu": {"const": false}, "memory_bytes": {"const": 34359738368},
+        "memory_type": {"const": "DDR5"}, "memory_speed_mts": {"const": 5600}, "board_product": {"const": "039NNG"},
+        "board_revision": {"const": "A00"}, "os_architecture": {"const": "x64"}
+      }
+    },
+    "observed": {
+      "type": "object", "additionalProperties": false,
+      "required": ["os", "computer", "cpu", "memory_modules", "baseboards", "bios", "gpu_adapters", "display_drivers", "gpu_memory", "disk_volumes", "pagefile", "power_plan", "runtimes"],
+      "properties": {
+        "os": {"$ref": "#/$defs/os"}, "computer": {"$ref": "#/$defs/computer"},
+        "cpu": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/cpu"}},
+        "memory_modules": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/memory"}},
+        "baseboards": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/board"}},
+        "bios": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/bios"}},
+        "gpu_adapters": {"type": "array", "maxItems": 8, "items": {"$ref": "#/$defs/gpu"}},
+        "display_drivers": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/driver"}},
+        "gpu_memory": {"$ref": "#/$defs/gpuMemory"},
+        "disk_volumes": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/disk"}},
+        "pagefile": {"$ref": "#/$defs/pagefile"}, "power_plan": {"$ref": "#/$defs/power"}, "runtimes": {"$ref": "#/$defs/runtimes"}
+      }
+    },
+    "os": {
+      "type": "object", "additionalProperties": false, "required": ["product", "version", "build", "architecture", "sku", "secure_boot"],
+      "properties": {"product": {"$ref": "#/$defs/nullableString"}, "version": {"$ref": "#/$defs/nullableString"}, "build": {"$ref": "#/$defs/nullableString"}, "architecture": {"$ref": "#/$defs/nullableString"}, "sku": {"type": ["integer", "null"], "minimum": 0, "maximum": 1000}, "secure_boot": {"type": ["boolean", "null"]}}
+    },
+    "computer": {
+      "type": "object", "additionalProperties": false, "required": ["manufacturer", "model", "system_type", "total_memory_bytes", "available_memory_bytes"],
+      "properties": {"manufacturer": {"$ref": "#/$defs/nullableString"}, "model": {"$ref": "#/$defs/nullableString"}, "system_type": {"$ref": "#/$defs/nullableString"}, "total_memory_bytes": {"type": ["integer", "null"], "minimum": 0}, "available_memory_bytes": {"type": ["integer", "null"], "minimum": 0}}
+    },
+    "cpu": {
+      "type": "object", "additionalProperties": false, "required": ["slot_index", "name", "manufacturer", "architecture", "address_width", "physical_cores", "logical_processors", "max_clock_mhz", "virtualization_firmware", "second_level_address_translation", "vpro_enterprise", "vpro_evidence_source", "features"],
+      "properties": {"slot_index": {"type": "integer", "minimum": 0, "maximum": 3}, "name": {"$ref": "#/$defs/nullableString"}, "manufacturer": {"$ref": "#/$defs/nullableString"}, "architecture": {"$ref": "#/$defs/nullableString"}, "address_width": {"type": ["integer", "null"], "minimum": 32, "maximum": 64}, "physical_cores": {"type": ["integer", "null"], "minimum": 1, "maximum": 256}, "logical_processors": {"type": ["integer", "null"], "minimum": 1, "maximum": 512}, "max_clock_mhz": {"type": ["integer", "null"], "minimum": 1, "maximum": 100000}, "virtualization_firmware": {"type": ["boolean", "null"]}, "second_level_address_translation": {"type": ["boolean", "null"]}, "vpro_enterprise": {"type": ["boolean", "null"]}, "vpro_evidence_source": {"$ref": "#/$defs/nullableString"}, "features": {"$ref": "#/$defs/features"}}
+    },
+    "features": {
+      "type": "object", "additionalProperties": false, "required": ["aes", "avx", "avx2", "bmi1", "bmi2", "fma", "popcnt", "sse42"],
+      "properties": {"aes": {"type": ["boolean", "null"]}, "avx": {"type": ["boolean", "null"]}, "avx2": {"type": ["boolean", "null"]}, "bmi1": {"type": ["boolean", "null"]}, "bmi2": {"type": ["boolean", "null"]}, "fma": {"type": ["boolean", "null"]}, "popcnt": {"type": ["boolean", "null"]}, "sse42": {"type": ["boolean", "null"]}}
+    },
+    "memory": {
+      "type": "object", "additionalProperties": false, "required": ["slot_index", "capacity_bytes", "speed_mts", "configured_speed_mts", "smbios_memory_type", "data_width"],
+      "properties": {"slot_index": {"type": "integer", "minimum": 0, "maximum": 15}, "capacity_bytes": {"type": ["integer", "null"], "minimum": 1}, "speed_mts": {"type": ["integer", "null"], "minimum": 1}, "configured_speed_mts": {"type": ["integer", "null"], "minimum": 1}, "smbios_memory_type": {"type": ["integer", "null"], "minimum": 0, "maximum": 255}, "data_width": {"type": ["integer", "null"], "minimum": 1, "maximum": 1024}}
+    },
+    "board": {"type": "object", "additionalProperties": false, "required": ["manufacturer", "product", "revision"], "properties": {"manufacturer": {"$ref": "#/$defs/nullableString"}, "product": {"$ref": "#/$defs/nullableString"}, "revision": {"$ref": "#/$defs/nullableString"}}},
+    "bios": {"type": "object", "additionalProperties": false, "required": ["manufacturer", "version", "release_utc", "secure_boot"], "properties": {"manufacturer": {"$ref": "#/$defs/nullableString"}, "version": {"$ref": "#/$defs/nullableString"}, "release_utc": {"type": ["string", "null"], "maxLength": 32}, "secure_boot": {"type": ["boolean", "null"]}}},
+    "gpu": {"type": "object", "additionalProperties": false, "required": ["slot_index", "name", "vendor", "pnp_device_id", "driver_version", "driver_date_utc", "adapter_ram_bytes", "integrated", "status"], "properties": {"slot_index": {"type": "integer", "minimum": 0, "maximum": 7}, "name": {"$ref": "#/$defs/nullableString"}, "vendor": {"$ref": "#/$defs/nullableString"}, "pnp_device_id": {"type": ["string", "null"], "pattern": "^PCI\\\\VEN_[0-9A-F]{4}&DEV_[0-9A-F]{4}$"}, "driver_version": {"$ref": "#/$defs/nullableString"}, "driver_date_utc": {"type": ["string", "null"], "maxLength": 32}, "adapter_ram_bytes": {"type": ["integer", "null"], "minimum": 0}, "integrated": {"type": ["boolean", "null"]}, "status": {"$ref": "#/$defs/nullableString"}}},
+    "driver": {"type": "object", "additionalProperties": false, "required": ["slot_index", "name", "pnp_device_id", "driver_version", "driver_date_utc", "manufacturer", "signed", "signer_name"], "properties": {"slot_index": {"type": "integer", "maximum": 15, "minimum": 0}, "name": {"$ref": "#/$defs/nullableString"}, "pnp_device_id": {"type": ["string", "null"], "pattern": "^PCI\\\\VEN_[0-9A-F]{4}&DEV_[0-9A-F]{4}$"}, "driver_version": {"$ref": "#/$defs/nullableString"}, "driver_date_utc": {"type": ["string", "null"], "maxLength": 32}, "manufacturer": {"$ref": "#/$defs/nullableString"}, "signed": {"type": ["boolean", "null"]}, "signer_name": {"$ref": "#/$defs/nullableString"}}},
+    "gpuMemory": {"type": "object", "additionalProperties": false, "required": ["shared_capacity_bytes", "dedicated_capacity_bytes", "source"], "properties": {"shared_capacity_bytes": {"type": ["integer", "null"], "minimum": 0}, "dedicated_capacity_bytes": {"type": ["integer", "null"], "minimum": 0}, "source": {"type": "string", "maxLength": 64}}},
+    "disk": {"type": "object", "additionalProperties": false, "required": ["slot_index", "filesystem", "size_bytes", "free_bytes", "compressed"], "properties": {"slot_index": {"type": "integer", "minimum": 0, "maximum": 15}, "filesystem": {"$ref": "#/$defs/nullableString"}, "size_bytes": {"type": ["integer", "null"], "minimum": 1}, "free_bytes": {"type": ["integer", "null"], "minimum": 0}, "compressed": {"type": ["boolean", "null"]}}},
+    "pagefile": {"type": "object", "additionalProperties": false, "required": ["allocated_bytes", "current_usage_bytes", "peak_usage_bytes"], "properties": {"allocated_bytes": {"type": ["integer", "null"], "minimum": 0}, "current_usage_bytes": {"type": ["integer", "null"], "minimum": 0}, "peak_usage_bytes": {"type": ["integer", "null"], "minimum": 0}}},
+    "power": {"type": "object", "additionalProperties": false, "required": ["active", "scheme_guid", "name"], "properties": {"active": {"type": ["boolean", "null"]}, "scheme_guid": {"type": ["string", "null"], "maxLength": 36}, "name": {"$ref": "#/$defs/nullableString"}}},
+    "runtimes": {"type": "object", "additionalProperties": false, "required": ["vulkan", "opencl", "directml"], "properties": {"vulkan": {"$ref": "#/$defs/runtime"}, "opencl": {"$ref": "#/$defs/runtime"}, "directml": {"$ref": "#/$defs/runtime"}}},
+    "runtime": {"type": "object", "additionalProperties": false, "required": ["present", "version", "source"], "properties": {"present": {"type": "boolean"}, "version": {"type": ["string", "null"], "maxLength": 64}, "source": {"const": "system32-fixed-name-presence-only"}}},
+    "checks": {"type": "object", "additionalProperties": false, "required": ["hardware_match", "reason_codes"], "properties": {"hardware_match": {"const": false}, "reason_codes": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z0-9_]{1,64}$", "enum": ["available_memory_invalid", "baseboard_mismatch", "bios_evidence_incomplete", "cim_materialization_bound_unproven", "collector_execution_identity_unbound", "collector_hash_mismatch", "collector_signature_unproven", "collection_safety_unproven", "cpu_features_unproven", "cpu_sku_mismatch", "cpu_topology_invalid", "dell_manufacturer_mismatch", "directml_runtime_absent", "discrete_gpu_absence_unproven", "display_driver_binding_unproven", "duplicate_display_driver", "duplicate_gpu_device", "duplicate_memory_slot", "fixture_not_target_evidence", "fixed_disk_ntfs_unproven", "gpu_shared_memory_unproven", "integrated_gpu_unproven", "intel_gpu_identity_mismatch", "memory_ddr5_5600_mismatch", "memory_module_capacity_mismatch", "not_executed_on_target", "opencl_runtime_absent", "pagefile_unproven", "power_plan_unproven", "secure_boot_unproven", "separate_gpu_detected", "system_memory_mismatch", "target_trust_anchor_unavailable", "vpro_enterprise_unproven", "vulkan_runtime_absent", "windows_x64_mismatch"]}}}},
+    "verdict": {"type": "object", "additionalProperties": false, "required": ["status", "target_evidence_accepted"], "properties": {"status": {"const": "NOT_READY"}, "target_evidence_accepted": {"const": false}}}
+  }
+}
