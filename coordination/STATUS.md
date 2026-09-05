@@ -9,7 +9,22 @@
 - Critical path: contracts → fixture vertical slice → controlled model artifact → real CPU slice → tools → hardening/release
 - Shadeform policy: project `.env`, ownership-bound lifecycle, read-only catalogue before create, cost preflight, provider backstop longer than run, salvage before teardown, no idle instance
 - Known target: Dell Intel Core Ultra 7 vPro Enterprise-class platform; integrated `Intel Graphics` only, driver `32.0.101.8247`, 32 GB memory reported at 5600 MT/s, motherboard `039NNG A00`. Exact CPU SKU, GPU PNP/device ID/shared memory, OS/Vulkan facts, and measured available-memory topology still require the read-only receipt, so accelerated target promotion and final Phase 8 acceptance cannot yet be claimed
-- Security note: `coordination/SECURITY_INCIDENTS.md` records a legacy reference credential exposure; the credential was removed from project env copies and requires rotation at the source
+- Security note: `coordination/SECURITY_INCIDENTS.md` records the legacy reference credential exposure and SI-002's stopped local transfer incident; both require source-side credential rotation/revocation. No credential value, URL, or secret is recorded here.
+
+## Source, evidence, and gate truth
+
+- Source state is tracked independently from evidence and release approval. A
+  merged implementation is not a runtime receipt, an independent audit, or a
+  gate approval; no Phase gate is advanced by this refresh.
+- TOOL-032's durable action-journal source is merged on `main` from
+  `55f3dfd` (implementation) through `65decba` (merge). Its production
+  pathname-store and live-provider limitations remain blockers.
+- The external lifecycle line at `e5` was rejected; its repair is pending and
+  remote execution remains disabled. No new provider or target evidence is
+  claimed.
+- Graph source tip `4332e1a` remains on the separate
+  `luna/graph-action-reconciliation` branch pending independent audit. It is
+  not merged and does not establish live Graph readiness.
 
 ## Check-in cadence
 

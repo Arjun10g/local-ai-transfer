@@ -22,12 +22,14 @@
   hostile external-tools harness uses injected Graph/CDP/Copilot fakes and does
   not execute a real account, browser, Copilot service, or Windows process.
   Disabled/unconfigured provider definitions are now withheld from the model,
-  and a reviewed secret-free action-journal/controller barrier is merged.
-  However, its Node pathname store deliberately refuses every production
+  and the reviewed secret-free action-journal/controller barrier is source-
+  merged (`55f3dfd`, merge `65decba`). This source status is not independent
+  evidence or gate approval. However, its Node pathname store deliberately refuses every production
   action until a native handle-relative protected store exists. Graph provider
-  reconciliation is not implemented, browser/Copilot proposal state remains
-  memory-only, and browser/Copilot executable paths are not bound to immutable
-  file identity across preview and spawn.
+  reconciliation tip `4332e1a` remains unmerged and pending independent audit;
+  browser/Copilot proposal state remains memory-only, and browser/Copilot
+  executable paths are not bound to immutable file identity across preview and
+  spawn.
 - Impact: a passing model score or mocked provider run cannot establish safe
   end-to-end mail, Teams, browser-action, or Copilot readiness. A host restart
   after an ambiguous provider write can permit duplicate work, and a mutable
@@ -54,6 +56,9 @@
   candidate that passes that canary is eligible for the HF-backed evaluator.
 - Needed from: S2 candidate plan, S4 lifecycle review, and S0 authorization.
 - State: OPEN; does not block local mocked/source hardening.
+- Source/evidence correction: the external lifecycle line at `e5` was rejected
+  and its repair remains pending. Remote execution stays disabled; this does
+  not weaken the blocker or authorize a live retry.
 
 ## B-005 — Windows process/application launch boundary is not identity-pinned
 

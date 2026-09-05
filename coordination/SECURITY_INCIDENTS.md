@@ -9,3 +9,21 @@
 - Required external action: rotate/revoke the affected GitHub token in the Expert PreFetch environment.
 - Prevention: environment audits must parse variable names and emit an allowlisted presence result, never transform arbitrary lines for display.
 - Repository impact: no credential was committed; `.env` and credential-bearing files remain ignored and excluded from archives.
+
+## SI-002 — Unexpected local Hugging Face transfer stopped
+
+- Timestamp: 2026-09-05 (local observation)
+- Scope: local process inspection only; no credential value, URL, or secret is
+  recorded.
+- Symptom: an unexpected local `node`/`curl` Hugging Face transfer was found
+  and stopped. A credential was exposed in process arguments.
+- Containment: the process was stopped; no provider, model, or live execution
+  was authorized. No matching partial file was found in the workspace.
+- Required external action: rotate/revoke the exposed Hugging Face credential
+  at its source and inspect the relevant credential stores and supervisors.
+- Prevention: credentials must never be passed in subprocess arguments. Use
+  sanctioned secret handling with bounded, non-persistent transport instead;
+  audits must record only allowlisted executable/state facts, never values,
+  URLs, or secrets.
+- Repository impact: no credential value, URL, secret, or matching workspace
+  partial file was recorded or committed.

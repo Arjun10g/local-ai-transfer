@@ -1,5 +1,10 @@
 # Live Task Claims
 
+State semantics: source implementation, evidence, and gate approval are
+separate. `MERGED_SOURCE_PENDING_GATE` means source is on `main` only; it is
+not a release or live-readiness approval. `PENDING_INDEPENDENT_AUDIT` and
+`REJECTED_REPAIR_PENDING` are not approval states.
+
 | Task | Owner | Branch | State | Dependencies | Review owner | Evidence |
 |---|---|---|---|---|---|---|
 | SOL-001 | S0 | `main` | IN_PROGRESS | none | S4 | `coordination/` |
@@ -23,14 +28,14 @@
 | TOOL-017 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-013 | S0, S4 | `197649d`, `2e4c2fc`, `c706a2b`; allowlisted app/browser argv, external-egress gating/preview, strict args tests |
 | TOOL-018 | S3 | `luna/production-tool-advertisement-harness` | READY_FOR_REVIEW | TOOL-013, TOOL-022, RUN-020 | S0, S4 | `cbf63a2`; immutable configured-capability filtering, Windows subprocess exclusions, and mocked HostServer/controller vertical harness |
 | TOOL-022 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-003, SOL-003 | S0, S4 | `2f811f1`, `e30b06c`, `95805dc`, `4405ba7`, `bdc78df`, `83931e7`; strict provider contract/controller schema wiring; explicit config mapping; T0 enum validation; browser-action schemas/status; exact-IP DNS/CDP/startup/cleanup/replay/path hardening; disabled/unconfigured/fake-only evidence; focused 71-pass run and full npm 105-pass run |
-| TOOL-023 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-022, SOL-003 | S0, S4 | `2f811f1`, `e30b06c`; Graph Outlook/Teams endpoints, bounded hostile response projections, host revisions, at-most-once writes, profile/grant tests, explicit account/profile/scope mapping |
+| TOOL-023 | S3 | `luna/graph-action-reconciliation` | PENDING_INDEPENDENT_AUDIT | TOOL-022, SOL-003 | S0, S4 | `4332e1a`; Graph reconciliation source tip only. Not merged, not live, and pending independent audit; no provider evidence claimed |
 | TOOL-024 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-022, SOL-003 | S0, S4 | `2f811f1`, `e30b06c`, `a1230c8`; prompt-only Copilot stdin bridge with supported flags, minimal env, redaction/version/cancel tests, isolated provider status |
 | TOOL-025 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-022, SOL-003 | S0, S4 | `f30ad1b`, `d5cc74c`; bounded operator-configured process.run_allowlisted with strict per-action schemas, absolute executable/interpreter denylist, writable workspace cwd binding, canonical executable identity preview/dispatch binding, exact authorization objects, integer argv parity, minimal env/stdin/output bounds, cancellation/tree cleanup, at-most-once ledger, grant revocation, and focused/full green evidence |
-| TOOL-026 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-023, TOOL-024, SOL-003 | S0, S4 | `7e723d6`, `47f072a`, `890f600`, `de8d674`, `c6052d3`, `8c2c0dd`, `39a8be8`, `b2dac29`; Graph/UI hardening plus browser-control gate, module-owned workspace-bound Copilot context, strict ACP framing/cleanup, and production-registry regression; focused mocked 50-pass evidence, no heavy suite per laptop constraint |
-| QA-REMOTE-001 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-023, TOOL-024, TOOL-026, SOL-003 | S0, S4 | pending commit; marker-gated hostile loopback Graph/browser/CDP/Copilot ACP/grant harness with deterministic fuzz seeds, bounded soak, secret-free receipts, and local refusal self-test |
-| QA-REMOTE-002 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | QA-REMOTE-001, SOL-003 | S0, S4 | pending commit; plan-first Shadeform wrapper with exact audited closure upload, remote Node v24.20.0 Linux x64 SHA verification, explicit A100 target/review markers, watchdog/backstop, exact teardown, and receipt salvage |
+| TOOL-026 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-023, TOOL-024, SOL-003 | S0, S4 | `7e723d6`, `47f072a`, `890f600`, `de8d674`, `c6052d3`, `8c2c0dd`, `39a8be8`, `b2dac29`; historical Graph/UI predecessor plus browser/Copilot hardening; Graph reconciliation is tracked separately by TOOL-023 at `4332e1a` and remains pending audit, not merged/live |
+| QA-REMOTE-001 | S3 | `luna/agent-tools` | REJECTED_REPAIR_PENDING | TOOL-023, TOOL-024, TOOL-026, SOL-003 | S0, S4 | lifecycle/evidence line `e5` rejected; repair pending. The marker-gated hostile harness remains unapproved and unrun |
+| QA-REMOTE-002 | S3 | `luna/agent-tools` | REJECTED_REPAIR_PENDING | QA-REMOTE-001, SOL-003 | S0, S4 | lifecycle/evidence line `e5` rejected; repair pending. Remote Shadeform execution remains disabled; no target receipt or live result claimed |
 | TOOL-027 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-022, SOL-003 | S0, S4 | pending commit; opt-in browser safe-actions gate with configured HTTPS origins, inspected opaque handle/page bindings, strict text-field/no-navigation-button classes, T3 confirmation, post-action URL and validating-proxy egress checks; generic mutations remain test-only |
-| TOOL-032 | S3 | `luna/durable-action-journal-core` | READY_FOR_REVIEW | TOOL-013, TOOL-018 | S0, S4 | `2cf1f8b`; durable action/egress journal, controller fsync dispatch barrier, truthful hiding, bounded operator endpoints, deterministic crash tests |
+| TOOL-032 | S3 | `main` (merged from `luna/durable-action-journal-core`) | MERGED_SOURCE_PENDING_GATE | TOOL-013, TOOL-018 | S0, S4 | `55f3dfd` implementation; `65decba` merge; durable action/egress journal and controller barrier are source-merged, but independent evidence, production pathname-store availability, and gate approval remain pending |
 | QA-001 | S4 | `luna/qa-release` | CLAIMED | SOL-001 | S0 | pending |
 | SEC-001 | S4 | `luna/qa-release` | CLAIMED | QA-001, SOL-003 | S0 | pending |
 | RUN-019 | S1 | `main` | IN_PROGRESS | RUN-010, MODEL-004 | S0, S4 | real tool-role/template pipeline and tests pending |

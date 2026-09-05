@@ -12,3 +12,10 @@
 | Phase 7 | NOT_STARTED | Reproducible Windows release and Shadeform demo |
 | Phase 8 | BLOCKED | Exact Dell hardware/driver receipt and bounded target execution required |
 
+## Governance interpretation
+
+Source implementation, evidence, and gate approval are separate records. A
+source commit or merge can establish only what is present in the source tree;
+it does not establish runtime/target evidence, independent review, or release
+approval. `READY_FOR_REVIEW` means review is pending, not that the product is
+ready. No gate state above is advanced by a source-only merge or status update.
