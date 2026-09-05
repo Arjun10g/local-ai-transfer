@@ -68,10 +68,10 @@ function validateFrameShape(message) {
     } else if (message.method === 'session/request_permission') {
       // ACP permission requests are intentionally answered cancelled. Keep the
       // accepted shape narrow so a server cannot smuggle arbitrary authority.
-      const params = exactKeys(message.params, [], ['sessionId', 'toolCall', 'options']);
-      if (params.sessionId !== undefined && (typeof params.sessionId !== 'string' || params.sessionId.length < 1 || params.sessionId.length > 128 || /[\u0000-\u001f\u007f]/u.test(params.sessionId))) throw new ProviderToolError('provider_failed');
-      if (params.toolCall !== undefined) { const toolCall = exactKeys(params.toolCall, [], ['toolCallId', 'title', 'description', 'kind']); for (const key of ['toolCallId', 'title', 'description', 'kind']) if (toolCall[key] !== undefined && (typeof toolCall[key] !== 'string' || toolCall[key].length > 2048 || /[\u0000-\u001f\u007f]/u.test(toolCall[key]))) throw new ProviderToolError('provider_failed'); }
-      if (params.options !== undefined) { if (!Array.isArray(params.options) || params.options.length > 16) throw new ProviderToolError('provider_failed'); params.options.forEach(validatePermissionOption); }
+      const params = exactKeys(message.params, ['sessionId', 'toolCall', 'options']);
+      if (typeof params.sessionId !== 'string' || params.sessionId.length < 1 || params.sessionId.length > 128 || /[\u0000-\u001f\u007f]/u.test(params.sessionId)) throw new ProviderToolError('provider_failed');
+      const toolCall = exactKeys(params.toolCall, ['toolCallId', 'title'], ['description', 'kind']); for (const key of ['toolCallId', 'title', 'description', 'kind']) if (toolCall[key] !== undefined && (typeof toolCall[key] !== 'string' || toolCall[key].length > 2048 || /[\u0000-\u001f\u007f]/u.test(toolCall[key]))) throw new ProviderToolError('provider_failed');
+      if (!Array.isArray(params.options) || params.options.length > 16 || params.options.length < 1) throw new ProviderToolError('provider_failed'); params.options.forEach(validatePermissionOption);
     } else throw new ProviderToolError('provider_failed');
     return message;
   }

@@ -62,7 +62,7 @@ test('ACP session updates require exact session correlation and known update sha
 test('ACP command and permission payloads are strict bounded objects', () => {
   const command = { jsonrpc: '2.0', method: 'session/update', params: { sessionId: 's', update: { sessionUpdate: 'available_commands_update', availableCommands: [{ name: 'help', description: 'bounded' }] } } };
   assert.equal(parseCopilotAcpFrame(JSON.stringify(command)).params.update.availableCommands[0].name, 'help');
-  const permission = { jsonrpc: '2.0', id: 2, method: 'session/request_permission', params: { options: [{ optionId: 'allow_once', name: 'Allow once', kind: 'allow_once' }] } };
+  const permission = { jsonrpc: '2.0', id: 2, method: 'session/request_permission', params: { sessionId: 's', toolCall: { toolCallId: 'tc', title: 'bounded' }, options: [{ optionId: 'allow_once', name: 'Allow once', kind: 'allow_once' }] } };
   assert.equal(parseCopilotAcpFrame(JSON.stringify(permission)).params.options[0].optionId, 'allow_once');
   for (const invalid of [
     { ...command, params: { ...command.params, update: { ...command.params.update, availableCommands: [{ description: 'missing name' }] } } },
