@@ -3,7 +3,9 @@
 State semantics: source implementation, evidence, and gate approval are
 separate. `MERGED_SOURCE_PENDING_GATE` means source is on `main` only; it is
 not a release or live-readiness approval. `PENDING_INDEPENDENT_AUDIT` and
-`REJECTED_REPAIR_PENDING` are not approval states.
+`REJECTED_REPAIR_PENDING` are not approval states. `SUPERSEDED_SOURCE_HISTORY`
+retains a historical task without making it current authority;
+`BLOCKED_BELOW_GATE` records evidence that failed or cannot satisfy its gate.
 
 | Task | Owner | Branch | State | Dependencies | Review owner | Evidence |
 |---|---|---|---|---|---|---|
@@ -32,20 +34,20 @@ not a release or live-readiness approval. `PENDING_INDEPENDENT_AUDIT` and
 | TOOL-023 | S3 | `main` (merged from `luna/graph-action-reconciliation`) | MERGED_SOURCE_PENDING_GATE | TOOL-022, SOL-003 | S0, S4 | `b4702a5`; two independent source-safety approvals; 96-pass mocked post-merge run. Production journal and live-provider evidence remain unavailable |
 | TOOL-024 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-022, SOL-003 | S0, S4 | `2f811f1`, `e30b06c`, `a1230c8`; prompt-only Copilot stdin bridge with supported flags, minimal env, redaction/version/cancel tests, isolated provider status |
 | TOOL-025 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-022, SOL-003 | S0, S4 | `f30ad1b`, `d5cc74c`; bounded operator-configured process.run_allowlisted with strict per-action schemas, absolute executable/interpreter denylist, writable workspace cwd binding, canonical executable identity preview/dispatch binding, exact authorization objects, integer argv parity, minimal env/stdin/output bounds, cancellation/tree cleanup, at-most-once ledger, grant revocation, and focused/full green evidence |
-| TOOL-026 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-023, TOOL-024, SOL-003 | S0, S4 | `7e723d6`, `47f072a`, `890f600`, `de8d674`, `c6052d3`, `8c2c0dd`, `39a8be8`, `b2dac29`; historical Graph/UI predecessor plus browser/Copilot hardening; Graph reconciliation is tracked separately by TOOL-023 at `4332e1a` and remains pending audit, not merged/live |
+| TOOL-026 | S3 | `luna/agent-tools` | SUPERSEDED_SOURCE_HISTORY | TOOL-023, TOOL-024, SOL-003 | S0, S4 | historical Graph/UI predecessor plus browser/Copilot hardening. Current Graph reconciliation is tracked separately by TOOL-023 at `b4702a5` and is source-merged, not live-approved |
 | QA-REMOTE-001 | S3 | `main` | MERGED_SOURCE_PENDING_GATE | TOOL-023, TOOL-024, TOOL-026, SOL-003 | S0, S4 | marker-gated hostile harness source is present on `main`; its remote/live execution, evidence, and gate approval remain pending |
-| QA-REMOTE-002 | S3 | `luna/agent-tools` | REJECTED_REPAIR_PENDING | QA-REMOTE-001, SOL-003 | S0, S4 | lifecycle/evidence line `e5` rejected; repair pending. Remote Shadeform execution remains disabled; no target receipt or live result claimed |
-| TOOL-027 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-022, SOL-003 | S0, S4 | pending commit; opt-in browser safe-actions gate with configured HTTPS origins, inspected opaque handle/page bindings, strict text-field/no-navigation-button classes, T3 confirmation, post-action URL and validating-proxy egress checks; generic mutations remain test-only |
+| QA-REMOTE-002 | S3 | `main` (merged from `luna/external-tools-final`) | MERGED_SOURCE_PENDING_GATE | QA-REMOTE-001, SOL-003 | S0, S4 | lifecycle authority hardening merge `91de464`; remote execution remains false, no approved/committed cost-ledger genesis, and no new live/provider/target result is claimed |
+| TOOL-027 | S3 | `luna/browser-action-reconciliation` | REJECTED_REPAIR_PENDING | TOOL-022, TOOL-032, SOL-003 | S0, S4 | exact unmerged/rejected candidate `5dc2ad2`; no production journal, live browser, process, or Windows evidence; do not advertise or activate |
 | TOOL-032 | S3 | `main` (merged from `luna/durable-action-journal-core`) | MERGED_SOURCE_PENDING_GATE | TOOL-013, TOOL-018 | S0, S4 | `55f3dfd` implementation; `65decba` merge; durable action/egress journal and controller barrier are source-merged, but independent evidence, production pathname-store availability, and gate approval remain pending |
-| TOOL-WINFS-REFUSAL | S3 | `luna/windows-fs-refusal-slice` | READY_FOR_REVIEW | B-005, TOOL-014, TOOL-015 | S0, S4 | post-rebase repair commit; explicit Windows filesystem/package NOT_READY gates, outermost refusal, preserved `local_capabilities` status, and focused zero-mutation evidence in `coordination/status/S3.md`; no helper activation; `SAFE_FOR_TARGET_EXECUTION=NO` |
-| TOOL-034 | S3 | `luna/native-journal-protocol-slice` | READY_FOR_REVIEW | TOOL-032, B-005-SOURCE | S0, S1, S4 | rebased `fff2967`, `cf4dac1`, `40a6463` on `main@d704b81`; bounded canonical/HMAC journal protocol, exact transition- and predecessor-bound detail pagination, synthetic vectors, and focused adversarial tests only; no helper/store/transport/activation and production availability remains false |
+| TOOL-WINFS-REFUSAL | S3 | `main` (merged from `luna/windows-fs-refusal-slice`) | MERGED_SOURCE_PENDING_GATE | B-005, TOOL-014, TOOL-015 | S0, S4 | refusal merge `7cea137`; Windows filesystem/package paths refuse before access/write/spawn; no helper activation or target functionality; `SAFE_FOR_TARGET_EXECUTION=NO` |
+| TOOL-034 | S3 | `main` (merged from `luna/native-journal-protocol-slice`) | MERGED_SOURCE_PENDING_GATE | TOOL-032, B-005-SOURCE | S0, S1, S4 | protocol implementation `40a6463`, merge `3746421`; bounded canonical/HMAC contract and synthetic vectors only; no helper/store/transport/trust anchor/package/activation and production availability remains false |
 | QA-001 | S4 | `luna/qa-release` | CLAIMED | SOL-001 | S0 | pending |
-| QA-SAFE-RUNNER | S4 | `luna/qa-safe-runner` | READY_FOR_REVIEW | QA-001, SOL-003 | rebased repair `4c0aa29` plus new-main inventory port `ff02b0a` on `main@91de464`; exact whole-test-tree classification includes the merged lifecycle tests, strict bounded TAP, POSIX dir-fd/reopened-identity create-new output with exact durable failure cleanup and private final parent, early Windows file-output refusal, metadata-only package planning; 21 repair-focused tests pass; release remains BLOCKED |
+| QA-SAFE-RUNNER | S4 | `main` (merged from `luna/qa-safe-runner`) | MERGED_SOURCE_PENDING_GATE | QA-001, SOL-003 | S0 | repair `4c0aa29`, inventory port `ff02b0a`, audited tip `7072940`, merge `d704b816`; plan-only classification and publication hardening are source-merged; unsafe lanes remain `SKIP`/`UNPROVEN` and release remains `BLOCKED` |
 | SEC-001 | S4 | `luna/qa-release` | CLAIMED | QA-001, SOL-003 | S0 | pending |
 | RUN-019 | S1 | `main` | IN_PROGRESS | RUN-010, MODEL-004 | S0, S4 | real tool-role/template pipeline and tests pending |
 | RUN-020 | S1 | `main` | IN_PROGRESS | RUN-019, TOOL-001 | S0, S4 | structured Qwen call normalization evidence pending |
-| MODEL-006 | S2 | `main` | IN_PROGRESS | MODEL-002, TOOL-014 | S0, S4 | bounded local GGUF evaluation pending |
-| MODEL-007 | S2 | `main` | IN_PROGRESS | MODEL-006, RUN-020 | S0, S4 | tool prompt/bundle evaluation pending |
+| MODEL-006 | S2 | `main` | BLOCKED_BELOW_GATE | MODEL-002, TOOL-014 | S0, S4 | expected Q4 identity is fixed, but ignored local bytes/custody are unapproved; strongest general remote evaluation 27/34 is below gate; bounded accepted-artifact local evaluation remains absent |
+| MODEL-007 | S2 | `main` | BLOCKED_BELOW_GATE | MODEL-006, RUN-020 | S0, S4 | production-profile evaluation 13/32 (19 failures); corrected later attempts ended during provider activation, not evaluation |
 | QA-010 | S4 | `main` | IN_PROGRESS | TOOL-018, MODEL-006 | S0 | heavy autonomous tool tests pending |
 | SEC-006 | S4 | `main` | IN_PROGRESS | RUN-020, TOOL-019 | S0 | parser/schema adversarial evidence pending |
 | SOL-G4 | S0 | `main` | IN_PROGRESS | RUN-020, MODEL-007, QA-010 | S4 | release-hardening review in progress |

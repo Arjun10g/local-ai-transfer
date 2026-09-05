@@ -57,9 +57,10 @@
   candidate that passes that canary is eligible for the HF-backed evaluator.
 - Needed from: S2 candidate plan, S4 lifecycle review, and S0 authorization.
 - State: OPEN; does not block local mocked/source hardening.
-- Source/evidence correction: the external lifecycle line at `e5` was rejected
-  and its repair remains pending. Remote execution stays disabled; this does
-  not weaken the blocker or authorize a live retry.
+- Source/evidence correction: lifecycle authority hardening is source-merged
+  at `91de464`, but `REMOTE_EXECUTION_ENABLED=False` remains binding and no
+  approved/committed cost-ledger genesis exists. The merge neither authorizes
+  a live retry nor supplies model-quality evidence.
 
 ## B-005 — Windows process/application launch boundary is not identity-pinned
 
@@ -86,3 +87,25 @@
   acceptance.
 - Needed from: S1/S3 implementation, S4 security review, and target operator.
 - State: OPEN; blocks Phase 3/4/6 readiness and full laptop-control claims.
+
+## B-006 — Model/tool quality and artifact acceptance remain below gate
+
+- Fact: the strongest recorded general remote tool evaluation completed at
+  27/34, below its gate. A separate production-profile run completed at 13/32
+  with 19 failures and therefore failed that profile. Subsequent corrected
+  attempts did not reach evaluation because provider activation timed out.
+- Fact: the product verifier pins `Qwen3.5-9B-Q4_K_M.gguf` to exactly
+  5,629,109,088 bytes and SHA-256
+  `c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b`.
+  That technical identity does not approve ignored local bytes or establish
+  transfer custody. Local revalidation, an approved transfer receipt, and the
+  chain of custody remain unset.
+- Impact: neither model/tool quality nor the deployable local artifact is
+  accepted for release.
+- Workaround: keep the known identity as a fail-closed verifier constraint;
+  do not load or distribute local bytes until an approved transfer and fresh
+  verification receipt exist. Resume quality work only through the separately
+  authorized, lifecycle-gated route.
+- Needed from: S0/S2 artifact and quality approval, S4 evidence review, and the
+  target operator for the approved transfer/acceptance route.
+- State: OPEN; blocks Phase 1/2/4/7/8 and every readiness claim.
