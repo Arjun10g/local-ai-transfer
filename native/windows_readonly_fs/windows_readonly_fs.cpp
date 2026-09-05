@@ -24,6 +24,12 @@ constexpr DWORD kObjectShare = FILE_SHARE_READ;  // Deny WRITE and DELETE.
 constexpr DWORD kPrivateAccess = FILE_ALL_ACCESS;
 constexpr ULONG kRelativeOpenOptions =
     FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT;
+// Both gates are deliberately false. Synchronous NtOpenFile and directory
+// enumeration cannot honor an in-process deadline reliably; no operation may
+// reach them until an independently reviewed broker issuer and killable/
+// cancellable I/O boundary replace these source-only gates.
+constexpr bool kAuthenticatedGrantIssuerAvailable = false;
+constexpr bool kCancellableNativeIoBoundaryAvailable = false;
 
 class UniqueHandle final {
  public:
@@ -419,7 +425,7 @@ Status open_drive_root(const Request& request, const wchar_t (&drive_root)[4],
   std::uint64_t ignored_size = 0;
   ObjectIdentity identity{};
   Status status = inspect_object(handle.get(), current_sid,
-                                 request.expected_root_identity.volume_serial,
+                                 request.grant_capability->root_identity().volume_serial,
                                  false, &kind, &ignored_size, identity);
   if (status != Status::kOk) return status;
   if (kind != ObjectKind::kDirectory) return Status::kUnsupportedFileType;
@@ -448,7 +454,7 @@ Status open_grant_components(const Request& request,
     std::uint64_t ignored_size = 0;
     ObjectIdentity identity{};
     status = inspect_object(handle.get(), current_sid,
-                            request.expected_root_identity.volume_serial, true,
+                            request.grant_capability->root_identity().volume_serial, true,
                             &kind, &ignored_size, identity);
     if (status != Status::kOk) return status;
     if (kind != ObjectKind::kDirectory)
@@ -458,7 +464,8 @@ Status open_grant_components(const Request& request,
     start = end + 1;
   }
   if (held.size() < 2 ||
-      !same_identity(held.back().identity, request.expected_root_identity))
+      !same_identity(held.back().identity,
+                     request.grant_capability->root_identity()))
     return Status::kIdentityMismatch;
   std::wstring resolved;
   if (!final_path(held.back().handle.get(), resolved) ||
@@ -585,15 +592,25 @@ Status list_target(const Request& request, PSID current_sid,
     }
     std::size_t offset = 0;
     for (;;) {
-      if (offset > buffer.size() - offsetof(FILE_ID_BOTH_DIR_INFO, FileName))
+      constexpr std::size_t header_bytes =
+          offsetof(FILE_ID_BOTH_DIR_INFO, FileName);
+      if (offset > buffer.size() - header_bytes)
         return Status::kIoFailed;
       const auto* item = reinterpret_cast<const FILE_ID_BOTH_DIR_INFO*>(
           buffer.data() + offset);
+      const std::size_t remaining = buffer.size() - offset;
+      const std::size_t next = item->NextEntryOffset;
+      std::size_t record_bytes = remaining;
+      if (next != 0) {
+        if ((next % sizeof(void*)) != 0 || next < header_bytes ||
+            next > remaining)
+          return Status::kIoFailed;
+        record_bytes = next;
+      }
       if ((item->FileNameLength % sizeof(wchar_t)) != 0 ||
           item->FileNameLength == 0 ||
           item->FileNameLength > kMaxComponentCharacters * sizeof(wchar_t) ||
-          item->FileNameLength >
-              buffer.size() - offset - offsetof(FILE_ID_BOTH_DIR_INFO, FileName))
+          item->FileNameLength > record_bytes - header_bytes)
         return Status::kBoundsExceeded;
       const std::wstring name(item->FileName,
                               item->FileNameLength / sizeof(wchar_t));
@@ -622,12 +639,8 @@ Status list_target(const Request& request, PSID current_sid,
         response.entries.push_back(Entry{std::move(utf8_name), kind, size});
         held.push_back(HeldObject{std::move(child), identity, kind, true});
       }
-      if (item->NextEntryOffset == 0) break;
-      if ((item->NextEntryOffset % sizeof(void*)) != 0 ||
-          item->NextEntryOffset < offsetof(FILE_ID_BOTH_DIR_INFO, FileName) ||
-          item->NextEntryOffset > buffer.size() - offset)
-        return Status::kIoFailed;
-      offset += item->NextEntryOffset;
+      if (next == 0) break;
+      offset += next;
     }
   }
   response.receipt.entries_returned =
@@ -698,10 +711,6 @@ Status read_target(const Request& request, PSID current_sid,
 
 bool valid_request(const Request& request) {
   if (request.abi_version != kAbiVersion ||
-      !valid_grant_id(request.grant_id) ||
-      request.expected_root_identity.volume_serial == 0 ||
-      all_zero(request.expected_root_identity.file_id.data(),
-               request.expected_root_identity.file_id.size()) ||
       request.relative_components.size() > kMaxComponents ||
       request.execution.monotonic_ms == nullptr ||
       request.execution.is_cancelled == nullptr)
@@ -724,7 +733,6 @@ void initialize_receipt(const Request& request, Status status,
   response.receipt = Receipt{};
   response.receipt.status = status_name(status);
   response.receipt.operation = operation_name(request.operation);
-  if (valid_grant_id(request.grant_id)) response.receipt.grant_id = request.grant_id;
   response.receipt.component_count = static_cast<std::uint32_t>(
       std::min<std::size_t>(request.relative_components.size(), kMaxComponents));
 }
@@ -734,6 +742,26 @@ void initialize_receipt(const Request& request, Status status,
 struct ReadLease::Impl {
   std::vector<HeldObject> held;
 };
+
+bool BrokerGrantCapability::valid() const noexcept {
+  return kAuthenticatedGrantIssuerAvailable && authenticated_ &&
+         allowed_operations_ != 0 && expires_monotonic_ms_ != 0 &&
+         valid_grant_id(grant_id_) && !absolute_root_.empty() &&
+         root_identity_.volume_serial != 0 &&
+         !all_zero(root_identity_.file_id.data(), root_identity_.file_id.size()) &&
+         !all_zero(authority_nonce_.data(), authority_nonce_.size()) &&
+         !all_zero(request_binding_digest_.data(), request_binding_digest_.size()) &&
+         !all_zero(mac_.data(), mac_.size());
+}
+const std::string& BrokerGrantCapability::grant_id() const noexcept {
+  return grant_id_;
+}
+const std::wstring& BrokerGrantCapability::absolute_root() const noexcept {
+  return absolute_root_;
+}
+const ObjectIdentity& BrokerGrantCapability::root_identity() const noexcept {
+  return root_identity_;
+}
 
 ReadLease::ReadLease() noexcept = default;
 ReadLease::~ReadLease() = default;
@@ -755,6 +783,21 @@ Status execute_readonly(const Request& request, ReadLease& lease,
       initialize_receipt(request, status, response);
       return status;
     }
+    // This refusal intentionally precedes capability dereference, root/path
+    // normalization, token access, and every CreateFile/NtOpenFile/read/list
+    // operation. No caller-supplied field can bypass either missing boundary.
+    if (!kAuthenticatedGrantIssuerAvailable ||
+        !kCancellableNativeIoBoundaryAvailable) {
+      status = Status::kPlatformUnavailable;
+      initialize_receipt(request, status, response);
+      return status;
+    }
+    if (request.grant_capability == nullptr ||
+        !request.grant_capability->valid()) {
+      status = Status::kUnsafeGrant;
+      initialize_receipt(request, status, response);
+      return status;
+    }
     status = checkpoint(request.execution);
     if (status != Status::kOk) {
       initialize_receipt(request, status, response);
@@ -762,7 +805,8 @@ Status execute_readonly(const Request& request, ReadLease& lease,
     }
     std::wstring canonical;
     wchar_t drive_root[4]{};
-    if (!canonical_root(request.absolute_grant_root, canonical, drive_root)) {
+    if (!canonical_root(request.grant_capability->absolute_root(), canonical,
+                        drive_root)) {
       status = Status::kUnsafeGrant;
       initialize_receipt(request, status, response);
       return status;
@@ -782,7 +826,7 @@ Status execute_readonly(const Request& request, ReadLease& lease,
     }
     candidate->held.push_back(std::move(root));
     status = validate_volume(candidate->held.front().handle.get(), drive_root,
-                             request.expected_root_identity.volume_serial);
+                             request.grant_capability->root_identity().volume_serial);
     if (status != Status::kOk) {
       initialize_receipt(request, status, response);
       return status;
@@ -811,7 +855,7 @@ Status execute_readonly(const Request& request, ReadLease& lease,
     }
     if (status == Status::kOk)
       status = validate_held(candidate->held, user.sid,
-                             request.expected_root_identity.volume_serial);
+                             request.grant_capability->root_identity().volume_serial);
     if (status == Status::kOk) status = checkpoint(request.execution);
     if (status != Status::kOk) {
       response = Response{};

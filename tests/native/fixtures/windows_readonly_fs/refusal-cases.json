@@ -1,5 +1,25 @@
 {
-  "schema": "lae.windows-readonly-fs.static-cases.v1",
+  "schema": "lae.windows-readonly-fs.static-cases.v2",
+  "public_entry_cases": [
+    {
+      "name": "missing_broker_capability",
+      "state": {"grant_capability": null},
+      "status": "platform_unavailable",
+      "filesystem_access": false
+    },
+    {
+      "name": "forged_caller_root_and_identity_fields",
+      "state": {"absolute_grant_root": "C:\\forged", "expected_root_identity": "forged"},
+      "status": "platform_unavailable",
+      "filesystem_access": false
+    },
+    {
+      "name": "blocking_open_never_started",
+      "state": {"grant_capability": "opaque", "operation": "read", "cancel_during_open": true},
+      "status": "platform_unavailable",
+      "filesystem_access": false
+    }
+  ],
   "cases": [
     {
       "name": "invalid_request",

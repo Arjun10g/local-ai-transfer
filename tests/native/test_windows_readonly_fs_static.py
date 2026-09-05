@@ -15,8 +15,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 CPP = ROOT / "native" / "windows_readonly_fs" / "windows_readonly_fs.cpp"
 HPP = ROOT / "native" / "windows_readonly_fs" / "windows_readonly_fs.hpp"
-CONTRACT = ROOT / "contracts" / "windows-readonly-fs" / "v0.1.0.json"
-PROSE = ROOT / "contracts" / "windows-readonly-fs" / "v0.1.0.md"
+CONTRACT = ROOT / "contracts" / "windows-readonly-fs" / "v0.2.0.json"
+PROSE = ROOT / "contracts" / "windows-readonly-fs" / "v0.2.0.md"
 CASES = ROOT / "tests" / "native" / "fixtures" / "windows_readonly_fs" / "refusal-cases.json"
 MAX_SOURCE_BYTES = 256 * 1024
 MAX_JSON_BYTES = 64 * 1024
@@ -85,6 +85,21 @@ def readonly_decision(state):
     return "ok", trace
 
 
+def directory_record_name_is_bounded(*, remaining, next_offset, header, name_bytes):
+    if remaining < header:
+        return False
+    record_bytes = remaining
+    if next_offset:
+        if next_offset < header or next_offset > remaining or next_offset % 8:
+            return False
+        record_bytes = next_offset
+    return 0 < name_bytes <= record_bytes - header
+
+
+def public_entry_decision(_state):
+    return "platform_unavailable", []
+
+
 class WindowsReadonlyFilesystemStaticTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -98,7 +113,8 @@ class WindowsReadonlyFilesystemStaticTests(unittest.TestCase):
         for key in (
             "production_available", "native_target_registered", "helper_added",
             "transport_added", "node_integration_added", "package_added",
-            "activation_permitted",
+            "activation_permitted", "authenticated_grant_issuer_available",
+            "cancellable_native_io_available",
         ):
             self.assertIs(self.contract[key], False)
         cmake = source(ROOT / "native" / "CMakeLists.txt")
@@ -133,12 +149,39 @@ class WindowsReadonlyFilesystemStaticTests(unittest.TestCase):
             'supplied.rfind(L"\\\\\\\\", 0)', 'supplied.rfind(L"\\\\\\\\?\\\\", 0)',
             'supplied.rfind(L"\\\\\\\\.\\\\", 0)', "index != 1",
             "FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT",
-            "same_identity(held.back().identity, request.expected_root_identity)",
+            "same_identity(held.back().identity,",
             "GetFinalPathNameByHandleW", "equal_path(resolved, canonical)",
         ):
             self.assertIn(token, self.cpp)
-        self.assertIn("expected_root_identity", self.hpp)
-        self.assertIn("all_zero(request.expected_root_identity.file_id.data()", self.cpp)
+        self.assertIn("BrokerGrantCapability", self.hpp)
+        self.assertNotIn("absolute_grant_root", self.hpp)
+        self.assertNotIn("expected_root_identity", self.hpp)
+        self.assertIn("request.grant_capability->root_identity()", self.cpp)
+
+    def test_public_entry_refuses_before_all_authority_path_token_and_io_access(self):
+        execute = self.cpp[self.cpp.index("Status execute_readonly("):]
+        refusal = execute.index("!kAuthenticatedGrantIssuerAvailable")
+        self.assertLess(refusal, execute.index("request.grant_capability->valid()"))
+        for later in ("canonical_root(", "current_user(", "open_drive_root(", "open_grant_components(", "open_request_target(", "stat_target(", "list_target(", "read_target("):
+            self.assertLess(refusal, execute.index(later), later)
+        self.assertIn("constexpr bool kAuthenticatedGrantIssuerAvailable = false", self.cpp)
+        self.assertIn("constexpr bool kCancellableNativeIoBoundaryAvailable = false", self.cpp)
+        self.assertEqual(
+            "platform_unavailable_before_capability_path_token_or_filesystem_access",
+            self.contract["public_execution"],
+        )
+
+    def test_grant_authority_is_opaque_nonconstructible_and_not_caller_fields(self):
+        request = re.search(r"struct Request \{(.+?)\n\};", self.hpp, re.S).group(1)
+        self.assertIn("const BrokerGrantCapability* grant_capability", request)
+        for forbidden in ("grant_id", "absolute_grant_root", "expected_root_identity", "authority_nonce", "mac_"):
+            self.assertNotIn(forbidden, request)
+        capability = re.search(r"class BrokerGrantCapability final \{(.+?)\n\};", self.hpp, re.S).group(1)
+        private = capability.split("private:", 1)[1]
+        for bound in ("grant_id_", "absolute_root_", "root_identity_", "allowed_operations_", "expires_monotonic_ms_", "authority_nonce_", "request_binding_digest_", "mac_"):
+            self.assertIn(bound, private)
+        for forbidden in (r"\bissue\s*\(", r"\bdeserialize\s*\(", r"\bset_[A-Za-z0-9_]*\s*\(", r"ForTest"):
+            self.assertNotRegex(self.hpp + self.cpp, forbidden)
 
     def test_all_descendants_use_handle_relative_one_component_nofollow_opens(self):
         for token in (
@@ -200,6 +243,23 @@ class WindowsReadonlyFilesystemStaticTests(unittest.TestCase):
             self.cpp.index("response.entries.push_back"),
         )
 
+    def test_directory_name_is_bounded_by_current_record_not_shared_buffer(self):
+        for token in (
+            "const std::size_t next = item->NextEntryOffset",
+            "std::size_t record_bytes = remaining",
+            "record_bytes = next",
+            "item->FileNameLength > record_bytes - header_bytes",
+        ):
+            self.assertIn(token, self.cpp)
+        # This name fits the remaining allocation but crosses into the next
+        # record and must be refused.
+        self.assertFalse(directory_record_name_is_bounded(
+            remaining=1024, next_offset=128, header=96, name_bytes=64,
+        ))
+        self.assertTrue(directory_record_name_is_bounded(
+            remaining=1024, next_offset=160, header=96, name_bytes=64,
+        ))
+
     def test_read_is_bounded_chunked_strict_utf8_and_binary_refusing(self):
         for token in (
             "kMaxReadBytes = 65'536", "kMaxReadableFileBytes = 16'777'216",
@@ -210,10 +270,12 @@ class WindowsReadonlyFilesystemStaticTests(unittest.TestCase):
         ):
             self.assertIn(token, self.hpp + self.cpp)
 
-    def test_deadline_cancel_and_failure_outputs_are_checked_throughout(self):
+    def test_deadline_cancel_latent_checks_are_not_claimed_as_blocking_io_cancellation(self):
         self.assertGreaterEqual(self.cpp.count("checkpoint(request.execution)"), 8)
         self.assertIn("execution.is_cancelled(execution.opaque)", self.cpp)
         self.assertIn("now >= execution.deadline_monotonic_ms", self.cpp)
+        self.assertIn("latent checkpoints are insufficient", self.contract["cancellation"]["checks"])
+        self.assertIn("unreachable", self.contract["cancellation"]["blocking_io"])
         failure_block = re.search(
             r"if \(status != Status::kOk\) \{\n      response = Response\{\};(.+?)return status;",
             self.cpp,
@@ -232,10 +294,16 @@ class WindowsReadonlyFilesystemStaticTests(unittest.TestCase):
         ).group(1)
         source_statuses = set(re.findall(r'return "([a-z0-9_]+)";', status_switch))
         self.assertEqual(source_statuses, set(self.contract["status_codes"]))
-        self.assertIn("kAbiVersion = 1", self.hpp)
+        self.assertIn("kAbiVersion = 2", self.hpp)
 
     def test_static_refusal_vectors_match_and_never_publish_unsafe_results(self):
-        self.assertEqual(self.cases["schema"], "lae.windows-readonly-fs.static-cases.v1")
+        self.assertEqual(self.cases["schema"], "lae.windows-readonly-fs.static-cases.v2")
+        for case in self.cases["public_entry_cases"]:
+            with self.subTest(case=case["name"]):
+                status, trace = public_entry_decision(case["state"])
+                self.assertEqual(status, case["status"])
+                self.assertFalse(case["filesystem_access"])
+                self.assertEqual([], trace)
         for case in self.cases["cases"]:
             with self.subTest(case=case["name"]):
                 status, trace = readonly_decision(case["state"])

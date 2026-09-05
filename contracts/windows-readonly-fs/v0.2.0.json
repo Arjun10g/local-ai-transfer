@@ -1,7 +1,7 @@
 {
-  "schema_version": "lae.windows-readonly-fs.v1",
-  "$id": "lae://contracts/windows-readonly-fs/0.1.0",
-  "version": "0.1.0",
+  "schema_version": "lae.windows-readonly-fs.v2",
+  "$id": "lae://contracts/windows-readonly-fs/0.2.0",
+  "version": "0.2.0",
   "status": "source_only_not_enabled",
   "production_available": false,
   "native_target_registered": false,
@@ -10,8 +10,11 @@
   "node_integration_added": false,
   "package_added": false,
   "activation_permitted": false,
+  "authenticated_grant_issuer_available": false,
+  "cancellable_native_io_available": false,
+  "public_execution": "platform_unavailable_before_capability_path_token_or_filesystem_access",
   "platform": "windows_x64_source_only",
-  "abi_version": 1,
+  "abi_version": 2,
   "operations": [
     "stat",
     "list",
@@ -32,17 +35,14 @@
     "required": [
       "abi_version",
       "operation",
-      "grant_id",
-      "absolute_grant_root",
-      "expected_root_identity",
+      "grant_capability",
       "relative_components",
       "offset",
       "max_bytes",
       "execution"
     ],
     "unknown_fields": "reject",
-    "grant_id": "1_to_64_lowercase_ascii_alnum_hyphen_underscore",
-    "expected_root_identity": "nonzero_FILE_ID_INFO_volume_serial_and_128_bit_file_id_from_independent_grant_authority",
+    "grant_capability": "opaque_nonconstructible_broker_issued_MAC_and_request_bound_authority; issuer_absent_in_this_slice",
     "relative_components": "zero_to_64_individually_validated_UTF16_components_never_joined",
     "operation_rules": {
       "stat": "offset_and_max_bytes_must_be_zero",
@@ -62,7 +62,7 @@
     "read_chunk_bytes": 16384
   },
   "path_and_handle_policy": {
-    "root_path": "exact canonical absolute DOS drive path; UNC, extended, device, ADS, slash, dot, reserved, trailing-dot-space, malformed UTF16, and aliases refused",
+    "root_path": "latent implementation reads an exact canonical absolute DOS drive path only from the opaque grant capability; no caller request field supplies it; UNC, extended, device, ADS, slash, dot, reserved, trailing-dot-space, malformed UTF16, and aliases refused",
     "root_open": "CreateFileW opens only the fixed drive root with OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS plus FILE_FLAG_OPEN_REPARSE_POINT, and FILE_SHARE_READ only; each grant-root component is then a relative NtOpenFile",
     "descendant_open": "every grant-root and request component uses NtOpenFile OBJECT_ATTRIBUTES.RootDirectory against the retained parent and exactly one validated component",
     "pathname_fallback": false,
@@ -74,7 +74,7 @@
     "alternate_data_streams": "colon is refused in every caller or enumerated component"
   },
   "security_policy": {
-    "root_identity": "exact independently supplied FILE_ID_INFO volume serial and 128-bit file ID",
+    "root_identity": "exact FILE_ID_INFO volume serial and 128-bit file ID carried only by a future authenticated broker-issued capability",
     "current_user": "non-service current process token user SID",
     "acl": "every grant-root component and request/list target must be owned by current user and have a protected, nondefaulted DACL with exactly one noninherited FILE_ALL_ACCESS allow ACE for that SID; the fixed volume root is identity-held but exempt",
     "receipt": "finite metadata only; no root, relative path, SID, user, file text, list names, OS error, or free-form diagnostic"
@@ -109,12 +109,13 @@
       "FILE_ATTRIBUTE_VIRTUAL"
     ],
     "read_encoding": "strict UTF-8 only; embedded NUL is binary_refused; invalid or partial UTF-8 is utf8_required",
-    "list": "each enumerated name is validated then independently relative-opened and inspected before inclusion; any unsafe/raced entry fails the whole call"
+    "list": "each record name is bounded by that record's validated NextEntryOffset before validation; each name is then independently relative-opened and inspected before inclusion; any unsafe/raced entry fails the whole call"
   },
   "cancellation": {
     "clock": "caller-provided monotonic callback",
     "deadline": "mandatory absolute monotonic deadline",
-    "checks": "before and after root/traversal/list/read chunks and before final identity validation",
+    "checks": "latent checkpoints are insufficient for blocking native calls; public execution refuses until a genuinely cancellable or killable native I/O boundary exists",
+    "blocking_io": "NtOpenFile, GetFileInformationByHandleEx enumeration, and synchronous ReadFile are unreachable from the public entrypoint in this slice",
     "failure_output": "no file text, entries, stat result, or retained lease"
   },
   "status_codes": [
@@ -143,6 +144,8 @@
   ],
   "residual_gates": [
     "independent source and security audit",
+    "authenticated broker capability issuer with operation arguments deadline nonce and root identity MAC binding",
+    "genuinely cancellable worker/overlapped or supervised fail-stop boundary covering open enumeration and read",
     "remote Windows SDK compile and static analysis",
     "signed and manifest-pinned helper/library artifact design",
     "authenticated bounded foreground transport and supervision",
