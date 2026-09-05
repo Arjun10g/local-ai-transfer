@@ -1,0 +1,72 @@
+{
+  "schema": "local_bmo.windows-release-verifier-contract.v0.1.0",
+  "status": "source_only_not_activated",
+  "closed_contract": true,
+  "unknown_fields": "reject",
+  "limits": {
+    "manifest_entries": 64,
+    "path_components": 16,
+    "component_utf16_code_units": 255,
+    "single_file_bytes": 268435456,
+    "tree_bytes": 1073741824,
+    "directory_records": 512,
+    "directory_buffer_bytes": 65536,
+    "hash_chunk_bytes": 65536,
+    "receipt_bytes": 4096
+  },
+  "activation_gates": {
+    "compiled_manifest_identity_trusted": false,
+    "authenticode_policy_trusted": false,
+    "cancellable_native_io_trusted": false,
+    "public_behavior": "refuse_before_request_dereference_or_path_file_access"
+  },
+  "root_authority": {
+    "source": "future_authenticated_supervisor_preopened_directory_handle_only",
+    "path_input": "forbidden",
+    "lifetime": "duplicated_then_retained_until_receipt_finalization",
+    "required_access": ["FILE_LIST_DIRECTORY", "FILE_READ_ATTRIBUTES", "READ_CONTROL", "SYNCHRONIZE"],
+    "share_mode": ["FILE_SHARE_READ"],
+    "required_flags": ["FILE_FLAG_BACKUP_SEMANTICS", "FILE_FLAG_OPEN_REPARSE_POINT"],
+    "identity": "FILE_ID_INFO volume serial plus 128-bit file ID, stable before and after verification",
+    "security": "protected current-user-only owner and DACL required",
+    "volume": "fixed non-hotplug local NTFS with persistent ACLs"
+  },
+  "manifest": {
+    "identity": "SHA-256 of exact bounded compiled-in manifest bytes",
+    "entries": "strictly sorted finite allowlist of canonical relative file paths, sizes, SHA-256 digests, and signer policies",
+    "duplicates": "reject exact, ordinal-case-insensitive, and normalized component collisions",
+    "model": "external and excluded; no model path, size, digest, or handle is accepted by this verifier"
+  },
+  "tree_walk": {
+    "root": "use only retained preopened handle",
+    "descendants": "one safe UTF-16 component per NtOpenFile RootDirectory open",
+    "open_options": ["FILE_OPEN_REPARSE_POINT", "FILE_SYNCHRONOUS_IO_NONALERT"],
+    "share_mode": ["FILE_SHARE_READ"],
+    "inventory": "enumerate every reachable object beneath expected directories and require exact derived directory plus manifest file set",
+    "reject_names": ["empty", "dot", "dotdot", "separator", "colon_or_ADS", "device", "reserved_DOS", "trailing_dot_or_space", "control", "wildcard", "invalid_UTF16", "8.3_short_name"],
+    "reject_objects": ["reparse", "hardlink", "delete_pending", "write_shared", "non_disk", "wrong_volume", "non_NTFS", "network", "removable", "extra", "missing", "case_collision", "duplicate_file_id", "alternate_data_stream"]
+  },
+  "file_verification": {
+    "read": "retained handle only, exact bounded size, no content returned",
+    "digest": "SHA-256 over every allowlisted file with before/after identity and size rechecks",
+    "signatures": "EXE, DLL, and script entries require a future handle-bound offline Authenticode policy hook and exact signer-subject digest",
+    "deadline": "future cancellable native-I/O boundary must check cancellation and monotonic deadline before and after every blocking boundary"
+  },
+  "receipt": {
+    "schema": "local_bmo.windows-release-verification-receipt.v0.1.0",
+    "canonical": "fixed key order compact ASCII JSON",
+    "metadata_only": true,
+    "forbidden": ["path", "file_name", "user", "SID", "volume_serial", "file_id", "content", "model_identity", "certificate_subject", "environment"],
+    "success_requires": "all entries, directories, hashes, identities, signer policies, root identity, and exact inventory verified"
+  },
+  "non_claims": [
+    "not compiled",
+    "not linked",
+    "not packaged",
+    "not imported by host",
+    "not a package builder",
+    "not a ZIP extractor",
+    "not production ready",
+    "not Windows tested"
+  ]
+}

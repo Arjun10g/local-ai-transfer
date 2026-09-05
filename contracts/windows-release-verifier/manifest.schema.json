@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "lae://contracts/windows-release-verifier/manifest/0.1.0",
+  "title": "Windows release verifier compiled manifest identity",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "release_manifest_schema", "package_kind", "activation", "model", "entries"],
+  "properties": {
+    "schema": {"const": "local_bmo.windows-release-manifest-identity.v0.1.0"},
+    "release_manifest_schema": {"const": "release-manifest.v1"},
+    "package_kind": {"enum": ["fixture-skeleton", "portable-release"]},
+    "activation": {"const": false},
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["included", "disposition"],
+      "properties": {
+        "included": {"const": false},
+        "disposition": {"const": "EXTERNAL_AND_VERIFIED_SEPARATELY"}
+      }
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "size_bytes", "sha256", "signer_policy", "signer_subject_sha256"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4095,
+            "pattern": "^[^\\\\:\\u0000-\\u001f\\u007f-\\u009f]+$"
+          },
+          "size_bytes": {"type": "integer", "minimum": 0, "maximum": 268435456},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "signer_policy": {
+            "enum": [
+              "not_applicable",
+              "offline_authenticode_required",
+              "offline_authenticode_required_but_unset"
+            ]
+          },
+          "signer_subject_sha256": {
+            "type": ["string", "null"],
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"signer_policy": {"const": "not_applicable"}}},
+            "then": {"properties": {"signer_subject_sha256": {"const": null}}}
+          },
+          {
+            "if": {"properties": {"signer_policy": {"const": "offline_authenticode_required"}}},
+            "then": {"properties": {"signer_subject_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}
+          },
+          {
+            "if": {"properties": {"signer_policy": {"const": "offline_authenticode_required_but_unset"}}},
+            "then": {"properties": {"signer_subject_sha256": {"const": null}}}
+          }
+        ]
+      }
+    }
+  }
+}
