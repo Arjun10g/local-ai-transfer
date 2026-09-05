@@ -64,6 +64,9 @@ INCIDENT_LOG = ROOT / "docs" / "90_operations" / "SHADEFORM_FAILURE_MODES.md"
 RESOURCE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{5,127}$")
 PHASE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 NONCE = re.compile(r"^[0-9a-f]{32}$")
+LEGACY_DELETION_EVIDENCE_SUFFIXES = (
+    "deletion-intent.json", "deletion-confirmation.json", "deletion-receipt.json",
+)
 
 LEDGER_HEADER = "| date | phase | instance id | gpu | $/hr | purpose | status | cost logged | idle min |"
 # Statuses after which a ledger row is history and may not be rewritten.
@@ -229,6 +232,32 @@ def new_ownership_nonce() -> str:
 
 def runtime_ledger_path(phase_id: str) -> Path:
     return RUNTIME_ROOT / f"{validate_phase_id(phase_id)}.json"
+
+
+def legacy_deletion_evidence_paths(phase_id: str) -> tuple[Path, ...]:
+    """Return phase-only deletion artifacts that cannot authorize a new owner."""
+
+    phase = validate_phase_id(phase_id)
+    return tuple(RUNTIME_ROOT / f"{phase}.{suffix}" for suffix in LEGACY_DELETION_EVIDENCE_SUFFIXES)
+
+
+def preflight_legacy_deletion_evidence(phase_id: str) -> None:
+    """Fail closed before any paid/provider action when legacy evidence exists.
+
+    These phase-only artifacts predate the owner-bound deletion index and are
+    not safe to associate with a new nonce.  This is deliberately read-only:
+    it performs only bounded path validation and ``lstat`` calls, never opens,
+    parses, removes, or mutates an evidence file.
+    """
+
+    for path in legacy_deletion_evidence_paths(phase_id):
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ShadeformError("legacy deletion evidence requires manual recovery") from exc
+        raise ShadeformError("legacy deletion evidence requires manual recovery")
 
 
 def process_start_marker(pid: int | None) -> str | None:

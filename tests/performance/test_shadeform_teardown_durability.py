@@ -30,16 +30,23 @@ class ShadeformTeardownDurabilityTests(unittest.TestCase):
         sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER, sf.INCIDENTS = self.originals
         self.temporary.cleanup()
 
-    def record(self, *, phase: str = "durable-delete", instance: str = "instance-durable-1") -> sf.OwnedResource:
-        nonce = "0123456789abcdef0123456789abcdef"
+    def record(
+        self,
+        *,
+        phase: str = "durable-delete",
+        instance: str = "instance-durable-1",
+        nonce: str = "0123456789abcdef0123456789abcdef",
+        run_id: str = "durability-test",
+        key_id: str = "key-durable-1",
+    ) -> sf.OwnedResource:
         created = sf.utc_now() - timedelta(hours=1)
         return sf.OwnedResource(
             phase_id=phase,
-            run_id="durability-test",
+            run_id=run_id,
             instance_id=instance,
-            instance_name=sf.owned_instance_name("durability-test", nonce),
+            instance_name=sf.owned_instance_name(run_id, nonce),
             ownership_nonce=nonce,
-            ssh_key_id="key-durable-1",
+            ssh_key_id=key_id,
             ssh_key_name=f"j1m-{nonce}",
             ssh_public_key="ssh-ed25519 AAAA",
             gpu="A100_80G",
@@ -211,9 +218,144 @@ class ShadeformTeardownDurabilityTests(unittest.TestCase):
         second_delete.assert_not_called()
         self.assertEqual(receipt["status"], "complete")
 
+    def test_two_sequential_owners_share_phase_without_reusing_evidence(self) -> None:
+        phase = "sequential-owner"
+        first = self.record(
+            phase=phase, instance="instance-sequential-1", run_id="sequential-run-1",
+            key_id="key-sequential-1",
+        )
+        second = self.record(
+            phase=phase, instance="instance-sequential-2", run_id="sequential-run-2",
+            nonce="fedcba9876543210fedcba9876543210", key_id="key-sequential-2",
+        )
+
+        def complete(record: sf.OwnedResource) -> dict[str, object]:
+            sf.write_owned_resource(record)
+            with mock.patch.object(sf, "verify_owned_instance_before_delete", return_value={}), \
+                    mock.patch.object(sf, "_delete_instance", return_value={"success": True}), \
+                    mock.patch.object(sf, "append_cost_event"), \
+                    mock.patch.object(sf, "verify_owned_ssh_key_before_delete", return_value={}), \
+                    mock.patch.object(sf, "delete_ssh_key", return_value={"success": True}):
+                return teardown.teardown_exact(phase, record.instance_id, env_file=self.env_file)
+
+        first_receipt = complete(first)
+        first_path = teardown._deletion_receipt_path(phase, first)
+        second_receipt = complete(second)
+        second_path = teardown._deletion_receipt_path(phase, second)
+
+        self.assertEqual(first_receipt["status"], "complete")
+        self.assertEqual(second_receipt["status"], "complete")
+        self.assertNotEqual(first_path, second_path)
+        self.assertTrue(first_path.is_file())
+        self.assertTrue(second_path.is_file())
+        self.assertEqual(
+            teardown.teardown_exact(phase, first.instance_id, env_file=self.env_file)["instance_id"],
+            first.instance_id,
+        )
+        self.assertEqual(
+            teardown.teardown_exact(phase, second.instance_id, env_file=self.env_file)["instance_id"],
+            second.instance_id,
+        )
+        with self.assertRaisesRegex(RuntimeError, "no durable exact ownership evidence"):
+            teardown.teardown_exact(phase, "instance-sequential-missing", env_file=self.env_file)
+
+    def test_stale_namespaced_intent_is_isolated_from_new_owner(self) -> None:
+        phase = "stale-owner-evidence"
+        stale = self.record(
+            phase=phase, instance="instance-stale-owner-1", run_id="stale-run",
+            key_id="key-stale-owner-1",
+        )
+        current = self.record(
+            phase=phase, instance="instance-current-owner-2", run_id="current-run",
+            nonce="abcdefabcdefabcdefabcdefabcdefab", key_id="key-current-owner-2",
+        )
+        sf.write_owned_resource(stale)
+        stale_intent = teardown._write_deletion_intent(phase, stale, status="dispatched")
+        stale_path = teardown._deletion_intent_path(phase, stale)
+        sf.clear_owned_resource(phase, stale.instance_id)
+        sf.write_owned_resource(current)
+
+        delete = mock.Mock(return_value={"success": True})
+        with mock.patch.object(sf, "verify_owned_instance_before_delete", return_value={}), \
+                mock.patch.object(sf, "_delete_instance", delete), \
+                mock.patch.object(sf, "append_cost_event"), \
+                mock.patch.object(sf, "verify_owned_ssh_key_before_delete", return_value={}), \
+                mock.patch.object(sf, "delete_ssh_key", return_value={"success": True}):
+            receipt = teardown.teardown_exact(phase, current.instance_id, env_file=self.env_file)
+
+        self.assertEqual(receipt["instance_id"], current.instance_id)
+        self.assertEqual(delete.call_args.args[2], current.instance_id)
+        self.assertEqual(
+            sf.strict_json_object(stale_path.read_bytes(), label="stale test intent"),
+            stale_intent,
+        )
+
+    def test_crash_after_new_owner_persistence_creates_its_own_namespace_on_retry(self) -> None:
+        record = self.record(
+            phase="owner-persist-crash", instance="instance-owner-persist-crash",
+            nonce="11111111111111111111111111111111", key_id="key-owner-persist-crash",
+        )
+        sf.write_owned_resource(record)
+        index_path = teardown._deletion_evidence_index_path(record.phase_id, record.instance_id)
+        self.assertFalse(index_path.exists())
+
+        with mock.patch.object(sf, "verify_owned_instance_before_delete", return_value={}), \
+                mock.patch.object(sf, "_delete_instance", return_value={"success": True}), \
+                mock.patch.object(sf, "append_cost_event"), \
+                mock.patch.object(sf, "verify_owned_ssh_key_before_delete", return_value={}), \
+                mock.patch.object(sf, "delete_ssh_key", return_value={"success": True}):
+            receipt = teardown.teardown_exact(
+                record.phase_id, record.instance_id, env_file=self.env_file,
+            )
+
+        self.assertEqual(receipt["status"], "complete")
+        indexed = sf.strict_json_object(index_path.read_bytes(), label="test evidence index")
+        self.assertEqual(indexed["owner"], teardown._owner_binding(record))
+
+    def test_malformed_or_different_owner_index_refuses_before_provider_access(self) -> None:
+        record = self.record(
+            phase="bad-owner-namespace", instance="instance-bad-namespace",
+        )
+        sf.write_owned_resource(record)
+        expected = teardown._bind_owner_evidence(record.phase_id, record)
+        path = teardown._deletion_evidence_index_path(record.phase_id, record.instance_id)
+        malformed = dict(expected)
+        malformed["owner_namespace"] = "0" * 64
+        sf._durable_atomic_write(
+            path, (json.dumps(malformed, sort_keys=True) + "\n").encode("utf-8"),
+        )
+
+        with mock.patch.object(sf, "load_env") as load_env, \
+                mock.patch.object(sf, "verify_owned_instance_before_delete") as provider:
+            with self.assertRaisesRegex(RuntimeError, "different owner"):
+                teardown.teardown_exact(
+                    record.phase_id, record.instance_id, env_file=self.env_file,
+                )
+        load_env.assert_not_called()
+        provider.assert_not_called()
+
+    def test_legacy_phase_only_evidence_requires_manual_recovery(self) -> None:
+        record = self.record(
+            phase="legacy-phase-evidence", instance="instance-after-legacy",
+        )
+        sf.write_owned_resource(record)
+        legacy = sf.RUNTIME_ROOT / f"{record.phase_id}.deletion-receipt.json"
+        sf.durable_create_new(legacy, b"{}")
+
+        with mock.patch.object(sf, "load_env") as load_env, \
+                mock.patch.object(sf, "verify_owned_instance_before_delete") as provider:
+            with self.assertRaisesRegex(RuntimeError, "legacy deletion evidence"):
+                teardown.teardown_exact(
+                    record.phase_id, record.instance_id, env_file=self.env_file,
+                )
+        load_env.assert_not_called()
+        provider.assert_not_called()
+
     def test_strict_receipt_and_intent_loaders_reject_untrusted_files(self) -> None:
         record = self.record(phase="strict-evidence", instance="instance-strict-1")
-        receipt_path = sf.RUNTIME_ROOT / f"{record.phase_id}.deletion-receipt.json"
+        sf.write_owned_resource(record)
+        teardown._bind_owner_evidence(record.phase_id, record)
+        receipt_path = teardown._deletion_receipt_path(record.phase_id, record)
         sf._ensure_durable_directory(receipt_path.parent)
         cases = {
             "schema-less": b"{}",
@@ -246,7 +388,7 @@ class ShadeformTeardownDurabilityTests(unittest.TestCase):
 
         with mock.patch.object(sf, "utc_now", return_value=datetime(2026, 1, 1, tzinfo=timezone.utc)):
             intent = teardown._write_deletion_intent(record.phase_id, record, status="dispatched")
-        intent_path = teardown._deletion_intent_path(record.phase_id)
+        intent_path = teardown._deletion_intent_path(record.phase_id, record)
         malicious = dict(intent)
         malicious["owner"] = dict(intent["owner"])
         malicious["owner"]["ownership_nonce"] = "f" * 32

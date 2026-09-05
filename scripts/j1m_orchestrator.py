@@ -863,6 +863,10 @@ def _salvage(
 
 
 def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, artifact_destination: Path, mode: str = "prove", model_artifact: Path | None = None, model_manifest: Path | None = None) -> dict[str, Any]:
+    # Phase-only deletion artifacts predate nonce/owner-bound evidence and
+    # cannot safely authorize a new paid run. Check them before config/env
+    # loading, candidate access, key generation, reservation, or provider POSTs.
+    sf.preflight_legacy_deletion_evidence(phase_id)
     config = j1m_runner.load_config(config_path)
     if mode == "eval":
         # The evaluation lane is remote-only: the host downloads the pinned
@@ -1001,6 +1005,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             watchdog = subprocess.Popen(watchdog_command)
             lifecycle["watchdog_pid"] = watchdog.pid
             try:
+                sf.preflight_legacy_deletion_evidence(phase_id)
                 key_id = sf.add_ssh_key(api_key, phase_id, f"j1m-{nonce}", public_key)
             except sf.AmbiguousProviderOutcome as exc:
                 # A timed-out or malformed key-create response may have
@@ -1056,6 +1061,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 started_at_utc=create_intent_started,
             )
             try:
+                sf.preflight_legacy_deletion_evidence(phase_id)
                 instance_id = sf.create_instance(api_key, env, phase_id=phase_id, run_id=run_id, candidate=candidate, ssh_key_id=key_id, nonce=nonce, max_runtime_hours=runtime, auto_delete_contract=auto_delete)
             except Exception as exc:
                 incident = {

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import sys
@@ -20,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MAX_LOCAL_SALVAGE_BYTES = 1_048_576
 DELETION_INTENT_SCHEMA = "local_bmo.shadeform.deletion-intent.v1"
 DELETION_RECEIPT_SCHEMA = "local_bmo.shadeform.deletion-receipt.v1"
+DELETION_EVIDENCE_INDEX_SCHEMA = "local_bmo.shadeform.deletion-evidence-index.v1"
 RECEIPT_ERROR_FIELDS = (
     "cost_bookkeeping_error_type",
     "attempt_reservation_error_type",
@@ -121,6 +123,157 @@ def _record_from_owner(owner: object) -> shadeform.OwnedResource:
 
 def _validate_owner_binding(owner: object) -> dict[str, object]:
     return _owner_binding(_record_from_owner(owner))
+
+
+def _owner_evidence_namespace(record: shadeform.OwnedResource) -> str:
+    """Return a bounded filename component derived from the exact owner."""
+
+    binding = _owner_binding(record)
+    encoded = json.dumps(
+        binding, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _instance_evidence_locator(instance_id: str) -> str:
+    exact = shadeform.validate_resource_id(instance_id, field="deletion evidence instance id")
+    return hashlib.sha256(exact.encode("utf-8")).hexdigest()
+
+
+def _deletion_evidence_index_path(phase_id: str, instance_id: str) -> Path:
+    phase = shadeform.validate_phase_id(phase_id)
+    return shadeform.RUNTIME_ROOT / (
+        f"{phase}.deletion-owner-{_instance_evidence_locator(instance_id)}.json"
+    )
+
+
+def _legacy_deletion_evidence_paths(phase_id: str) -> tuple[Path, Path, Path]:
+    return shadeform.legacy_deletion_evidence_paths(phase_id)  # type: ignore[return-value]
+
+
+def _refuse_legacy_deletion_evidence(phase_id: str) -> None:
+    """Fail closed rather than assign phase-only evidence to a new owner."""
+
+    try:
+        shadeform.preflight_legacy_deletion_evidence(phase_id)
+    except shadeform.ShadeformError as exc:
+        raise RuntimeError("legacy deletion evidence requires manual recovery") from exc
+
+
+def _deletion_evidence_index_payload(
+    phase_id: str, record: shadeform.OwnedResource,
+) -> dict[str, object]:
+    phase = shadeform.validate_phase_id(phase_id)
+    owner = _owner_binding(record)
+    if owner["phase_id"] != phase:
+        raise ValueError("deletion evidence owner is bound to another phase")
+    return {
+        "schema": DELETION_EVIDENCE_INDEX_SCHEMA,
+        "phase_id": phase,
+        "instance_id": owner["instance_id"],
+        "owner_namespace": _owner_evidence_namespace(record),
+        "owner": owner,
+    }
+
+
+def _bind_owner_evidence(
+    phase_id: str, record: shadeform.OwnedResource,
+) -> dict[str, object]:
+    """Durably bind an exact instance locator to one immutable owner."""
+
+    expected = _deletion_evidence_index_payload(phase_id, record)
+    _refuse_legacy_deletion_evidence(phase_id)
+    path = _deletion_evidence_index_path(phase_id, record.instance_id)
+    data = (json.dumps(expected, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if len(data) > MAX_LOCAL_SALVAGE_BYTES:
+        raise ValueError("deletion evidence index exceeds bound")
+
+    normal = shadeform.read_owned_resource(phase_id)
+    recovery = shadeform.read_recovery_owned_resource(phase_id)
+    if normal is not None and recovery is not None and _owner_binding(normal) != _owner_binding(recovery):
+        raise RuntimeError("normal and recovery ownership records conflict; manual recovery is required")
+    durable_owner = normal or recovery
+    if durable_owner is not None and _owner_binding(durable_owner) != expected["owner"]:
+        raise RuntimeError("deletion evidence owner is not the durable phase owner")
+
+    if durable_owner is None:
+        # Once final cleanup clears the reusable phase ledger, the immutable
+        # index is the only locator for this owner's retained history. Never
+        # manufacture that trust anchor from a caller-supplied record.
+        try:
+            existing = shadeform.strict_json_object(
+                shadeform.bounded_stable_bytes(
+                    path, MAX_LOCAL_SALVAGE_BYTES, label="deletion evidence index",
+                ),
+                label="deletion evidence index",
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError("deletion evidence owner lacks durable ownership proof") from exc
+        except (OSError, ValueError, shadeform.ShadeformError) as exc:
+            raise RuntimeError("deletion evidence index requires manual recovery") from exc
+        if existing != expected or set(existing) != set(expected):
+            raise RuntimeError("deletion evidence index belongs to a different owner")
+        return expected
+
+    try:
+        shadeform.durable_create_new(path, data)
+    except FileExistsError:
+        try:
+            existing = shadeform.strict_json_object(
+                shadeform.bounded_stable_bytes(
+                    path, MAX_LOCAL_SALVAGE_BYTES, label="deletion evidence index",
+                ),
+                label="deletion evidence index",
+            )
+        except (OSError, ValueError, shadeform.ShadeformError) as exc:
+            raise RuntimeError("deletion evidence index requires manual recovery") from exc
+        if existing != expected or set(existing) != set(expected):
+            raise RuntimeError("deletion evidence index belongs to a different owner")
+    return expected
+
+
+def _load_indexed_owner(
+    phase_id: str, instance_id: str,
+) -> shadeform.OwnedResource | None:
+    """Resolve one exact completed owner without scanning phase history."""
+
+    phase = shadeform.validate_phase_id(phase_id)
+    exact = shadeform.validate_resource_id(instance_id, field="deletion evidence instance id")
+    _refuse_legacy_deletion_evidence(phase)
+    path = _deletion_evidence_index_path(phase, exact)
+    try:
+        payload = shadeform.strict_json_object(
+            shadeform.bounded_stable_bytes(
+                path, MAX_LOCAL_SALVAGE_BYTES, label="deletion evidence index",
+            ),
+            label="deletion evidence index",
+        )
+        owner = _record_from_owner(payload.get("owner"))
+        expected = _deletion_evidence_index_payload(phase, owner)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, TypeError, shadeform.ShadeformError) as exc:
+        raise RuntimeError("deletion evidence index requires manual recovery") from exc
+    if (
+        set(payload) != set(expected)
+        or payload != expected
+        or payload.get("instance_id") != exact
+    ):
+        raise RuntimeError("deletion evidence index requires manual recovery")
+    return owner
+
+
+def _owner_evidence_path(
+    phase_id: str, record: shadeform.OwnedResource, kind: str,
+) -> Path:
+    if kind not in {"intent", "confirmation", "receipt"}:
+        raise ValueError("deletion evidence kind is invalid")
+    phase = shadeform.validate_phase_id(phase_id)
+    binding = _owner_binding(record)
+    if binding["phase_id"] != phase:
+        raise ValueError("deletion evidence owner is bound to another phase")
+    namespace = _owner_evidence_namespace(record)
+    return shadeform.RUNTIME_ROOT / f"{phase}.{namespace}.deletion-{kind}.json"
 
 
 def _normalized_deletion(value: object) -> dict[str, object]:
@@ -225,8 +378,10 @@ def _canonical_deletion_receipt(phase_id: str, payload: dict[str, object]) -> di
 
 def _write_deletion_receipt(phase_id: str, payload: dict[str, object], *, deadline: float | None = None) -> dict[str, object]:
     _require_time(deadline)
-    path = shadeform.RUNTIME_ROOT / f"{phase_id}.deletion-receipt.json"
     canonical = _canonical_deletion_receipt(phase_id, payload)
+    record = _record_from_owner(canonical["owner"])
+    _bind_owner_evidence(phase_id, record)
+    path = _deletion_receipt_path(phase_id, record)
     data = (json.dumps(canonical, indent=2, sort_keys=True) + "\n").encode("utf-8")
     if len(data) > MAX_LOCAL_SALVAGE_BYTES:
         raise ValueError("deletion receipt exceeds bound")
@@ -263,7 +418,15 @@ def salvage_local(source: Path | None, destination: Path, *, deadline: float | N
 
 
 def _load_deletion_receipt(phase_id: str, exact: str, record: shadeform.OwnedResource | None = None) -> dict[str, object] | None:
-    path = shadeform.RUNTIME_ROOT / f"{phase_id}.deletion-receipt.json"
+    exact = shadeform.validate_resource_id(exact, field="deletion receipt instance id")
+    if record is None:
+        record = _load_indexed_owner(phase_id, exact)
+        if record is None:
+            return None
+    _bind_owner_evidence(phase_id, record)
+    if record.instance_id != exact:
+        raise RuntimeError("deletion receipt owner does not match the exact resource")
+    path = _deletion_receipt_path(phase_id, record)
     try:
         payload = shadeform.strict_json_object(
             shadeform.bounded_stable_bytes(path, MAX_LOCAL_SALVAGE_BYTES, label="deletion receipt"),
@@ -281,12 +444,16 @@ def _load_deletion_receipt(phase_id: str, exact: str, record: shadeform.OwnedRes
     return canonical
 
 
-def _deletion_intent_path(phase_id: str) -> Path:
-    return shadeform.RUNTIME_ROOT / f"{phase_id}.deletion-intent.json"
+def _deletion_intent_path(phase_id: str, record: shadeform.OwnedResource) -> Path:
+    return _owner_evidence_path(phase_id, record, "intent")
 
 
-def _deletion_confirmation_path(phase_id: str) -> Path:
-    return shadeform.RUNTIME_ROOT / f"{phase_id}.deletion-confirmation.json"
+def _deletion_confirmation_path(phase_id: str, record: shadeform.OwnedResource) -> Path:
+    return _owner_evidence_path(phase_id, record, "confirmation")
+
+
+def _deletion_receipt_path(phase_id: str, record: shadeform.OwnedResource) -> Path:
+    return _owner_evidence_path(phase_id, record, "receipt")
 
 
 def _deletion_intent_payload(
@@ -356,7 +523,12 @@ def _write_deletion_intent(
     data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
     if len(data) > MAX_LOCAL_SALVAGE_BYTES:
         raise ValueError("deletion intent exceeds bound")
-    path = _deletion_intent_path(phase_id) if status == "dispatched" else _deletion_confirmation_path(phase_id)
+    _bind_owner_evidence(phase_id, record)
+    path = (
+        _deletion_intent_path(phase_id, record)
+        if status == "dispatched"
+        else _deletion_confirmation_path(phase_id, record)
+    )
     try:
         shadeform.durable_create_new(path, data)
     except FileExistsError:
@@ -370,7 +542,8 @@ def _write_deletion_intent(
 
 
 def _load_deletion_intent(phase_id: str, record: shadeform.OwnedResource) -> dict[str, object] | None:
-    path = _deletion_intent_path(phase_id)
+    _bind_owner_evidence(phase_id, record)
+    path = _deletion_intent_path(phase_id, record)
     try:
         payload = shadeform.strict_json_object(
             shadeform.bounded_stable_bytes(path, MAX_LOCAL_SALVAGE_BYTES, label="deletion intent"),
@@ -390,7 +563,7 @@ def _load_deletion_intent(phase_id: str, record: shadeform.OwnedResource) -> dic
         raise RuntimeError("deletion intent requires manual recovery") from exc
     if set(payload) != set(dispatched) or payload != dispatched:
         raise RuntimeError("deletion intent requires manual recovery")
-    confirmation_path = _deletion_confirmation_path(phase_id)
+    confirmation_path = _deletion_confirmation_path(phase_id, record)
     try:
         confirmation_payload = shadeform.strict_json_object(
             shadeform.bounded_stable_bytes(
@@ -500,11 +673,13 @@ def teardown_exact(phase_id: str, instance_id: str, *, env_file: Path = ROOT / "
     with shadeform.phase_cleanup_lock(phase_id):
         current, _ = _owned_state(phase_id, exact)
         if current is None:
-            prior = _load_deletion_receipt(phase_id, exact)
+            evidence_owner = _load_indexed_owner(phase_id, exact)
+            if evidence_owner is None:
+                raise RuntimeError("refusing teardown: no durable exact ownership evidence")
+            prior = _load_deletion_receipt(phase_id, exact, evidence_owner)
             if prior is None:
                 raise RuntimeError("refusing teardown: no durable exact ownership evidence")
-            owner = _record_from_owner(prior.get("owner"))
-            intent = _load_deletion_intent(phase_id, owner)
+            intent = _load_deletion_intent(phase_id, evidence_owner)
             deletion = prior.get("deletion")
             if (
                 prior.get("status") != "complete"

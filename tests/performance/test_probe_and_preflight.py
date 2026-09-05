@@ -177,6 +177,58 @@ class ShadeformPreflightTests(unittest.TestCase):
 
 
 class RemoteExternalToolsGateTests(unittest.TestCase):
+    def test_shared_legacy_deletion_preflight_is_read_only_and_clean_phase_passes(self):
+        from scripts import shadeform_lifecycle as sf
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(sf, "RUNTIME_ROOT", root):
+                sf.preflight_legacy_deletion_evidence("clean-phase")
+                (root / "legacy-phase.deletion-receipt.json").write_bytes(b"phase-only")
+                with self.assertRaisesRegex(sf.ShadeformError, "legacy deletion evidence"):
+                    sf.preflight_legacy_deletion_evidence("legacy-phase")
+                with mock.patch.object(Path, "lstat", side_effect=OSError("metadata denied")):
+                    with self.assertRaisesRegex(sf.ShadeformError, "legacy deletion evidence"):
+                        sf.preflight_legacy_deletion_evidence("error-phase")
+
+    def test_j1m_legacy_evidence_blocks_before_any_provider_mutation(self):
+        module = load_module(ROOT / "scripts/j1m_orchestrator.py", "j1m_legacy_evidence_gate")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "legacy-phase.deletion-intent.json").write_bytes(b"phase-only")
+            with mock.patch.object(module.sf, "RUNTIME_ROOT", root), \
+                 mock.patch.object(module.j1m_runner, "load_config") as load_config, \
+                 mock.patch.object(module.sf, "load_env") as load_env, \
+                 mock.patch.object(module.sf, "list_candidates") as list_candidates, \
+                 mock.patch.object(module.sf, "create_ephemeral_ssh_key") as create_keypair, \
+                 mock.patch.object(module.sf, "reserve_create_attempt") as reserve_attempt, \
+                 mock.patch.object(module.sf, "add_ssh_key") as add_key, \
+                 mock.patch.object(module.sf, "create_instance") as create_instance, \
+                 mock.patch.object(module.sf, "delete_ssh_key") as delete_key, \
+                 mock.patch.object(module, "teardown_exact") as teardown_exact:
+                with self.assertRaisesRegex(module.sf.ShadeformError, "legacy deletion evidence"):
+                    module.execute(Path(directory) / "missing.env", config_path=Path(directory) / "missing.json", phase_id="legacy-phase", run_id="run", artifact_destination=root / "out")
+            load_config.assert_not_called(); load_env.assert_not_called(); list_candidates.assert_not_called(); create_keypair.assert_not_called(); reserve_attempt.assert_not_called(); add_key.assert_not_called(); create_instance.assert_not_called(); delete_key.assert_not_called(); teardown_exact.assert_not_called()
+
+    def test_remote_external_tools_legacy_evidence_blocks_before_any_provider_mutation(self):
+        module = load_module(ROOT / "scripts/shadeform/remote_external_tools.py", "remote_external_tools_legacy_evidence_gate")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "legacy-phase.deletion-confirmation.json").write_bytes(b"phase-only")
+            args = types.SimpleNamespace(phase_id="legacy-phase", env_file=root / "missing.env")
+            with mock.patch.object(module, "REMOTE_EXECUTION_ENABLED", True), \
+                 mock.patch.object(module.shadeform, "RUNTIME_ROOT", root), \
+                 mock.patch.object(module.shadeform, "load_env") as load_env, \
+                 mock.patch.object(module.shadeform, "list_candidates") as list_candidates, \
+                 mock.patch.object(module.shadeform, "create_ephemeral_ssh_key") as create_keypair, \
+                 mock.patch.object(module.shadeform, "reserve_create_attempt") as reserve_attempt, \
+                 mock.patch.object(module.shadeform, "add_ssh_key") as add_key, \
+                 mock.patch.object(module.shadeform, "create_instance") as create_instance, \
+                 mock.patch.object(module.shadeform, "delete_ssh_key") as delete_key, \
+                 mock.patch.object(module, "shadeform_teardown") as teardown:
+                with self.assertRaisesRegex(module.shadeform.ShadeformError, "legacy deletion evidence"):
+                    module.execute(args)
+            load_env.assert_not_called(); list_candidates.assert_not_called(); create_keypair.assert_not_called(); reserve_attempt.assert_not_called(); add_key.assert_not_called(); create_instance.assert_not_called(); delete_key.assert_not_called(); teardown.assert_not_called()
+
     def test_inherited_remote_qa_cannot_reach_provider(self):
         module = load_module(ROOT / "scripts/shadeform/remote_external_tools.py", "remote_external_tools_gate")
         args = types.SimpleNamespace()

@@ -801,6 +801,10 @@ def _teardown_complete(value: object) -> bool:
 def execute(args: argparse.Namespace) -> dict[str, object]:
     if not REMOTE_EXECUTION_ENABLED:
         raise RunnerError("remote external-tools QA execution is gated pending explicit activation approval")
+    # Legacy phase-only deletion evidence cannot bind a new paid owner. Run the
+    # shared read-only preflight before env/credential loading, candidate
+    # access, SSH-key creation, reservation, or instance creation.
+    shadeform.preflight_legacy_deletion_evidence(args.phase_id)
     env = shadeform.load_env(args.env_file)
     _assert_review_markers(env)
     plan = build_plan(phase_id=args.phase_id, run_id=args.run_id, runtime_hours=args.runtime_hours, fuzz_cases=args.fuzz_cases, soak_iterations=args.soak_iterations, env=env)
@@ -911,6 +915,7 @@ def execute(args: argparse.Namespace) -> dict[str, object]:
             lifecycle["watchdog"] = {"status": "prearmed", "pid": watchdog.pid, "max_seconds": round(watchdog_seconds, 3), "recovery": "exact_nonce_name"}
             lifecycle["stage"] = "ssh_key_create"
             try:
+                shadeform.preflight_legacy_deletion_evidence(args.phase_id)
                 key_id = shadeform.add_ssh_key(api_key, args.phase_id, key_name, public_key)
             except shadeform.AmbiguousProviderOutcome as exc:
                 key_ambiguity_unresolved = True
@@ -959,6 +964,7 @@ def execute(args: argparse.Namespace) -> dict[str, object]:
                 started_at_utc=create_intent_started,
             )
             try:
+                shadeform.preflight_legacy_deletion_evidence(args.phase_id)
                 instance_id = shadeform.create_instance(api_key, env, phase_id=args.phase_id, run_id=args.run_id, candidate=candidate, ssh_key_id=key_id, nonce=nonce, max_runtime_hours=args.runtime_hours, auto_delete_contract=auto_delete)
                 lifecycle["instance_id"] = instance_id
                 lifecycle["deadline"] = {

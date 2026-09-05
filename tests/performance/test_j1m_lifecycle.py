@@ -755,7 +755,7 @@ class StaticSafetyTests(unittest.TestCase):
                         mock.patch.object(teardown.shadeform, "_delete_instance", delete):
                     with self.assertRaises(RuntimeError):
                         teardown.teardown_exact(phase, record.instance_id, env_file=env)
-                intent = json.loads(teardown._deletion_intent_path(phase).read_text(encoding="utf-8"))
+                intent = json.loads(teardown._deletion_intent_path(phase, record).read_text(encoding="utf-8"))
                 self.assertEqual(intent["status"], "dispatched")
                 with mock.patch.object(teardown.shadeform, "instance_info", side_effect=sf.ShadeformHTTPError(404, "gone")), \
                         mock.patch.object(teardown.shadeform, "_delete_instance") as second_delete, \
