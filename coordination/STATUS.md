@@ -1,6 +1,7 @@
 # Program Status
 
 - Overall release/full-access state: `BLOCKED` / `NOT_READY`
+- Authoritative source baseline: `main@2ec9c44bf299a309f8266700e8f9ea1e39c62f39`
 - Working source-hardening stream: Phase 6
 - Formal gate state: Phase 0 `IN_PROGRESS` and unapproved; Phases 1–7 have
   incomplete/unapproved evidence; Phase 8 is `BLOCKED`
@@ -30,11 +31,23 @@
   `55f3dfd` (implementation) through `65decba` (merge). Its production
   store is deliberately unavailable, so journal-dependent production actions
   remain hidden/refused.
+- Four independently source-reviewed native boundaries are now on `main`:
+  inert Windows read-only filesystem source by `1741c86`, inert hardware-
+  attestor source by `e579d49`, inert journal-helper/transport source by
+  `645f348`, and inert release-tree verifier source by `2ec9c44`. These sources
+  remain unlinked, uncompiled, absent from production activation/package
+  paths, and explicitly `NO` for production and target execution.
+- The later process implementation candidate `6167ef6` and supervisor-
+  authority candidate `81cfd79` were rejected and remain unmerged. Native
+  clipboard candidate `0ba98d5` and diagnostic-receipt candidate `1c08a6a`
+  were also rejected/unmerged and have repairs in progress. None confers a
+  capability on `main`.
 - The inert Win32 journal-storage boundary is source-merged from `d0ed670` by
   `3d46ccb`; the journal container source is source-merged by `16b4b0e`.
-  Journal helper slice 4 and the read-only filesystem slice remain WIP and
-  unmerged. The process-broker reference candidate `ed3bf7d` is unmerged and
-  inert.
+  Even with the inert helper source now merged by `645f348`, the production
+  ActionJournal store/transport remains unavailable because there is no
+  activated trusted supervisor, production import, package wiring, compile,
+  or target evidence.
 - The external lifecycle hardening is source-merged at `91de464`. Remote
   execution remains disabled by the source guard (`REMOTE_EXECUTION_ENABLED=False`),
   and no approved/committed cost-ledger genesis or new provider run is claimed.

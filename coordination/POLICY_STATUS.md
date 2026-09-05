@@ -13,9 +13,9 @@
 | Intel SYCL backend | UNASSESSED | S2 | Separate experimental evidence and redistribution approval |
 | Local loopback serving | APPROVED_WITH_CONDITIONS | S1/S3/S4 | Auth, origin, limits, security tests |
 | Local filesystem/process tools (non-Windows source/fixture scope) | APPROVED_WITH_CONDITIONS | S3/S4 | Workspace bounds, confirmation, no shell, adversarial tests; not target approval |
-| Windows filesystem tools | NOT_READY_REFUSED | S1/S3/S4 | Source-merged refusal boundary; identity-pinned native helper and real target evidence required before reads/writes can be exposed |
-| Windows process/app/browser/clipboard execution | NOT_READY_REFUSED | S1/S3/S4 | Quarantined broker prerequisites, exact executable identity, containment, environment, and target acceptance |
-| Production durable ActionJournal | UNAVAILABLE | S3/S4 | Native handle-relative protected store, authenticated transport, packaging, recovery, and target evidence |
+| Windows filesystem tools | NOT_READY_REFUSED | S1/S3/S4 | Refusal boundary plus inert read-only native source merged by `1741c86`; issuer/cancellable-I/O, linking, packaging, compilation, and real target evidence remain absent before reads/writes can be exposed |
+| Windows process/app/browser/clipboard execution | NOT_READY_REFUSED | S1/S3/S4 | Quarantined mainline broker stays inactive; later process `6167ef6`, supervisor `81cfd79`, and clipboard `0ba98d5` candidates were rejected/unmerged; exact identity, containment, environment, and target acceptance remain absent |
+| Production durable ActionJournal | UNAVAILABLE | S3/S4 | Inert storage/helper source is merged through `645f348`, but production import, authenticated supervisor/transport activation, packaging, compile, recovery, and target evidence remain absent |
 | Remote external-tools lifecycle | DISABLED | S2/S3/S4 | Source hardening merged; `REMOTE_EXECUTION_ENABLED=False`; explicit approved cost-ledger genesis and separate live authorization required |
 | Live web/search provider | UNASSESSED | S0/S3 | Provider approval and synthetic live-run evidence |
 | Microsoft Graph mail/Teams provider | REQUESTED_LIVE_UNASSESSED | S0/S3/S4 | Reconciliation source is merged, but production journal, delegated scope/admin consent, synthetic account, redaction, and live package evidence remain absent |
