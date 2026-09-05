@@ -120,8 +120,13 @@ const projectionDraft = value => {
     }
   }
   const etag = value['@odata.etag'] === undefined ? null : boundedField(value['@odata.etag'], 512); const changeKey = value.changeKey === undefined ? null : boundedField(value.changeKey, 512); if (etag === null && value['@odata.etag'] !== undefined || changeKey === null && value.changeKey !== undefined) return null;
+  const operationHeaders = Array.isArray(value.internetMessageHeaders) ? value.internetMessageHeaders : [];
+  const operationHeader = operationHeaders.find(header => header && typeof header === 'object' && !Array.isArray(header) && typeof header.name === 'string' && header.name.toLowerCase() === LAE_OPERATION_HEADER);
+  const operationMarkerValue = operationHeader?.value;
+  const operation_marker = operationMarkerValue === undefined ? null : typeof operationMarkerValue === 'string' && /^act_[a-f0-9]{32}:[a-f0-9]{64}$/u.test(operationMarkerValue) ? operationMarkerValue : null;
+  if (operationMarkerValue !== undefined && operation_marker === null) return null;
   const bodyPreview = previewText(body.text, 512);
-  return { id, subject, raw_body: rawBody, content_type: contentType, body: body.text, body_preview: bodyPreview.text, body_truncated: bodyPreview.truncated, recipients, etag, change_key: changeKey };
+  return { id, subject, raw_body: rawBody, content_type: contentType, body: body.text, body_preview: bodyPreview.text, body_truncated: bodyPreview.truncated, recipients, etag, change_key: changeKey, operation_marker };
 };
 const draftContent = draft => ({ subject: draft.subject, raw_body: draft.raw_body, content_type: draft.content_type, recipients: draft.recipients });
 const draftContentDigest = draft => digest(draftContent(draft));
@@ -196,12 +201,14 @@ export class MicrosoftGraphProvider {
     let value; try { value = typeof this.credentialSource === 'function' ? await this.credentialSource(signal) : await this.credentialSource.getAccessToken?.(signal); } catch (error) { if (['provider_cancelled', 'provider_offline', 'provider_timeout'].includes(error?.code)) throw new ProviderToolError(error.code); this.clearAuth(); throw new ProviderToolError('provider_unauthorized'); }
     if (typeof value !== 'string' || !value || Buffer.byteLength(value, 'utf8') > MAX_TOKEN_BYTES || /[\u0000-\u001f\u007f]/u.test(value)) throw new ProviderToolError('provider_unauthorized'); return value;
   }
-  async request({ method, path, query, headers = {}, body, signal }) {
+  async request({ method, path, query, headers = {}, body, signal, onDispatch }) {
     if (!validGraphMethodPath(method, path)) throw new ProviderToolError('provider_destination_rejected');
     if (this.credentialSource instanceof MicrosoftDeviceCodeCredential && !scopeAllows(this.credentialSource.scopes, requiredGraphScope(method, path))) throw new ProviderToolError('provider_unauthorized', 'configured delegated scopes do not cover this operation');
     const bearer = await this.token(signal); checkAborted(signal); const deadline = new AbortController(); let rejectAbort; const relay = () => { deadline.abort(); rejectAbort?.(Object.assign(new Error('provider cancelled'), { code: 'provider_cancelled' })); }; signal?.addEventListener('abort', relay, { once: true }); let timer;
     let response; try {
       const request = { origin: this.origin, method, path, query: query ?? {}, headers: { ...headers, authorization: `Bearer ${bearer}`, accept: 'application/json' }, body, signal: deadline.signal };
+      if (onDispatch !== undefined && typeof onDispatch !== 'function') throw new ProviderToolError('provider_invalid_request');
+      checkAborted(signal); onDispatch?.();
       const pending = typeof this.transport === 'function' ? this.transport(request) : this.transport.request(request); let rejectTimeout; const timeout = new Promise((_, reject) => { rejectTimeout = reject; }); const cancelled = new Promise((_, reject) => { rejectAbort = reject; }); timer = setTimeout(() => { deadline.abort(); rejectTimeout(Object.assign(new Error('provider timeout'), { code: 'provider_timeout' })); }, this.requestTimeoutMs); response = await Promise.race([pending, timeout, cancelled]);
     } catch (error) {
       if (signal?.aborted) throw new ProviderToolError('provider_cancelled');
@@ -239,10 +246,10 @@ export class MicrosoftGraphProvider {
     const response = await this.request({ method: 'GET', path: `${API}/me/mailFolders/drafts/messages`, query: { '$top': MAX_RECONCILIATION_ITEMS, '$select': 'id,subject,body,toRecipients,ccRecipients,internetMessageHeaders,changeKey' }, signal });
     const values = safeArray(response.body?.value, MAX_RECONCILIATION_ITEMS); return values.filter(value => Array.isArray(value?.internetMessageHeaders) && value.internetMessageHeaders.some(header => header && typeof header.name === 'string' && header.name.toLowerCase() === LAE_OPERATION_HEADER && header.value === marker)).map(value => projectionDraft(value)).filter(Boolean);
   }
-  async listSentForDigest(binding, expectedDigest, existingIds, snapshotAt, signal) {
-    const response = await this.request({ method: 'GET', path: `${API}/me/mailFolders/sentitems/messages`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$top': MAX_RECONCILIATION_ITEMS, '$orderby': 'sentDateTime desc', '$select': 'id,subject,body,toRecipients,ccRecipients,changeKey,sentDateTime' }, signal });
+  async listSentForDigest(expectedDigest, existingIds, snapshotAt, sentMarker, signal) {
+    const response = await this.request({ method: 'GET', path: `${API}/me/mailFolders/sentitems/messages`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$top': MAX_RECONCILIATION_ITEMS, '$orderby': 'sentDateTime desc', '$select': 'id,subject,body,toRecipients,ccRecipients,changeKey,sentDateTime,internetMessageHeaders' }, signal });
     const values = safeArray(response.body?.value, MAX_RECONCILIATION_ITEMS); const upper = this.now() + 60000;
-    return values.map(value => { const item = projectionDraft(value); return item ? { ...item, sent_at_ms: typeof value?.sentDateTime === 'string' ? Date.parse(value.sentDateTime) : NaN } : null; }).filter(item => item && !existingIds?.has(item.id) && draftContentDigest(item) === expectedDigest && Number.isFinite(snapshotAt) && Number.isFinite(item.sent_at_ms) && item.sent_at_ms >= snapshotAt - 1000 && item.sent_at_ms <= upper && (!binding || binding.operation_digest));
+    return values.map(value => { const item = projectionDraft(value); return item ? { ...item, sent_at_ms: typeof value?.sentDateTime === 'string' ? Date.parse(value.sentDateTime) : NaN } : null; }).filter(item => item && typeof sentMarker === 'string' && item.operation_marker === sentMarker && !existingIds?.has(item.id) && draftContentDigest(item) === expectedDigest && Number.isFinite(snapshotAt) && Number.isFinite(item.sent_at_ms) && item.sent_at_ms >= snapshotAt - 1000 && item.sent_at_ms <= upper);
   }
   async listChatMessagesForProof(chatId, signal) {
     const response = await this.request({ method: 'GET', path: `${API}/chats/${encodeURIComponent(chatId)}/messages`, query: { '$top': MAX_RECONCILIATION_ITEMS }, signal });
@@ -264,7 +271,7 @@ export class MicrosoftGraphProvider {
     try { await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(args.draft_id)}`, query: { '$select': 'id' }, signal }); }
     catch (error) { if (isNotFound(error)) draftPresent = false; else return reconcilingPayload({ binding, response, reconciliation: 'draft_state_unavailable' }); }
     if (draftPresent) return reconcilingPayload({ binding, response, reconciliation: 'draft_still_present' });
-    const sent = await this.listSentForDigest(binding, saved.draftBinding, saved.preexistingSentIds, saved.sent_snapshot_at, signal);
+    const sent = await this.listSentForDigest(saved.draftBinding, saved.preexistingSentIds, saved.sent_snapshot_at, saved.sent_marker, signal);
     if (sent.length === 1) return verifiedPayload({ binding, response, resource: { id: sent[0].id }, reconciliation: 'unique_sent_item' });
     return reconcilingPayload({ binding, response, reconciliation: sent.length > 1 ? 'multiple_matching_sent_items' : 'sent_item_not_found' });
   }
@@ -275,7 +282,7 @@ export class MicrosoftGraphProvider {
     }
     if (call.name === 'mail.send_draft') {
       if (this.permissionProfile === 'always_ask' && call.preview_authorized !== true) return { provider: 'microsoft_graph', action: 'send_draft_preview_access', destination: '/me', draft_id: args.draft_id, preview_authorization_required: true, data_categories: ['existing_draft_content'], permission_profile: this.permissionProfile };
-      const draftResponse = await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(args.draft_id)}`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$select': 'id,subject,body,toRecipients,ccRecipients,internetMessageHeaders,changeKey' }, signal: call.signal }); const draft = projectionDraft(draftResponse.body); if (!draft) throw new ProviderToolError('provider_invalid_response', 'draft projection unavailable'); const saved = this.proposals.get(call.id); saved.draftBinding = draftContentDigest(draft); saved.draftIdentity = Object.freeze({ etag: draft.etag, change_key: draft.change_key }); return { provider: 'microsoft_graph', action: 'send_draft', destination: '/me', draft_id: draft.id, subject: draft.subject, body_preview: draft.body_preview, body_truncated: draft.body_truncated, recipients: draft.recipients.map(recipient => recipient.address), etag: draft.etag, change_key: draft.change_key, proposal_revision: proposalRevision, data_categories: ['recipient', 'subject', 'existing_draft_content'], permission_profile: this.permissionProfile };
+      const draftResponse = await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(args.draft_id)}`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$select': 'id,subject,body,toRecipients,ccRecipients,internetMessageHeaders,changeKey' }, signal: call.signal }); const draft = projectionDraft(draftResponse.body); if (!draft) throw new ProviderToolError('provider_invalid_response', 'draft projection unavailable'); if (!draft.etag || !draft.change_key) throw new ProviderToolError('provider_invalid_response', 'draft version unavailable'); const saved = this.proposals.get(call.id); saved.draftBinding = draftContentDigest(draft); saved.sent_marker = draft.operation_marker; saved.draftIdentity = Object.freeze({ etag: draft.etag, change_key: draft.change_key }); return { provider: 'microsoft_graph', action: 'send_draft', destination: '/me', draft_id: draft.id, subject: draft.subject, body_preview: draft.body_preview, body_truncated: draft.body_truncated, recipients: draft.recipients.map(recipient => recipient.address), etag: draft.etag, change_key: draft.change_key, proposal_revision: proposalRevision, data_categories: ['recipient', 'subject', 'existing_draft_content'], permission_profile: this.permissionProfile };
     }
     if (call.name === 'mail.mark_read') {
       return { provider: 'microsoft_graph', action: 'mark_read', destination: '/me', message_id: args.message_id, is_read: args.is_read, proposal_revision: proposalRevision, permission_profile: this.permissionProfile };
@@ -328,9 +335,9 @@ export class MicrosoftGraphProvider {
       }
       if (call.name === 'mail.send_draft') {
         saved.prewrite_verified = false; saved.post_attempted = false; saved.reconciliation_allowed = false;
-        const currentResponse = await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(args.draft_id)}`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$select': 'id,subject,body,toRecipients,ccRecipients,internetMessageHeaders,changeKey' }, signal: operation.signal }); const current = projectionDraft(currentResponse.body); if (!current || current.id !== args.draft_id || draftContentDigest(current) !== saved.draftBinding || current.etag !== saved.draftIdentity?.etag || current.change_key !== saved.draftIdentity?.change_key) throw new ProviderToolError('provider_permission_insufficient', 'draft identity changed after preview');
+        const currentResponse = await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(args.draft_id)}`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$select': 'id,subject,body,toRecipients,ccRecipients,internetMessageHeaders,changeKey' }, signal: operation.signal }); const current = projectionDraft(currentResponse.body); if (!current || !saved.draftIdentity?.etag || !saved.draftIdentity?.change_key || !current.etag || !current.change_key || current.id !== args.draft_id || draftContentDigest(current) !== saved.draftBinding || current.operation_marker !== saved.sent_marker || current.etag !== saved.draftIdentity.etag || current.change_key !== saved.draftIdentity.change_key) throw new ProviderToolError('provider_permission_insufficient', 'draft identity changed after preview');
         const sentBefore = await this.request({ method: 'GET', path: `${API}/me/mailFolders/sentitems/messages`, query: { '$top': MAX_RECONCILIATION_ITEMS, '$orderby': 'sentDateTime desc', '$select': 'id,sentDateTime' }, signal: operation.signal }); saved.preexistingSentIds = new Set(safeArray(sentBefore.body?.value, MAX_RECONCILIATION_ITEMS).filter(item => typeof item?.id === 'string').map(item => item.id)); saved.sent_snapshot_at = this.now(); saved.prewrite_verified = true; saved.reconciliation_allowed = true;
-        const sendHeaders = {}; if (saved.draftIdentity?.etag) sendHeaders['If-Match'] = saved.draftIdentity.etag; saved.post_attempted = true; response = await this.request({ method: 'POST', path: `${API}/me/messages/${encodeURIComponent(args.draft_id)}/send`, headers: sendHeaders, signal: operation.signal });
+        const sendHeaders = { 'If-Match': saved.draftIdentity.etag }; response = await this.request({ method: 'POST', path: `${API}/me/messages/${encodeURIComponent(args.draft_id)}/send`, headers: sendHeaders, signal: operation.signal, onDispatch: () => { saved.post_attempted = true; } });
         return result(call, 'ok', await this.reconcileSendDraft(call, args, binding, response, saved, operation.signal));
       }
       if (call.name === 'mail.mark_read') {
@@ -342,8 +349,8 @@ export class MicrosoftGraphProvider {
       }
       if (call.name === 'teams.send_message') {
         saved.prewrite_verified = false; saved.post_attempted = false; saved.reconciliation_allowed = false; saved.team_sender_id = null; saved.team_prewrite_at = this.now();
-        const before = await this.listChatMessagesForProof(args.chat_id, operation.signal); saved.preexistingTeamIds = new Set(before.map(item => item.id)); saved.prewrite_verified = true; saved.reconciliation_allowed = true; saved.post_attempted = true;
-        response = await this.request({ method: 'POST', path: `${API}/chats/${encodeURIComponent(args.chat_id)}/messages`, body: { body: { contentType: 'text', content: args.body } }, signal: operation.signal });
+        const before = await this.listChatMessagesForProof(args.chat_id, operation.signal); saved.preexistingTeamIds = new Set(before.map(item => item.id)); saved.prewrite_verified = true; saved.reconciliation_allowed = true;
+        response = await this.request({ method: 'POST', path: `${API}/chats/${encodeURIComponent(args.chat_id)}/messages`, body: { body: { contentType: 'text', content: args.body } }, signal: operation.signal, onDispatch: () => { saved.post_attempted = true; } });
         const resource = response.status === 201 ? teamsResource(response.body, args.chat_id, args.body) : null;
         if (resource) return result(call, 'ok', verifiedPayload({ call, binding, response, resource, reconciliation: 'created_resource' }));
         const after = await this.listChatMessagesForProof(args.chat_id, operation.signal); const matches = this.teamsProofMatches(after, args, saved).filter(item => !saved.preexistingTeamIds.has(item.id));

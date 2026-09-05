@@ -40,6 +40,18 @@ function modelVisibleToolResult(result) {
     try { return { ...item, text: JSON.stringify(stripPrivateJournalMetadata(JSON.parse(item.text))) }; } catch { return item; }
   }) };
 }
+const SAFE_RECONCILIATIONS = new Set(['created_resource', 'unique_exact_draft', 'unique_sent_item', 'post_write_get_verified', 'pre_read_already_desired']);
+function modelVisibleReconciliationResult(result, binding) {
+  let payload;
+  try { payload = JSON.parse(result?.content?.[0]?.text ?? ''); } catch { payload = null; }
+  const verified = payload?.provider_completion === 'verified' && payload?.state === 'completed' && payload?.completed === true;
+  if (!verified) return makeToolResult({ id: result.id, name: result.name, status: 'failed', text: JSON.stringify({ code: 'action_completion_unverified', state: 'reconciling', completion: 'controller_acknowledged', provider_completion: 'unverified' }), durationMs: result.metadata?.duration_ms ?? 0 });
+  const httpStatus = payload.http_status === null || (Number.isInteger(payload.http_status) && payload.http_status >= 200 && payload.http_status <= 599) ? payload.http_status : null;
+  const privateValues = Object.values(binding ?? {}).filter(value => typeof value === 'string' && value.length > 0);
+  const resourceId = typeof payload.resource_id === 'string' && payload.resource_id.length <= 512 && !/[\u0000-\u001f\u007f]/u.test(payload.resource_id) && !privateValues.some(value => payload.resource_id.includes(value)) ? payload.resource_id : null;
+  const reconciliation = SAFE_RECONCILIATIONS.has(payload.evidence?.reconciliation) ? payload.evidence.reconciliation : null;
+  return makeToolResult({ id: result.id, name: result.name, status: 'ok', text: JSON.stringify({ state: 'completed', provider_completion: 'verified', completion: 'provider_verified', accepted: true, completed: true, http_status: httpStatus, resource_id: resourceId, reconciliation }), durationMs: result.metadata?.duration_ms ?? 0 });
+}
 function digestEvidence(value) { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
 
 // The model sees only the OpenAI-compatible function schema. Execution and
@@ -241,12 +253,15 @@ export class ConversationController {
           // `policy` is host-internal bookkeeping, not a model/provider
           // authorization object. Only pass concrete user/grant proof across
           // the provider boundary.
-          const internal = activeJournalOperation ? { journal_binding: { operation_id: activeJournalOperation.id, operation_digest: activeJournalOperation.operationDigest, arguments_digest: activeJournalOperation.argumentsDigest, preview_digest: activeJournalOperation.previewDigest } } : undefined;
+          const internal = activeJournalOperation?.reconcile ? { journal_binding: { operation_id: activeJournalOperation.id, operation_digest: activeJournalOperation.operationDigest, arguments_digest: activeJournalOperation.argumentsDigest, preview_digest: activeJournalOperation.previewDigest } } : undefined;
           result = await invokeWithTimeout(tool, tool.execute, { ...call, ...(authorization.kind === 'policy' ? {} : { authorization }), ...(internal ? { internal } : {}) }, controller.signal);
         }
         try { result = validateToolResult(result); } catch { throw Object.assign(new Error('invalid_tool_result'), { code: 'invalid_tool_result' }); }
         if (result.id !== call.id || result.name !== call.name) throw Object.assign(new Error('tool_result_mismatch'), { code: 'tool_result_mismatch' });
+        let strictModelResult = false; let modelBinding = null;
         if (activeJournalOperation) {
+          strictModelResult = activeJournalOperation.reconcile === true;
+          modelBinding = activeJournalOperation;
           if (result.status === 'ok') {
             await this.actionJournal.acknowledge(activeJournalOperation.id);
             if (activeJournalOperation.reconcile && !providerVerified(result, activeJournalOperation)) {
@@ -258,7 +273,7 @@ export class ConversationController {
           else await this.actionJournal.markUnknown(activeJournalOperation.id);
           activeJournalOperation = null;
         }
-        const modelResult = modelVisibleToolResult(result);
+        const modelResult = strictModelResult ? modelVisibleReconciliationResult(result, modelBinding) : modelVisibleToolResult(result);
         emit('tool.completed', { result });
         this._appendHistory(session, { role: 'assistant', content: callText });
         this._appendHistory(session, { role: 'tool', name: call.name, tool_call_id: call.id, content: modelResult.content[0]?.text ?? '' });

@@ -19,12 +19,18 @@ GET after a PATCH. A timeout is never retried blindly; a GET can prove the
 desired state, otherwise the operation remains reconciling.
 
 `mail.send_draft` binds the complete bounded normalized draft content,
-recipients, subject, and returned ETag/change key at preview. It does not claim
-completion from Graph's `202 Accepted`. Completion requires the draft to be
-absent and exactly one new matching Sent Items projection; otherwise it stays
-reconciling. Teams sends do not use an idempotency header or automatic retry.
-They complete only from a validated `201 Created` resource or one bounded,
-unique post-dispatch chat-message proof; ambiguous results remain reconciling.
+recipients, subject, and non-empty returned ETag/change key at preview. It does
+not claim completion from Graph's `202 Accepted`. Completion requires the draft
+to be absent and exactly one new matching Sent Items projection carrying the
+same bounded `x-lae-operation` marker already present on the draft, plus a
+post-snapshot `sentDateTime` inside the bounded deterministic window. Existing
+drafts without that marker, missing versions, stale versions, old matches, or
+undated matches remain reconciling/manual; no unsupported marker is invented.
+Teams sends do not use an idempotency header or automatic retry. They complete
+only from a validated `201 Created` resource. Timeout/list-message proof stays
+manual in this slice because a trusted signed-in sender identity is not
+available; content/time alone is insufficient against a concurrent identical
+message.
 
 Official Microsoft Graph references (accessed 2026-09-05):
 
