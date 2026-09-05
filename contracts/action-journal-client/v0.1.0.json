@@ -1,0 +1,95 @@
+{
+  "$id": "lae://contracts/action-journal-client/0.1.0",
+  "schema_version": "lae.native-action-journal-client.v1",
+  "version": "0.1.0",
+  "status": "source_only_test_injection_not_enabled",
+  "production_available": false,
+  "host_import_added": false,
+  "native_transport_added": false,
+  "pipe_discovery_added": false,
+  "process_launch_added": false,
+  "package_added": false,
+  "availability_changed": false,
+  "protocol": "lae.action-journal.v0.1.0",
+  "test_transport": {
+    "cooperative_abort_required": true,
+    "all_operations_must_settle_before_return": true,
+    "uncooperative_operation_behavior": "caller_remains_pending_and_health_blocks",
+    "chunk_contract": "Uint8Array backed by ArrayBuffer; byteLength is checked before client copy",
+    "source_key_contract": "exact standalone transferable 32-byte ArrayBuffer; source view is detached",
+    "pre_factory_key_copies_excluded": true
+  },
+  "factory_validation": {
+    "accessors_invoked": false,
+    "proxy_traps_may_execute": true,
+    "reflective_traps": "caught_and_fail_closed",
+    "standalone_key_captured_before_shape_validation": true,
+    "malformed_result_cleanup": "captured_transport_close_then_zero_after_quiescence",
+    "rejected_close": "retained_poisoned_ownership_and_fail_stop",
+    "inaccessible_key_material": "not_proven_and_refused",
+    "factory_ownership_slot": "registered_before_invocation_and_resolved_only_after_adopt_or_exact_close"
+  },
+  "pre_transport_errors": {
+    "clock_or_request_id_failure": "action_journal_prewrite_invalid",
+    "mutation_recovery": "forbidden_before_transport_dispatch",
+    "close_request": "action_journal_close_requested"
+  },
+  "close_transaction": {
+    "deadline_clock": "trusted_monotonic_performance_timer",
+    "operation_invocations": 1,
+    "timeout_behavior": "abort_then_grace_then_await_settlement",
+    "rejection": "poisoned_ownership_retained_and_close_unproven",
+    "clear_state": "only_after_quiesced_close_and_key_zeroing",
+    "concurrent_close": "same_promise",
+    "close_request": "immediate_epoch_and_abort_blocks_new_io_or_recovery"
+  },
+  "limits": {
+    "deadline_ms_default": 15000,
+    "deadline_ms_max": 600000,
+    "settlement_grace_ms_default": 1000,
+    "max_connections": 4,
+    "max_pending_calls": 8,
+    "max_read_chunks_per_response": 8,
+    "max_response_bytes": 65536,
+    "max_recovery_records": 1024,
+    "max_detail_events": 32
+  },
+  "lost_ack": {
+    "prepare": "one exact helper-idempotent prepare binding retry",
+    "other_mutations": "never replay; authenticate complete detail on a new session",
+    "proof": "final event must equal the locally derived helper receipt digest and event digest for exact prior receipt, operation, method, canonical body, state, authorization, and resolution",
+    "state_only_match_forbidden": true
+  },
+  "duplicate_semantics": {
+    "binding": "exact tool_name plus arguments_digest, independent of request_id and call_id",
+    "same_session": "one unresolved binding only",
+    "startup": "any active state not reduced by helper recovery to unknown_manual blocks all prepares",
+    "unknown_manual": "blocks all prepares until explicit manual resolution"
+  },
+  "cleanup_claim": {
+    "owned_mutable_key_buffers_zeroed_after_settled_close": true,
+    "factory_source_key_view_detached": true,
+    "immutable_js_strings_or_prior_factory_copies_erased": false,
+    "request_frame_or_parsed_object_erasure_claimed": false
+  },
+  "output": {
+    "allowed": "finite status codes and protocol-validated redacted receipts/events",
+    "forbidden": [
+      "HMAC key",
+      "session nonce",
+      "request or call IDs",
+      "arguments or previews",
+      "provider payload",
+      "transport errors",
+      "paths or identities"
+    ]
+  },
+  "activation_blockers": [
+    "authenticated immutable supervisor authority",
+    "accepted native helper and storage runtime",
+    "real cancellable named-pipe transport",
+    "OS-enforced process and secret lifetime",
+    "host/controller integration",
+    "Windows target acceptance and packaging"
+  ]
+}
