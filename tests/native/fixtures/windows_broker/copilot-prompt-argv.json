@@ -1,0 +1,1 @@
+{"action_id":"copilot.ask.stdin","parameters":[{"name":"prompt","kind":"utf8","placement":"argv","max_bytes":8192,"required":true,"allowed_values":["synthetic"]}],"argv_template":[{"literal":"ask"},{"parameter":"prompt"}]}

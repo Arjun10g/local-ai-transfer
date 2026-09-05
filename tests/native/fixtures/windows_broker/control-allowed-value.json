@@ -1,0 +1,1 @@
+{"action_id":"process.status.fixed","parameters":[{"name":"format","kind":"utf8","placement":"argv","max_bytes":32,"required":true,"allowed_values":["safe\u0000unsafe"]}],"argv_template":[{"parameter":"format"}]}

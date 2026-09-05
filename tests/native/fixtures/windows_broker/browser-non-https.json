@@ -1,0 +1,1 @@
+{"schema":"lae.windows-broker.request.v1","request_id":"request_browser_0001","kind":"invoke","action_id":"browser.edge.open_https","deadline_ms":10000,"arguments":{"url":"http://example.com"}}

@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "lae://contracts/windows-process-broker/request/1.0.0",
+  "title": "LAE Windows broker request v1",
+  "oneOf": [
+    {"$ref": "#/$defs/hello"},
+    {"$ref": "#/$defs/invoke"},
+    {"$ref": "#/$defs/cancel"}
+  ],
+  "$defs": {
+    "requestId": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "base": {
+      "type": "object",
+      "properties": {
+        "schema": {"const": "lae.windows-broker.request.v1"},
+        "request_id": {"$ref": "#/$defs/requestId"}
+      },
+      "required": ["schema", "request_id"]
+    },
+    "argument": {
+      "oneOf": [
+        {"type": "string", "minLength": 1, "maxLength": 65536, "not": {"pattern": "[\\u0000-\\u001f\\u007f]"}},
+        {"type": "integer", "minimum": 0, "maximum": 2147483647}
+      ]
+    },
+    "hello": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {"const": "lae.windows-broker.request.v1"},
+            "request_id": {"$ref": "#/$defs/requestId"},
+            "kind": {"const": "hello"}
+          },
+          "required": ["schema", "request_id", "kind"]
+        }
+      ]
+    },
+    "invoke": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {"const": "lae.windows-broker.request.v1"},
+            "request_id": {"$ref": "#/$defs/requestId"},
+            "kind": {"const": "invoke"},
+            "action_id": {"type": "string", "minLength": 2, "maxLength": 96, "pattern": "^[A-Za-z0-9_.-]+$"},
+            "deadline_ms": {"type": "integer", "minimum": 100, "maximum": 120000},
+            "arguments": {
+              "type": "object",
+              "maxProperties": 16,
+              "propertyNames": {"pattern": "^[A-Za-z0-9_.-]{1,64}$"},
+              "additionalProperties": {"$ref": "#/$defs/argument"}
+            }
+          },
+          "required": ["schema", "request_id", "kind", "action_id", "deadline_ms", "arguments"]
+        }
+      ]
+    },
+    "cancel": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {"const": "lae.windows-broker.request.v1"},
+            "request_id": {"$ref": "#/$defs/requestId"},
+            "kind": {"const": "cancel"},
+            "target_request_id": {"$ref": "#/$defs/requestId"}
+          },
+          "required": ["schema", "request_id", "kind", "target_request_id"]
+        }
+      ]
+    }
+  }
+}

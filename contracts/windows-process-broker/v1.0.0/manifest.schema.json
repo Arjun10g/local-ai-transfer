@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "lae://contracts/windows-process-broker/manifest/1.0.0",
+  "title": "LAE Windows broker manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "mode", "manifest_id", "runtime_directory_id", "executables", "directories", "actions"],
+  "properties": {
+    "schema": {"const": "lae.windows-broker.manifest.v1"},
+    "mode": {"enum": ["product", "fixture"]},
+    "manifest_id": {"$ref": "#/$defs/id"},
+    "runtime_directory_id": {"$ref": "#/$defs/id"},
+    "executables": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/executable"}},
+    "directories": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/directory"}},
+    "actions": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "#/$defs/action"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_.-]+$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "fileId": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "absolutePath": {"type": "string", "minLength": 4, "maxLength": 32767, "pattern": "^[A-Za-z]:\\\\[^\\u0000-\\u001f\\u007f:<>\"|]*$"},
+    "directory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "absolute_path", "volume_serial", "file_id_128"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "absolute_path": {"$ref": "#/$defs/absolutePath"},
+        "volume_serial": {"type": "integer", "minimum": 0},
+        "file_id_128": {"$ref": "#/$defs/fileId"}
+      }
+    },
+    "executable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "class", "absolute_path", "size_bytes", "sha256", "volume_serial", "file_id_128"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "class": {"enum": ["process_tool", "application", "browser", "copilot"]},
+        "absolute_path": {"allOf": [{"$ref": "#/$defs/absolutePath"}, {"pattern": "\\.[Ee][Xx][Ee]$"}]},
+        "size_bytes": {"type": "integer", "minimum": 1, "maximum": 536870912},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "volume_serial": {"type": "integer", "minimum": 0},
+        "file_id_128": {"$ref": "#/$defs/fileId"}
+      }
+    },
+    "parameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind", "placement", "max_bytes", "required"],
+      "properties": {
+        "name": {"$ref": "#/$defs/id"},
+        "kind": {"enum": ["utf8", "https_url", "unsigned_decimal", "workspace_relative"]},
+        "placement": {"enum": ["argv", "stdin", "clipboard"]},
+        "max_bytes": {"type": "integer", "minimum": 1, "maximum": 65536},
+        "required": {"const": true},
+        "allowed_values": {"type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 65536, "not": {"pattern": "[\\u0000-\\u001f\\u007f]"}}}
+      }
+    },
+    "argumentPart": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["literal"], "properties": {"literal": {"type": "string", "minLength": 1, "maxLength": 4096, "not": {"pattern": "[\\u0000-\\u001f\\u007f]"}}}},
+        {"type": "object", "additionalProperties": false, "required": ["parameter"], "properties": {"parameter": {"$ref": "#/$defs/id"}}}
+      ]
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action_id", "kind", "parameters", "timeout_ms", "stdout_limit_bytes", "stderr_limit_bytes", "max_processes", "visible", "environment_profile"],
+      "properties": {
+        "action_id": {"type": "string", "minLength": 2, "maxLength": 96, "pattern": "^[A-Za-z0-9_.-]+$"},
+        "kind": {"enum": ["process", "application", "browser", "copilot", "clipboard_read", "clipboard_write"]},
+        "executable_id": {"$ref": "#/$defs/id"},
+        "cwd_id": {"$ref": "#/$defs/id"},
+        "argv_template_id": {"$ref": "#/$defs/id"},
+        "action_policy_id": {"$ref": "#/$defs/id"},
+        "confinement_profile": {"enum": ["unproven-disabled", "appcontainer-low-integrity-v1"]},
+        "argv_template": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/argumentPart"}},
+        "parameters": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/parameter"}},
+        "timeout_ms": {"type": "integer", "minimum": 100, "maximum": 120000},
+        "stdout_limit_bytes": {"type": "integer", "minimum": 0, "maximum": 262144},
+        "stderr_limit_bytes": {"type": "integer", "minimum": 0, "maximum": 262144},
+        "max_processes": {"type": "integer", "minimum": 1, "maximum": 32},
+        "visible": {"type": "boolean"},
+        "environment_profile": {"const": "systemroot-broker-temp-v1"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"enum": ["process", "application", "browser", "copilot"]}}, "required": ["kind"]},
+          "then": {
+            "required": ["executable_id", "cwd_id", "argv_template_id", "action_policy_id", "confinement_profile", "argv_template"],
+            "properties": {"argv_template": {"minItems": 1}}
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {"required": ["executable_id"]}, {"required": ["cwd_id"]},
+                {"required": ["argv_template_id"]}, {"required": ["action_policy_id"]},
+                {"required": ["confinement_profile"]}, {"required": ["argv_template"]}
+              ]
+            }
+          }
+        },
+        {
+          "if": {"properties": {"kind": {"const": "process"}}, "required": ["kind"]},
+          "then": {
+            "properties": {
+              "parameters": {
+                "items": {
+                  "allOf": [
+                    {"$ref": "#/$defs/parameter"},
+                    {
+                      "required": ["allowed_values"],
+                      "properties": {
+                        "kind": {"enum": ["utf8", "https_url", "unsigned_decimal"]},
+                        "placement": {"const": "argv"},
+                        "required": {"const": true}
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"kind": {"const": "application"}}, "required": ["kind"]},
+          "then": {"properties": {"parameters": {"maxItems": 0}}}
+        },
+        {
+          "if": {"properties": {"kind": {"const": "browser"}}, "required": ["kind"]},
+          "then": {
+            "properties": {
+              "visible": {"const": true},
+              "parameters": {
+                "minItems": 1,
+                "maxItems": 1,
+                "prefixItems": [{"allOf": [{"$ref": "#/$defs/parameter"}, {"properties": {"name": {"const": "url"}, "kind": {"const": "https_url"}, "placement": {"const": "argv"}, "max_bytes": {"maximum": 2048}, "required": {"const": true}}}]}],
+                "items": false
+              },
+              "argv_template": {"contains": {"const": {"parameter": "url"}}, "minContains": 1, "maxContains": 1}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"kind": {"const": "copilot"}}, "required": ["kind"]},
+          "then": {
+            "properties": {
+              "visible": {"const": false},
+              "parameters": {
+                "minItems": 1,
+                "maxItems": 1,
+                "prefixItems": [{"allOf": [{"$ref": "#/$defs/parameter"}, {"properties": {"name": {"const": "prompt"}, "kind": {"const": "utf8"}, "placement": {"const": "stdin"}, "max_bytes": {"maximum": 65536}, "required": {"const": true}}}]}],
+                "items": false
+              },
+              "argv_template": {"items": {"type": "object", "additionalProperties": false, "required": ["literal"], "properties": {"literal": {"type": "string", "minLength": 1, "maxLength": 4096, "not": {"pattern": "[\\u0000-\\u001f\\u007f]"}}}}}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"kind": {"const": "clipboard_read"}}, "required": ["kind"]},
+          "then": {
+            "properties": {
+              "parameters": {"maxItems": 0}, "timeout_ms": {"maximum": 5000},
+              "stdout_limit_bytes": {"minimum": 1, "maximum": 65536},
+              "stderr_limit_bytes": {"const": 0}, "max_processes": {"const": 1},
+              "visible": {"const": false}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"kind": {"const": "clipboard_write"}}, "required": ["kind"]},
+          "then": {
+            "properties": {
+              "parameters": {
+                "minItems": 1, "maxItems": 1,
+                "prefixItems": [{"allOf": [{"$ref": "#/$defs/parameter"}, {"properties": {"kind": {"const": "utf8"}, "placement": {"const": "clipboard"}, "max_bytes": {"maximum": 65536}, "required": {"const": true}}}]}],
+                "items": false
+              },
+              "timeout_ms": {"maximum": 5000}, "stdout_limit_bytes": {"const": 0},
+              "stderr_limit_bytes": {"const": 0}, "max_processes": {"const": 1},
+              "visible": {"const": false}
+            }
+          }
+        }
+      ]
+    }
+  }
+}
