@@ -5,6 +5,7 @@ import { createActionBinding } from './action-journal.mjs';
 import { readGraphAttestation, transferGraphAttestation } from '../providers/microsoft-graph.mjs';
 import { browserSafeCompletionDigest, projectBrowserResult, readBrowserAttestation, transferBrowserAttestation } from '../providers/browser-actions.mjs';
 import { isGraphReadTool, readGraphReadAttestation, transferGraphReadAttestation } from '../providers/microsoft-graph-reads.mjs';
+import { copilotSafeCompletionDigest, readCopilotAttestation, transferCopilotAttestation } from '../providers/copilot-cli.mjs';
 import { timeNowDefinition, timeNowTool } from '../tools/time-now.mjs';
 
 export const STATES = Object.freeze(['IDLE', 'BUILDING_PROMPT', 'INFERENCING', 'TOOL_PROPOSED', 'WAITING_CONFIRMATION', 'TOOL_RUNNING', 'CONTINUING_MODEL', 'COMPLETED', 'CANCELLED', 'FAILED']);
@@ -21,18 +22,19 @@ const EFFECT_TIERS = Object.freeze({
   create: ['T2'], replace: ['T2'], write_sensitive: ['T2'], create_draft: ['T2'], modify_mail: ['T2'],
   process_execution: ['T3'], cloud_inference: ['T3'], send_mail: ['T3'], send_teams: ['T3'], browser_input: ['T3'], browser_activation: ['T3']
 });
-const RECONCILIATION_REQUIRED_EFFECTS = new Set(['create_draft', 'send_mail', 'modify_mail', 'send_teams', 'browser_navigation', 'browser_input', 'browser_activation']);
+const RECONCILIATION_REQUIRED_EFFECTS = new Set(['create_draft', 'send_mail', 'modify_mail', 'send_teams', 'browser_navigation', 'browser_input', 'browser_activation', 'cloud_inference']);
 const BROWSER_TOOL_NAMES = new Set(['browser.session_start', 'browser.inspect_links', 'browser.inspect_page', 'browser.follow_link', 'browser.fill_field', 'browser.activate_control', 'browser.session_close']);
+const COPILOT_TOOL_NAMES = new Set(['coding.copilot_ask']);
 const BROWSER_PROOFS = new Set(['session_started', 'navigation_verified', 'input_verified', 'activation_verified']);
 const PRIVATE_JOURNAL_KEYS = new Set(['operation_id', 'operation_digest', 'arguments_digest', 'preview_digest', 'response_digest', 'resource_digest']);
 const providerAttestationMatches = (result, expectedBinding, call) => {
-  const browser = BROWSER_TOOL_NAMES.has(call?.name);
-  const attestation = browser ? readBrowserAttestation(result) : readGraphAttestation(result);
+  const browser = BROWSER_TOOL_NAMES.has(call?.name); const copilot = COPILOT_TOOL_NAMES.has(call?.name);
+  const attestation = browser ? readBrowserAttestation(result) : copilot ? readCopilotAttestation(result) : readGraphAttestation(result);
   let payload = null; try { payload = JSON.parse(result?.content?.[0]?.text ?? ''); } catch {}
   const safeProofs = browser ? BROWSER_PROOFS : SAFE_RECONCILIATIONS;
-  const providerPayloadValid = browser || payload?.provider_completion === 'verified' && payload?.state === 'completed' && payload?.completed === true;
-  const safePayloadBound = !browser || attestation?.safe_payload_digest === browserSafeCompletionDigest(result);
-  return result?.status === 'ok' && payload && typeof payload === 'object' && providerPayloadValid && payload.reconciliation === attestation?.proof && attestation?.provider === (browser ? 'browser_actions' : 'microsoft_graph') && attestation.call_id === call.id && attestation.tool_name === call.name && attestation.operation_id === expectedBinding.id && attestation.operation_digest === expectedBinding.operationDigest && attestation.arguments_digest === expectedBinding.argumentsDigest && attestation.preview_digest === expectedBinding.previewDigest && safeProofs.has(attestation.proof) && safePayloadBound;
+  const providerPayloadValid = browser ? true : copilot ? payload?.provider === 'github_copilot' && payload?.state === 'ready' : payload?.provider_completion === 'verified' && payload?.state === 'completed' && payload?.completed === true;
+  const safePayloadBound = browser ? attestation?.safe_payload_digest === browserSafeCompletionDigest(result) : copilot ? attestation?.safe_payload_digest === copilotSafeCompletionDigest(result) : true;
+  return result?.status === 'ok' && payload && typeof payload === 'object' && providerPayloadValid && (copilot || payload.reconciliation === attestation?.proof) && attestation?.provider === (browser ? 'browser_actions' : copilot ? 'github_copilot' : 'microsoft_graph') && attestation.call_id === call.id && attestation.tool_name === call.name && attestation.operation_id === expectedBinding.id && attestation.operation_digest === expectedBinding.operationDigest && attestation.arguments_digest === expectedBinding.argumentsDigest && attestation.preview_digest === expectedBinding.previewDigest && (copilot || safeProofs.has(attestation.proof)) && safePayloadBound;
 };
 function stripPrivateJournalMetadata(value) {
   if (Array.isArray(value)) return value.map(stripPrivateJournalMetadata);
@@ -64,6 +66,12 @@ function modelVisibleReconciliationResult(result, controllerVerified, binding) {
   const resourceId = typeof payload.resource_id === 'string' && payload.resource_id.length <= 512 && !/[\u0000-\u001f\u007f]/u.test(payload.resource_id) && !privateValues.some(value => payload.resource_id.toLocaleLowerCase('en-US').includes(value.toLocaleLowerCase('en-US'))) ? payload.resource_id : null;
   const reconciliation = SAFE_RECONCILIATIONS.has(payload.reconciliation) ? payload.reconciliation : null;
   return makeToolResult({ id: result.id, name: result.name, status: 'ok', text: JSON.stringify({ state: 'completed', provider_completion: 'verified', completion: 'provider_verified', accepted: true, completed: true, http_status: httpStatus, resource_id: resourceId, reconciliation }), durationMs: result.metadata?.duration_ms ?? 0 });
+}
+function modelVisibleCopilotResult(result, controllerVerified) {
+  let payload = null;
+  try { payload = JSON.parse(result?.content?.[0]?.text ?? ''); } catch {}
+  if (controllerVerified !== true || !payload || typeof payload !== 'object' || Array.isArray(payload) || payload.provider !== 'github_copilot' || payload.state !== 'ready' || typeof payload.stdout !== 'string' || Buffer.byteLength(payload.stdout, 'utf8') > 65536 || !['ok', 'failed', 'cancelled'].includes(payload.exit_class) || typeof payload.truncated !== 'boolean' || !Number.isSafeInteger(payload.duration_ms) || payload.duration_ms < 0 || payload.duration_ms > 120000 || !Number.isSafeInteger(payload.egress_bytes) || payload.egress_bytes < 1 || payload.egress_bytes > 65536) return makeToolResult({ id: result?.id, name: result?.name, status: 'failed', text: JSON.stringify({ code: 'action_completion_unverified', state: 'reconciling', completion: 'controller_acknowledged', provider_completion: 'unverified' }), durationMs: result?.metadata?.duration_ms ?? 0 });
+  return makeToolResult({ id: result.id, name: result.name, status: 'ok', text: JSON.stringify({ provider: 'github_copilot', state: 'ready', completion: 'provider_verified', stdout: payload.stdout, exit_class: payload.exit_class, truncated: payload.truncated, duration_ms: payload.duration_ms, cli_version: typeof payload.cli_version === 'string' && payload.cli_version.length <= 128 ? payload.cli_version : 'unverified', egress_bytes: payload.egress_bytes }), durationMs: result.metadata?.duration_ms ?? 0 });
 }
 function digestEvidence(value) { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
 
@@ -266,7 +274,11 @@ export class ConversationController {
           // `policy` is host-internal bookkeeping, not a model/provider
           // authorization object. Only pass concrete user/grant proof across
           // the provider boundary.
-          const internal = activeJournalOperation?.reconcile ? { journal_binding: { operation_id: activeJournalOperation.id, operation_digest: activeJournalOperation.operationDigest, arguments_digest: activeJournalOperation.argumentsDigest, preview_digest: activeJournalOperation.previewDigest } } : undefined;
+          // Every durable action receives the host-only journal binding. The
+          // Copilot ACP egress path is not reconcilable, but it still needs a
+          // durable operation guard; providers must never infer authority from
+          // model-visible arguments.
+          const internal = activeJournalOperation ? { journal_binding: { operation_id: activeJournalOperation.id, operation_digest: activeJournalOperation.operationDigest, arguments_digest: activeJournalOperation.argumentsDigest, preview_digest: activeJournalOperation.previewDigest } } : undefined;
           result = await invokeWithTimeout(tool, tool.execute, { ...call, ...(authorization.kind === 'policy' ? {} : { authorization }), ...(internal ? { internal } : {}) }, controller.signal);
         }
         const hostResult = result;
@@ -274,6 +286,7 @@ export class ConversationController {
         if (result.id !== call.id || result.name !== call.name) throw Object.assign(new Error('tool_result_mismatch'), { code: 'tool_result_mismatch' });
         transferGraphAttestation(hostResult, result); if (BROWSER_TOOL_NAMES.has(call.name)) transferBrowserAttestation(hostResult, result);
         transferGraphReadAttestation(hostResult, result);
+        if (COPILOT_TOOL_NAMES.has(call.name)) transferCopilotAttestation(hostResult, result);
         let strictModelResult = false; let controllerVerified = false; let modelBinding = null;
         if (activeJournalOperation) {
           strictModelResult = activeJournalOperation.reconcile === true;
@@ -292,7 +305,7 @@ export class ConversationController {
           else await this.actionJournal.markUnknown(activeJournalOperation.id);
           activeJournalOperation = null;
         }
-        const modelResult = BROWSER_TOOL_NAMES.has(call.name) ? projectBrowserResult(result, { controllerVerified, reconciliationRequired: strictModelResult }) : strictModelResult ? modelVisibleReconciliationResult(result, controllerVerified, modelBinding) : isGraphReadTool(call.name) ? modelVisibleGraphReadResult(result, call) : modelVisibleToolResult(result);
+        const modelResult = BROWSER_TOOL_NAMES.has(call.name) ? projectBrowserResult(result, { controllerVerified, reconciliationRequired: strictModelResult }) : strictModelResult && COPILOT_TOOL_NAMES.has(call.name) ? modelVisibleCopilotResult(result, controllerVerified) : strictModelResult ? modelVisibleReconciliationResult(result, controllerVerified, modelBinding) : isGraphReadTool(call.name) ? modelVisibleGraphReadResult(result, call) : modelVisibleToolResult(result);
         emit('tool.completed', { result: modelResult });
         this._appendHistory(session, { role: 'assistant', content: callText });
         this._appendHistory(session, { role: 'tool', name: call.name, tool_call_id: call.id, content: modelResult.content[0]?.text ?? '' });

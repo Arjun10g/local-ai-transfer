@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { EventEmitter } from 'node:events';
 import assert from 'node:assert/strict';
 import { appendFile, chmod, lstat, link as hardlink, mkdtemp, readFile, realpath, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -7,6 +8,7 @@ import { ActionJournal, ACTION_JOURNAL_LIMITS, createActionBinding } from '../..
 import { ConversationController, requiresDurableAction } from '../../host/agent/controller.mjs';
 import { makeToolResult } from '../../host/agent/tool-envelope.mjs';
 import { HostServer } from '../../host/server/host-server.mjs';
+import { CopilotCliProvider, createCopilotTool } from '../../host/providers/copilot-cli.mjs';
 
 const SECRET = 'do-not-persist-super-secret-body';
 const REQUEST_ID = 'request_action01';
@@ -213,7 +215,21 @@ test('confirmed Copilot egress receives the same durable pre-dispatch receipt wi
   };
   const controller = new ConversationController({ actionJournal: journal, confirmationTimeoutMs: 1000, toolRegistry: { [tool.name]: tool }, engine: { async *generate({ messages }) { if (!messages.some(message => message.role === 'tool')) { yield { kind: 'tool_call_chunk', text: JSON.stringify({ id: 'call_copilot01', name: tool.name, arguments: { prompt: SECRET } }) }; return; } yield { kind: 'text_delta', text: 'done' }; } } });
   const result = controller.runTurn({ sessionId: 'session_copilot1', requestId: 'request_copilot1', message: 'ask', onEvent: event => { events.push(event); if (event.event === 'tool.confirmation_required') queueMicrotask(() => controller.confirm(event.data.confirmation_id, true, { requestId: event.request_id, callId: event.data.call.id })); } });
-  assert.equal((await result).state, 'COMPLETED'); assert.equal(executions, 1); const summary = await journal.summary(); assert.equal(summary.records[0].side_effect, 'cloud_inference'); assert.equal(summary.records[0].state, 'completed'); assert.equal(JSON.stringify(summary).includes(SECRET), false); assert.equal((await readFile(join(path, `${summary.records[0].operation_id}.jsonl`), 'utf8')).includes(SECRET), false); assert.equal(events.find(event => event.event === 'tool.completed').data.result.status, 'ok');
+  assert.equal((await result).state, 'COMPLETED'); assert.equal(executions, 1); const summary = await journal.summary(); assert.equal(summary.records[0].side_effect, 'cloud_inference'); assert.equal(summary.records[0].state, 'reconciling'); assert.equal(JSON.stringify(summary).includes(SECRET), false); assert.equal((await readFile(join(path, `${summary.records[0].operation_id}.jsonl`), 'utf8')).includes(SECRET), false); const completion = events.find(event => event.event === 'tool.completed').data.result; assert.equal(completion.status, 'failed'); assert.match(completion.content[0].text, /action_completion_unverified/);
+});
+
+test('journal completes a genuine Copilot adapter attestation but rejects generic completion', async t => {
+  const path = await directory(t); const journal = await ActionJournal.open(deterministicOptions(path)); const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null; child.signalCode = null;
+  child.stdin = { write(line) { const request = JSON.parse(line); queueMicrotask(() => {
+    if (request.method === 'initialize') child.stdout.emit('data', Buffer.from(`${JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { protocolVersion: 1 } })}\n`));
+    else if (request.method === 'session/new') child.stdout.emit('data', Buffer.from(`${JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { sessionId: 'journal-copilot' } })}\n`));
+    else if (request.method === 'session/prompt') { child.stdout.emit('data', Buffer.from(`${JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'journal-copilot', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'attested' } } } })}\n`)); child.stdout.emit('data', Buffer.from(`${JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { stopReason: 'end_turn' } })}\n`)); child.exitCode = 0; child.emit('close', 0); }
+  }); return true; }, end() {} }; child.kill = () => { child.exitCode = 0; child.emit('close', 0); };
+  const provider = new CopilotCliProvider({ testOnly: true, protocol: 'acp', enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], cwd: '/approved/workspace', version: '1.2.3', versionCheck: async () => true, readContext: async () => ({ text: '', files: [] }), spawn: () => child });
+  const tool = createCopilotTool(provider); const events = []; const engine = { async *generate({ messages }) { if (!messages.some(message => message.role === 'tool')) { yield { kind: 'tool_call_chunk', text: JSON.stringify({ id: 'call_journal_copilot', name: 'coding.copilot_ask', arguments: { prompt: 'hello', workspace_id: 'project', context_paths: [] } }) }; return; } yield { kind: 'text_delta', text: 'done' }; yield { kind: 'done' }; } };
+  const controller = new ConversationController({ engine, actionJournal: journal, toolRegistry: { [tool.name]: tool }, confirmationTimeoutMs: 1000 }); const pending = controller.runTurn({ sessionId: 'session_journal_cp', requestId: 'request_journal_cp', message: 'ask', onEvent: event => events.push(event) });
+  while (!events.some(event => event.event === 'tool.confirmation_required')) await new Promise(resolve => setImmediate(resolve)); const confirmation = events.find(event => event.event === 'tool.confirmation_required'); assert.equal(controller.confirm(confirmation.data.confirmation_id, true, { requestId: 'request_journal_cp', callId: 'call_journal_copilot' }), true);
+  assert.equal((await pending).state, 'COMPLETED'); const completed = events.find(event => event.event === 'tool.completed').data.result; assert.equal(JSON.parse(completed.content[0].text).completion, 'provider_verified'); assert.equal((await journal.summary()).records[0].state, 'completed');
 });
 
 test('active bounds and terminal pruning keep lifetime use bounded', async t => {
