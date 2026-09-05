@@ -77,9 +77,13 @@
   no process-creation implementation, has empty trust/containment/confinement
   activation prerequisites, is excluded from build/package/host integration,
   and is explicitly `QUARANTINED` / `NOT_READY`. Later process implementation
-  `6167ef6` and supervisor-authority `81cfd79` were rejected and remain
-  unmerged; the native clipboard candidate `0ba98d5` was also rejected and its
-  repair remains in progress.
+  `6167ef6` remains rejected and unmerged. The rejected supervisor-authority
+  predecessor `81cfd79` is superseded by independently accepted inert source
+  `8c34cca`, merged by `9f6bbb6` after 24/24 focused source checks. The rejected
+  clipboard predecessor `0ba98d5` is superseded by inert repair `04d6860` and
+  audited handoff `393189f`, merged by `0622713` after 26/26 focused source plus
+  2/2 inventory checks. Both merged boundaries remain unlinked, uncompiled,
+  activation-gated false, and explicitly unavailable for production/target use.
 - Impact: a path replacement/search-path race can change executed bytes, and a
   launched application can inherit provider credentials or other host secrets.
   Current process/app/browser/clipboard tests do not establish safe laptop

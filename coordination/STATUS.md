@@ -1,7 +1,7 @@
 # Program Status
 
 - Overall release/full-access state: `BLOCKED` / `NOT_READY`
-- Authoritative source baseline: `main@2ec9c44bf299a309f8266700e8f9ea1e39c62f39`
+- Authoritative source baseline: `main@062271367ca41b27aa4651138ea92662845388a5`
 - Working source-hardening stream: Phase 6
 - Formal gate state: Phase 0 `IN_PROGRESS` and unapproved; Phases 1–7 have
   incomplete/unapproved evidence; Phase 8 is `BLOCKED`
@@ -31,17 +31,19 @@
   `55f3dfd` (implementation) through `65decba` (merge). Its production
   store is deliberately unavailable, so journal-dependent production actions
   remain hidden/refused.
-- Four independently source-reviewed native boundaries are now on `main`:
+- Six independently source-reviewed native boundaries are now on `main`:
   inert Windows read-only filesystem source by `1741c86`, inert hardware-
   attestor source by `e579d49`, inert journal-helper/transport source by
-  `645f348`, and inert release-tree verifier source by `2ec9c44`. These sources
-  remain unlinked, uncompiled, absent from production activation/package
-  paths, and explicitly `NO` for production and target execution.
-- The later process implementation candidate `6167ef6` and supervisor-
-  authority candidate `81cfd79` were rejected and remain unmerged. Native
-  clipboard candidate `0ba98d5` and diagnostic-receipt candidate `1c08a6a`
-  were also rejected/unmerged and have repairs in progress. None confers a
-  capability on `main`.
+  `645f348`, inert release-tree verifier source by `2ec9c44`, inert supervisor-
+  authority source `8c34cca` by `9f6bbb6`, and inert clipboard source
+  `04d6860`/`393189f` by `0622713`. Recorded focused source evidence was 24/24
+  for the supervisor and 26/26 plus 2/2 inventory checks for the clipboard.
+  These sources remain unlinked, uncompiled, absent from production activation/
+  package paths, and explicitly `NO` for production and target execution.
+- Process implementation candidate `6167ef6` remains rejected and unmerged.
+  Rejected supervisor predecessor `81cfd79` and clipboard predecessor
+  `0ba98d5` are historical and were superseded by the inert merged source above;
+  neither predecessor nor either merged source confers an executable capability.
 - The inert Win32 journal-storage boundary is source-merged from `d0ed670` by
   `3d46ccb`; the journal container source is source-merged by `16b4b0e`.
   Even with the inert helper source now merged by `645f348`, the production
