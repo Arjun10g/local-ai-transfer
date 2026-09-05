@@ -99,6 +99,7 @@ const SIDE_EFFECTS = new Set(ACTION_JOURNAL_SIDE_EFFECTS);
 const RESOLUTIONS = new Set(ACTION_JOURNAL_RESOLUTIONS);
 const RECONCILIATION_REASONS = new Set(ACTION_JOURNAL_RECONCILIATION_REASONS);
 const ERRORS = new Set(ACTION_JOURNAL_ERRORS);
+const TERMINAL_STATES = new Set(['completed', 'cancelled', 'failed_definitive']);
 const UTF8_FATAL = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 const TRANSITIONS = Object.freeze({
@@ -367,7 +368,6 @@ function validateResponseBody(envelope) {
       if (previous !== null && event.sequence !== previous + 1) fail('invalid_request');
       previous = event.sequence;
     }
-    if (body.events.length > 0 && body.events.at(-1).state !== receipt.state) fail('invalid_request');
     return;
   }
   exactKeys(body, ['receipt']);
@@ -424,6 +424,7 @@ function validateResponseAgainstRequest(response, request, nowMs) {
     let previous = request.body.cursor;
     for (const receipt of response.body.records) {
       if (previous !== null && receipt.operation_id <= previous) fail('invalid_request');
+      if (!request.body.include_terminal && TERMINAL_STATES.has(receipt.state)) fail('invalid_request');
       previous = receipt.operation_id;
     }
     if (response.body.truncated) {
@@ -431,11 +432,33 @@ function validateResponseAgainstRequest(response, request, nowMs) {
     }
   }
   if (request.method === 'detail') {
-    if (response.body.events.length > request.body.limit) fail('invalid_request');
-    const firstExpected = request.body.after_sequence === null ? 0 : request.body.after_sequence + 1;
-    if (response.body.events.length > 0 && response.body.events[0].sequence !== firstExpected) fail('invalid_request');
-    if (response.body.truncated) {
-      if (response.body.events.length === 0 || response.body.next_sequence !== response.body.events.at(-1).sequence) fail('invalid_request');
+    const { events, receipt, truncated, next_sequence: nextSequence } = response.body;
+    if (events.length > request.body.limit) fail('invalid_request');
+    const afterSequence = request.body.after_sequence;
+    const firstExpected = afterSequence === null ? 0 : afterSequence + 1;
+    if (afterSequence !== null && afterSequence > receipt.sequence) fail('invalid_request');
+    const remaining = Math.max(0, receipt.sequence - firstExpected + 1);
+    const expectedCount = Math.min(remaining, request.body.limit);
+    if (events.length !== expectedCount) fail('invalid_request');
+    for (let index = 0; index < events.length; index++) {
+      if (events[index].sequence !== firstExpected + index) fail('invalid_request');
+    }
+    const expectedTruncated = events.length > 0 && events.at(-1).sequence < receipt.sequence;
+    if (truncated !== expectedTruncated) fail('invalid_request');
+    if (truncated) {
+      if (nextSequence !== events.at(-1).sequence) fail('invalid_request');
+    } else {
+      if (nextSequence !== null) fail('invalid_request');
+      if (remaining > 0) {
+        const last = events.at(-1);
+        if (
+          last.sequence !== receipt.sequence
+          || last.state !== receipt.state
+          || last.authorization_kind !== receipt.authorization_kind
+          || last.resolution !== receipt.resolution
+          || last.receipt_digest !== receipt.receipt_digest
+        ) fail('invalid_request');
+      } else if (afterSequence !== receipt.sequence) fail('invalid_request');
     }
   }
 }
@@ -618,13 +641,26 @@ export class ActionJournalProtocolReceiver {
   }
 }
 
-export function transitionState(currentState, method) {
+export function transitionState(currentState, method, resolution = null) {
   if (method === 'prepare') {
-    if (currentState !== null) fail('invalid_transition');
+    if (currentState !== null || resolution !== null) fail('invalid_transition');
     return 'prepared';
   }
   const transition = TRANSITIONS[method];
   if (!transition || !transition.from.includes(currentState)) fail('invalid_transition');
+  if (method === 'complete') {
+    const expected = currentState === 'unknown_manual' ? 'manual_completed' : 'completed';
+    if (resolution !== expected) fail('invalid_transition');
+  } else if (method === 'fail_definitive') {
+    const expected = currentState === 'unknown_manual'
+      ? 'manual_failed_definitive'
+      : 'pre_dispatch_failure';
+    if (resolution !== expected) fail('invalid_transition');
+  } else if (method === 'cancel') {
+    if (!['user_denied', 'request_cancelled'].includes(resolution)) fail('invalid_transition');
+  } else if (method === 'mark_unknown') {
+    if (resolution !== 'dispatch_ambiguous') fail('invalid_transition');
+  } else if (resolution !== null) fail('invalid_transition');
   return transition.to;
 }
 

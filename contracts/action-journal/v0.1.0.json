@@ -164,8 +164,16 @@
     "queue": "bounded lockstep requests already sent by the client",
     "exact": ["request_id", "method", "operation_id", "request_deadline"],
     "prepare_exception": "a successful prepare returns one non-null helper-created operation_id; a prepare error returns null",
-    "summary": "record count is request-limited, operation ids are strictly increasing after cursor, and a truncated page cursor equals its final record id",
-    "detail": "event count is request-limited, sequences begin exactly after after_sequence and are contiguous, and a truncated page cursor equals its final event sequence"
+    "summary": "record count is request-limited, operation ids are strictly increasing after cursor, a truncated page cursor equals its final record id, and include_terminal=false excludes every terminal state",
+    "detail": "receipt.sequence is the authenticated high-watermark; return exactly min(limit, remaining) contiguous events beginning after after_sequence; truncated iff the final returned sequence is below the high-watermark; a complete final event exactly equals the receipt projection; an empty complete page requires after_sequence equal to the high-watermark"
+  },
+  "terminal_states": ["completed", "cancelled", "failed_definitive"],
+  "detail_page_binding": {
+    "high_watermark": "receipt.sequence",
+    "first_sequence": "after_sequence is null ? 0 : after_sequence + 1",
+    "event_count": "min(limit, max(0, receipt.sequence - first_sequence + 1))",
+    "truncated": "events is nonempty and final event sequence is less than receipt.sequence",
+    "complete": "next_sequence is null and final event exactly equals receipt projection, or after_sequence equals receipt.sequence with no events"
   },
   "error_response": {
     "body": {},
@@ -228,9 +236,9 @@
     "dispatch": {"from": ["authorized"], "to": "dispatching"},
     "acknowledge": {"from": ["dispatching"], "to": "acknowledged"},
     "begin_reconciliation": {"from": ["dispatching", "acknowledged"], "to": "reconciling"},
-    "complete": {"from": ["acknowledged", "reconciling", "unknown_manual"], "to": "completed"},
+    "complete": {"from": ["acknowledged", "reconciling", "unknown_manual"], "to": "completed", "resolution_by_source": {"acknowledged": "completed", "reconciling": "completed", "unknown_manual": "manual_completed"}},
     "cancel": {"from": ["prepared", "authorized"], "to": "cancelled"},
-    "fail_definitive": {"from": ["prepared", "authorized", "reconciling", "unknown_manual"], "to": "failed_definitive"},
+    "fail_definitive": {"from": ["prepared", "authorized", "reconciling", "unknown_manual"], "to": "failed_definitive", "resolution_by_source": {"prepared": "pre_dispatch_failure", "authorized": "pre_dispatch_failure", "reconciling": "pre_dispatch_failure", "unknown_manual": "manual_failed_definitive"}},
     "mark_unknown": {"from": ["dispatching", "acknowledged", "reconciling"], "to": "unknown_manual"}
   },
   "recovery": {

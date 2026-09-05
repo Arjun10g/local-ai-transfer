@@ -102,6 +102,17 @@ function receiptFor(state, sequence = 0, operationId = OPERATION, overrides = {}
   });
 }
 
+function eventFor(state, sequence = 0, overrides = {}) {
+  const receipt = receiptFor(state, sequence, OPERATION, overrides);
+  return {
+    authorization_kind: receipt.authorization_kind,
+    receipt_digest: receipt.receipt_digest,
+    resolution: receipt.resolution,
+    sequence: receipt.sequence,
+    state: receipt.state,
+  };
+}
+
 function successResponseFor(request, sequence = 0, overrides = {}) {
   let operationId = request.operation_id;
   let state = null;
@@ -329,6 +340,160 @@ test('summary and detail query bounds, ordering, and pagination are response-bou
   errorCode(() => detailReceiver.receive(encodeEnvelope(wrongFirst, KEY)), 'invalid_request');
 });
 
+test('summary response honors the exact include-terminal filter', () => {
+  const excluded = requestFor('summary', 0, 90, {
+    body: { cursor: null, include_terminal: false, limit: 2 },
+  });
+  for (const state of ['completed', 'cancelled', 'failed_definitive']) {
+    const rejectingReceiver = new ActionJournalProtocolReceiver({ key: KEY, kind: 'response', nonce: NONCE, now: () => NOW });
+    rejectingReceiver.expectResponse(excluded);
+    const terminal = successResponseFor(excluded, 0, {
+      body: { next_cursor: null, records: [receiptFor(state)], truncated: false },
+    });
+    errorCode(() => rejectingReceiver.receive(encodeEnvelope(terminal, KEY)), 'invalid_request');
+  }
+  const receiver = new ActionJournalProtocolReceiver({ key: KEY, kind: 'response', nonce: NONCE, now: () => NOW });
+  receiver.expectResponse(excluded);
+  assert.equal(receiver.receive(encodeEnvelope(successResponseFor(excluded, 0), KEY)).body.records[0].state, 'prepared');
+
+  const included = requestFor('summary', 0, 91, {
+    body: { cursor: null, include_terminal: true, limit: 1 },
+  });
+  const includedReceiver = new ActionJournalProtocolReceiver({ key: KEY, kind: 'response', nonce: NONCE, now: () => NOW });
+  includedReceiver.expectResponse(included);
+  const accepted = successResponseFor(included, 0, {
+    body: { next_cursor: null, records: [receiptFor('failed_definitive')], truncated: false },
+  });
+  assert.equal(includedReceiver.receive(encodeEnvelope(accepted, KEY)).body.records[0].state, 'failed_definitive');
+});
+
+test('detail pagination is complete and contiguous through the authenticated receipt high-watermark', () => {
+  const request = requestFor('detail', 0, 92, {
+    body: { after_sequence: 3, limit: 2 },
+  });
+  const receipt = receiptFor('reconciling', 6);
+  const page = buildResponse({
+    requestId: request.request_id,
+    sequence: 0,
+    nonce: NONCE,
+    method: 'detail',
+    operationId: OPERATION,
+    state: receipt.state,
+    body: {
+      events: [eventFor('dispatching', 4), eventFor('acknowledged', 5)],
+      next_sequence: 5,
+      receipt,
+      truncated: true,
+    },
+  });
+  const receiver = new ActionJournalProtocolReceiver({ key: KEY, kind: 'response', nonce: NONCE, now: () => NOW });
+  receiver.expectResponse(request);
+  assert.equal(receiver.receive(encodeEnvelope(page, KEY)).body.receipt.sequence, 6);
+
+  const finalRequest = requestFor('detail', 0, 93, {
+    body: { after_sequence: 5, limit: 2 },
+  });
+  const finalReceiver = new ActionJournalProtocolReceiver({ key: KEY, kind: 'response', nonce: NONCE, now: () => NOW });
+  finalReceiver.expectResponse(finalRequest);
+  const finalPage = buildResponse({
+    requestId: finalRequest.request_id,
+    sequence: 0,
+    nonce: NONCE,
+    method: 'detail',
+    operationId: OPERATION,
+    state: receipt.state,
+    body: { events: [eventFor('reconciling', 6)], next_sequence: null, receipt, truncated: false },
+  });
+  assert.equal(finalReceiver.receive(encodeEnvelope(finalPage, KEY)).body.truncated, false);
+
+  const currentRequest = requestFor('detail', 0, 94, {
+    body: { after_sequence: 6, limit: 2 },
+  });
+  const currentReceiver = new ActionJournalProtocolReceiver({ key: KEY, kind: 'response', nonce: NONCE, now: () => NOW });
+  currentReceiver.expectResponse(currentRequest);
+  const currentPage = buildResponse({
+    requestId: currentRequest.request_id,
+    sequence: 0,
+    nonce: NONCE,
+    method: 'detail',
+    operationId: OPERATION,
+    state: receipt.state,
+    body: { events: [], next_sequence: null, receipt, truncated: false },
+  });
+  assert.deepEqual(currentReceiver.receive(encodeEnvelope(currentPage, KEY)).body.events, []);
+});
+
+test('detail rejects hidden, short, gapped, or receipt-divergent event pages', () => {
+  const request = requestFor('detail', 0, 95, {
+    body: { after_sequence: 3, limit: 2 },
+  });
+  const receipt = receiptFor('reconciling', 5);
+  const invalidBodies = [
+    // A hidden final event cannot be described as a complete page.
+    { events: [eventFor('dispatching', 4)], next_sequence: null, receipt, truncated: false },
+    // A truncated page must fill the requested bound while more events remain.
+    { events: [eventFor('dispatching', 4)], next_sequence: 4, receipt: receiptFor('reconciling', 6), truncated: true },
+    // The page must begin exactly after the request cursor.
+    { events: [eventFor('reconciling', 5)], next_sequence: null, receipt, truncated: false },
+    // Completion must match every exposed receipt projection field.
+    { events: [eventFor('dispatching', 4), eventFor('reconciling', 5, { receiptDigest: DIGEST.e })], next_sequence: null, receipt, truncated: false },
+  ];
+  for (const body of invalidBodies) {
+    const receiver = new ActionJournalProtocolReceiver({ key: KEY, kind: 'response', nonce: NONCE, now: () => NOW });
+    receiver.expectResponse(request);
+    const response = buildResponse({
+      requestId: request.request_id,
+      sequence: 0,
+      nonce: NONCE,
+      method: 'detail',
+      operationId: OPERATION,
+      state: body.receipt.state,
+      body,
+    });
+    errorCode(() => receiver.receive(encodeEnvelope(response, KEY)), 'invalid_request');
+  }
+
+  const ahead = requestFor('detail', 0, 96, {
+    body: { after_sequence: 6, limit: 2 },
+  });
+  const aheadReceipt = receiptFor('reconciling', 5);
+  const aheadResponse = buildResponse({
+    requestId: ahead.request_id,
+    sequence: 0,
+    nonce: NONCE,
+    method: 'detail',
+    operationId: OPERATION,
+    state: aheadReceipt.state,
+    body: { events: [], next_sequence: null, receipt: aheadReceipt, truncated: false },
+  });
+  const aheadReceiver = new ActionJournalProtocolReceiver({ key: KEY, kind: 'response', nonce: NONCE, now: () => NOW });
+  aheadReceiver.expectResponse(ahead);
+  errorCode(() => aheadReceiver.receive(encodeEnvelope(aheadResponse, KEY)), 'invalid_request');
+});
+
+test('checked-in adversarial vectors cover response correlation and manual resolution', async () => {
+  const vectors = JSON.parse(await readFile(new URL('../../contracts/action-journal/v0.1.0-vectors.json', import.meta.url), 'utf8'));
+  assert.deepEqual(
+    vectors.adversarial_response_vectors.map(vector => [vector.name, vector.expected_error]),
+    [
+      ['summary_terminal_under_nonterminal_filter', 'invalid_request'],
+      ['detail_hidden_final_event', 'invalid_request'],
+      ['detail_underfilled_truncated_page', 'invalid_request'],
+      ['detail_completion_receipt_mismatch', 'invalid_request'],
+      ['detail_cursor_beyond_high_watermark', 'invalid_request'],
+      ['unknown_manual_ordinary_complete_resolution', 'invalid_transition'],
+      ['unknown_manual_pre_dispatch_failure_resolution', 'invalid_transition'],
+    ],
+  );
+  for (const vector of vectors.adversarial_response_vectors) {
+    if (vector.request_method === 'summary') {
+      assert.deepEqual(Object.keys(vector.request_body).sort(), ['cursor', 'include_terminal', 'limit']);
+    } else if (vector.request_method === 'detail') {
+      assert.deepEqual(Object.keys(vector.request_body).sort(), ['after_sequence', 'limit']);
+    }
+  }
+});
+
 test('receipt relation is exact and raw provider fields can never enter a response', () => {
   const request = requestFor('acknowledge', 0, 85);
   const wrongResolution = successResponseFor(request, 0);
@@ -352,8 +517,18 @@ test('transition graph rejects out-of-order and terminal mutations', () => {
   assert.equal(transitionState('prepared', 'authorize'), 'authorized');
   assert.equal(transitionState('authorized', 'dispatch'), 'dispatching');
   assert.equal(transitionState('dispatching', 'begin_reconciliation'), 'reconciling');
-  assert.equal(transitionState('reconciling', 'mark_unknown'), 'unknown_manual');
-  assert.equal(transitionState('unknown_manual', 'complete'), 'completed');
+  assert.equal(transitionState('reconciling', 'mark_unknown', 'dispatch_ambiguous'), 'unknown_manual');
+  assert.equal(transitionState('prepared', 'cancel', 'user_denied'), 'cancelled');
+  assert.equal(transitionState('acknowledged', 'complete', 'completed'), 'completed');
+  assert.equal(transitionState('reconciling', 'fail_definitive', 'pre_dispatch_failure'), 'failed_definitive');
+  assert.equal(transitionState('unknown_manual', 'complete', 'manual_completed'), 'completed');
+  assert.equal(transitionState('unknown_manual', 'fail_definitive', 'manual_failed_definitive'), 'failed_definitive');
+  errorCode(() => transitionState('unknown_manual', 'complete', 'completed'), 'invalid_transition');
+  errorCode(() => transitionState('unknown_manual', 'fail_definitive', 'pre_dispatch_failure'), 'invalid_transition');
+  errorCode(() => transitionState('acknowledged', 'complete', 'manual_completed'), 'invalid_transition');
+  errorCode(() => transitionState('prepared', 'fail_definitive', 'manual_failed_definitive'), 'invalid_transition');
+  errorCode(() => transitionState('prepared', 'cancel'), 'invalid_transition');
+  errorCode(() => transitionState('reconciling', 'mark_unknown'), 'invalid_transition');
   errorCode(() => transitionState('prepared', 'dispatch'), 'invalid_transition');
   errorCode(() => transitionState('completed', 'cancel'), 'invalid_transition');
 });

@@ -53,6 +53,57 @@
       "frame_hex": "0000017d7b22626f6479223a7b22706c6174666f726d5f617661696c61626c65223a66616c73652c2270726f64756374696f6e5f656e61626c6564223a66616c73652c227265636f766572795f636f756e74223a302c22737461747573223a22756e617661696c61626c65227d2c226572726f72223a6e756c6c2c226b696e64223a22726573706f6e7365222c226d6163223a2232333731363761316563663863663739303137333933393037643730623265383563666131326665643931346234373631643735336331626136356131396466222c226d6574686f64223a226865616c7468222c226e6f6e6365223a223030313132323333343435353636373738383939616162626363646465656666222c226f7065726174696f6e5f6964223a6e756c6c2c22726571756573745f6964223a227265715f3031323334353637383961626364656630313233343536373839616263646566222c2273657175656e6365223a302c227374617465223a6e756c6c2c2276657273696f6e223a317d"
     }
   ],
+  "adversarial_response_vectors": [
+    {
+      "name": "summary_terminal_under_nonterminal_filter",
+      "request_method": "summary",
+      "request_body": {"cursor": null, "include_terminal": false, "limit": 1},
+      "response_projection": {"record_states": ["completed"], "truncated": false, "next_cursor": null},
+      "expected_error": "invalid_request"
+    },
+    {
+      "name": "detail_hidden_final_event",
+      "request_method": "detail",
+      "request_body": {"after_sequence": 3, "limit": 2},
+      "response_projection": {"event_sequences": [4], "receipt_sequence": 5, "truncated": false, "next_sequence": null},
+      "expected_error": "invalid_request"
+    },
+    {
+      "name": "detail_underfilled_truncated_page",
+      "request_method": "detail",
+      "request_body": {"after_sequence": 3, "limit": 2},
+      "response_projection": {"event_sequences": [4], "receipt_sequence": 6, "truncated": true, "next_sequence": 4},
+      "expected_error": "invalid_request"
+    },
+    {
+      "name": "detail_completion_receipt_mismatch",
+      "request_method": "detail",
+      "request_body": {"after_sequence": 3, "limit": 2},
+      "response_projection": {"event_sequences": [4, 5], "receipt_sequence": 5, "final_event_receipt_digest_matches": false, "truncated": false, "next_sequence": null},
+      "expected_error": "invalid_request"
+    },
+    {
+      "name": "detail_cursor_beyond_high_watermark",
+      "request_method": "detail",
+      "request_body": {"after_sequence": 6, "limit": 2},
+      "response_projection": {"event_sequences": [], "receipt_sequence": 5, "truncated": false, "next_sequence": null},
+      "expected_error": "invalid_request"
+    },
+    {
+      "name": "unknown_manual_ordinary_complete_resolution",
+      "current_state": "unknown_manual",
+      "request_method": "complete",
+      "request_body": {"receipt_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "resolution": "completed"},
+      "expected_error": "invalid_transition"
+    },
+    {
+      "name": "unknown_manual_pre_dispatch_failure_resolution",
+      "current_state": "unknown_manual",
+      "request_method": "fail_definitive",
+      "request_body": {"resolution": "pre_dispatch_failure"},
+      "expected_error": "invalid_transition"
+    }
+  ],
   "semantic_scenarios": {
     "lost_ack": "reconnect_with_new_key_and_nonce_then_detail_never_redispatch",
     "noncancellable_commit": "cancel_returns_commit_non_cancellable_then_detail",
