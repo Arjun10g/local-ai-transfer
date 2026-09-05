@@ -35,17 +35,12 @@ MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 MAX_TAP_BYTES = 4 * 1024 * 1024
 MAX_TAP_LINES = 100_000
 MAX_TAP_LINE_CHARS = 16 * 1024
+IGNORED_GENERATED_DIRECTORY_NAMES = frozenset({"__pycache__"})
 
-NONCONVENTIONAL_TEST_PATHS = frozenset({
-    "tests/native/http_negative_tests.py",
-    "tests/native/model_validator_tests.cpp",
-    "tests/native/real_init_guard.py",
-    "tests/native/real_model_smoke.py",
-    "tests/native/runtime_tests.cpp",
-})
-
-# Every current test file is classified. New tests must be assigned a class
-# here before they can enter evidence; unknown files fail closed.
+# Every executable test file is classified. Every other regular file below
+# ``tests/`` must be explicitly reviewed as support data. New files in either
+# category therefore fail closed rather than escaping through a filename
+# convention.
 TEST_INVENTORY = {
     "tests/host/action-journal.test.mjs": "host_fixture",
     "tests/host/external-tools.test.mjs": "provider_fixture",
@@ -78,6 +73,39 @@ TEST_INVENTORY = {
     "tests/security/test_adversarial.py": "security_fixture",
     "tests/security/tool-calling-adversarial.test.mjs": "loopback_fixture",
 }
+
+REVIEWED_TEST_SUPPORT_FILES = frozenset({
+    "tests/__init__.py",
+    "tests/model/__init__.py",
+    "tests/model/production_tool_call_eval.json",
+    "tests/model/qwen_xml_vectors.json",
+    "tests/model/tool_call_eval.json",
+    "tests/native/fixtures/windows_broker/application-user-argv.json",
+    "tests/native/fixtures/windows_broker/argument-control.json",
+    "tests/native/fixtures/windows_broker/browser-localhost.json",
+    "tests/native/fixtures/windows_broker/browser-non-https.json",
+    "tests/native/fixtures/windows_broker/class-mismatch.json",
+    "tests/native/fixtures/windows_broker/clipboard-over-limit.json",
+    "tests/native/fixtures/windows_broker/control-allowed-value.json",
+    "tests/native/fixtures/windows_broker/control-literal.json",
+    "tests/native/fixtures/windows_broker/copilot-prompt-argv.json",
+    "tests/native/fixtures/windows_broker/duplicate-key.json",
+    "tests/native/fixtures/windows_broker/generic-host.json",
+    "tests/native/fixtures/windows_broker/identity-mismatch.json",
+    "tests/native/fixtures/windows_broker/ignored-parameter.json",
+    "tests/native/fixtures/windows_broker/non-exe-host.json",
+    "tests/native/fixtures/windows_broker/numeric-allowed-invalid.json",
+    "tests/native/fixtures/windows_broker/process-unconstrained-argv.json",
+    "tests/native/fixtures/windows_broker/raw-command-surface.json",
+    "tests/native/fixtures/windows_broker/replayed-request-id.json",
+    "tests/native/fixtures/windows_broker/timeout-too-large.json",
+    "tests/native/fixtures/windows_broker/unknown-argument.json",
+    "tests/performance/__init__.py",
+    "tests/qa/__init__.py",
+    "tests/release/__init__.py",
+    "tests/security/README.md",
+    "tests/security/__init__.py",
+})
 
 SAFE_MODE_REASON = "safe_mode_disables_subprocess_model_network_and_lifecycle_execution"
 PROTECTED_OUTPUT_NAMES = frozenset({"incidents.jsonl", "ledger.md", "cost-ledger.jsonl", "cost_ledger.jsonl"})
@@ -129,6 +157,8 @@ def _discover_test_files(root: Path, predicate) -> list[Path]:
                 raise DiscoveryError("test discovery encountered a link or reparse point")
             child_path = Path(child.path)
             if stat.S_ISDIR(info.st_mode):
+                if child.name in IGNORED_GENERATED_DIRECTORY_NAMES:
+                    continue
                 if depth + 1 > MAX_DISCOVERY_DEPTH:
                     raise DiscoveryError("test discovery depth bound exceeded")
                 pending.append((child_path, depth + 1))
@@ -140,6 +170,8 @@ def _discover_test_files(root: Path, predicate) -> list[Path]:
                     files.append(child_path)
                     if len(files) > MAX_DISCOVERY_FILES:
                         raise DiscoveryError("test discovery file bound exceeded")
+            else:
+                raise DiscoveryError("test discovery encountered an unsupported entry type")
     return sorted(files)
 
 
@@ -163,28 +195,30 @@ def python_unittest_command(root: Path) -> list[str]:
 
 def discovered_test_paths(root: Path) -> set[str]:
     base = Path(root).absolute()
-    paths = set(discover_node_tests(base))
-    paths.update(module.replace(".", "/") + ".py" for module in discover_python_test_modules(base))
-    extra = _discover_test_files(
-        base,
-        lambda path: path.relative_to(base).as_posix() in NONCONVENTIONAL_TEST_PATHS,
-    )
-    paths.update(path.relative_to(base).as_posix() for path in extra)
-    return paths
+    tree_files = _discover_test_files(base, lambda _path: True)
+    paths = {path.relative_to(base).as_posix() for path in tree_files}
+    return paths - REVIEWED_TEST_SUPPORT_FILES
 
 
 def inventory_check(root: Path) -> dict[str, Any]:
     try:
-        discovered = discovered_test_paths(root)
+        base = Path(root).absolute()
+        tree_files = {
+            path.relative_to(base).as_posix()
+            for path in _discover_test_files(base, lambda _path: True)
+        }
+        discovered = tree_files - REVIEWED_TEST_SUPPORT_FILES
         discovery_error = None
     except DiscoveryError as error:
+        tree_files = set()
         discovered = set()
         discovery_error = str(error)
     known = set(TEST_INVENTORY)
+    reviewed_tree = known | REVIEWED_TEST_SUPPORT_FILES
     return {
         "discovered": sorted(discovered),
-        "unknown": sorted(discovered - known),
-        "missing": sorted(known - discovered),
+        "unknown": sorted(tree_files - reviewed_tree),
+        "missing": sorted(reviewed_tree - tree_files),
         "classes": {path: TEST_INVENTORY[path] for path in sorted(discovered & known)},
         "discovery_error": discovery_error,
     }
@@ -372,6 +406,17 @@ def _validate_directory_info(info: os.stat_result) -> None:
         raise ValueError("output directory ownership, mode, link count, or type is unsafe")
 
 
+def _validate_private_parent_info(info: os.stat_result) -> None:
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or int(info.st_uid) != os.geteuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+        or int(info.st_nlink) < 1
+        or int(info.st_size) < 0
+    ):
+        raise ValueError("output parent must be a private current-user 0700 directory")
+
+
 def _validate_private_file_info(info: os.stat_result, *, size: int, links: int = 1) -> None:
     if _reparse(info):
         raise ValueError("output path contains a link or reparse point")
@@ -430,6 +475,7 @@ def _open_output_directory(path: Path, *, create: bool) -> int:
                 raise
             os.close(descriptor)
             descriptor = child
+        _validate_private_parent_info(os.fstat(descriptor))
         return descriptor
     except BaseException:
         os.close(descriptor)
@@ -499,14 +545,16 @@ def _reopen_verified_temp(
         raise
 
 
-def _unlink_temp_if_exact(parent_fd: int, name: str, expected: os.stat_result) -> None:
+def _unlink_if_exact(parent_fd: int, name: str, expected: os.stat_result) -> bool:
     current = _stat_at_optional(parent_fd, name)
     if current is None or _identity(current) != _identity(expected):
-        return
+        return False
     try:
         os.unlink(name, dir_fd=parent_fd)
-    except OSError:
-        return
+        os.fsync(parent_fd)
+    except OSError as error:
+        raise ValueError("exact failed-publication entry cannot be removed durably") from error
+    return True
 
 
 def validate_output_path(path: Path) -> Path:
@@ -606,10 +654,21 @@ def write_output_atomically(path: Path, text: str) -> None:
         published = True
     finally:
         if not published and initial is not None:
-            _unlink_temp_if_exact(parent_fd, temporary_name, initial)
-        for descriptor in (target_reader, reader, writer, parent_fd):
-            if descriptor is not None:
-                os.close(descriptor)
+            try:
+                # A successful link is not authoritative until every
+                # post-link identity/content/path check completes. On failure,
+                # remove only our exact inode through the pinned parent fd and
+                # durably settle that directory entry before permitting retry.
+                _unlink_if_exact(parent_fd, target.name, initial)
+                _unlink_if_exact(parent_fd, temporary_name, initial)
+            finally:
+                for descriptor in (target_reader, reader, writer, parent_fd):
+                    if descriptor is not None:
+                        os.close(descriptor)
+        else:
+            for descriptor in (target_reader, reader, writer, parent_fd):
+                if descriptor is not None:
+                    os.close(descriptor)
 
 
 def main() -> int:

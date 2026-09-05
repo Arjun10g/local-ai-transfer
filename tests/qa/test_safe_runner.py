@@ -53,6 +53,16 @@ class SafeRunnerTests(unittest.TestCase):
         self.assertEqual(plan["inventory"]["unknown"], ["tests/host/unknown.test.mjs"])
         self.assertTrue(any(item.get("reason") == "unknown_test_inventory_entry" for item in plan["results"]))
 
+    def test_unknown_nonconventional_native_file_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "tests/native").mkdir(parents=True)
+            candidate = root / "tests/native/new_native_test.cpp"
+            candidate.write_text("int main() { return 0; }", encoding="utf-8")
+            inventory = runner.inventory_check(root)
+        self.assertIn("tests/native/new_native_test.cpp", inventory["discovered"])
+        self.assertIn("tests/native/new_native_test.cpp", inventory["unknown"])
+
     def test_inventory_exactly_matches_current_tests_without_content_reads(self):
         with (
             patch.object(Path, "open", side_effect=AssertionError("test content must not be opened")),
@@ -202,6 +212,40 @@ ok 1 - skipped # SKIP not run
                 with self.assertRaisesRegex(ValueError, "reopened temporary output identity changed"):
                     runner.write_output_atomically(target, "trusted\n")
             self.assertTrue(replaced)
+            self.assertFalse(target.exists())
+
+    def test_post_link_verification_failure_removes_final_and_allows_retry(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            root = Path(directory)
+            target = root / "summary.json"
+            original_reopen = runner._reopen_verified_temp
+            reopen_count = 0
+
+            def fail_second_reopen(parent_fd, name, expected, data, *, links=1):
+                nonlocal reopen_count
+                reopen_count += 1
+                if reopen_count == 2:
+                    raise ValueError("injected post-link verification failure")
+                return original_reopen(parent_fd, name, expected, data, links=links)
+
+            with patch.object(runner, "_reopen_verified_temp", side_effect=fail_second_reopen):
+                with self.assertRaisesRegex(ValueError, "injected post-link verification failure"):
+                    runner.write_output_atomically(target, "first\n")
+            self.assertEqual(reopen_count, 2)
+            self.assertFalse(target.exists())
+
+            runner.write_output_atomically(target, "retry\n")
+            self.assertEqual(target.read_text(encoding="utf-8"), "retry\n")
+
+    def test_non_private_output_parent_is_rejected_before_publication(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            root = Path(directory)
+            parent = root / "public"
+            parent.mkdir(mode=0o700)
+            parent.chmod(0o755)
+            target = parent / "summary.json"
+            with self.assertRaisesRegex(ValueError, "private current-user 0700"):
+                runner.write_output_atomically(target, "must-not-publish\n")
             self.assertFalse(target.exists())
 
     def test_parent_path_swap_is_rejected_before_publication(self):
