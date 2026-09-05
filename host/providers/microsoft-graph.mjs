@@ -130,6 +130,7 @@ const projectionDraft = value => {
 };
 const draftContent = draft => ({ subject: draft.subject, raw_body: draft.raw_body, content_type: draft.content_type, recipients: draft.recipients });
 const draftContentDigest = draft => digest(draftContent(draft));
+const requestedDraftContentDigest = args => digest({ subject: args.subject, raw_body: normalizeText(args.body, 65536).text, content_type: 'Text', recipients: [...args.to.map(address => ({ field: 'to', address, name: '' })), ...(args.cc ?? []).map(address => ({ field: 'cc', address, name: '' }))] });
 const journalBinding = call => {
   const binding = call?.internal?.journal_binding;
   if (binding === undefined) return null;
@@ -241,10 +242,10 @@ export class MicrosoftGraphProvider {
     const response = await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(messageId)}`, query: { '$select': 'id,isRead' }, signal });
     const state = messageState(response.body, messageId); if (!state) throw new ProviderToolError('provider_invalid_response'); return state;
   }
-  async listDraftsForMarker(marker, signal) {
+  async listDraftsForMarker(marker, expectedDigest, signal) {
     if (!marker) return [];
-    const response = await this.request({ method: 'GET', path: `${API}/me/mailFolders/drafts/messages`, query: { '$top': MAX_RECONCILIATION_ITEMS, '$select': 'id,subject,body,toRecipients,ccRecipients,internetMessageHeaders,changeKey' }, signal });
-    const values = safeArray(response.body?.value, MAX_RECONCILIATION_ITEMS); return values.filter(value => Array.isArray(value?.internetMessageHeaders) && value.internetMessageHeaders.some(header => header && typeof header.name === 'string' && header.name.toLowerCase() === LAE_OPERATION_HEADER && header.value === marker)).map(value => projectionDraft(value)).filter(Boolean);
+    const response = await this.request({ method: 'GET', path: `${API}/me/mailFolders/drafts/messages`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$top': MAX_RECONCILIATION_ITEMS, '$select': 'id,subject,body,toRecipients,ccRecipients,internetMessageHeaders,changeKey' }, signal });
+    const values = safeArray(response.body?.value, MAX_RECONCILIATION_ITEMS); return values.filter(value => Array.isArray(value?.internetMessageHeaders) && value.internetMessageHeaders.some(header => header && typeof header.name === 'string' && header.name.toLowerCase() === LAE_OPERATION_HEADER && header.value === marker)).map(value => projectionDraft(value)).filter(value => value && draftContentDigest(value) === expectedDigest);
   }
   async listSentForDigest(expectedDigest, existingIds, snapshotAt, sentMarker, signal) {
     const response = await this.request({ method: 'GET', path: `${API}/me/mailFolders/sentitems/messages`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$top': MAX_RECONCILIATION_ITEMS, '$orderby': 'sentDateTime desc', '$select': 'id,subject,body,toRecipients,ccRecipients,changeKey,sentDateTime,internetMessageHeaders' }, signal });
@@ -261,7 +262,7 @@ export class MicrosoftGraphProvider {
     return items.filter(item => item.content_type === 'text' && item.content === args.body && item.sender_id === saved.team_sender_id && Number.isFinite(item.created_ms) && item.created_ms >= saved.team_prewrite_at - 1000 && item.created_ms <= upper);
   }
   async reconcileCreateDraft(call, args, binding, response = null, signal) {
-    const matches = await this.listDraftsForMarker(operationMarker(binding), signal);
+    const matches = await this.listDraftsForMarker(operationMarker(binding), requestedDraftContentDigest(args), signal);
     if (matches.length === 1) return verifiedPayload({ binding, response, resource: { id: matches[0].id }, reconciliation: 'unique_exact_draft' });
     return reconcilingPayload({ binding, response, reconciliation: matches.length > 1 ? 'multiple_exact_drafts' : 'draft_not_found' });
   }
@@ -326,9 +327,9 @@ export class MicrosoftGraphProvider {
     let response;
     try {
       if (call.name === 'mail.create_draft') {
-        const marker = operationMarker(binding); const body = { subject: args.subject, body: { contentType: 'Text', content: args.body }, toRecipients: args.to.map(address), ccRecipients: (args.cc ?? []).map(address) };
+        saved.post_attempted = false; const marker = operationMarker(binding); const body = { subject: args.subject, body: { contentType: 'Text', content: args.body }, toRecipients: args.to.map(address), ccRecipients: (args.cc ?? []).map(address) };
         if (marker) body.internetMessageHeaders = [{ name: LAE_OPERATION_HEADER, value: marker }];
-        response = await this.request({ method: 'POST', path: `${API}/me/messages`, body, signal: operation.signal });
+        response = await this.request({ method: 'POST', path: `${API}/me/messages`, body, signal: operation.signal, onDispatch: () => { saved.post_attempted = true; } });
         const created = response.status === 201 && validResource(response.body);
         if (created) return result(call, 'ok', verifiedPayload({ call, binding, response, resource: { id: response.body.id }, reconciliation: 'created_resource' }));
         return result(call, 'ok', await this.reconcileCreateDraft(call, args, binding, response, operation.signal));
@@ -359,7 +360,7 @@ export class MicrosoftGraphProvider {
       }
       throw new ProviderToolError('provider_invalid_response');
     } catch (error) {
-      if (call.name === 'mail.create_draft' && ['provider_timeout', 'provider_failed'].includes(error?.code) && !operation.signal.aborted) {
+      if (call.name === 'mail.create_draft' && ['provider_timeout', 'provider_failed'].includes(error?.code) && !operation.signal.aborted && saved.post_attempted) {
         try { return result(call, 'ok', await this.reconcileCreateDraft(call, args, binding, null, operation.signal)); } catch {}
       }
       if (call.name === 'mail.send_draft' && ['provider_timeout', 'provider_failed'].includes(error?.code) && !operation.signal.aborted && saved.draftBinding && saved.prewrite_verified && saved.post_attempted && saved.reconciliation_allowed) {

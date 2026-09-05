@@ -11,7 +11,10 @@ The mail draft creator carries a bounded `x-lae-operation` Internet message
 header when a journal binding is present. On a timeout or incomplete response,
 the adapter searches only the signed-in account's bounded Drafts collection
 and accepts one exact marker match. Multiple or absent matches remain
-`reconciling` and require manual resolution.
+`reconciling` and require manual resolution. The marker match is additionally
+required to have the exact normalized subject, plain-text body, content type,
+and recipient projection requested by the action; a marker on different draft
+content is never treated as completion.
 
 `mail.mark_read` first reads the requested message state, performs no PATCH
 when the requested state is already present, and always verifies with a fresh

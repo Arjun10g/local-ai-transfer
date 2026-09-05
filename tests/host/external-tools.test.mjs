@@ -65,6 +65,29 @@ test('Graph draft reconciliation uses the private journal marker and never repla
   const second = value(await tool.execute({ ...request, authorization: { kind: 'user_confirmation' }, internal: { journal_binding: binding } })); assert.equal(second.code, 'provider_write_already_attempted'); assert.equal(requests.filter(item => item.method === 'POST').length, 1);
 });
 
+test('Graph create reconciliation requires exact requested draft content', async () => {
+  const binding = { operation_id: `act_${'3'.repeat(32)}`, operation_digest: 'c'.repeat(64), arguments_digest: 'd'.repeat(64), preview_digest: 'e'.repeat(64) };
+  const marker = `${binding.operation_id}:${binding.operation_digest}`; let posts = 0;
+  const transport = { request: async request => {
+    if (request.method === 'POST') { posts += 1; throw Object.assign(new Error('late timeout'), { code: 'provider_timeout' }); }
+    return { status: 200, body: { value: [{ id: 'draft-mismatch', internetMessageHeaders: [{ name: 'x-lae-operation', value: marker }], subject: 'different', body: { content: 'x', contentType: 'Text' }, toRecipients: [{ emailAddress: { address: 'alice@example.com' } }] }] } };
+  } };
+  const tool = createMicrosoftGraphTools({ enabled: true, credentialSource: { getAccessToken: async () => 'synthetic-token' }, transport })['mail.create_draft'];
+  const request = call('mail.create_draft', { to: ['alice@example.com'], subject: 'requested', body: 'x' }, 'call_marker_mismatch'); await tool.preview(request);
+  const output = value(await tool.execute({ ...request, authorization: { kind: 'user_confirmation' }, internal: { journal_binding: binding } }));
+  assert.equal(output.code, 'provider_action_reconciling'); assert.equal(output.evidence.reconciliation, 'draft_not_found'); assert.equal(posts, 1);
+});
+
+test('Graph create token failure never reconciles a matching-marker draft before POST dispatch', async () => {
+  const binding = { operation_id: `act_${'4'.repeat(32)}`, operation_digest: 'f'.repeat(64), arguments_digest: '0'.repeat(64), preview_digest: '1'.repeat(64) };
+  const marker = `${binding.operation_id}:${binding.operation_digest}`; let transportCalls = 0;
+  const credentialSource = { getAccessToken: async () => { throw Object.assign(new Error('token timeout'), { code: 'provider_timeout' }); } };
+  const transport = { request: async () => { transportCalls += 1; return { status: 200, body: { value: [{ id: 'matching-draft', internetMessageHeaders: [{ name: 'x-lae-operation', value: marker }], subject: 'x', body: { content: 'x', contentType: 'Text' }, toRecipients: [{ emailAddress: { address: 'alice@example.com' } }] }] } }; } };
+  const tool = createMicrosoftGraphTools({ enabled: true, credentialSource, transport })['mail.create_draft']; const request = call('mail.create_draft', { to: ['alice@example.com'], subject: 'x', body: 'x' }, 'call_create_token_timeout'); await tool.preview(request);
+  const output = value(await tool.execute({ ...request, authorization: { kind: 'user_confirmation' }, internal: { journal_binding: binding } }));
+  assert.equal(output.code, 'provider_timeout'); assert.equal(transportCalls, 0);
+});
+
 test('Graph mark-read is repeatable only through desired-state verification', async () => {
   const binding = { operation_id: `act_${'2'.repeat(32)}`, operation_digest: 'a'.repeat(64), arguments_digest: 'b'.repeat(64), preview_digest: 'c'.repeat(64) }; let current = false; let patches = 0;
   const transport = { request: async request => { if (request.method === 'PATCH') { patches += 1; current = true; return { status: 204, body: {} }; } return { status: 200, body: { id: 'm-read', isRead: current } }; } };
@@ -291,6 +314,8 @@ test('controller binds provider completion digests and keeps journal authority o
   assert.equal(exact.output.state, 'COMPLETED'); const exactResult = exact.events.find(event => event.event === 'tool.completed').data.result; assert.match(exactResult.content[0].text, /operation_digest/); const exactHistory = exact.controller.sessions.get('ses_testverified').history.findLast(item => item.role === 'tool').content; const exactVisible = JSON.parse(exactHistory); assert.equal(exactVisible.resource_id, null); assert.equal(exactVisible.reconciliation, 'created_resource'); assert.equal(exactHistory.includes('operation_id'), false); assert.equal(exactHistory.includes('operation_digest'), false); assert.equal(exactHistory.includes('4'.repeat(64)), false);
   const plain = await run('test.plain', ({ internal }) => makeToolResult({ id: 'call_test_plain', name: 'test.plain', text: `provider echoed ${internal.journal_binding.operation_id} ${internal.journal_binding.operation_digest} ${internal.journal_binding.arguments_digest}` }), 'req_plain_echo');
   assert.equal(plain.output.state, 'COMPLETED'); const plainResult = plain.events.find(event => event.event === 'tool.completed').data.result; assert.match(plainResult.content[0].text, /action_completion_unverified/); const plainHistory = plain.controller.sessions.get('ses_testplain').history.at(-1).content; assert.equal(plainHistory.includes('operation_id'), false); assert.equal(plainHistory.includes('act_'), false); assert.equal(plainHistory.includes('operation_digest'), false);
+  const failed = await run('test.failed', () => makeToolResult({ id: 'call_test_failed', name: 'test.failed', status: 'failed', text: JSON.stringify({ provider_completion: 'verified', state: 'completed', completed: true, evidence: { operation_digest: '5'.repeat(64), arguments_digest: '6'.repeat(64), preview_digest: '7'.repeat(64), response_digest: '8'.repeat(64), resource_digest: null } }) }), 'req_failed_forged');
+  assert.equal(failed.output.state, 'COMPLETED'); const failedResult = failed.events.find(event => event.event === 'tool.completed').data.result; assert.equal(failedResult.status, 'failed'); const failedHistory = failed.controller.sessions.get('ses_testfailed').history.findLast(item => item.role === 'tool').content; assert.match(failedHistory, /action_completion_unverified/); assert.equal((await failed.controller.actionJournal.summary()).records[0].state, 'unknown_manual');
 });
 
 test('controller stages private send-draft preview behind confirmation and emits only bounded public call data', async t => {

@@ -41,11 +41,10 @@ function modelVisibleToolResult(result) {
   }) };
 }
 const SAFE_RECONCILIATIONS = new Set(['created_resource', 'unique_exact_draft', 'unique_sent_item', 'post_write_get_verified', 'pre_read_already_desired']);
-function modelVisibleReconciliationResult(result, binding) {
+function modelVisibleReconciliationResult(result, controllerVerified, binding) {
   let payload;
   try { payload = JSON.parse(result?.content?.[0]?.text ?? ''); } catch { payload = null; }
-  const verified = payload?.provider_completion === 'verified' && payload?.state === 'completed' && payload?.completed === true;
-  if (!verified) return makeToolResult({ id: result.id, name: result.name, status: 'failed', text: JSON.stringify({ code: 'action_completion_unverified', state: 'reconciling', completion: 'controller_acknowledged', provider_completion: 'unverified' }), durationMs: result.metadata?.duration_ms ?? 0 });
+  if (controllerVerified !== true) return makeToolResult({ id: result.id, name: result.name, status: 'failed', text: JSON.stringify({ code: 'action_completion_unverified', state: 'reconciling', completion: 'controller_acknowledged', provider_completion: 'unverified' }), durationMs: result.metadata?.duration_ms ?? 0 });
   const httpStatus = payload.http_status === null || (Number.isInteger(payload.http_status) && payload.http_status >= 200 && payload.http_status <= 599) ? payload.http_status : null;
   const privateValues = Object.values(binding ?? {}).filter(value => typeof value === 'string' && value.length > 0);
   const resourceId = typeof payload.resource_id === 'string' && payload.resource_id.length <= 512 && !/[\u0000-\u001f\u007f]/u.test(payload.resource_id) && !privateValues.some(value => payload.resource_id.includes(value)) ? payload.resource_id : null;
@@ -258,7 +257,7 @@ export class ConversationController {
         }
         try { result = validateToolResult(result); } catch { throw Object.assign(new Error('invalid_tool_result'), { code: 'invalid_tool_result' }); }
         if (result.id !== call.id || result.name !== call.name) throw Object.assign(new Error('tool_result_mismatch'), { code: 'tool_result_mismatch' });
-        let strictModelResult = false; let modelBinding = null;
+        let strictModelResult = false; let controllerVerified = false; let modelBinding = null;
         if (activeJournalOperation) {
           strictModelResult = activeJournalOperation.reconcile === true;
           modelBinding = activeJournalOperation;
@@ -268,12 +267,15 @@ export class ConversationController {
               await this.actionJournal.beginReconciliation(activeJournalOperation.id);
               const responseDigest = digestEvidence({ status: result.status, content: result.content.map(item => ({ type: item.type, text_digest: digestEvidence(item.text) })) });
               result = makeToolResult({ id: call.id, name: call.name, status: 'failed', text: JSON.stringify({ code: 'action_completion_unverified', operation_id: activeJournalOperation.id, state: 'reconciling', completion: 'controller_acknowledged', provider_completion: 'unverified', evidence: { operation_digest: activeJournalOperation.operationDigest, preview_digest: activeJournalOperation.previewDigest, resource_digest: null, response_digest: responseDigest, arguments_digest: activeJournalOperation.argumentsDigest } }) });
-            } else await this.actionJournal.complete(activeJournalOperation.id);
+            } else {
+              await this.actionJournal.complete(activeJournalOperation.id);
+              controllerVerified = activeJournalOperation.reconcile === true;
+            }
           }
           else await this.actionJournal.markUnknown(activeJournalOperation.id);
           activeJournalOperation = null;
         }
-        const modelResult = strictModelResult ? modelVisibleReconciliationResult(result, modelBinding) : modelVisibleToolResult(result);
+        const modelResult = strictModelResult ? modelVisibleReconciliationResult(result, controllerVerified, modelBinding) : modelVisibleToolResult(result);
         emit('tool.completed', { result });
         this._appendHistory(session, { role: 'assistant', content: callText });
         this._appendHistory(session, { role: 'tool', name: call.name, tool_call_id: call.id, content: modelResult.content[0]?.text ?? '' });
