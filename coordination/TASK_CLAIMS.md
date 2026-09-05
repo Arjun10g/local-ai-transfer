@@ -30,6 +30,7 @@
 | QA-REMOTE-001 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-023, TOOL-024, TOOL-026, SOL-003 | S0, S4 | pending commit; marker-gated hostile loopback Graph/browser/CDP/Copilot ACP/grant harness with deterministic fuzz seeds, bounded soak, secret-free receipts, and local refusal self-test |
 | QA-REMOTE-002 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | QA-REMOTE-001, SOL-003 | S0, S4 | pending commit; plan-first Shadeform wrapper with exact audited closure upload, remote Node v24.20.0 Linux x64 SHA verification, explicit A100 target/review markers, watchdog/backstop, exact teardown, and receipt salvage |
 | TOOL-027 | S3 | `luna/agent-tools` | READY_FOR_REVIEW | TOOL-022, SOL-003 | S0, S4 | pending commit; opt-in browser safe-actions gate with configured HTTPS origins, inspected opaque handle/page bindings, strict text-field/no-navigation-button classes, T3 confirmation, post-action URL and validating-proxy egress checks; generic mutations remain test-only |
+| TOOL-032 | S3 | `luna/durable-action-journal-core` | READY_FOR_REVIEW | TOOL-013, TOOL-018 | S0, S4 | `2cf1f8b`; durable action/egress journal, controller fsync dispatch barrier, truthful hiding, bounded operator endpoints, deterministic crash tests |
 | QA-001 | S4 | `luna/qa-release` | CLAIMED | SOL-001 | S0 | pending |
 | SEC-001 | S4 | `luna/qa-release` | CLAIMED | QA-001, SOL-003 | S0 | pending |
 | RUN-019 | S1 | `main` | IN_PROGRESS | RUN-010, MODEL-004 | S0, S4 | real tool-role/template pipeline and tests pending |

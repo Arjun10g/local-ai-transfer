@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, realpath, readFile } from 'node:fs/promises';
+import { chmod, mkdtemp, realpath, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ProcessRunProvider, createProcessRunTools, terminateProcessTree } from '../../host/tools/local/process-run.mjs';
@@ -9,6 +9,7 @@ import { WorkspacePolicy } from '../../host/tools/local/workspace-policy.mjs';
 import { OperatorGrantControl, OperatorGrantStore } from '../../host/providers/operator-grants.mjs';
 import { mergeConfig } from '../../host/agent/config.mjs';
 import { ConversationController } from '../../host/agent/controller.mjs';
+import { ActionJournal } from '../../host/agent/action-journal.mjs';
 
 const call = (arguments_, id = 'process_call') => ({ id, name: 'process.run_allowlisted', arguments: arguments_ });
 const value = result => JSON.parse(result.content[0].text);
@@ -22,6 +23,7 @@ class FakeChild extends EventEmitter {
 async function setup({ spawn, killProcess, taskkillSpawn, resolveExecutable, statExecutable, statResolvedExecutable, grantControl, actions = { probe: action({}) }, workspace = {} } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'lae-process-')); const policy = new WorkspacePolicy([{ id: 'project', path: root, read: workspace.read ?? true, write: workspace.write ?? true }]); const provider = new ProcessRunProvider({ enabled: true, actions, workspacePolicy: policy, grantControl, spawn, killProcess, taskkillSpawn, resolveExecutable: resolveExecutable ?? (async value => value), statExecutable: statExecutable ?? (async () => ({ isSymbolicLink: () => false })), statResolvedExecutable: statResolvedExecutable ?? (async () => ({ isFile: () => true, mode: 0o755 })), environment: { PATH: '/secret', SystemRoot: '/windows' } }); return { provider, root, tools: createProcessRunTools(provider) };
 }
+async function journal(t) { const path = await realpath(await mkdtemp(join(tmpdir(), 'lae-process-journal-'))); await chmod(path, 0o700); t.after(() => rm(path, { recursive: true, force: true })); return ActionJournal.open({ directory: path, testOnly: true }); }
 
 test('process.run_allowlisted uses fixed argv, workspace cwd, minimal env, bounded UTF-8, and stdin only when declared', async () => {
   let launched; const setupValue = await setup({ spawn: (executable, args, options) => { launched = { executable, args, options }; const child = new FakeChild(); return child; } }); const request = call({ action_id: 'probe', parameters: { name: 'safe', input: 'literal input' } }); const preview = await setupValue.tools.preview(request); assert.equal(preview.action_id, 'probe'); assert.equal(await setupValue.tools.confirmationRequired(request), true); const output = value(await setupValue.tools.execute({ ...request, authorization: { kind: 'user_confirmation' } })); assert.equal(output.stdout, '😀'); assert.deepEqual(launched.args, ['--name', 'safe']); assert.equal(launched.options.shell, false); assert.equal(launched.options.env.PATH, undefined); assert.equal(launched.options.env.SystemRoot, '/windows'); assert.equal(launched.options.cwd, await realpath(setupValue.root)); assert.equal(launched.options.detached, true);
@@ -45,12 +47,12 @@ test('process action validates scalar argv kinds and rejects unsafe config befor
   assert.throws(() => mergeConfig({ process_actions: { enabled: true, actions: { constructor: action({}) } } }), /process action/);
 });
 
-test('process schema is exact per configured action and controller rejects undeclared parameters', async () => {
+test('process schema is exact per configured action and controller rejects undeclared parameters', async t => {
   const configured = await setup({ spawn: () => new FakeChild() }); const schema = configured.tools.parameters;
   assert.equal(schema.additionalProperties, false); assert.deepEqual(schema.properties.action_id.enum, ['probe']); assert.equal(schema.oneOf.length, 1); assert.equal(schema.oneOf[0].properties.parameters.additionalProperties, false); assert.deepEqual(schema.oneOf[0].required, ['action_id', 'parameters']);
   let advertised;
   const engine = { async *generate({ tools }) { advertised = tools.find(item => item.function.name === 'process.run_allowlisted'); yield { kind: 'tool_call_chunk', text: JSON.stringify({ id: 'process_schema_call', name: 'process.run_allowlisted', arguments: { action_id: 'probe', parameters: { name: 'safe', unknown: true } } }) }; } };
-  const controller = new ConversationController({ engine, toolRegistry: { 'process.run_allowlisted': configured.tools } }); const output = await controller.runTurn({ sessionId: 'process_schema_session', requestId: 'process_schema_request', message: 'run it' }); assert.equal(output.error, 'invalid_tool_arguments'); assert.deepEqual(advertised.function.parameters, schema);
+  const controller = new ConversationController({ engine, actionJournal: await journal(t), toolRegistry: { 'process.run_allowlisted': configured.tools } }); const output = await controller.runTurn({ sessionId: 'process_schema_session', requestId: 'process_schema_request', message: 'run it' }); assert.equal(output.error, 'invalid_tool_arguments'); assert.deepEqual(advertised.function.parameters, schema);
 });
 
 test('process termination uses an injectable bounded Windows tree-kill path', async () => {

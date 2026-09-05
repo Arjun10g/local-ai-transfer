@@ -102,7 +102,7 @@ test('controller rejects unknown tools and malformed model calls without executi
   assert.equal(unknownResult.error, 'unknown_tool');
   const malformed = new ConversationController({
     engine: { async *generate() { yield { kind: 'tool_call_chunk', text: '{"id":"bad id","name":"time.now","arguments":{}}' }; } },
-    toolRegistry: { 'time.now': { name: 'time.now', execute: async () => { executions++; } } }
+    toolRegistry: { 'time.now': { name: 'time.now', risk_tier: 'T0', side_effect: 'none', execute: async () => { executions++; } } }
   });
   const malformedResult = await malformed.runTurn({ sessionId: 'ses_malformed', requestId: 'req_malformed', message: 'run', onEvent: () => {} });
   assert.equal(malformedResult.state, 'FAILED');
@@ -114,7 +114,7 @@ test('controller bounds multi-step tool loops and oversized tool-call chunks', a
   const looping = new ConversationController({
     maxToolCalls: 2,
     engine: { async *generate() { yield { kind: 'tool_call_chunk', text: JSON.stringify(call('test.loop', {}, 'call_loop01')) }; } },
-    toolRegistry: { 'test.loop': { name: 'test.loop', execute: async value => { executions++; return makeToolResult({ id: value.id, name: value.name, text: 'loop' }); } } }
+    toolRegistry: { 'test.loop': { name: 'test.loop', risk_tier: 'T1', side_effect: 'read_sensitive', execute: async value => { executions++; return makeToolResult({ id: value.id, name: value.name, text: 'loop' }); } } }
   });
   const loopResult = await looping.runTurn({ sessionId: 'ses_loop01', requestId: 'req_loop01', message: 'loop', onEvent: () => {} });
   assert.equal(loopResult.error, 'tool_call_limit_exceeded');
@@ -130,7 +130,7 @@ test('confirmation expires into denial and cannot be replayed', async () => {
   const controller = new ConversationController({
     confirmationTimeoutMs: 10,
     engine: oneToolEngine(call('test.confirm', {}, 'call_expire1'), 'denied after expiry'),
-    toolRegistry: { 'test.confirm': { name: 'test.confirm', risk_tier: 'T2', requires_confirmation: true, execute: async () => { executions++; return makeToolResult({ id: 'call_expire1', name: 'test.confirm' }); } } }
+    toolRegistry: { 'test.confirm': { name: 'test.confirm', risk_tier: 'T1', side_effect: 'read_sensitive', requires_confirmation: true, execute: async () => { executions++; return makeToolResult({ id: 'call_expire1', name: 'test.confirm' }); } } }
   });
   const events = [];
   const run = controller.runTurn({ sessionId: 'ses_expire', requestId: 'req_expire', message: 'confirm', onEvent: event => events.push(event) });
@@ -147,7 +147,7 @@ test('confirmation approval is bound to request and call and cancellation wins',
   const controller = new ConversationController({
     confirmationTimeoutMs: 1000,
     engine: oneToolEngine(call('test.confirm', {}, 'call_bind01')),
-    toolRegistry: { 'test.confirm': { name: 'test.confirm', risk_tier: 'T2', requires_confirmation: true, execute: async () => { executions++; return makeToolResult({ id: 'call_bind01', name: 'test.confirm' }); } } }
+    toolRegistry: { 'test.confirm': { name: 'test.confirm', risk_tier: 'T1', side_effect: 'read_sensitive', requires_confirmation: true, execute: async () => { executions++; return makeToolResult({ id: 'call_bind01', name: 'test.confirm' }); } } }
   });
   const events = [];
   const run = controller.runTurn({ sessionId: 'ses_bind01', requestId: 'req_bind01', message: 'confirm', onEvent: event => events.push(event) });
@@ -163,7 +163,7 @@ test('confirmation approval is bound to request and call and cancellation wins',
 test('controller treats a tool result with the wrong correlation ID as a failure', async () => {
   const controller = new ConversationController({
     engine: oneToolEngine(call('test.result', {}, 'call_expected')),
-    toolRegistry: { 'test.result': { name: 'test.result', execute: async () => makeToolResult({ id: 'call_other', name: 'test.result' }) } }
+    toolRegistry: { 'test.result': { name: 'test.result', risk_tier: 'T1', side_effect: 'read_sensitive', execute: async () => makeToolResult({ id: 'call_other', name: 'test.result' }) } }
   });
   const result = await controller.runTurn({ sessionId: 'ses_result', requestId: 'req_result', message: 'result', onEvent: () => {} });
   assert.equal(result.state, 'FAILED');
@@ -185,7 +185,7 @@ test('controller validates the full tool-result schema before continuing', async
     },
     toolRegistry: {
       'test.invalid_result': {
-        name: 'test.invalid_result',
+        name: 'test.invalid_result', risk_tier: 'T1', side_effect: 'read_sensitive',
         execute: async () => ({ id: 'call_invalid_result', name: 'test.invalid_result', status: 'running', content: [], metadata: { truncated: false, duration_ms: 0 } })
       }
     }
@@ -206,7 +206,7 @@ test('provider/tool failures fail closed without a continuation or hidden fallba
         yield { kind: 'text_delta', text: 'must not continue' };
       }
     },
-    toolRegistry: { 'test.failure': { name: 'test.failure', execute: async () => { throw Object.assign(new Error('provider timeout'), { code: 'provider_timeout' }); } } }
+    toolRegistry: { 'test.failure': { name: 'test.failure', risk_tier: 'T1', side_effect: 'read_sensitive', execute: async () => { throw Object.assign(new Error('provider timeout'), { code: 'provider_timeout' }); } } }
   });
   const result = await controller.runTurn({ sessionId: 'ses_fail01', requestId: 'req_fail01', message: 'try provider', onEvent: () => {} });
   assert.equal(result.state, 'FAILED');
@@ -220,7 +220,7 @@ test('controller enforces each tool definition timeout and aborts the operation'
     engine: oneToolEngine(call('test.timeout', {}, 'call_timeout1')),
     toolRegistry: {
       'test.timeout': {
-        name: 'test.timeout',
+        name: 'test.timeout', risk_tier: 'T1', side_effect: 'read_sensitive',
         timeout_ms: 10,
         execute: async value => await new Promise(resolve => {
           value.signal.addEventListener('abort', () => { aborted = true; resolve(makeToolResult({ id: value.id, name: value.name, status: 'cancelled' })); }, { once: true });
@@ -372,7 +372,7 @@ test('HostServer strictly validates confirmation bodies and contains chat handle
 
 test('confirmation endpoint integration requires both correlation fields and rejects replay', async t => {
   const engine = oneToolEngine(call('test.confirm', {}, 'call_http01'));
-  const controller = new ConversationController({ engine, confirmationTimeoutMs: 1000, toolRegistry: { 'test.confirm': { name: 'test.confirm', risk_tier: 'T2', requires_confirmation: true, execute: async value => makeToolResult({ id: value.id, name: value.name }) } } });
+  const controller = new ConversationController({ engine, confirmationTimeoutMs: 1000, toolRegistry: { 'test.confirm': { name: 'test.confirm', risk_tier: 'T1', side_effect: 'read_sensitive', requires_confirmation: true, execute: async value => makeToolResult({ id: value.id, name: value.name }) } } });
   const host = new HostServer({ controller, engine });
   const address = await host.listen(0);
   t.after(() => host.close());

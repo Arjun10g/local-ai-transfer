@@ -1,10 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { chmod, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createLocalToolRegistry } from '../../host/tools/local/index.mjs';
 import { createExternalToolRegistry } from '../../host/providers/index.mjs';
 import { ConversationController, modelToolDefinitions } from '../../host/agent/controller.mjs';
 import { HostServer } from '../../host/server/host-server.mjs';
 import { makeToolResult } from '../../host/agent/tool-envelope.mjs';
+import { ActionJournal } from '../../host/agent/action-journal.mjs';
 
 const auth = token => ({ authorization: `Bearer ${token}` });
 const configuredWorkspace = (write = true) => ({ id: 'project', path: '/approved/workspace', read: true, write });
@@ -114,13 +118,13 @@ test('production registries advertise only immutable configured capabilities', (
 test('mocked HostServer drives validated read and confirmed mutation through model continuation', async t => {
   const observations = { advertised: [], readPreviews: 0, readExecutions: 0, draftPreviews: 0, draftExecutions: 0, authorization: null, continuations: [] };
   const readTool = {
-    name: 'mail.read_message', description: 'Read one synthetic message.', risk_tier: 'T1', requires_confirmation: false, timeout_ms: 1000,
+    name: 'mail.read_message', description: 'Read one synthetic message.', risk_tier: 'T1', side_effect: 'read_mail', requires_confirmation: false, timeout_ms: 1000,
     parameters: { type: 'object', additionalProperties: false, required: ['message_id'], properties: { message_id: { type: 'string', maxLength: 64 } } },
     preview: async call => { observations.readPreviews += 1; assert.equal(typeof call.arguments.message_id, 'string'); return { provider: 'mock_mail', message_id: call.arguments.message_id }; },
     execute: async call => { observations.readExecutions += 1; assert.equal(call.authorization, undefined); return makeToolResult({ id: call.id, name: call.name, text: JSON.stringify({ subject: 'Synthetic', body: 'Meeting Friday' }) }); }
   };
   const draftTool = {
-    name: 'mail.create_draft', description: 'Create one synthetic draft.', risk_tier: 'T2', requires_confirmation: true, timeout_ms: 1000,
+    name: 'mail.create_draft', description: 'Create one synthetic draft.', risk_tier: 'T2', side_effect: 'create_draft', requires_confirmation: true, timeout_ms: 1000,
     parameters: { type: 'object', additionalProperties: false, required: ['to', 'subject', 'body'], properties: { to: { type: 'string', maxLength: 320 }, subject: { type: 'string', maxLength: 998 }, body: { type: 'string', maxLength: 4096 } } },
     preview: async call => { observations.draftPreviews += 1; return { provider: 'mock_mail', recipients: [call.arguments.to], subject: call.arguments.subject, body_preview: call.arguments.body }; },
     confirmationRequired: (_call, { preview }) => { assert.equal(preview.subject, 'Friday follow-up'); return true; },
@@ -135,12 +139,14 @@ test('mocked HostServer drives validated read and confirmed mutation through mod
       if (toolMessages.length === 0) { yield { kind: 'tool_call_chunk', text: JSON.stringify({ id: 'call_read01', name: 'mail.read_message', arguments: { message_id: 'message-1' } }) }; return; }
       observations.continuations.push(toolMessages.map(message => ({ name: message.name, content: JSON.parse(message.content) })));
       if (toolMessages.length === 1) { yield { kind: 'tool_call_chunk', text: JSON.stringify({ id: 'call_draft01', name: 'mail.create_draft', arguments: { to: 'alice@example.com', subject: 'Friday follow-up', body: 'Meeting is Friday.' } }) }; return; }
-      yield { kind: 'text_delta', text: 'Read the message and created the confirmed draft.' }; yield { kind: 'done', finish_reason: 'stop' };
+      yield { kind: 'text_delta', text: 'Read the message; draft completion is awaiting reconciliation.' }; yield { kind: 'done', finish_reason: 'stop' };
     },
     async shutdown() {}
   };
-  const controller = new ConversationController({ engine, confirmationTimeoutMs: 1000, toolRegistry: { [readTool.name]: readTool, [draftTool.name]: draftTool } });
-  const host = new HostServer({ controller, engine }); const address = await host.listen(0); t.after(() => host.close());
+  const rawJournalPath = await mkdtemp(join(tmpdir(), 'lae-vertical-journal-')); const journalPath = await realpath(rawJournalPath); await chmod(journalPath, 0o700); t.after(() => rm(journalPath, { recursive: true, force: true }));
+  const actionJournal = await ActionJournal.open({ directory: journalPath, testOnly: true });
+  const controller = new ConversationController({ engine, actionJournal, confirmationTimeoutMs: 1000, toolRegistry: { [readTool.name]: readTool, [draftTool.name]: draftTool } });
+  const host = new HostServer({ controller, engine, actionJournal }); const address = await host.listen(0); t.after(() => host.close());
   const sessionResponse = await fetch(`${address.url}/api/sessions`, { method: 'POST', headers: { ...auth(address.token), 'content-type': 'application/json' }, body: '{}' });
   const session = await sessionResponse.json();
   const response = await fetch(`${address.url}/api/chat`, { method: 'POST', headers: { ...auth(address.token), 'content-type': 'application/json' }, body: JSON.stringify({ session_id: session.session_id, request_id: 'request_vertical01', message: 'read then draft' }) });
@@ -162,7 +168,8 @@ test('mocked HostServer drives validated read and confirmed mutation through mod
   assert.deepEqual(started.map(event => event.data.call), proposed.map(event => event.data.call));
   assert.deepEqual(started.map(event => event.data.authorization), ['policy', 'user_confirmation']);
   assert.deepEqual(completed.map(event => ({ id: event.data.result.id, name: event.data.result.name })), proposed.map(event => event.data.call));
-  assert.deepEqual(completed.map(event => event.data.result.status), ['ok', 'ok']);
+  assert.deepEqual(completed.map(event => event.data.result.status), ['ok', 'failed']);
+  assert.equal(JSON.parse(completed[1].data.result.content[0].text).code, 'action_completion_unverified');
   assert.deepEqual({ readPreviews: observations.readPreviews, readExecutions: observations.readExecutions, draftPreviews: observations.draftPreviews, draftExecutions: observations.draftExecutions }, { readPreviews: 1, readExecutions: 1, draftPreviews: 1, draftExecutions: 1 });
   assert.deepEqual(observations.authorization, { kind: 'user_confirmation' });
   assert.deepEqual(observations.continuations.at(-1).map(item => item.name), ['mail.read_message', 'mail.create_draft']);

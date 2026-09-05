@@ -28,6 +28,15 @@ function exactBody(input, allowed, required = []) {
   if (Object.keys(input).some(key => !allowed.includes(key)) || required.some(key => !Object.hasOwn(input, key))) throw Object.assign(new Error('invalid_request_body'), { code: 'invalid_request_body' });
   return input;
 }
+function errorStatus(code) {
+  if (code === 'body_too_large') return 413;
+  if (code === 'request_timeout') return 408;
+  if (code === 'action_reconciliation_unavailable') return 501;
+  if (code === 'action_journal_not_found') return 404;
+  if (code === 'action_journal_invalid_request' || code === 'invalid_json' || code?.startsWith('invalid_') || code === 'unsupported_content_type') return 400;
+  if (code?.startsWith('action_journal_')) return 409;
+  return 500;
+}
 async function body(req, maxBytes, timeoutMs) {
   const declared = Number(req.headers['content-length']);
   if (Number.isSafeInteger(declared) && declared > maxBytes) throw Object.assign(new Error('body_too_large'), { code: 'body_too_large' });
@@ -41,9 +50,11 @@ async function body(req, maxBytes, timeoutMs) {
 }
 
 export class HostServer {
-  constructor({ controller, engine, config = {}, providers, providerAuth, providerShutdown, operatorGrants } = {}) {
+  constructor({ controller, engine, config = {}, providers, providerAuth, providerShutdown, operatorGrants, actionJournal } = {}) {
     if (!controller) throw new TypeError('controller is required');
-    this.controller = controller; this.engine = engine; this.config = mergeConfig(config); this.providers = providers; this.providerAuth = providerAuth; this.providerShutdown = providerShutdown; this.operatorGrants = operatorGrants; this.token = randomBytes(32).toString('base64url'); this.bootstrapNonce = randomBytes(32).toString('base64url'); this.bootstrapExpiresAt = 0; this.bootstrapUsed = false; this.server = null; this.port = null; this.authFailures = new Map();
+    const controllerJournal = controller.actionJournal;
+    if (controllerJournal !== undefined && actionJournal !== undefined && controllerJournal !== actionJournal) throw new TypeError('controller and host action journals must be identical');
+    this.controller = controller; this.engine = engine; this.config = mergeConfig(config); this.providers = providers; this.providerAuth = providerAuth; this.providerShutdown = providerShutdown; this.operatorGrants = operatorGrants; this.actionJournal = actionJournal ?? controllerJournal; this.actionJournalBound = this.actionJournal !== undefined && this.controller.actionJournal === this.actionJournal; this.token = randomBytes(32).toString('base64url'); this.bootstrapNonce = randomBytes(32).toString('base64url'); this.bootstrapExpiresAt = 0; this.bootstrapUsed = false; this.server = null; this.port = null; this.authFailures = new Map();
   }
   async listen(port = 0) {
     if (this.server) return this.address();
@@ -78,7 +89,7 @@ export class HostServer {
     this.bootstrapUsed = true; this.bootstrapNonce = null; this.clearAuthFailure(req);
     return json(res, 200, { token: this.token });
   }
-  fail(res, error) { if (res.destroyed || res.writableEnded) return; if (res.headersSent) { res.end(); return; } const code = error?.code ?? 'request_failed'; const status = code === 'body_too_large' ? 413 : code === 'request_timeout' ? 408 : code === 'invalid_json' ? 400 : 500; json(res, status, { error: code }); }
+  fail(res, error) { if (res.destroyed || res.writableEnded) return; if (res.headersSent) { res.end(); return; } const code = error?.code ?? 'request_failed'; json(res, errorStatus(code), { error: code }); }
   async handle(req, res) {
     res.setHeader('x-content-type-options', 'nosniff');
     if (!this.allowedRequest(req)) return json(res, 403, { error: 'forbidden' });
@@ -93,6 +104,29 @@ export class HostServer {
     if (req.method === 'GET' && path === '/api/provider-auth/microsoft_graph') return this.providerAuthStatus(res);
     if (req.method === 'GET' && path === '/api/operator-grants') return json(res, 200, { capabilities: this.operatorGrants?.list?.() ?? [] });
     try {
+      if (req.method === 'GET' && path === '/api/action-journal') {
+        if (!this.actionJournal) return json(res, 409, { error: 'action_journal_unavailable' });
+        const keys = [...requestUrl.searchParams.keys()]; if (keys.some(key => !['limit', 'state'].includes(key)) || new Set(keys).size !== keys.length) return json(res, 400, { error: 'action_journal_invalid_request' });
+        const rawLimit = requestUrl.searchParams.get('limit'); const state = requestUrl.searchParams.get('state') ?? undefined; const limit = rawLimit === null ? 100 : Number(rawLimit);
+        return json(res, 200, await this.actionJournal.summary({ limit, state }));
+      }
+      const actionDetail = path.match(/^\/api\/action-journal\/(act_[a-f0-9]{32})$/u);
+      if (req.method === 'GET' && actionDetail && !requestUrl.search) {
+        if (!this.actionJournal) return json(res, 409, { error: 'action_journal_unavailable' });
+        return json(res, 200, await this.actionJournal.detail(actionDetail[1]));
+      }
+      const actionResolution = path.match(/^\/api\/action-journal\/(act_[a-f0-9]{32})\/resolve$/u);
+      if (req.method === 'POST' && actionResolution && !requestUrl.search) {
+        if (!this.actionJournal) return json(res, 409, { error: 'action_journal_unavailable' }); if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' });
+        const input = exactBody(await body(req, Math.min(this.config.host.max_body_bytes, 1024), this.config.host.request_timeout_ms), ['resolution'], ['resolution']);
+        if (!['completed', 'failed_definitive'].includes(input.resolution)) return json(res, 400, { error: 'action_journal_invalid_request' });
+        return json(res, 200, { resolved: true, receipt: await this.actionJournal.resolve(actionResolution[1], input.resolution) });
+      }
+      const actionReconcile = path.match(/^\/api\/action-journal\/(act_[a-f0-9]{32})\/reconcile$/u);
+      if (req.method === 'POST' && actionReconcile && !requestUrl.search) {
+        if (!this.actionJournal) return json(res, 409, { error: 'action_journal_unavailable' }); if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); exactBody(await body(req, Math.min(this.config.host.max_body_bytes, 1024), this.config.host.request_timeout_ms), []);
+        return json(res, 501, { error: 'action_reconciliation_unavailable' });
+      }
       if (req.method === 'POST' && path === '/api/sessions') { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); const input = exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), ['session_id', 'reset']); if (input.session_id !== undefined && (typeof input.session_id !== 'string' || !OPAQUE_ID.test(input.session_id))) return json(res, 400, { error: 'invalid_request_body' }); if (input.reset !== undefined && typeof input.reset !== 'boolean') return json(res, 400, { error: 'invalid_request_body' }); const session = this.controller.createSession(input.session_id); if (input.reset) this.controller.resetSession(session.id); return json(res, 201, { session_id: session.id, state: this.controller.state(session.id) }); }
       if (req.method === 'POST' && path === '/api/chat') return await this.chat(req, res);
       const authAction = path.match(/^\/api\/provider-auth\/microsoft_graph\/(start|cancel|clear)$/);
@@ -111,7 +145,7 @@ export class HostServer {
       if (req.method === 'POST' && confirmation) { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); const input = exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), ['approved', 'request_id', 'call_id'], ['approved', 'request_id', 'call_id']); if (typeof input.approved !== 'boolean' || typeof input.request_id !== 'string' || !OPAQUE_ID.test(input.request_id) || typeof input.call_id !== 'string' || !OPAQUE_ID.test(input.call_id)) return json(res, 400, { error: 'invalid_request_body' }); const accepted = this.controller.confirm(confirmation[1], input.approved, { requestId: input.request_id, callId: input.call_id }); return json(res, accepted ? 200 : 404, { accepted }); }
       if (req.method === 'POST' && path === '/api/shutdown') { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), []); json(res, 200, { shutting_down: true }); setImmediate(() => this.close()); return; }
       return json(res, 404, { error: 'not_found' });
-    } catch (error) { if (res.headersSent) return this.fail(res, error); const code = error.code ?? (error instanceof TypeError ? 'invalid_request_body' : 'request_failed'); const status = code === 'body_too_large' ? 413 : code === 'request_timeout' ? 408 : (code.startsWith('invalid_') || code === 'unsupported_content_type') ? 400 : 500; return json(res, status, { error: code }); }
+    } catch (error) { if (res.headersSent) return this.fail(res, error); const code = error.code ?? (error instanceof TypeError ? 'invalid_request_body' : 'request_failed'); return json(res, errorStatus(code), { error: code }); }
   }
   providerAuthStatus(res) { const status = this.providerAuth?.()?.microsoft_graph?.status?.() ?? { state: 'unavailable', prompt: null }; return json(res, 200, { microsoft_graph: status }); }
   async asset(path, res) {
@@ -119,7 +153,7 @@ export class HostServer {
     if (!isWithinDirectory(UI_ROOT, candidate)) return json(res, 404, { error: 'not_found' });
     try { const content = await readFile(candidate, 'utf8'); res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', ...securityHeaders() }); res.end(content); } catch { json(res, 404, { error: 'not_found' }); }
   }
-  async status(res) { let engine = { ready: false, backend: 'unknown' }; try { engine = await this.engine?.health?.() ?? engine; } catch { /* generic status only */ } const providers = typeof this.providers === 'function' ? this.providers() : this.providers ?? {}; json(res, 200, { host: { bind: '127.0.0.1', port: this.port }, engine, network: { provider: this.config.network.provider, enabled: this.config.network.provider !== 'disabled' }, providers, operator_grants: { available: this.operatorGrants?.list?.().length ?? 0, active: this.operatorGrants?.list?.().filter(value => value.granted).length ?? 0 }, limits: { max_body_bytes: this.config.host.max_body_bytes, max_connections: this.config.host.max_connections } }); }
+  async status(res) { let engine = { ready: false, backend: 'unknown' }; try { engine = await this.engine?.health?.() ?? engine; } catch { /* generic status only */ } const providers = typeof this.providers === 'function' ? this.providers() : this.providers ?? {}; const journal = this.actionJournal?.health?.() ?? { state: 'unavailable', error: 'action_journal_unavailable' }; const bound = this.actionJournalBound; const journalError = this.actionJournal === undefined ? journal.error : bound ? journal.error ?? null : 'action_journal_controller_mismatch'; json(res, 200, { host: { bind: '127.0.0.1', port: this.port }, engine, network: { provider: this.config.network.provider, enabled: this.config.network.provider !== 'disabled' }, providers, action_journal: { state: journal.state, error: journalError, bound_to_controller: bound, durable_action_dispatch: bound && journal.state === 'ready' }, operator_grants: { available: this.operatorGrants?.list?.().length ?? 0, active: this.operatorGrants?.list?.().filter(value => value.granted).length ?? 0 }, limits: { max_body_bytes: this.config.host.max_body_bytes, max_connections: this.config.host.max_connections } }); }
   async chat(req, res) {
     if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' });
     const input = exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), ['session_id', 'message', 'mode', 'request_id'], ['session_id', 'message', 'request_id']);
