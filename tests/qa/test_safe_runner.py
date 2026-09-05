@@ -73,6 +73,20 @@ class SafeRunnerTests(unittest.TestCase):
         self.assertIsNone(inventory["discovery_error"])
         self.assertEqual(inventory["unknown"], [])
         self.assertEqual(inventory["missing"], [])
+        self.assertEqual(
+            inventory["classes"].get(
+                "tests/host/action-journal-container-model.test.mjs"
+            ),
+            "host_fixture",
+        )
+        self.assertEqual(
+            inventory["classes"].get("tests/host/action-journal-protocol.test.mjs"),
+            "host_fixture",
+        )
+        self.assertNotIn(
+            "tests/reference/action-journal-container-model.mjs",
+            inventory["discovered"],
+        )
         self.assertIn(
             "tests/host/windows-fs-refusal-slice.test.mjs",
             inventory["discovered"],
