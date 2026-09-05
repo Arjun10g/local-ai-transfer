@@ -2,16 +2,24 @@
 
 ## Current governance snapshot — 2026-09-05
 
+- Authoritative source baseline:
+  `main@fa5aa38c806ba98d269ce304325e178416584bbe`.
 - The durable journal/controller barrier is source-merged at `65decba`, and the
   bounded wire-protocol contract is source-merged at `3746421`.
-- Production journal availability remains false. The protocol merge adds no
-  native helper, handle-relative store, transport, key trust anchor, package
-  integration, process launch, recovery deployment, or activation.
+- Subsequent inert slices are also source-merged: container by `16b4b0e`,
+  Win32 storage by `3d46ccb`, helper/store-codec/authenticated-pipe contracts
+  by `645f348`, and test-only client `dc29ced` by `4b8e737` after 29/29 client
+  plus 26/26 protocol checks. These are source components, not an activated
+  end-to-end store or production transport/import.
+- Production journal availability remains false. There is no activated key
+  trust anchor, production import/transport, package integration, compile,
+  deployed recovery owner, or target evidence.
 - Consequently Graph/browser/Copilot/process mutations remain hidden/refused
   when production durability is required. Graph reconciliation source being
-  merged is not live-provider readiness; browser candidate `5dc2ad2` is
-  rejected and repair `fc317fce023f9364e7f19b69a700124d1936f8ca` remains
-  unmerged/unreviewed.
+  merged is not live-provider readiness; rejected browser predecessor
+  `5dc2ad2` is historical, while repaired browser reconciliation
+  `fc317fce023f9364e7f19b69a700124d1936f8ca` is source-merged by `976aeff`
+  after source/mock review and remains live/Windows/target unproven.
 - Overall action-journal/production-action state: `NOT_READY`; no formal gate is
   approved.
 

@@ -1,7 +1,7 @@
 # Program Status
 
 - Overall release/full-access state: `BLOCKED` / `NOT_READY`
-- Authoritative source baseline: `main@062271367ca41b27aa4651138ea92662845388a5`
+- Authoritative source baseline: `main@fa5aa38c806ba98d269ce304325e178416584bbe`
 - Working source-hardening stream: Phase 6
 - Formal gate state: Phase 0 `IN_PROGRESS` and unapproved; Phases 1–7 have
   incomplete/unapproved evidence; Phase 8 is `BLOCKED`
@@ -31,25 +31,30 @@
   `55f3dfd` (implementation) through `65decba` (merge). Its production
   store is deliberately unavailable, so journal-dependent production actions
   remain hidden/refused.
-- Six independently source-reviewed native boundaries are now on `main`:
+- Eight independently source-reviewed Windows/runtime boundaries are on `main`:
   inert Windows read-only filesystem source by `1741c86`, inert hardware-
   attestor source by `e579d49`, inert journal-helper/transport source by
   `645f348`, inert release-tree verifier source by `2ec9c44`, inert supervisor-
-  authority source `8c34cca` by `9f6bbb6`, and inert clipboard source
-  `04d6860`/`393189f` by `0622713`. Recorded focused source evidence was 24/24
-  for the supervisor and 26/26 plus 2/2 inventory checks for the clipboard.
+  authority source `8c34cca` by `9f6bbb6`, inert clipboard source
+  `04d6860`/`393189f` by `0622713`, test-only journal client `dc29ced` by
+  `4b8e737`, and dormant supervisor-owned process transaction `64b3947` by
+  `ca2d893`. Recorded focused evidence was 29/29 client plus 26/26 protocol,
+  56/56 process-transaction source plus 2/2 inventory, 24/24 supervisor, and
+  26/26 clipboard plus 2/2 inventory checks.
   These sources remain unlinked, uncompiled, absent from production activation/
   package paths, and explicitly `NO` for production and target execution.
 - Process implementation candidate `6167ef6` remains rejected and unmerged.
+  The later merged process transaction remains unreachable: its adapter is
+  `nullptr`/unrecovered and it has no public launch API, CMake, or package path.
   Rejected supervisor predecessor `81cfd79` and clipboard predecessor
   `0ba98d5` are historical and were superseded by the inert merged source above;
   neither predecessor nor either merged source confers an executable capability.
 - The inert Win32 journal-storage boundary is source-merged from `d0ed670` by
   `3d46ccb`; the journal container source is source-merged by `16b4b0e`.
-  Even with the inert helper source now merged by `645f348`, the production
-  ActionJournal store/transport remains unavailable because there is no
-  activated trusted supervisor, production import, package wiring, compile,
-  or target evidence.
+  Even with the inert helper source merged by `645f348` and the test-only
+  client merged by `4b8e737`, the production ActionJournal store/transport
+  remains unavailable because there is no activated trusted supervisor,
+  production transport/import, package wiring, compile, or target evidence.
 - The external lifecycle hardening is source-merged at `91de464`. Remote
   execution remains disabled by the source guard (`REMOTE_EXECUTION_ENABLED=False`),
   and no approved/committed cost-ledger genesis or new provider run is claimed.
@@ -64,9 +69,10 @@
 - The plan-only QA runner is source-merged at `d704b816`. It classifies unsafe
   work as `SKIP`/`UNPROVEN` and always reports release `BLOCKED`; it is not a
   substitute for the missing native/model/provider/Windows receipts.
-- The bounded action-journal wire protocol is source-merged at `3746421`, but
-  it is inert: no native helper, durable store, transport, trust anchor,
-  packaging, activation, or production availability was added.
+- The bounded action-journal wire protocol is source-merged at `3746421`.
+  Later inert container, storage, helper, and test-only client slices do not
+  add an activated trust anchor, production transport/import, packaging, or
+  production availability.
 - Browser reconciliation source `fc317fce023f9364e7f19b69a700124d1936f8ca`
   is merged by `976aeff` after independent source/mock review. The rejected
   predecessor `5dc2ad2` remains historical. No live browser, Windows process,
@@ -75,6 +81,13 @@
 - Copilot source hardening `c41b97b` is merged by `a39a09f`, but Copilot is
   globally omitted/unavailable in production and has no live evidence. It
   provides no production or live capability on `main`.
+- The non-accepting hardware diagnostic receipt is source-merged by `a4c5f3b`;
+  it cannot emit target acceptance and its PowerShell collector remains a
+  refusal stub. The default-off Windows compile-check graph was repaired by
+  `9f20fae` and expanded from audited handoff `c9ae88d` by `fa5aa38` to six
+  isolated static targets. Its recorded scoped evidence is 13/13 plus 2/2
+  inventory checks; it was not configured or built, so `SAFE_TO_COMPILE`
+  remains unknown/`NO` and production/target remain `NO`.
 - The strongest recorded general remote tool evaluation is 27/34, below its
   gate. The later production-profile result is 13/32 and failed that profile;
   these are distinct results and neither establishes model/tool readiness.
