@@ -22,6 +22,15 @@ const MAX_SOAK = 1000;
 const MAX_CASES = 1536;
 const TOKEN = 'synthetic-token-never-for-a-real-account';
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/u;
+const FINITE_ERRORS = new Set(['harness_failure', 'provider_failed', 'provider_timeout', 'provider_cancelled', 'provider_invalid_response', 'provider_permission_insufficient', 'provider_destination_rejected', 'provider_response_too_large', 'invalid_tool_arguments', 'schema_mismatch', 'transport_failed']);
+const FIXED_CASE_IDS = Object.freeze([
+  'graph.strict-arguments', 'graph.bounded-hostile-projection', 'graph.malformed-response',
+  'graph.write-replay', 'graph.draft-toctou', 'graph.cancel-and-timeout', 'graph.egress-boundary',
+  'browser.private-and-malformed-destination', 'browser.production-mutation-gate',
+  'browser.hostile-resolver-and-bounds', 'browser.cdp-response-bound',
+  'copilot.legacy-fail-closed', 'copilot.acp-session-binding', 'copilot.acp-oversize',
+  'grants.revoke-generation',
+]);
 
 function boundedInt(value, fallback, min, max) {
   const number = value === undefined ? fallback : Number(value);
@@ -61,7 +70,7 @@ function rng(seed) {
 }
 
 function safeCaseError(error) {
-  const code = typeof error?.code === 'string' && /^[a-z][a-z0-9_]{0,63}$/u.test(error.code) ? error.code : 'harness_failure';
+  const code = typeof error?.code === 'string' && FINITE_ERRORS.has(error.code) ? error.code : 'harness_failure';
   return code;
 }
 
@@ -189,13 +198,23 @@ async function grantCases() {
 
 async function runHeavy(options) {
   const emulator = await new HostileLoopbackEmulator().start();
-  const aggregate = { passed: 0, failed: 0, requests: 0, bytes: 0, fuzz_cases: options.fuzz, soak_iterations: options.soak, seeds: options.seeds };
+  const aggregate = { passed: 0, failed: 0, case_count: 0, requests: 0, assertion_count: 0, fuzz_cases: options.fuzz, soak_iterations: options.soak, seeds: options.seeds };
   try {
     const cases = [...await graphCases(emulator, aggregate), ...await browserCases(), ...await copilotCases(), ...await grantCases()];
-    for (let index = 0; index < options.soak; index++) { const started = Date.now(); emulator.mode = 'normal'; const response = await emulator.transport({ origin: 'https://graph.microsoft.com', method: 'GET', path: '/v1.0/me/chats', query: { '$top': 1 }, headers: { authorization: `Bearer ${TOKEN}` }, signal: undefined }); assert.equal(response.status, 200); cases.push(caseRecord(`soak-${index}`, started, 1)); }
+    for (let index = 0; index < options.soak; index++) { const started = Date.now(); emulator.mode = 'normal'; const response = await emulator.transport({ origin: 'https://graph.microsoft.com', method: 'GET', path: '/v1.0/me/chats', query: { '$top': 1 }, headers: { authorization: `Bearer ${TOKEN}` }, signal: undefined }); assert.equal(response.status, 200); aggregate.requests += 1; cases.push(caseRecord(`soak-${index}`, started, 1)); }
     aggregate.passed = cases.filter(item => item.status === 'PASS').length; aggregate.failed = cases.length - aggregate.passed;
+    aggregate.case_count = cases.length;
+    // These counters deliberately describe bounded synthetic case evidence,
+    // not provider/network traffic.  Binding them to the case records keeps
+    // the remote receipt independently cross-validatable.
+    aggregate.formula = 'case-evidence-v1';
+    aggregate.requests = cases.length;
+    aggregate.assertion_count = cases.reduce((total, item) => total + item.assertions, 0);
+    assert.equal(new Set(FIXED_CASE_IDS).size, FIXED_CASE_IDS.length);
+    assert.equal(FIXED_CASE_IDS.length, 15);
+    for (const id of FIXED_CASE_IDS) assert.equal(cases.filter(item => item.id === id).length, 1);
     assert.ok(cases.length <= MAX_CASES);
-    return { schema_version: 'remote-external-tools-qa.v1', run_id: process.env.LAE_REMOTE_RUN_ID, remote_marker_verified: true, status: aggregate.failed ? 'FAIL' : 'PASS', git_revision: process.env.GIT_COMMIT ?? 'unreported', seeds: options.seeds, bounds: { max_fuzz_cases: MAX_FUZZ, max_soak_iterations: MAX_SOAK, max_cases: MAX_CASES, max_response_bytes: 262144 }, cases, aggregate, secret_free: true, limitations: ['Hostile loopback emulators and injected fake ACP/CDP seams only.', 'No real Microsoft account, credential, browser, Copilot service, provider network, or Windows process evidence.', 'Remote marker proves orchestration intent, not provider authenticity.'] };
+    return { schema_version: 'remote-external-tools-qa.v1', run_id: process.env.LAE_REMOTE_RUN_ID, remote_marker_verified: true, status: aggregate.failed ? 'FAIL' : 'PASS', git_revision: process.env.LAE_REMOTE_GIT_COMMIT ?? 'unreported', seeds: options.seeds, bounds: { max_fuzz_cases: MAX_FUZZ, max_soak_iterations: MAX_SOAK, max_cases: MAX_CASES, max_response_bytes: 262144 }, cases, aggregate, secret_free: true, limitations: ['Hostile loopback emulators and injected fake ACP/CDP seams only.', 'No real Microsoft account, credential, browser, Copilot service, provider network, or Windows process evidence.', 'Remote marker proves orchestration intent, not provider authenticity.'] };
   } finally { await emulator.close(); }
 }
 

@@ -1,10 +1,18 @@
 import importlib.util
+import hashlib
 import json
+import os
 import tempfile
 import types
 import unittest
 from unittest import mock
 from pathlib import Path
+
+from tests.performance.lifecycle_test_isolation import (
+    PATH_METHODS,
+    CheckoutPathGuard,
+    install_lifecycle_execute_isolation,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -177,6 +185,125 @@ class ShadeformPreflightTests(unittest.TestCase):
 
 
 class RemoteExternalToolsGateTests(unittest.TestCase):
+    def setUp(self):
+        from scripts import shadeform_lifecycle
+
+        self.lifecycle = shadeform_lifecycle
+        self.lifecycle_paths = install_lifecycle_execute_isolation(
+            self,
+            shadeform_lifecycle,
+            prefix="remote-gate-runtime-",
+        )
+
+    def test_checkout_guard_denies_every_path_api_without_mutating_evidence(self):
+        isolated_base = self.lifecycle_paths.runtime_root.parent
+        for name, expected in {
+            "RUNTIME_ROOT": self.lifecycle_paths.runtime_root,
+            "MARKDOWN_LEDGER": self.lifecycle_paths.markdown_ledger,
+            "COST_LEDGER": self.lifecycle_paths.cost_ledger,
+            "INCIDENTS": self.lifecycle_paths.incidents,
+        }.items():
+            actual = Path(getattr(self.lifecycle, name))
+            self.assertEqual(actual, expected)
+            self.assertTrue(actual.is_relative_to(isolated_base))
+
+        with tempfile.TemporaryDirectory(prefix="synthetic-operator-evidence-") as directory:
+            checkout = Path(directory) / "checkout"
+            runtime = checkout / "experiments" / "runtime"
+            runtime.mkdir(parents=True)
+            incident = runtime / "incidents.jsonl"
+            incident.write_bytes(b'{"status":"operator-owned"}\n')
+            ledger = checkout / "experiments" / "LEDGER.md"
+            ledger.write_bytes(b"operator ledger\n")
+            before = {
+                path: hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in (incident, ledger)
+            }
+            safe_source = Path(directory) / "safe-source"
+            safe_source.write_bytes(b"safe")
+            guard = CheckoutPathGuard(roots=(runtime,), paths=(ledger,))
+            calls = {
+                "open": lambda: incident.open("rb"),
+                "read_text": lambda: incident.read_text(encoding="utf-8"),
+                "read_bytes": incident.read_bytes,
+                "write_text": lambda: incident.write_text("changed", encoding="utf-8"),
+                "write_bytes": lambda: incident.write_bytes(b"changed"),
+                "lstat": lambda: incident.lstat(),
+                "stat": lambda: incident.stat(),
+                "exists": lambda: incident.exists(),
+                "is_file": lambda: incident.is_file(),
+                "mkdir": lambda: (runtime / "new").mkdir(),
+                "replace": lambda: incident.replace(Path(directory) / "moved"),
+                "rename": lambda: incident.rename(Path(directory) / "renamed"),
+                "unlink": lambda: incident.unlink(),
+                "rmdir": lambda: runtime.rmdir(),
+            }
+            self.assertEqual(set(calls), set(PATH_METHODS))
+            with guard.patches():
+                for name, operation in calls.items():
+                    with self.subTest(api=f"Path.{name}"), self.assertRaises(AssertionError):
+                        operation()
+                with self.assertRaises(AssertionError):
+                    os.open(incident, os.O_RDONLY)
+                with self.assertRaises(AssertionError):
+                    os.replace(safe_source, ledger)
+                with self.assertRaises(AssertionError):
+                    open(ledger, "rb")
+            after = {
+                path: hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in (incident, ledger)
+            }
+            self.assertEqual(after, before)
+
+    def test_shared_legacy_deletion_preflight_is_read_only_and_clean_phase_passes(self):
+        from scripts import shadeform_lifecycle as sf
+        root = self.lifecycle_paths.runtime_root
+        root.mkdir(parents=True, exist_ok=True)
+        sf.preflight_legacy_deletion_evidence("clean-phase")
+        (root / "legacy-phase.deletion-receipt.json").write_bytes(b"phase-only")
+        with self.assertRaisesRegex(sf.ShadeformError, "legacy deletion evidence"):
+            sf.preflight_legacy_deletion_evidence("legacy-phase")
+        with mock.patch.object(Path, "lstat", side_effect=OSError("metadata denied")):
+            with self.assertRaisesRegex(sf.ShadeformError, "legacy deletion evidence"):
+                sf.preflight_legacy_deletion_evidence("error-phase")
+
+    def test_j1m_legacy_evidence_blocks_before_any_provider_mutation(self):
+        module = load_module(ROOT / "scripts/j1m_orchestrator.py", "j1m_legacy_evidence_gate")
+        root = self.lifecycle_paths.runtime_root
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "legacy-phase.deletion-intent.json").write_bytes(b"phase-only")
+        with mock.patch.object(module.j1m_runner, "load_config") as load_config, \
+             mock.patch.object(module.sf, "load_env") as load_env, \
+             mock.patch.object(module.sf, "list_candidates") as list_candidates, \
+             mock.patch.object(module.sf, "create_ephemeral_ssh_key") as create_keypair, \
+             mock.patch.object(module.sf, "reserve_create_attempt") as reserve_attempt, \
+             mock.patch.object(module.sf, "add_ssh_key") as add_key, \
+             mock.patch.object(module.sf, "create_instance") as create_instance, \
+             mock.patch.object(module.sf, "delete_owned_ssh_key_exact") as delete_key, \
+             mock.patch.object(module, "teardown_exact") as teardown_exact:
+            with self.assertRaisesRegex(module.sf.ShadeformError, "legacy deletion evidence"):
+                module.execute(root / "missing.env", config_path=root / "missing.json", phase_id="legacy-phase", run_id="run", artifact_destination=root / "out")
+        load_config.assert_not_called(); load_env.assert_not_called(); list_candidates.assert_not_called(); create_keypair.assert_not_called(); reserve_attempt.assert_not_called(); add_key.assert_not_called(); create_instance.assert_not_called(); delete_key.assert_not_called(); teardown_exact.assert_not_called()
+
+    def test_remote_external_tools_legacy_evidence_blocks_before_any_provider_mutation(self):
+        module = load_module(ROOT / "scripts/shadeform/remote_external_tools.py", "remote_external_tools_legacy_evidence_gate")
+        root = self.lifecycle_paths.runtime_root
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "legacy-phase.deletion-confirmation.json").write_bytes(b"phase-only")
+        args = types.SimpleNamespace(phase_id="legacy-phase", env_file=root / "missing.env")
+        with mock.patch.object(module, "REMOTE_EXECUTION_ENABLED", True), \
+             mock.patch.object(module.shadeform, "load_env") as load_env, \
+             mock.patch.object(module.shadeform, "list_candidates") as list_candidates, \
+             mock.patch.object(module.shadeform, "create_ephemeral_ssh_key") as create_keypair, \
+             mock.patch.object(module.shadeform, "reserve_create_attempt") as reserve_attempt, \
+             mock.patch.object(module.shadeform, "add_ssh_key") as add_key, \
+             mock.patch.object(module.shadeform, "create_instance") as create_instance, \
+             mock.patch.object(module.shadeform, "delete_owned_ssh_key_exact") as delete_key, \
+             mock.patch.object(module, "shadeform_teardown") as teardown:
+            with self.assertRaisesRegex(module.shadeform.ShadeformError, "legacy deletion evidence"):
+                module.execute(args)
+        load_env.assert_not_called(); list_candidates.assert_not_called(); create_keypair.assert_not_called(); reserve_attempt.assert_not_called(); add_key.assert_not_called(); create_instance.assert_not_called(); delete_key.assert_not_called(); teardown.assert_not_called()
+
     def test_inherited_remote_qa_cannot_reach_provider(self):
         module = load_module(ROOT / "scripts/shadeform/remote_external_tools.py", "remote_external_tools_gate")
         args = types.SimpleNamespace()

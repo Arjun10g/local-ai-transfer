@@ -63,3 +63,42 @@ the exact owned key/instance and pinned host key, starts the external watchdog,
 arms a host shutdown backstop, salvages the bounded receipt, and tears down
 only the exact owned resource. No provider mutation is attempted without both
 review markers.
+
+## Explicit cost-ledger genesis
+
+Paid planning remains fail-closed until the authoritative
+`experiments/runtime/cost-ledger.jsonl` starts with one reviewed v2 genesis
+event. Launchers never create this event and never infer prior spend from the
+human-readable Markdown ledger. The offline
+`initialize_cost_ledger.py` command is the only source initializer; it has no
+credential, catalogue, provider, network, or process path.
+
+Before any future use, a reviewer must reconcile all prior settled spend,
+prove that the current pending-owner count is exactly zero, review the fixed
+program `local-bmo-shadeform`, the `USD` cap, and SHA-256 hashes of both the
+existing display ledger and incident evidence. The canonical ledger parent
+must already exist as an owner-private, non-symlink POSIX directory. The
+command requires the exact confirmation phrase exported by
+`COST_LEDGER_GENESIS_CONFIRMATION`; it creates one mode-0600 file with
+no-follow, exclusive, handle-relative operations. An identical crash-retry
+validates the existing sole genesis and reports `recovered_existing` without
+writing it; any changed value is refused without overwriting evidence.
+
+The launch-time candidate balance is advisory. Immediately before a possible
+provider mutation, the pre-create reservation exclusively locks the private
+parent and existing ledger, revalidates the exact genesis/program/currency/cap,
+recomputes every settled and pending owner, and durably appends only if the
+proposal remains within the reviewed cap. Generic cost-event append operations
+cannot create a missing authority.
+
+On POSIX this protects the immediate canonical parent and ledger identity.
+A same-UID adversary able to rename a higher ancestor while the process runs is
+not excluded by these primitives; remote execution remains gated until that
+residual is independently accepted or replaced with a stronger filesystem
+trust anchor.
+
+This repository task deliberately does not execute the initializer against
+operator evidence. A source merge is not permission to initialize the ledger
+or enable remote execution; Sol must separately review the asserted baseline
+values and invocation. `REMOTE_EXECUTION_ENABLED=False` remains independent
+and binding.

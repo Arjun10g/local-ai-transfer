@@ -27,7 +27,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts import j1m_runner, shadeform_lifecycle as sf
-from scripts.shadeform_teardown import teardown_exact
+from scripts.shadeform_teardown import teardown_exact, teardown_recovered_exact
 
 ROOT = Path(__file__).resolve().parents[1]
 _STDERR_TAIL_LIMIT = 1200
@@ -36,7 +36,7 @@ _EVAL_RECEIPT_MAX_BYTES = 64 * 1024
 _EVAL_ARTIFACT_RECEIPT_MAX_BYTES = 8 * 1024
 _PREFLIGHT_RECEIPT_MAX_BYTES = 1024
 _MAX_OUTPUT_RESERVE_TOKENS = 256
-_DELETION_RESERVE_SECONDS = 480.0
+_DELETION_RESERVE_SECONDS = 660.0
 # This is source-controlled acceptance data, not a value supplied by a run
 # configuration.  The config repeats it for operator visibility/parity checks,
 # but a caller cannot turn an arbitrary manifest plus a self-authored lock into
@@ -111,10 +111,10 @@ def _persist_lifecycle(phase_id: str, lifecycle: dict[str, Any]) -> None:
     """Durably retain bounded local failure/progress evidence before teardown."""
 
     path = sf.runtime_ledger_path(phase_id).with_name(f"{phase_id}.lifecycle-receipt.json")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(json.dumps({"schema": "local_bmo.j1m.lifecycle-receipt.v1", **lifecycle}, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    payload = (json.dumps({"schema": "local_bmo.j1m.lifecycle-receipt.v1", **lifecycle}, sort_keys=True) + "\n").encode("utf-8")
+    if len(payload) > MAX_RECEIPT_BYTES:
+        raise ValueError("lifecycle receipt exceeds bound")
+    sf.private_durable_atomic_write(path, payload, label="J1M lifecycle receipt")
 
 
 def _progress(path: Path, event: str, **details: Any) -> None:
@@ -863,6 +863,10 @@ def _salvage(
 
 
 def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, artifact_destination: Path, mode: str = "prove", model_artifact: Path | None = None, model_manifest: Path | None = None) -> dict[str, Any]:
+    # Phase-only deletion artifacts predate nonce/owner-bound evidence and
+    # cannot safely authorize a new paid run. Check them before config/env
+    # loading, candidate access, key generation, reservation, or provider POSTs.
+    sf.preflight_legacy_deletion_evidence(phase_id)
     config = j1m_runner.load_config(config_path)
     if mode == "eval":
         # The evaluation lane is remote-only: the host downloads the pinned
@@ -881,11 +885,12 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
         eval_artifact = None
     env = sf.load_env(env_file)
     api_key = sf.require_env(env, "SHADEFORM_API_KEY")
+    budget_cap_usd = sf.configured_budget_cap_usd(env)
     runtime = float(config["modes"][mode]["runtime_hours"])
     # Validate the effective provider backstop before even reading the live
     # candidate catalogue. A too-short ceiling must not reach key generation,
     # key upload, or instance creation.
-    sf._auto_delete(env, runtime)
+    auto_delete = sf._auto_delete(env, runtime)
     # Candidate selection is policy- and budget-bound; identity is checked
     # again before create so a catalogue reorder cannot change the target.
     candidates = sf.list_candidates(api_key, env, phase_id=phase_id, min_vram_gb=80, max_runtime_hours=runtime)
@@ -905,6 +910,8 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
         key_ambiguity_unresolved = False
         attempt_reserved = False
         settle_attempt_after_cleanup = False
+        attempt_settled_during_cleanup = False
+        attempt_cleanup_receipt_ok = True
         recorded = False
         record: sf.OwnedResource | None = None
         known_hosts = temp_root / "known_hosts"
@@ -962,10 +969,45 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 phase_id, nonce, candidate,
                 backstop_hours=float(config["modes"][mode]["provider_backstop_hours"]),
                 public_key_sha256=hashlib.sha256(public_key.encode("utf-8")).hexdigest(),
+                expected_budget_cap_usd=budget_cap_usd,
                 public_key_fingerprint=key_fingerprint,
             )
             attempt_reserved = True
+            # Prearm exact recovery before the first SSH-key provider POST.
+            # The watcher starts from the durable nonce/name/fingerprint and
+            # can later reconcile a possibly-created instance.
+            launcher_pid = os.getpid()
+            launcher_start_marker = sf.process_start_marker(launcher_pid)
+            deadline_started = time.monotonic()
+            provider_deadline = deadline_started + float(config["modes"][mode]["provider_backstop_hours"]) * 3600
+            run_deadline = deadline_started + runtime * 3600
+            watchdog_deadline = deadline_started + float(config["modes"][mode]["external_watchdog_seconds"])
+            execution_deadline = min(provider_deadline, run_deadline, watchdog_deadline)
+            watchdog_seconds = execution_deadline - time.monotonic() - _DELETION_RESERVE_SECONDS
+            if watchdog_seconds < 1.0:
+                raise TimeoutError("insufficient deadline for pre-create recovery watchdog")
+            expected_instance_name = sf.owned_instance_name(run_id, nonce)
+            watchdog_command = [
+                os.sys.executable, str(ROOT / "scripts" / "shadeform_watchdog.py"),
+                "--phase-id", phase_id, "--launcher-pid", str(launcher_pid),
+                "--max-seconds", str(watchdog_seconds),
+                "--deadline-epoch", str(time.time() + execution_deadline - time.monotonic()),
+                "--provider-delete-deadline-epoch", str(datetime.fromisoformat(str(auto_delete["date_threshold"])).timestamp()),
+                "--env-file", str(env_file), "--ownership-nonce", nonce,
+                "--ssh-key-name", f"j1m-{nonce}", "--ssh-key-fingerprint", key_fingerprint,
+                "--allow-unrecorded-exact", "--key-only-recovery",
+                "--instance-name", expected_instance_name, "--precreate-recovery",
+                "--cloud", candidate.cloud, "--region", candidate.region,
+                "--instance-type", candidate.instance_type, "--hourly-usd", str(candidate.hourly_usd),
+                "--gpu", candidate.gpu, "--gpu-count", "1", "--vram-gb", str(candidate.vram_gb),
+                "--os-image", candidate.os_image,
+            ]
+            if launcher_start_marker is not None:
+                watchdog_command.extend(["--launcher-start-marker", launcher_start_marker])
+            watchdog = subprocess.Popen(watchdog_command)
+            lifecycle["watchdog_pid"] = watchdog.pid
             try:
+                sf.preflight_legacy_deletion_evidence(phase_id)
                 key_id = sf.add_ssh_key(api_key, phase_id, f"j1m-{nonce}", public_key)
             except sf.AmbiguousProviderOutcome as exc:
                 # A timed-out or malformed key-create response may have
@@ -1009,16 +1051,21 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 phase_id, nonce, candidate,
                 backstop_hours=float(config["modes"][mode]["provider_backstop_hours"]),
                 public_key_sha256=hashlib.sha256(public_key.encode("utf-8")).hexdigest(),
+                expected_budget_cap_usd=budget_cap_usd,
                 public_key_fingerprint=key_fingerprint,
                 ssh_key_id=key_id,
             )
+            create_intent_started = sf.utc_now().isoformat()
+            sf.append_instance_create_intent(
+                phase_id, nonce, instance_name=expected_instance_name, ssh_key_id=key_id,
+                hourly_usd=candidate.hourly_usd,
+                backstop_hours=float(config["modes"][mode]["provider_backstop_hours"]),
+                provider_delete_deadline_utc=str(auto_delete["date_threshold"]),
+                started_at_utc=create_intent_started,
+            )
             try:
-                instance_id = sf.create_instance(api_key, env, phase_id=phase_id, run_id=run_id, candidate=candidate, ssh_key_id=key_id, nonce=nonce, max_runtime_hours=runtime)
-                created_monotonic = time.monotonic()
-                provider_deadline = created_monotonic + float(config["modes"][mode]["provider_backstop_hours"]) * 3600
-                run_deadline = created_monotonic + runtime * 3600
-                watchdog_deadline = created_monotonic + float(config["modes"][mode]["external_watchdog_seconds"])
-                execution_deadline = min(provider_deadline, run_deadline, watchdog_deadline)
+                sf.preflight_legacy_deletion_evidence(phase_id)
+                instance_id = sf.create_instance(api_key, env, phase_id=phase_id, run_id=run_id, candidate=candidate, ssh_key_id=key_id, nonce=nonce, max_runtime_hours=runtime, auto_delete_contract=auto_delete)
             except Exception as exc:
                 incident = {
                     "phase_id": phase_id,
@@ -1043,36 +1090,22 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     pass
                 raise
             lifecycle["instance_id"] = instance_id
-            launcher_pid = os.getpid()
-            launcher_start_marker = sf.process_start_marker(launcher_pid)
             activation_seconds = int(config["modes"][mode].get("activation_timeout_seconds", 1800))
-            record = sf.OwnedResource(phase_id=phase_id, run_id=run_id, instance_id=instance_id, ownership_nonce=nonce, ssh_key_id=key_id, ssh_key_name=f"j1m-{nonce}", gpu=candidate.gpu, cloud=candidate.cloud, region=candidate.region, hourly_usd=candidate.hourly_usd, created_at_utc=sf.utc_now().isoformat(), active_deadline_utc=(sf.utc_now() + sf.timedelta(seconds=activation_seconds)).isoformat(), run_deadline_utc=(sf.utc_now() + sf.timedelta(hours=runtime)).isoformat(), instance_type=candidate.instance_type, launcher_pid=launcher_pid, launcher_start_marker=launcher_start_marker, ssh_public_key_fingerprint=key_fingerprint)
+            record = sf.OwnedResource(phase_id=phase_id, run_id=run_id, instance_id=instance_id, instance_name=expected_instance_name, ownership_nonce=nonce, ssh_key_id=key_id, ssh_key_name=f"j1m-{nonce}", gpu=candidate.gpu, cloud=candidate.cloud, region=candidate.region, hourly_usd=candidate.hourly_usd, created_at_utc=create_intent_started, provider_delete_deadline_utc=str(auto_delete["date_threshold"]), active_deadline_utc=(sf.utc_now() + sf.timedelta(seconds=activation_seconds)).isoformat(), run_deadline_utc=(sf.utc_now() + sf.timedelta(hours=runtime)).isoformat(), instance_type=candidate.instance_type, gpu_count=1, vram_gb=candidate.vram_gb, os_image=candidate.os_image, ssh_public_key=public_key, launcher_pid=launcher_pid, launcher_start_marker=launcher_start_marker, ssh_public_key_fingerprint=key_fingerprint)
+            # Bind the exact instance cost before the owned record. The
+            # pre-armed watchdog plus durable create intent covers a crash in
+            # either write, while exact-owner recovery reuses this immutable
+            # reservation and settles it before key cleanup.
+            sf.append_cost_event({"instance_id": instance_id, "phase_id": phase_id, "ownership_nonce": nonce, "create_started_at_utc": create_intent_started, "status": "pending", "estimated_cost_usd": round(candidate.hourly_usd * float(config["modes"][mode]["provider_backstop_hours"]), 6)})
             # Ownership record is written before any poll/upload. If this
             # fails, the fallback below still deletes the exact returned ID.
             sf.write_owned_resource(record)
             recorded = True
-            # Start the external watchdog immediately after ownership and
-            # before any fallible cost-ledger append. It protects the long
-            # pending_provider interval as well as later SSH/build stages.
-            watchdog_command = [
-                os.sys.executable, str(ROOT / "scripts" / "shadeform_watchdog.py"),
-                "--phase-id", phase_id, "--instance-id", instance_id,
-                "--launcher-pid", str(launcher_pid), "--max-seconds", str(config["modes"][mode]["external_watchdog_seconds"]),
-                "--env-file", str(env_file),
-            ]
-            if launcher_start_marker is not None:
-                watchdog_command.extend(["--launcher-start-marker", launcher_start_marker])
-            watchdog_started = time.monotonic()
-            watchdog = subprocess.Popen(watchdog_command)
-            watchdog_deadline = watchdog_started + float(config["modes"][mode]["external_watchdog_seconds"])
-            execution_deadline = min(provider_deadline, run_deadline, watchdog_deadline)
-            lifecycle["watchdog_pid"] = watchdog.pid
-            sf.append_cost_event({"instance_id": instance_id, "phase_id": phase_id, "status": "pending", "estimated_cost_usd": round(candidate.hourly_usd * float(config["modes"][mode]["provider_backstop_hours"]), 6)})
             # The instance reservation is now superseded by its exact
             # ownership/billing row. Keep the pre-create reservation history
             # but settle it to zero only after both durable writes and the
             # watchdog are in place.
-            sf.append_cost_event({"instance_id": attempt_id, "phase_id": phase_id, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
+            sf.append_cost_event({"instance_id": attempt_id, "phase_id": phase_id, "ownership_nonce": nonce, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
             j1m_runner.write_progress(progress_path, "wait-active-starting", phase_id=phase_id)
             wait_budget = int(_eval_timeout(execution_deadline, float(config["modes"][mode].get("activation_timeout_seconds", 1800))))
             info = sf.wait_active(api_key, phase_id, instance_id, timeout_seconds=wait_budget)
@@ -1282,52 +1315,75 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                         except Exception:
                             pass
                 else:
-                    # Ledger write failed: exact ID is still known, so delete
-                    # it before attempting any key/bookkeeping cleanup.
+                    fallback_deadline = execution_deadline if "execution_deadline" in locals() else None
                     try:
-                        lifecycle["deletion"] = sf._delete_instance(
-                            api_key, phase_id, instance_id,
-                            deadline=execution_deadline
-                            if "execution_deadline" in locals() else None,
+                        if record is None:
+                            raise RuntimeError("unrecorded instance lacks its full owner record")
+                        lifecycle["deletion"] = teardown_recovered_exact(
+                            record, env_file=env_file, deadline=fallback_deadline,
                         )
+                        if not deletion_confirmed():
+                            raise RuntimeError("recovered teardown did not confirm exact deletion")
                     except Exception as exc:
-                        lifecycle["deletion"] = {"success": False, "error_type": type(exc).__name__}
-                        try:
-                            sf.append_incident({"phase_id": phase_id, "incident": "post-instance-delete-failed", "instance_id": instance_id, "ssh_key_id": key_id, "nonce": nonce, "error_type": type(exc).__name__})
-                        except Exception:
-                            pass
-                    finally:
-                        if key_id is not None:
-                            try:
-                                lifecycle["key_cleanup"] = sf.delete_ssh_key(api_key, phase_id, key_id)
-                            except Exception as exc:
-                                lifecycle["key_cleanup"] = {"status": "failed", "error_type": type(exc).__name__}
-                                try:
-                                    sf.append_incident({"phase_id": phase_id, "incident": "post-instance-key-delete-failed", "instance_id": instance_id, "ssh_key_id": key_id, "nonce": nonce, "error_type": type(exc).__name__})
-                                except Exception:
-                                    pass
-                    if not deletion_confirmed():
-                        cleanup_failure = RuntimeError("exact instance deletion was not confirmed")
+                        lifecycle["deletion"] = {
+                            "status": "delete-failed", "retry_required": True,
+                            "error_type": type(exc).__name__,
+                        }
+                        cleanup_failure = RuntimeError("exact recovered teardown was not confirmed")
                         lifecycle["status"] = "failed"
             elif key_id is not None and not ambiguous_create:
                 # Key creation succeeded but instance creation did not.
-                try:
-                    lifecycle["key_cleanup"] = sf.delete_ssh_key(api_key, phase_id, key_id)
-                except Exception as exc:
-                    lifecycle["key_cleanup"] = {"status": "failed", "error_type": type(exc).__name__}
+                if attempt_reserved and settle_attempt_after_cleanup:
                     try:
-                        sf.append_incident({"phase_id": phase_id, "incident": "create-key-delete-failed", "ssh_key_id": key_id, "nonce": nonce, "error_type": type(exc).__name__})
-                    except Exception:
-                        pass
+                        sf.append_cost_event({"instance_id": attempt_id, "phase_id": phase_id, "ownership_nonce": nonce, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
+                        attempt_settled_during_cleanup = True
+                        try:
+                            sf.append_incident({
+                                "phase_id": phase_id,
+                                "incident": "attempt-reservation-reconciled",
+                                "nonce": nonce,
+                                "retry_required": False,
+                            })
+                        except Exception as receipt_exc:
+                            attempt_cleanup_receipt_ok = False
+                            cleanup_failure = RuntimeError("attempt settlement receipt was not confirmed")
+                            lifecycle["attempt_reservation_receipt_error_type"] = type(receipt_exc).__name__
+                    except Exception as exc:
+                        lifecycle["attempt_reservation_error_type"] = type(exc).__name__
+                        lifecycle["attempt_reservation_retry_required"] = True
+                        cleanup_failure = RuntimeError("attempt reservation settlement was not confirmed")
+                        try:
+                            sf.append_incident({"phase_id": phase_id, "incident": "attempt-reservation-settlement-failed", "nonce": nonce, "error_type": type(exc).__name__})
+                        except Exception:
+                            pass
+                if not settle_attempt_after_cleanup or (attempt_settled_during_cleanup and attempt_cleanup_receipt_ok):
+                    try:
+                        lifecycle["key_cleanup"] = sf.delete_owned_ssh_key_exact(
+                            api_key,
+                            phase_id,
+                            key_id,
+                            ownership_nonce=nonce,
+                            expected_name=f"j1m-{nonce}",
+                            expected_public_key=public_key,
+                            expected_fingerprint=key_fingerprint,
+                        )
+                        if lifecycle["key_cleanup"].get("status") != "confirmed":
+                            raise RuntimeError("exact SSH key deletion lacks durable confirmation")
+                    except Exception as exc:
+                        lifecycle["key_cleanup"] = {"status": "failed", "error_type": type(exc).__name__}
+                        try:
+                            sf.append_incident({"phase_id": phase_id, "incident": "create-key-delete-failed", "ssh_key_id": key_id, "nonce": nonce, "error_type": type(exc).__name__})
+                        except Exception:
+                            pass
             # Keep the watchdog alive through salvage and exact instance
             # deletion. It is stopped only after the provider explicitly
             # confirms deletion; an unconfirmed/raised cleanup leaves it
             # running for its own exact retry path.
             if deletion_confirmed():
                 stop_watchdog()
-            if attempt_reserved and settle_attempt_after_cleanup:
+            if attempt_reserved and settle_attempt_after_cleanup and not attempt_settled_during_cleanup:
                 try:
-                    sf.append_cost_event({"instance_id": attempt_id, "phase_id": phase_id, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
+                    sf.append_cost_event({"instance_id": attempt_id, "phase_id": phase_id, "ownership_nonce": nonce, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
                 except Exception as exc:
                     try:
                         sf.append_incident({"phase_id": phase_id, "incident": "attempt-reservation-settlement-failed", "nonce": nonce, "error_type": type(exc).__name__})
