@@ -46,6 +46,7 @@ TEST_INVENTORY = {
     "tests/host/action-journal-protocol.test.mjs": "host_fixture",
     "tests/host/action-journal.test.mjs": "host_fixture",
     "tests/host/external-tools.test.mjs": "provider_fixture",
+    "tests/host/graph-read-tools.test.mjs": "provider_fixture",
     "tests/host/fixture-host.test.mjs": "loopback_fixture",
     "tests/host/local-tools.test.mjs": "process_fixture",
     "tests/host/native-engine.test.mjs": "native_build",
