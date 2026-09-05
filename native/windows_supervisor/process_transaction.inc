@@ -27,6 +27,7 @@ enum class LaunchResultCode : std::uint8_t {
   kDeadline,
   kOutputLimit,
   kExitFailure,
+  kTerminalFailure,
   kOk,
 };
 
@@ -71,6 +72,26 @@ struct LaunchReceipt final {
   bool job_reaped = false;
   bool mutation_attempted = false;
 };
+
+bool concrete_terminal_failure(LaunchResultCode status) noexcept {
+  switch (status) {
+    case LaunchResultCode::kPreDispatchFailure:
+    case LaunchResultCode::kCancelled:
+    case LaunchResultCode::kDeadline:
+    case LaunchResultCode::kOutputLimit:
+    case LaunchResultCode::kExitFailure:
+    case LaunchResultCode::kTerminalFailure:
+      return true;
+    case LaunchResultCode::kUnavailable:
+    case LaunchResultCode::kInvalidRequest:
+    case LaunchResultCode::kCapabilityRefused:
+    case LaunchResultCode::kJournalUnavailable:
+    case LaunchResultCode::kDispatchedUnknown:
+    case LaunchResultCode::kOk:
+      return false;
+  }
+  return false;
+}
 
 struct ProcessLaunchAuthority final {
   std::mutex mutex;
@@ -185,6 +206,7 @@ bool checkpoint(const SupervisorState& supervisor,
                 const LaunchPlan& plan, HANDLE cancellation) noexcept {
   const std::uint64_t now = GetTickCount64();
   return process_launch_gates_open() && !authority.poisoned &&
+      !authority.shutting_down.load(std::memory_order_acquire) &&
       authority.root_generation != 0 && supervisor.root_job &&
       plan.limits.deadline_at_ms > now &&
       plan.limits.deadline_at_ms <= now + kLaunchMaxRuntimeMs &&
@@ -384,6 +406,7 @@ bool settle_started_overlapped_read(HANDLE file, OVERLAPPED& operation,
 
 bool overlapped_read(HANDLE file, OVERLAPPED& operation, void* buffer,
                      DWORD requested, DWORD& transferred, HANDLE cancellation,
+                     const std::atomic<bool>& shutting_down,
                      std::uint64_t deadline_at_ms,
                      std::uint64_t cleanup_deadline_at_ms) noexcept {
   transferred = 0;
@@ -399,6 +422,7 @@ bool overlapped_read(HANDLE file, OVERLAPPED& operation, void* buffer,
   for (;;) {
     const std::uint64_t now = GetTickCount64();
     if (now >= deadline_at_ms ||
+        shutting_down.load(std::memory_order_acquire) ||
         (cancellation && WaitForSingleObject(cancellation, 0) == WAIT_OBJECT_0)) {
       (void)settle_started_overlapped_read(
           file, operation, transferred, cleanup_deadline_at_ms, true);
@@ -426,7 +450,9 @@ bool overlapped_read(HANDLE file, OVERLAPPED& operation, void* buffer,
 }
 
 bool hash_retained_executable(HANDLE file, std::uint32_t exact_size,
-                              HANDLE cancellation, std::uint64_t deadline_at_ms,
+                              HANDLE cancellation,
+                              const std::atomic<bool>& shutting_down,
+                              std::uint64_t deadline_at_ms,
                               std::uint64_t cleanup_deadline_at_ms,
                               std::array<std::byte, 32>& output) noexcept {
   if (!file || exact_size == 0 || exact_size > kMaxIdentityFileBytes) return false;
@@ -459,7 +485,7 @@ bool hash_retained_executable(HANDLE file, std::uint32_t exact_size,
         chunk.size(), exact_size - offset));
     DWORD read = 0;
     if (!overlapped_read(file, operation, chunk.data(), request, read,
-                         cancellation, deadline_at_ms,
+                         cancellation, shutting_down, deadline_at_ms,
                          cleanup_deadline_at_ms) || read != request ||
         BCryptHashData(hash, reinterpret_cast<PUCHAR>(chunk.data()), read, 0) != 0) {
       ok = false;
@@ -675,10 +701,9 @@ bool prepare_startup_attributes(PreparedLaunch& context) noexcept {
 }
 
 bool start_drain_workers(Child& child, const LaunchLimits& limits) noexcept {
-  try {
-    child.stdout_context = std::make_unique<DrainContext>();
-    child.stderr_context = std::make_unique<DrainContext>();
-  } catch (...) {
+  if (!child.stdout_context.allocate() || !child.stderr_context.allocate()) {
+    child.stdout_context.discard_before_worker_start();
+    child.stderr_context.discard_before_worker_start();
     return false;
   }
   child.stdout_context->source = child.stdout_read.get();
@@ -687,13 +712,20 @@ bool start_drain_workers(Child& child, const LaunchLimits& limits) noexcept {
   child.stderr_context->limit = limits.stderr_limit;
   child.stdout_worker.reset(CreateThread(nullptr, 0, drain_child_pipe,
                                          child.stdout_context.get(), 0, nullptr));
-  if (!child.stdout_worker) return false;
+  if (!child.stdout_worker) {
+    child.stdout_context.discard_before_worker_start();
+    child.stderr_context.discard_before_worker_start();
+    return false;
+  }
   child.stderr_worker.reset(CreateThread(nullptr, 0, drain_child_pipe,
                                          child.stderr_context.get(), 0, nullptr));
   if (!child.stderr_worker) {
     CancelSynchronousIo(child.stdout_worker.get());
     if (!settle_drain_worker(child.stdout_worker, child.stdout_context.get(),
                              limits.cleanup_deadline_at_ms)) std::terminate();
+    child.stdout_worker.reset();
+    child.stdout_context.release_after_join();
+    child.stderr_context.discard_before_worker_start();
     return false;
   }
   return true;
@@ -717,6 +749,7 @@ bool monitor_registered_child(Child& child, HANDLE root_job,
   const std::uint64_t before_resume = GetTickCount64();
   if (before_resume >= plan.limits.deadline_at_ms ||
       before_resume >= context->capability->expires_at_ms ||
+      context->authority->shutting_down.load(std::memory_order_acquire) ||
       (context->cancellation &&
        WaitForSingleObject(context->cancellation, 0) == WAIT_OBJECT_0) ||
       ResumeThread(child.primary_thread.get()) != 1) return false;
@@ -724,6 +757,10 @@ bool monitor_registered_child(Child& child, HANDLE root_job,
 
   bool saw_exit = false;
   while (GetTickCount64() < plan.limits.deadline_at_ms) {
+    if (context->authority->shutting_down.load(std::memory_order_acquire)) {
+      context->receipt->status = LaunchResultCode::kCancelled;
+      return false;
+    }
     if (child.stdout_context->overflow.load(std::memory_order_acquire) ||
         child.stderr_context->overflow.load(std::memory_order_acquire)) {
       context->receipt->status = LaunchResultCode::kOutputLimit;
@@ -752,16 +789,35 @@ bool monitor_registered_child(Child& child, HANDLE root_job,
   }
   while (!job_empty(root_job)) {
     const std::uint64_t now = GetTickCount64();
-    if (now >= plan.limits.deadline_at_ms) break;
+    if (now >= plan.limits.deadline_at_ms ||
+        context->authority->shutting_down.load(std::memory_order_acquire))
+      break;
     Sleep(static_cast<DWORD>(std::min<std::uint64_t>(
         kWaitSliceMs, plan.limits.deadline_at_ms - now)));
   }
-  if (!job_empty(root_job)) return false;
-  if (GetTickCount64() >= plan.limits.deadline_at_ms) return false;
+  if (!job_empty(root_job)) {
+    context->receipt->status = LaunchResultCode::kDeadline;
+    return false;
+  }
+  if (context->authority->shutting_down.load(std::memory_order_acquire)) {
+    context->receipt->status = LaunchResultCode::kCancelled;
+    return false;
+  }
+  if (GetTickCount64() >= plan.limits.deadline_at_ms) {
+    context->receipt->status = LaunchResultCode::kDeadline;
+    return false;
+  }
   DWORD exit_code = 0;
   if (!GetExitCodeProcess(child.process.get(), &exit_code) ||
       exit_code == STILL_ACTIVE) return false;
-  if (GetTickCount64() >= plan.limits.deadline_at_ms) return false;
+  if (GetTickCount64() >= plan.limits.deadline_at_ms) {
+    context->receipt->status = LaunchResultCode::kDeadline;
+    return false;
+  }
+  if (context->authority->shutting_down.load(std::memory_order_acquire)) {
+    context->receipt->status = LaunchResultCode::kCancelled;
+    return false;
+  }
   context->receipt->exit_code = exit_code;
   context->receipt->status = exit_code == 0
       ? LaunchResultCode::kOk : LaunchResultCode::kExitFailure;
@@ -972,6 +1028,7 @@ DispatchStatus create_monitor_reap_after_durable_start(
       !executable_identity_bound(plan.expected_executable, observed) ||
       !hash_retained_executable(prepared.executable.get(), observed.size,
                                 supervisor.cancellation.get(),
+                                authority.shutting_down,
                                 plan.limits.deadline_at_ms,
                                 plan.limits.cleanup_deadline_at_ms,
                                 content_sha) ||
@@ -1010,19 +1067,41 @@ DispatchStatus create_monitor_reap_after_durable_start(
       create_monitor_reap_after_durable_start, &prepared);
   output = prepared.receipt;
   output.journal_bound = journal.durable_state == JournalState::kTerminalDurable;
-  if (journal.status == DispatchStatus::kTerminalSuccess && output.journal_bound &&
-      output.job_reaped) {
-    if (!authority.journal.begin_next_operation()) authority.poisoned = true;
-    return output;
+  switch (journal.status) {
+    case DispatchStatus::kTerminalSuccess:
+      if (!output.journal_bound || !output.job_reaped ||
+          output.status != LaunchResultCode::kOk) {
+        authority.poisoned = true;
+        output.status = LaunchResultCode::kDispatchedUnknown;
+        return output;
+      }
+      if (!authority.journal.begin_next_operation()) authority.poisoned = true;
+      return output;
+    case DispatchStatus::kTerminalFailure:
+      if (!output.journal_bound || !output.job_reaped) {
+        authority.poisoned = true;
+        output.status = LaunchResultCode::kDispatchedUnknown;
+        return output;
+      }
+      // The callback can discover failure after it had observed exit code 0
+      // (for example, drain settlement misses the operation deadline). Never
+      // leak that stale kOk, nor an untouched default, across a durable failure.
+      if (!concrete_terminal_failure(output.status))
+        output.status = LaunchResultCode::kTerminalFailure;
+      if (!authority.journal.begin_next_operation()) authority.poisoned = true;
+      return output;
+    case DispatchStatus::kPreDispatchFailure:
+      output.status = LaunchResultCode::kPreDispatchFailure;
+      return output;
+    case DispatchStatus::kDispatchedUnknown:
+    case DispatchStatus::kPersistenceFailure:
+      // Start/terminal append acknowledgement loss cannot prove whether a
+      // durable start or effect exists. Keep actual reap evidence, but require
+      // manual reconciliation and never replay.
+      output.status = LaunchResultCode::kDispatchedUnknown;
+      return output;
   }
-  if (journal.status == DispatchStatus::kTerminalFailure && output.journal_bound &&
-      output.job_reaped) {
-    if (!authority.journal.begin_next_operation()) authority.poisoned = true;
-    return output;
-  }
-  // Once a durable start may exist, any append/readback ambiguity is manual.
-  output.status = journal.status == DispatchStatus::kPreDispatchFailure
-      ? LaunchResultCode::kPreDispatchFailure
-      : LaunchResultCode::kDispatchedUnknown;
+  authority.poisoned = true;
+  output.status = LaunchResultCode::kDispatchedUnknown;
   return output;
 }

@@ -34,7 +34,9 @@ durable before dispatch and its terminal record durable before acknowledgement.
 The source-only process-transaction include models supervisor-owned ordering
 using creation-time `PROC_THREAD_ATTRIBUTE_JOB_LIST`, a suspended child, one
 serialized active launch, retained startup-attribute payloads, one owned
-cancellation event/absolute cleanup deadline, and a private durable-adapter interface. No adapter
+cancellation event/absolute cleanup deadline, guarded join-before-free drain
+contexts, journal-outcome-derived terminal receipts, and a private
+durable-adapter interface. No adapter
 implementation or startup-recovery installation is present, and the public
 header exposes no process API. See
 `contracts/windows-process-transaction/v0.1.0.md`.

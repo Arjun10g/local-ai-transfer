@@ -107,6 +107,20 @@
     "worker_settlement_ms": 2000
   },
   "receipt": {
+    "statuses": [
+      "unavailable",
+      "invalid_request",
+      "capability_refused",
+      "journal_unavailable",
+      "pre_dispatch_failure",
+      "dispatched_unknown",
+      "cancelled",
+      "deadline",
+      "output_limit",
+      "exit_failure",
+      "terminal_failure",
+      "ok"
+    ],
     "fields": [
       "status",
       "stdout_bytes",

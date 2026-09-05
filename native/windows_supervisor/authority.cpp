@@ -21,6 +21,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 // This translation unit is intentionally absent from native/CMakeLists.txt.
@@ -230,6 +231,48 @@ struct DrainContext final {
   ~DrainContext() { SecureZeroMemory(bytes.data(), bytes.size()); }
 };
 
+// CreateThread receives a raw context pointer. This owner therefore refuses
+// normal destruction while that pointer could still be in use. The context is
+// freed only before a worker starts or after its thread was joined and proven
+// stopped.
+class DrainContextOwner final {
+ public:
+  DrainContextOwner() = default;
+  ~DrainContextOwner() {
+    if (context_) std::terminate();
+  }
+  DrainContextOwner(const DrainContextOwner&) = delete;
+  DrainContextOwner& operator=(const DrainContextOwner&) = delete;
+  DrainContextOwner(DrainContextOwner&& other) noexcept
+      : context_(std::exchange(other.context_, nullptr)) {}
+  DrainContextOwner& operator=(DrainContextOwner&& other) noexcept {
+    if (context_) std::terminate();
+    context_ = std::exchange(other.context_, nullptr);
+    return *this;
+  }
+
+  bool allocate() noexcept {
+    if (context_) return false;
+    context_ = new (std::nothrow) DrainContext();
+    return context_ != nullptr;
+  }
+  explicit operator bool() const noexcept { return context_ != nullptr; }
+  DrainContext* get() const noexcept { return context_; }
+  DrainContext* operator->() const noexcept { return context_; }
+
+  void discard_before_worker_start() noexcept {
+    DrainContext* context = std::exchange(context_, nullptr);
+    delete context;
+  }
+  void release_after_join() noexcept {
+    DrainContext* context = std::exchange(context_, nullptr);
+    delete context;
+  }
+
+ private:
+  DrainContext* context_ = nullptr;
+};
+
 struct Child final {
   UniqueHandle process;
   UniqueHandle primary_thread;
@@ -237,8 +280,8 @@ struct Child final {
   UniqueHandle stderr_read;
   UniqueHandle stdout_worker;
   UniqueHandle stderr_worker;
-  std::unique_ptr<DrainContext> stdout_context;
-  std::unique_ptr<DrainContext> stderr_context;
+  DrainContextOwner stdout_context;
+  DrainContextOwner stderr_context;
   FixedIdentity executable{};
   std::uint64_t stable_id = 0;
   bool membership_verified = false;
@@ -1015,8 +1058,8 @@ bool settle_child_drains(Child& child,
   child.stderr_worker.reset();
   child.stdout_read.reset();
   child.stderr_read.reset();
-  child.stdout_context.reset();
-  child.stderr_context.reset();
+  child.stdout_context.release_after_join();
+  child.stderr_context.release_after_join();
   return true;
 }
 

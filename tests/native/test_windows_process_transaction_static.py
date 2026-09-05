@@ -133,6 +133,54 @@ def model_shutdown(lock_acquired: bool, reap_proved: bool) -> ShutdownSettlement
     return ShutdownSettlement(True, False, True)
 
 
+@dataclass
+class ReceiptProjection:
+    status: str
+    journal_bound: bool
+    job_reaped: bool
+
+
+def project_receipt(journal_status: str, callback_status: str,
+                    journal_bound: bool, job_reaped: bool) -> ReceiptProjection:
+    concrete_failures = {
+        "pre_dispatch_failure", "cancelled", "deadline", "output_limit",
+        "exit_failure", "terminal_failure",
+    }
+    if journal_status == "terminal_success":
+        status = "ok" if journal_bound and job_reaped and callback_status == "ok" \
+            else "dispatched_unknown"
+    elif journal_status == "terminal_failure":
+        if not journal_bound or not job_reaped:
+            status = "dispatched_unknown"
+        else:
+            status = callback_status if callback_status in concrete_failures \
+                else "terminal_failure"
+    elif journal_status == "pre_dispatch_failure":
+        status = "pre_dispatch_failure"
+    else:
+        status = "dispatched_unknown"
+    return ReceiptProjection(status, journal_bound, job_reaped)
+
+
+@dataclass
+class ContextDestruction:
+    freed: bool
+    retained: bool
+    fail_stop: bool
+
+
+def model_context_destruction(worker_started: bool,
+                              join_proved: bool) -> ContextDestruction:
+    if not worker_started or join_proved:
+        return ContextDestruction(True, False, False)
+    return ContextDestruction(False, True, True)
+
+
+def model_active_checkpoint(shutting_down: bool,
+                            cancellation_signalled: bool) -> bool:
+    return not shutting_down and not cancellation_signalled
+
+
 class WindowsProcessTransactionStaticTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -164,6 +212,7 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
         self.assertEqual(self.contract["limits"]["max_transaction_horizon_ms"], 240000)
         self.assertTrue(any("cooperative cancellation" in item
                             for item in self.contract["unresolved_activation_blockers"]))
+        self.assertIn("terminal_failure", self.contract["receipt"]["statuses"])
 
     def test_no_public_or_product_integration_surface(self):
         for token in (
@@ -380,6 +429,74 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
         self.assertTrue(complete.cancellation_signalled)
         self.assertFalse(complete.authority_retained)
         self.assertTrue(complete.job_closed)
+
+    def test_failed_set_event_still_stops_every_later_checkpoint(self):
+        checkpoint = self.tx[self.tx.index("bool checkpoint"):
+                             self.tx.index("bool append_bytes")]
+        shutdown = self.cpp[self.cpp.index("bool stop_supervisor"):
+                            self.cpp.index("JournalOutcome durable_journal_authorize")]
+        self.assertLess(shutdown.index("shutting_down.store(true"),
+                        shutdown.index("SetEvent(state.cancellation.get())"))
+        self.assertIn("authority.shutting_down.load(std::memory_order_acquire)",
+                      checkpoint)
+        self.assertGreaterEqual(
+            self.tx.count("shutting_down.load(std::memory_order_acquire)"), 4)
+        # A failed event signal cannot erase the already-published atomic stop.
+        self.assertFalse(model_active_checkpoint(
+            shutting_down=True, cancellation_signalled=False))
+
+    def test_worker_context_requires_join_before_release_or_fail_stops(self):
+        owner = self.cpp[self.cpp.index("class DrainContextOwner"):
+                         self.cpp.index("struct Child final")]
+        settle = self.cpp[self.cpp.index("bool settle_child_drains"):
+                          self.cpp.index("class ChildRegistry")]
+        self.assertIn("if (context_) std::terminate()", owner)
+        self.assertIn("release_after_join", owner)
+        self.assertNotIn("std::unique_ptr<DrainContext>", self.cpp)
+        self.assertLess(settle.index("stdout_worker.reset()"),
+                        settle.index("stdout_context.release_after_join()"))
+        self.assertLess(settle.index("stderr_worker.reset()"),
+                        settle.index("stderr_context.release_after_join()"))
+        unresolved = model_context_destruction(True, False)
+        self.assertEqual(unresolved, ContextDestruction(False, True, True))
+        self.assertEqual(model_context_destruction(True, True),
+                         ContextDestruction(True, False, False))
+        self.assertEqual(model_context_destruction(False, False),
+                         ContextDestruction(True, False, False))
+
+    def test_receipt_projection_uses_actual_journal_and_callback_outcome(self):
+        wrapper = self.tx[self.tx.index("const JournalOutcome journal"):]
+        self.assertIn("switch (journal.status)", wrapper)
+        self.assertIn("concrete_terminal_failure(output.status)", wrapper)
+        self.assertIn("output.status = LaunchResultCode::kTerminalFailure", wrapper)
+        for callback in ("ok", "unavailable", "invalid_request"):
+            with self.subTest(callback=callback):
+                result = project_receipt(
+                    "terminal_failure", callback, True, True)
+                self.assertEqual(result.status, "terminal_failure")
+                self.assertTrue(result.journal_bound)
+                self.assertTrue(result.job_reaped)
+        for callback in (
+            "pre_dispatch_failure", "cancelled", "deadline", "output_limit",
+            "exit_failure", "terminal_failure",
+        ):
+            with self.subTest(callback=callback):
+                self.assertEqual(
+                    project_receipt("terminal_failure", callback, True, True).status,
+                    callback,
+                )
+        self.assertEqual(
+            project_receipt("terminal_success", "ok", True, True).status, "ok")
+        self.assertEqual(
+            project_receipt("terminal_success", "unavailable", True, True).status,
+            "dispatched_unknown",
+        )
+        for journal in ("dispatched_unknown", "persistence_failure"):
+            with self.subTest(journal=journal):
+                result = project_receipt(journal, "ok", False, True)
+                self.assertEqual(result.status, "dispatched_unknown")
+                self.assertFalse(result.journal_bound)
+                self.assertTrue(result.job_reaped)
 
     def test_cleanup_uses_bound_absolute_deadlines(self):
         for token in (
