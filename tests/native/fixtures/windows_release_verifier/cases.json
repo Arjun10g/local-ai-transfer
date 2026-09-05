@@ -1,0 +1,19 @@
+{
+  "schema": "local_bmo.windows-release-verifier-fault-cases.v0.1.0",
+  "cases": [
+    {"name": "reparse_file", "mutation": "file_reparse", "expected_reason": "unsafe_object"},
+    {"name": "hardlink_file", "mutation": "file_link_count_two", "expected_reason": "unsafe_object"},
+    {"name": "delete_pending", "mutation": "file_delete_pending", "expected_reason": "unsafe_object"},
+    {"name": "write_share", "mutation": "file_write_share_allowed", "expected_reason": "unsafe_object"},
+    {"name": "alternate_stream", "mutation": "file_named_stream", "expected_reason": "unsafe_object"},
+    {"name": "short_name", "mutation": "file_short_name", "expected_reason": "unsafe_object"},
+    {"name": "extra", "mutation": "extra_file", "expected_reason": "inventory_mismatch"},
+    {"name": "missing", "mutation": "missing_file", "expected_reason": "inventory_mismatch"},
+    {"name": "case_collision", "mutation": "case_collision", "expected_reason": "inventory_mismatch"},
+    {"name": "content_swap", "mutation": "hash_change", "expected_reason": "hash_mismatch"},
+    {"name": "identity_swap", "mutation": "identity_change", "expected_reason": "identity_mismatch"},
+    {"name": "second_snapshot_swap", "mutation": "second_identity_change", "expected_reason": "identity_mismatch"},
+    {"name": "signer_mismatch", "mutation": "signer_change", "expected_reason": "signature_untrusted"},
+    {"name": "manifest_hash_mismatch", "mutation": "manifest_digest_change", "expected_reason": "manifest_identity_mismatch"}
+  ]
+}

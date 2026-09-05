@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "lae://contracts/windows-release-verifier/receipt/0.1.0",
+  "title": "Inert Windows release verifier metadata receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "reason",
+    "manifest_sha256",
+    "verified_files",
+    "verified_directories",
+    "verified_bytes",
+    "root_identity_retained",
+    "object_identities_retained",
+    "signatures_verified",
+    "model_external",
+    "activated"
+  ],
+  "properties": {
+    "schema": {"const": "local_bmo.windows-release-verification-receipt.v0.1.0"},
+    "status": {"enum": ["REFUSED_NOT_ACTIVATED", "VERIFIED", "FAILED"]},
+    "reason": {
+      "enum": [
+        "trust_anchor_unavailable",
+        "invalid_request",
+        "cancelled",
+        "deadline_exceeded",
+        "manifest_identity_mismatch",
+        "root_authority_invalid",
+        "unsafe_volume",
+        "unsafe_security",
+        "unsafe_name",
+        "inventory_mismatch",
+        "identity_mismatch",
+        "unsafe_object",
+        "size_mismatch",
+        "hash_mismatch",
+        "signature_untrusted",
+        "io_failed",
+        "none"
+      ]
+    },
+    "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "verified_files": {"type": "integer", "minimum": 0, "maximum": 64},
+    "verified_directories": {"type": "integer", "minimum": 0, "maximum": 64},
+    "verified_bytes": {"type": "integer", "minimum": 0, "maximum": 1073741824},
+    "root_identity_retained": {"type": "boolean"},
+    "object_identities_retained": {"type": "boolean"},
+    "signatures_verified": {"type": "boolean"},
+    "model_external": {"const": true},
+    "activated": {"const": false}
+  }
+}

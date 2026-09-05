@@ -1,0 +1,32 @@
+{
+  "schema": "local_bmo.windows-release-manifest-identity.v0.1.0",
+  "release_manifest_schema": "release-manifest.v1",
+  "package_kind": "fixture-skeleton",
+  "activation": false,
+  "model": {
+    "included": false,
+    "disposition": "EXTERNAL_AND_VERIFIED_SEPARATELY"
+  },
+  "entries": [
+    {"path": "backend-profiles.json", "size_bytes": 2334, "sha256": "524af868c7b8ac551d612288e4d5ada788f6cf914919794892279f80ee8782ef", "signer_policy": "not_applicable", "signer_subject_sha256": null},
+    {"path": "backend-runtime.example.json", "size_bytes": 2149, "sha256": "f05fbb0f3a61ddfadef9e844eac4552ef2801ce713b7052095b7f4389f108109", "signer_policy": "not_applicable", "signer_subject_sha256": null},
+    {"path": "Build-WindowsBackend.ps1", "size_bytes": 882, "sha256": "ae7d4582d8ec1338523e296e27b298e77b9ea7111dca5178ecf2ac8ab472ac01", "signer_policy": "offline_authenticode_required_but_unset", "signer_subject_sha256": null},
+    {"path": "CHECKSUMS.sha256", "size_bytes": 93, "sha256": "dfbd4ceea001296b4131c75240c4368b8af83573bccc6c8393d0b014fd9e076d", "signer_policy": "not_applicable", "signer_subject_sha256": null},
+    {"path": "config.example.json", "size_bytes": 117, "sha256": "2e8dd408679949debfefe7353eda0b75c301ea2ca44c467a68798383486aa19b", "signer_policy": "not_applicable", "signer_subject_sha256": null},
+    {"path": "host-config.example.json", "size_bytes": 320, "sha256": "5126af3805603c3e29f14c88c919a2cf33c4effef896f4d60d0c9d28f9f9f135", "signer_policy": "not_applicable", "signer_subject_sha256": null},
+    {"path": "licenses/README.md", "size_bytes": 162, "sha256": "f9c477e0d4c5b4c2d9251fe94923635825c5e0068812dbba5369e764ffb0f036", "signer_policy": "not_applicable", "signer_subject_sha256": null},
+    {"path": "node-provenance.json", "size_bytes": 495, "sha256": "f7f36a2e17f7a59f53c3cd198a93b20fa5ea612995d2381212e02b0f6926f3da", "signer_policy": "not_applicable", "signer_subject_sha256": null},
+    {"path": "README-OPERATOR.md", "size_bytes": 1567, "sha256": "be8f23c72c10660f8228741c00f6930f38a5ec24f9cdff40b8b974c04ea2388e", "signer_policy": "not_applicable", "signer_subject_sha256": null},
+    {"path": "RELEASE_MANIFEST.json", "size_bytes": 770, "sha256": "a33924e2dcf83817f8340009644cb9f03600844b31b7f4622c48cd8f87d221fd", "signer_policy": "not_applicable", "signer_subject_sha256": null},
+    {"path": "Run-WindowsBackend.ps1", "size_bytes": 797, "sha256": "457d798b2ddcbc88b894a17e8b7bc2f3b532b8b565311d3569c6c9ba25168167", "signer_policy": "offline_authenticode_required_but_unset", "signer_subject_sha256": null},
+    {"path": "SBOM.spdx.json", "size_bytes": 356, "sha256": "781416c6682c5f33693e7234463b2ffd846ba1d70b7c00c7078e46f58264c3bb", "signer_policy": "not_applicable", "signer_subject_sha256": null},
+    {"path": "schemas/README.md", "size_bytes": 220, "sha256": "1f5aff7285234865ac6436bcfdb8bbcac9b227874342fc2ce68ab5bb9ea0196c", "signer_policy": "not_applicable", "signer_subject_sha256": null},
+    {"path": "Start-LocalAssistant.ps1", "size_bytes": 698, "sha256": "68575c9f68bde3f6efaa90efab91c66e36c38727c6d0dd5479a8f8430cb3193d", "signer_policy": "offline_authenticode_required_but_unset", "signer_subject_sha256": null},
+    {"path": "THIRD_PARTY_NOTICES.md", "size_bytes": 529, "sha256": "b8462b522d66fb12fbe926823e4adf85f1438e4ce1ffd46bc441daf280d8d333", "signer_policy": "not_applicable", "signer_subject_sha256": null},
+    {"path": "ui/app.css", "size_bytes": 59, "sha256": "2962b955b6555f16d7c88fb953cd750aa33acd50d57e528478970e3b531ad0cb", "signer_policy": "not_applicable", "signer_subject_sha256": null},
+    {"path": "ui/app.js", "size_bytes": 124, "sha256": "3f2ebdc105037c20d56b8851fdfb378ad8b06dd58f3352afd894835527c27c9a", "signer_policy": "offline_authenticode_required_but_unset", "signer_subject_sha256": null},
+    {"path": "ui/index.html", "size_bytes": 320, "sha256": "5860e6e675b26da8cfece8f5c1b80c5bb73f9e2154fad493043f3b6d4ac9813f", "signer_policy": "not_applicable", "signer_subject_sha256": null},
+    {"path": "Verify-Release.ps1", "size_bytes": 425, "sha256": "2430a092de34530ce3793e42e23898cabb99aa676dd7b668d688960d5e8a72ae", "signer_policy": "offline_authenticode_required_but_unset", "signer_subject_sha256": null},
+    {"path": "windows_backend_plan.py", "size_bytes": 18016, "sha256": "34cbc10ceb6215b8e254c6cdc5ef4b049840e9864ce8e2622d833a0ab83f3a0f", "signer_policy": "offline_authenticode_required_but_unset", "signer_subject_sha256": null}
+  ]
+}
