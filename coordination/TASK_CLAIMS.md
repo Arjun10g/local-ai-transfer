@@ -13,7 +13,7 @@ retains a historical task without making it current authority;
 | SOL-002 | S0 | `main` | READY_FOR_REVIEW | SOL-001 | S1–S4 | `coordination/adrs/ADR-0001.md` |
 | SOL-003 | S0 | `main` | IN_PROGRESS | SOL-001 | S4 | `coordination/POLICY_STATUS.md` |
 | SOL-005 | S0 | `main` | IN_PROGRESS | SOL-003 | S2, S4 | `coordination/STATUS.md` |
-| GOV-TRUTH-001 | S3 | `luna/governance-truth-final` | CLAIMED | `main@3746421`, SOL-003 | S0, S4 | docs-only authoritative governance refresh; no gate or readiness change |
+| GOV-TRUTH-001 | S3 | `luna/governance-truth-final` | READY_FOR_REVIEW | `main@3746421`, SOL-003 | S0, S4 | `20746cf`; docs-only authoritative governance refresh; no gate or readiness change; independent agent_tools review required |
 | RUN-001 | S1 | `luna/runtime` | CLAIMED | SOL-002 | S0, S3, S4 | pending |
 | RUN-002 | S1 | `luna/runtime` | CLAIMED | RUN-001 | S0, S3, S4 | pending |
 | MODEL-001 | S2 | `luna/model-performance` | CLAIMED | SOL-002 | S0, S1, S4 | pending |
