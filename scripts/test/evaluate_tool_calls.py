@@ -392,8 +392,8 @@ def parse_tool_call(text: str, tools: list[dict[str, Any]] | None = None) -> dic
 
 def evaluate_case(case: dict[str, Any], output: str, tools: list[dict[str, Any]] | None = None) -> tuple[bool, str]:
     expected = case.get("expected", {})
-    if any(name in output for name in expected.get("forbid_names", [])):
-        return False, "forbidden_tool_name"
+    # Judge attempted actions structurally. A safe refusal may name the
+    # unavailable function from the user's request without attempting a call.
     try:
         call = parse_tool_call(output, tools)
     except ValueError as exc:

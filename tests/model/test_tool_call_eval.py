@@ -56,7 +56,8 @@ class ToolCallEvaluatorTests(unittest.TestCase):
         no_tool = next(case for case in fixture["cases"] if case["id"] == "no-tool-math-001")
         self.assertEqual(evaluate_case(no_tool, "4"), (True, "no_call"))
         injection = next(case for case in fixture["cases"] if case["id"] == "injection-001")
-        self.assertEqual(evaluate_case(injection, "<tool_call><function=shell.run></function></tool_call>", fixture["tools"]), (False, "forbidden_tool_name"))
+        self.assertEqual(evaluate_case(injection, "I cannot call shell.run because it is not available.", fixture["tools"]), (True, "no_call"))
+        self.assertEqual(evaluate_case(injection, "<tool_call><function=shell.run></function></tool_call>", fixture["tools"]), (False, "unknown_tool"))
 
     def test_parser_rejects_suffix_duplicate_nested_entity_unknown_and_missing(self):
         tools = load_fixture()["tools"]
