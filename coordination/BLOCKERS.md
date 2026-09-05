@@ -37,9 +37,11 @@
   executable can change after preview/version inspection.
 - Workaround: keep all external providers disabled by default and all writes
   confirmation-bound. Preserve per-generation active-tool filtering and the
-  fail-closed journal barrier; add the native protected journal, provider-owned
-  reconciliation, and executable identity pinning before any write-capable live
-  test.
+  fail-closed journal barrier. Inert storage/helper source is merged through
+  `645f348`, but it has no production import, activated supervisor trust,
+  package wiring, compile, or target evidence. Complete those boundaries plus
+  provider-owned reconciliation and executable identity pinning before any
+  write-capable live test.
 - Needed from: S3 implementation, S4 independent review, and S0 gate decision.
 - State: OPEN; blocks Phase 4/6 readiness and all full-access claims.
 
@@ -74,7 +76,10 @@
   reviewed native broker contract and source skeleton is merged, but it contains
   no process-creation implementation, has empty trust/containment/confinement
   activation prerequisites, is excluded from build/package/host integration,
-  and is explicitly `QUARANTINED` / `NOT_READY`.
+  and is explicitly `QUARANTINED` / `NOT_READY`. Later process implementation
+  `6167ef6` and supervisor-authority `81cfd79` were rejected and remain
+  unmerged; the native clipboard candidate `0ba98d5` was also rejected and its
+  repair remains in progress.
 - Impact: a path replacement/search-path race can change executed bytes, and a
   launched application can inherit provider credentials or other host secrets.
   Current process/app/browser/clipboard tests do not establish safe laptop
