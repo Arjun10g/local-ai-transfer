@@ -50,3 +50,23 @@
   candidate that passes that canary is eligible for the HF-backed evaluator.
 - Needed from: S2 candidate plan, S4 lifecycle review, and S0 authorization.
 - State: OPEN; does not block local mocked/source hardening.
+
+## B-005 — Windows process/application launch boundary is not identity-pinned
+
+- Fact: `process.run_allowlisted` repeats canonical pathname checks before
+  spawn, but Node cannot hold a deny-write/delete Windows image handle through
+  `CreateProcess`. `app.open`, `browser.open_url`, and clipboard subprocesses
+  currently spawn configured/bare executable paths without equivalent canonical
+  identity checks and inherit the host environment. The visible browser opener
+  uses bare `rundll32.exe`; the application config does not require an absolute
+  path. These boundaries are mocked on non-Windows hosts only.
+- Impact: a path replacement/search-path race can change executed bytes, and a
+  launched application can inherit provider credentials or other host secrets.
+  Current process/app/browser/clipboard tests do not establish safe laptop
+  execution.
+- Workaround: keep these launch-capable tools disabled in the Windows product
+  profile. Introduce one native identity-pinned, minimal-environment, Job-bound
+  process broker used by every Windows subprocess path, then run real Windows
+  cancellation/orphan/path-replacement acceptance.
+- Needed from: S1/S3 implementation, S4 security review, and target operator.
+- State: OPEN; blocks Phase 3/4/6 readiness and full laptop-control claims.
