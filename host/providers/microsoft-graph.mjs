@@ -12,6 +12,7 @@ const MAX_TOKEN_BYTES = 4096;
 const MAX_PROPOSALS = 128;
 const MAX_WRITE_RECORDS = 256;
 const MAX_RECONCILIATION_ITEMS = 50;
+const GRAPH_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(Z|[+-]\d{2}:\d{2})$/u;
 const OPERATION_ID = /^act_[a-f0-9]{32}$/u;
 const DIGEST = /^[a-f0-9]{64}$/u;
 const LAE_OPERATION_HEADER = 'x-lae-operation';
@@ -95,6 +96,17 @@ const previewText = (value, maxBytes) => {
 const safeTeamsUrl = value => {
   if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > 2048) return null;
   try { const url = new URL(value); if (url.protocol !== 'https:' || url.username || url.password || url.hash) return null; if (!(url.hostname === 'teams.microsoft.com' || url.hostname.endsWith('.teams.microsoft.com') || url.hostname === 'teams.live.com' || url.hostname.endsWith('.teams.live.com'))) return null; return url.toString(); } catch { return null; }
+};
+const graphDateTimeMs = value => {
+  if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > 64) return NaN;
+  const match = GRAPH_DATE_TIME.exec(value); if (!match) return NaN;
+  const year = Number(match[1]); const month = Number(match[2]); const day = Number(match[3]); const hour = Number(match[4]); const minute = Number(match[5]); const second = Number(match[6]);
+  if (year < 1 || year > 9999 || month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return NaN;
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0); const monthDays = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]; if (day < 1 || day > monthDays[month - 1]) return NaN;
+  const millis = match[7] ? Number(match[7].padEnd(3, '0')) : 0; const wall = new Date(0); wall.setUTCFullYear(year, month - 1, day); wall.setUTCHours(hour, minute, second, millis);
+  if (wall.getUTCFullYear() !== year || wall.getUTCMonth() !== month - 1 || wall.getUTCDate() !== day || wall.getUTCHours() !== hour || wall.getUTCMinutes() !== minute || wall.getUTCSeconds() !== second || wall.getUTCMilliseconds() !== millis) return NaN;
+  let offsetMinutes = 0; const zone = match[8]; if (zone !== 'Z') { const sign = zone[0] === '+' ? 1 : -1; const offsetHour = Number(zone.slice(1, 3)); const offsetMinute = Number(zone.slice(4, 6)); if (offsetHour > 14 || offsetMinute > 59 || offsetHour === 14 && offsetMinute !== 0 || zone === '-00:00') return NaN; offsetMinutes = sign * (offsetHour * 60 + offsetMinute); }
+  const timestamp = wall.getTime() - offsetMinutes * 60000; return Number.isFinite(timestamp) ? timestamp : NaN;
 };
 const projectionMessage = (value, maxPreview = 1024) => {
   if (!value || typeof value !== 'object' || typeof value.id !== 'string') return null;
@@ -285,7 +297,7 @@ export class MicrosoftGraphProvider {
     const upper = this.now() + 60000;
     const mapped = uniqueProofMap(collection.values, value => {
       if (!Array.isArray(value?.internetMessageHeaders) || typeof value?.sentDateTime !== 'string') return null;
-      const item = projectionDraft(value); const sentAt = Date.parse(value.sentDateTime); if (!item || !Number.isFinite(sentAt)) return null;
+      const item = projectionDraft(value); const sentAt = graphDateTimeMs(value.sentDateTime); if (!item || !Number.isFinite(sentAt)) return null;
       return { ...item, sent_at_ms: sentAt };
     }); if (!mapped) return { values: null, truncated: false };
     return { values: mapped.filter(item => typeof sentMarker === 'string' && item.operation_marker === sentMarker && !existingIds?.has(item.id) && draftContentDigest(item) === expectedDigest && Number.isFinite(snapshotAt) && item.sent_at_ms >= snapshotAt - 1000 && item.sent_at_ms <= upper), truncated: false };
@@ -294,7 +306,7 @@ export class MicrosoftGraphProvider {
     const response = await this.request({ method: 'GET', path: `${API}/chats/${encodeURIComponent(chatId)}/messages`, query: { '$top': MAX_RECONCILIATION_ITEMS }, signal });
     const collection = proofCollection(response.body); if (!collection.values || collection.truncated) return { values: collection.values, truncated: collection.truncated };
     const mapped = uniqueProofMap(collection.values, value => {
-      const createdMs = typeof value?.createdDateTime === 'string' ? Date.parse(value.createdDateTime) : NaN;
+      const createdMs = graphDateTimeMs(value?.createdDateTime);
       if (!validResource(value) || !value.body || typeof value.body !== 'object' || typeof value.body.content !== 'string' || value.body.contentType !== 'text' || !Number.isFinite(createdMs) || typeof value.from?.user?.id !== 'string' || !value.from.user.id.trim()) return null;
       return { id: value.id, content: value.body.content, content_type: 'text', created: value.createdDateTime, created_ms: createdMs, sender_id: value.from.user.id.slice(0, 512) };
     }); if (!mapped) return { values: null, truncated: false };
@@ -383,7 +395,7 @@ export class MicrosoftGraphProvider {
       if (call.name === 'mail.send_draft') {
         saved.prewrite_verified = false; saved.post_attempted = false; saved.reconciliation_allowed = false;
         const currentResponse = await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(args.draft_id)}`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$select': 'id,subject,body,toRecipients,ccRecipients,internetMessageHeaders,changeKey' }, signal: operation.signal }); const current = projectionDraft(currentResponse.body); if (!current || !saved.draftIdentity?.etag || !saved.draftIdentity?.change_key || !current.etag || !current.change_key || current.id !== args.draft_id || draftContentDigest(current) !== saved.draftBinding || current.operation_marker !== saved.sent_marker || current.etag !== saved.draftIdentity.etag || current.change_key !== saved.draftIdentity.change_key) throw new ProviderToolError('provider_permission_insufficient', 'draft identity changed after preview');
-        const sentBefore = await this.request({ method: 'GET', path: `${API}/me/mailFolders/sentitems/messages`, query: { '$top': MAX_RECONCILIATION_ITEMS, '$orderby': 'sentDateTime desc', '$select': 'id,sentDateTime' }, signal: operation.signal }); const sentCollection = proofCollection(sentBefore.body); if (!sentCollection.values || sentCollection.truncated) throw new ProviderToolError('provider_invalid_response', sentCollection.truncated ? 'sent proof collection is incomplete' : 'sent proof collection unavailable'); const sentSnapshot = uniqueProofMap(sentCollection.values, item => typeof item?.sentDateTime === 'string' && Number.isFinite(Date.parse(item.sentDateTime)) && typeof item.id === 'string' && item.id.length > 0 ? { id: item.id } : null); if (!sentSnapshot) throw new ProviderToolError('provider_invalid_response', 'sent proof collection contains an incomplete or duplicate item'); saved.preexistingSentIds = new Set(sentSnapshot.map(item => item.id)); saved.sent_snapshot_at = this.now(); saved.prewrite_verified = true; saved.reconciliation_allowed = true;
+        const sentBefore = await this.request({ method: 'GET', path: `${API}/me/mailFolders/sentitems/messages`, query: { '$top': MAX_RECONCILIATION_ITEMS, '$orderby': 'sentDateTime desc', '$select': 'id,sentDateTime' }, signal: operation.signal }); const sentCollection = proofCollection(sentBefore.body); if (!sentCollection.values || sentCollection.truncated) throw new ProviderToolError('provider_invalid_response', sentCollection.truncated ? 'sent proof collection is incomplete' : 'sent proof collection unavailable'); const sentSnapshot = uniqueProofMap(sentCollection.values, item => typeof item?.sentDateTime === 'string' && Number.isFinite(graphDateTimeMs(item.sentDateTime)) && typeof item.id === 'string' && item.id.length > 0 ? { id: item.id } : null); if (!sentSnapshot) throw new ProviderToolError('provider_invalid_response', 'sent proof collection contains an incomplete or duplicate item'); saved.preexistingSentIds = new Set(sentSnapshot.map(item => item.id)); saved.sent_snapshot_at = this.now(); saved.prewrite_verified = true; saved.reconciliation_allowed = true;
         const sendHeaders = { 'If-Match': saved.draftIdentity.etag }; response = await this.request({ method: 'POST', path: `${API}/me/messages/${encodeURIComponent(args.draft_id)}/send`, headers: sendHeaders, signal: operation.signal, onDispatch: () => { saved.post_attempted = true; } });
         return await this.reconcileSendDraft(call, args, binding, response, saved, operation.signal);
       }
