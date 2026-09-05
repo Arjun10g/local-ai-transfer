@@ -269,6 +269,8 @@ export class BrowserActionProvider {
         if (session.url !== attempt.postcondition.url || session.revision !== attempt.postcondition.page_revision) throw new ProviderToolError('provider_action_reconciling');
       } else if (attempt.action === 'browser.fill_field') {
         if (digest(call.arguments?.value) !== attempt.postcondition.value_digest || session.revision !== attempt.postcondition.page_revision) throw new ProviderToolError('provider_action_reconciling');
+        const requestedControl = session.controls.get(call.arguments?.control_id);
+        if (!requestedControl || digest(controlIdentity(requestedControl)) !== attempt.postcondition.control_identity_digest) throw new ProviderToolError('provider_action_reconciling');
         const matches = [...session.controls.values()].filter(candidate => digest(controlIdentity(candidate)) === attempt.postcondition.control_identity_digest);
         if (matches.length !== 1 || matches[0].value !== call.arguments?.value) throw new ProviderToolError('provider_action_reconciling');
       }
@@ -302,6 +304,7 @@ export class BrowserActionProvider {
       const control = session.controls?.get(args.control_id);
       if (!control && knownSessionMutation) { this.mutationProposal(call, args, session, { pending: true }, knownSessionMutation); return { provider: 'browser_actions', action: call.name, browser_session_id: session.id, page_revision: knownSessionMutation.pre_revision ?? session.revision, control_id: knownSessionMutation.control_id ?? args.control_id, control_label: knownSessionMutation.control_label ?? '', destination: knownSessionMutation.destination ?? session.url, data_egress: 'external_destination', reconciliation_only: true }; }
       if (!control || unsafeControl(control) || this.safeActions && call.name === 'browser.fill_field' && !actionField(control) || this.safeActions && call.name === 'browser.activate_control' && (control.kind !== 'control' || control.tag !== 'button' || control.type !== 'button' || control.form_action || control.href || control.disabled)) throw new ProviderToolError('browser_control_changed');
+      if (call.name === 'browser.fill_field' && knownSessionMutation && digest(args.value) === knownSessionMutation.value_digest) { this.mutationProposal(call, args, session, controlIdentity(control), knownSessionMutation); return { provider: 'browser_actions', action: call.name, browser_session_id: session.id, page_revision: knownSessionMutation.pre_revision ?? session.revision, control_id: knownSessionMutation.control_id ?? control.id, control_label: knownSessionMutation.control_label ?? control.label, destination: knownSessionMutation.destination ?? session.url, data_egress: 'external_destination', reconciliation_only: true }; }
       const pending = this.pendingMutation(session.id, call.name);
       if (pending) {
         this.mutationProposal(call, args, session, controlIdentity(control), pending);
