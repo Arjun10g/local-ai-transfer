@@ -1,32 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { createLocalToolRegistry } from '../../host/tools/local/index.mjs';
-import { createExternalToolRegistry } from '../../host/providers/index.mjs';
+import { createLocalToolDefinitionCatalog } from '../../host/tools/local/index.mjs';
+import { createExternalToolDefinitionCatalog } from '../../host/providers/index.mjs';
 import { modelToolDefinitions } from '../../host/agent/controller.mjs';
 
 const fixture = JSON.parse(await readFile(new URL('./production_tool_call_eval.json', import.meta.url), 'utf8'));
 
-function configuredDefinitions() {
-  const workspace = { id: 'project', path: 'C:/workspace', read: true, write: true };
-  const local = createLocalToolRegistry({
-    workspaces: [workspace],
-    process_actions: { enabled: false, actions: {} },
-    networkProvider: 'disabled'
-  });
-  const external = createExternalToolRegistry({
-    workspaceRoots: [workspace],
-    config: { browser_actions: { safe_actions: true, action_origins: ['https://example.com'] } }
-  });
+function catalogDefinitions() {
+  const local = createLocalToolDefinitionCatalog();
+  const external = createExternalToolDefinitionCatalog();
   return modelToolDefinitions(new Map([...Object.entries(local), ...Object.entries(external)]));
 }
 
-test('production fixture exactly matches configured host tool names and schemas', () => {
+test('production evaluation fixture exactly matches the explicit definition catalog', () => {
   assert.equal(fixture.schema, 'local_bmo.tool-call-eval.v1');
   assert.equal(fixture.limits.context_tokens, 8192);
   assert.equal(fixture.limits.max_output_tokens, 256);
   assert.ok(fixture.cases.length <= 64);
-  const advertised = configuredDefinitions();
+  const advertised = catalogDefinitions();
   const fixtureByName = new Map(fixture.tools.map(tool => [tool.function.name, tool.function]));
   const advertisedByName = new Map(advertised.map(tool => [tool.function.name, tool.function]));
   assert.equal(fixtureByName.size, 28);

@@ -4,8 +4,14 @@ The provider layer is host-only and uses Node.js built-ins. `MicrosoftGraphProvi
 accepts an injected delegated credential source and transport; it never discovers
 credentials, builds URLs from model input, or contacts Graph unless an operator
 constructs it with `enabled: true`. The default `createExternalToolRegistry()`
-returns disabled Graph and Copilot tools, so fixture/native launcher runs remain
-offline.
+returns no model-visible tools, so fixture/native launcher runs remain offline.
+Registry membership is a frozen startup-configuration decision: disabled or
+structurally unconfigured providers are omitted, Graph tools are limited to the
+configured delegated scopes, and transient sign-in state is not used to change
+the bundle. A configured device-code Graph provider therefore remains visible
+while signed out so the separate guarded authentication bootstrap can work.
+`createExternalToolDefinitionCatalog()` is schema/evaluation-only and must not
+be passed to the production controller.
 
 Graph requests are constrained to the fixed HTTPS Graph origin and `/me` mail,
 `/me/chats` listing, and `/chats/{id}/messages` existing-chat endpoint families.
@@ -67,6 +73,15 @@ activation require a page-revision-bound preview and user confirmation; static
 provider-authored CDP expressions are used, never model selectors or scripts.
 Password/file/hidden and sensitive controls are rejected, with bounded cleanup
 of the owned process, profile, and proxy.
+
+Copilot is omitted from the model bundle unless its executable/version policy
+and at least one workspace root are configured. Browser tools are omitted
+unless the provider executable and allowlist are configured; mutation tools
+remain absent unless their separate safe-actions gate is configured.
+On Windows, Copilot and browser-action tools remain omitted even when configured
+until their subprocess launches use the approved native identity-pinned,
+minimal-environment broker. Only explicitly test-only provider injections may
+retain those tools for isolated mocked tests.
 
 Live Graph/Copilot authorization, organization approval, Windows process
 evidence, and synthetic release-account evidence are not present in this

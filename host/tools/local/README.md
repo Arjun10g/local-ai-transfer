@@ -2,6 +2,12 @@
 
 These modules run in the Node.js 24 host with built-in modules only. The model
 does not receive executable paths, risk tiers, or policy configuration.
+`createLocalToolRegistry()` includes only capabilities supported by immutable
+startup configuration and records a frozen `capabilitySnapshot`. `time.now`
+and `system.get_info` are always present. Filesystem tools require an applicable
+configured workspace; app/browser/process tools require their allowlists or
+provider/action configuration. `createLocalToolDefinitionCatalog()` is for
+schema evaluation only and is never a production execution registry.
 
 ## Filesystem
 
@@ -22,10 +28,11 @@ directory temporary file, flushes it, and replaces atomically where the host
 filesystem supports it. A Windows fallback preserves/restores a backup if
 replacement fails.
 
-Final `realpath`/metadata checks narrow TOCTOU and reparse-point races, but
-Node cannot provide a kernel-level no-swap guarantee between authorization and
-open/rename on every Windows filesystem; that residual is documented for S4
-acceptance.
+Final `realpath`/metadata checks narrow TOCTOU and reparse-point races on the
+supported POSIX path. Windows filesystem tools are omitted from the production
+registry and their direct execution boundary returns
+`platform_path_safety_unavailable` until a handle-relative reparse-safe broker
+exists.
 
 Mutating tools are T2 and `requires_confirmation: true`; the controller, not a
 tool or model, binds confirmation to request/call IDs.
@@ -43,8 +50,11 @@ credentials, literal IP/private/local names, and launches through a fixed
 executable plus argv with `shell: false`. Neither action retrieves web
 content.
 
-On non-Windows hosts clipboard calls return a typed `platform_unsupported`
-result; no provider or shell fallback is attempted.
+On non-Windows hosts direct clipboard calls return a typed
+`platform_unsupported` result. On Windows, clipboard/app/default-browser tools
+are also omitted from the production registry until all subprocess paths use
+the native identity-pinned, minimal-environment broker. Direct modules remain
+available to focused test seams; no provider or shell fallback is attempted.
 
 ## Allowlisted process actions
 
@@ -71,5 +81,10 @@ no-swap guarantee if a trusted parent directory is replaced between that final
 check and process creation; that residual remains a platform acceptance item.
 
 This is allowlisting and lifecycle control, not an OS sandbox. Windows
-process-tree behavior requires platform-specific acceptance evidence; the
-fake process tests exercise the injectable termination boundary.
+process-tree and executable-identity behavior requires platform-specific
+acceptance evidence, so the tool is omitted from the Windows production
+registry even when configured. The fake process tests exercise the injectable
+termination boundary. A process action is also omitted unless its configured
+cwd workspace is writable because the current execution contract resolves cwd
+with write authorization; relaxing that condition requires a separate policy
+decision.
