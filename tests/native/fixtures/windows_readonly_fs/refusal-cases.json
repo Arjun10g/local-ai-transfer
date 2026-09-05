@@ -1,0 +1,100 @@
+{
+  "schema": "lae.windows-readonly-fs.static-cases.v2",
+  "public_entry_cases": [
+    {
+      "name": "missing_broker_capability",
+      "state": {"grant_capability": null},
+      "status": "platform_unavailable",
+      "filesystem_access": false
+    },
+    {
+      "name": "forged_caller_root_and_identity_fields",
+      "state": {"absolute_grant_root": "C:\\forged", "expected_root_identity": "forged"},
+      "status": "platform_unavailable",
+      "filesystem_access": false
+    },
+    {
+      "name": "blocking_open_never_started",
+      "state": {"grant_capability": "opaque", "operation": "read", "cancel_during_open": true},
+      "status": "platform_unavailable",
+      "filesystem_access": false
+    }
+  ],
+  "cases": [
+    {
+      "name": "invalid_request",
+      "state": {"request_valid": false},
+      "status": "invalid_request"
+    },
+    {
+      "name": "unc_grant",
+      "state": {"grant_safe": false},
+      "status": "unsafe_grant"
+    },
+    {
+      "name": "wrong_root_identity",
+      "state": {"root_identity": false},
+      "status": "identity_mismatch"
+    },
+    {
+      "name": "broad_root_acl",
+      "state": {"private_acl": false},
+      "status": "security_unavailable"
+    },
+    {
+      "name": "removable_volume",
+      "state": {"fixed_volume": false},
+      "status": "unsafe_volume"
+    },
+    {
+      "name": "wrong_filesystem",
+      "state": {"filesystem": "ReFS"},
+      "status": "unsupported_filesystem"
+    },
+    {
+      "name": "ads_component",
+      "state": {"components_safe": false},
+      "status": "unsafe_component"
+    },
+    {
+      "name": "relative_open_raced_to_reparse",
+      "state": {"relative_open": true, "plain_target": false},
+      "status": "reparse_refused"
+    },
+    {
+      "name": "hardlinked_file",
+      "state": {"links": 2},
+      "status": "link_count_refused"
+    },
+    {
+      "name": "cancel_before_read",
+      "state": {"cancelled": true},
+      "status": "cancelled"
+    },
+    {
+      "name": "deadline_during_enumeration",
+      "state": {"deadline": false},
+      "status": "deadline_exceeded"
+    },
+    {
+      "name": "binary_nul",
+      "state": {"operation": "read", "utf8": false, "nul": true},
+      "status": "binary_refused"
+    },
+    {
+      "name": "invalid_utf8",
+      "state": {"operation": "read", "utf8": false, "nul": false},
+      "status": "utf8_required"
+    },
+    {
+      "name": "identity_changes_after_read",
+      "state": {"final_identity": false},
+      "status": "identity_mismatch"
+    },
+    {
+      "name": "valid_read",
+      "state": {"operation": "read"},
+      "status": "ok"
+    }
+  ]
+}

@@ -1,0 +1,157 @@
+{
+  "schema_version": "lae.windows-readonly-fs.v2",
+  "$id": "lae://contracts/windows-readonly-fs/0.2.0",
+  "version": "0.2.0",
+  "status": "source_only_not_enabled",
+  "production_available": false,
+  "native_target_registered": false,
+  "helper_added": false,
+  "transport_added": false,
+  "node_integration_added": false,
+  "package_added": false,
+  "activation_permitted": false,
+  "authenticated_grant_issuer_available": false,
+  "cancellable_native_io_available": false,
+  "public_execution": "platform_unavailable_before_capability_path_token_or_filesystem_access",
+  "platform": "windows_x64_source_only",
+  "abi_version": 2,
+  "operations": [
+    "stat",
+    "list",
+    "read"
+  ],
+  "forbidden_operations": [
+    "create",
+    "write",
+    "patch",
+    "rename",
+    "delete",
+    "process",
+    "clipboard",
+    "browser",
+    "network"
+  ],
+  "request": {
+    "required": [
+      "abi_version",
+      "operation",
+      "grant_capability",
+      "relative_components",
+      "offset",
+      "max_bytes",
+      "execution"
+    ],
+    "unknown_fields": "reject",
+    "grant_capability": "opaque_nonconstructible_broker_issued_MAC_and_request_bound_authority; issuer_absent_in_this_slice",
+    "relative_components": "zero_to_64_individually_validated_UTF16_components_never_joined",
+    "operation_rules": {
+      "stat": "offset_and_max_bytes_must_be_zero",
+      "list": "offset_and_max_bytes_must_be_zero",
+      "read": "nonempty_components_offset_at_most_file_size_max_bytes_1_to_65536"
+    }
+  },
+  "limits": {
+    "max_root_utf16_code_units": 32767,
+    "max_component_utf16_code_units": 255,
+    "max_components": 64,
+    "max_list_entries": 256,
+    "max_list_name_bytes": 65536,
+    "max_read_bytes": 65536,
+    "max_readable_file_bytes": 16777216,
+    "enumeration_buffer_bytes": 65536,
+    "read_chunk_bytes": 16384
+  },
+  "path_and_handle_policy": {
+    "root_path": "latent implementation reads an exact canonical absolute DOS drive path only from the opaque grant capability; no caller request field supplies it; UNC, extended, device, ADS, slash, dot, reserved, trailing-dot-space, malformed UTF16, and aliases refused",
+    "root_open": "CreateFileW opens only the fixed drive root with OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS plus FILE_FLAG_OPEN_REPARSE_POINT, and FILE_SHARE_READ only; each grant-root component is then a relative NtOpenFile",
+    "descendant_open": "every grant-root and request component uses NtOpenFile OBJECT_ATTRIBUTES.RootDirectory against the retained parent and exactly one validated component",
+    "pathname_fallback": false,
+    "share": "FILE_SHARE_READ only for every root, component, target, and listed-child object; write and delete sharing denied",
+    "lifetime": "root, traversed components, target, and each reported list child retained and identity-revalidated through successful response",
+    "reparse": "FILE_OPEN_REPARSE_POINT then exact handle attribute rejection",
+    "hardlinks": "non-directory NumberOfLinks must equal one",
+    "delete_pending": "refuse",
+    "alternate_data_streams": "colon is refused in every caller or enumerated component"
+  },
+  "security_policy": {
+    "root_identity": "exact FILE_ID_INFO volume serial and 128-bit file ID carried only by a future authenticated broker-issued capability",
+    "current_user": "non-service current process token user SID",
+    "acl": "every grant-root component and request/list target must be owned by current user and have a protected, nondefaulted DACL with exactly one noninherited FILE_ALL_ACCESS allow ACE for that SID; the fixed volume root is identity-held but exempt",
+    "receipt": "finite metadata only; no root, relative path, SID, user, file text, list names, OS error, or free-form diagnostic"
+  },
+  "volume_policy": {
+    "drive_type": "DRIVE_FIXED",
+    "hotplug": false,
+    "removable": false,
+    "filesystem_allowlist": [
+      "NTFS"
+    ],
+    "required_flags": [
+      "FILE_PERSISTENT_ACLS"
+    ],
+    "rejected_flags": [
+      "FILE_READ_ONLY_VOLUME",
+      "FILE_VOLUME_IS_COMPRESSED"
+    ],
+    "all_objects": "FILE_ID_INFO volume serial must equal the independent root grant"
+  },
+  "object_policy": {
+    "type": "FILE_TYPE_DISK file or directory matching the fixed operation",
+    "rejected_attributes": [
+      "FILE_ATTRIBUTE_REPARSE_POINT",
+      "FILE_ATTRIBUTE_DEVICE",
+      "FILE_ATTRIBUTE_OFFLINE",
+      "FILE_ATTRIBUTE_SPARSE_FILE",
+      "FILE_ATTRIBUTE_COMPRESSED",
+      "FILE_ATTRIBUTE_ENCRYPTED",
+      "FILE_ATTRIBUTE_RECALL_ON_OPEN",
+      "FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS",
+      "FILE_ATTRIBUTE_VIRTUAL"
+    ],
+    "read_encoding": "strict UTF-8 only; embedded NUL is binary_refused; invalid or partial UTF-8 is utf8_required",
+    "list": "each record name is bounded by that record's validated NextEntryOffset before validation; each name is then independently relative-opened and inspected before inclusion; any unsafe/raced entry fails the whole call"
+  },
+  "cancellation": {
+    "clock": "caller-provided monotonic callback",
+    "deadline": "mandatory absolute monotonic deadline",
+    "checks": "latent checkpoints are insufficient for blocking native calls; public execution refuses until a genuinely cancellable or killable native I/O boundary exists",
+    "blocking_io": "NtOpenFile, GetFileInformationByHandleEx enumeration, and synchronous ReadFile are unreachable from the public entrypoint in this slice",
+    "failure_output": "no file text, entries, stat result, or retained lease"
+  },
+  "status_codes": [
+    "ok",
+    "platform_unavailable",
+    "invalid_request",
+    "unsafe_grant",
+    "unsafe_component",
+    "unsafe_volume",
+    "unsupported_filesystem",
+    "not_found",
+    "access_denied",
+    "security_unavailable",
+    "reparse_refused",
+    "unsupported_file_type",
+    "link_count_refused",
+    "delete_pending",
+    "identity_mismatch",
+    "bounds_exceeded",
+    "utf8_required",
+    "binary_refused",
+    "cancelled",
+    "deadline_exceeded",
+    "io_failed",
+    "internal"
+  ],
+  "residual_gates": [
+    "independent source and security audit",
+    "authenticated broker capability issuer with operation arguments deadline nonce and root identity MAC binding",
+    "genuinely cancellable worker/overlapped or supervised fail-stop boundary covering open enumeration and read",
+    "remote Windows SDK compile and static analysis",
+    "signed and manifest-pinned helper/library artifact design",
+    "authenticated bounded foreground transport and supervision",
+    "target NTFS ACL and NtOpenFile RootDirectory acceptance",
+    "filter-driver, antivirus, concurrent rename, reparse, hardlink, cancellation, and exhaustion testing",
+    "host policy integration without weakening the current Windows refusal",
+    "package provenance, dependency closure, target acceptance, and explicit gate approval"
+  ]
+}
