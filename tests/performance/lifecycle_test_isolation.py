@@ -11,6 +11,7 @@ import ast
 import builtins
 import contextlib
 import functools
+import hashlib
 import os
 import socket
 import subprocess
@@ -170,8 +171,12 @@ def lifecycle_execute_isolation(lifecycle_module, *, prefix="lifecycle-execute-"
             cost_ledger=base / "runtime" / "cost-ledger.jsonl",
             incidents=base / "runtime" / "incidents.jsonl",
         )
+        paths.runtime_root.mkdir(mode=0o700)
         paths.markdown_ledger.write_text(
             lifecycle_module.LEDGER_HEADER + "\n", encoding="utf-8"
+        )
+        paths.incidents.write_text(
+            '{"incident":"isolated-execute-fixture"}\n', encoding="utf-8"
         )
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.object(lifecycle_module, "RUNTIME_ROOT", paths.runtime_root))
@@ -179,6 +184,20 @@ def lifecycle_execute_isolation(lifecycle_module, *, prefix="lifecycle-execute-"
             stack.enter_context(mock.patch.object(lifecycle_module, "COST_LEDGER", paths.cost_ledger))
             stack.enter_context(mock.patch.object(lifecycle_module, "INCIDENTS", paths.incidents))
             stack.enter_context(guard.patches())
+            lifecycle_module.initialize_cost_ledger_genesis(
+                program=lifecycle_module.COST_LEDGER_PROGRAM,
+                currency=lifecycle_module.COST_LEDGER_CURRENCY,
+                budget_cap_usd=50.0,
+                prior_settled_spend_usd=0.0,
+                current_pending_owner_count=0,
+                expected_display_ledger_sha256=hashlib.sha256(
+                    paths.markdown_ledger.read_bytes()
+                ).hexdigest(),
+                expected_incidents_sha256=hashlib.sha256(
+                    paths.incidents.read_bytes()
+                ).hexdigest(),
+                confirmation=lifecycle_module.COST_LEDGER_GENESIS_CONFIRMATION,
+            )
             stack.enter_context(
                 mock.patch.object(
                     lifecycle_module,

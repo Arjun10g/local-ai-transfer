@@ -190,7 +190,9 @@ def _persist_lifecycle(phase_id: str, lifecycle: dict[str, object]) -> None:
         raise RunnerError("lifecycle receipt exceeds byte bound")
     path = _lifecycle_path(phase_id)
     try:
-        shadeform._durable_atomic_write(path, payload)
+        shadeform.private_durable_atomic_write(
+            path, payload, label="remote external-tools lifecycle receipt",
+        )
     except (OSError, TypeError, ValueError) as exc:
         raise RunnerError("lifecycle receipt durability failed") from exc
 

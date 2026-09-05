@@ -268,6 +268,14 @@ class RemoteExternalToolsLifecycleTests(unittest.TestCase):
             env_file=Path("/nonexistent/test.env"), output=ROOT / "experiments" / "results" / "test-run-repair.json",
         )
 
+    def test_execute_isolation_provisions_private_json_authority(self):
+        mode = self.lifecycle_paths.runtime_root.stat().st_mode & 0o777
+        self.assertEqual(mode, 0o700)
+        events = self.module.shadeform.cost_ledger_events()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event_kind"], "genesis")
+        self.assertEqual(events[0]["budget_cap_usd"], 50.0)
+
     def run_lifecycle(self, *, activation_error=None, checked_error=None, job_result=None,
                       job_error=None, salvage=None, deletion_error=None, deletion_receipt=None,
                       create_error=None, instance_pending_error=False,
@@ -559,7 +567,11 @@ class RemoteExternalToolsLifecycleTests(unittest.TestCase):
         )
         self.assertIsInstance(outcome.raised, OSError)
         self.assertEqual(outcome.direct_delete.call_count, 1)
-        self.assertEqual(outcome.delete_key.call_count, 1)
+        # The recovery helper is deliberately invoked twice to model restart.
+        # Both entries pass through the high-level exact state machine; the
+        # raw key DELETE no-replay invariant is covered by the provider-call
+        # counter in test_key_delete_accepted_but_present_retries_by_get_without_second_delete.
+        self.assertEqual(outcome.delete_key.call_count, 2)
         self.assertEqual(len(outcome.recovery_records), 1)
         data = self.module.shadeform.bounded_stable_bytes(
             self.module.shadeform.COST_LEDGER,
@@ -569,7 +581,7 @@ class RemoteExternalToolsLifecycleTests(unittest.TestCase):
         events = self.module.shadeform._cost_ledger_events(data)
         instance = [
             event for event in events
-            if event["instance_id"] == "instance-123456"
+            if event.get("instance_id") == "instance-123456"
         ]
         self.assertEqual(
             [event["status"] for event in instance],
@@ -577,7 +589,7 @@ class RemoteExternalToolsLifecycleTests(unittest.TestCase):
         )
         attempt = [
             event for event in events
-            if event["instance_id"] == "attempt-" + "a" * 32
+            if event.get("instance_id") == "attempt-" + "a" * 32
         ]
         self.assertEqual(
             instance[0]["estimated_cost_usd"],
@@ -621,6 +633,71 @@ class ExternalLifecycleBoundaryTests(unittest.TestCase):
         legacy = self.module.shadeform.legacy_deletion_evidence_paths(phase_id)[0]
         legacy.parent.mkdir(parents=True, exist_ok=True)
         legacy.write_bytes(b"{}")
+
+    @staticmethod
+    def watchdog_unrecorded_argv(phase_id, nonce):
+        now = time.time()
+        return [
+            "--phase-id", phase_id,
+            "--instance-name", "ep-run-" + nonce,
+            "--launcher-pid", "1234",
+            "--max-seconds", "1",
+            "--deadline-epoch", str(now + 1000),
+            "--provider-delete-deadline-epoch", str(now + 900),
+            "--allow-unrecorded-exact",
+            "--ownership-nonce", nonce,
+            "--ssh-key-id", "key-123456",
+            "--ssh-key-name", "j1m-" + nonce,
+            "--ssh-key-fingerprint", "A" * 43,
+            "--cloud", "cloud", "--region", "region",
+            "--instance-type", "type", "--hourly-usd", "1",
+            "--gpu", "A100", "--gpu-count", "1",
+            "--vram-gb", "80", "--os-image", "ubuntu",
+        ]
+
+    def test_watchdog_broken_owner_symlink_refuses_before_reconciliation(self):
+        watchdog = load_watchdog_module()
+        phase = "watchdog-broken-owner"
+        nonce = "b" * 32
+        sf = self.module.shadeform
+        sf.runtime_ledger_path(phase).symlink_to(
+            self.lifecycle_paths.runtime_root / "missing-owner-target"
+        )
+        with mock.patch.object(watchdog, "identity_alive", return_value=False), \
+                mock.patch.object(watchdog, "_pending_intent") as pending, \
+                mock.patch.object(sf, "load_env") as load_env, \
+                mock.patch.object(sf, "reconcile_instance_by_nonce") as reconcile, \
+                mock.patch.object(sf, "request") as provider:
+            result = watchdog.main(self.watchdog_unrecorded_argv(phase, nonce))
+        self.assertEqual(result, 1)
+        pending.assert_not_called()
+        load_env.assert_not_called()
+        reconcile.assert_not_called()
+        provider.assert_not_called()
+
+    def test_watchdog_owner_swap_race_refuses_before_reconciliation(self):
+        watchdog = load_watchdog_module()
+        phase = "watchdog-owner-swap"
+        nonce = "c" * 32
+        sf = self.module.shadeform
+        with mock.patch.object(watchdog, "identity_alive", return_value=False), \
+                mock.patch.object(
+                    sf, "read_phase_ownership",
+                    side_effect=[(None, False), sf.ShadeformError("owner path changed")],
+                ), \
+                mock.patch.object(watchdog, "_pending_intent", return_value={"status": "pending"}), \
+                mock.patch.object(sf, "load_env") as load_env, \
+                mock.patch.object(sf, "reconcile_instance_by_nonce") as reconcile, \
+                mock.patch.object(sf, "request") as provider:
+            result = watchdog.main(self.watchdog_unrecorded_argv(phase, nonce))
+        self.assertEqual(result, 1)
+        load_env.assert_not_called()
+        reconcile.assert_not_called()
+        provider.assert_not_called()
+        source = (ROOT / "scripts" / "shadeform_watchdog.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("record_path.exists()", source)
 
     def test_ssh_key_boundary_rechecks_legacy_evidence_before_post(self):
         phase_id = "key-boundary-race"
@@ -822,6 +899,7 @@ class ExternalLifecycleBoundaryTests(unittest.TestCase):
             ledger.chmod(0o600)
             with mock.patch.object(watchdog, "ROOT", root), \
                     mock.patch.object(watchdog, "identity_alive", return_value=False), \
+                    mock.patch.object(self.module.shadeform, "read_phase_ownership", return_value=(None, False)), \
                     mock.patch.object(self.module.shadeform, "COST_LEDGER", ledger), \
                     mock.patch.object(self.module.shadeform, "load_env") as load_env, \
                     mock.patch.object(self.module.shadeform, "reconcile_ssh_key") as reconcile, \

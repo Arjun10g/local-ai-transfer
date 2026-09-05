@@ -66,6 +66,16 @@ def _has_pending_intent(shadeform, phase_id: str, nonce: str | None) -> bool:
     return _pending_intent(shadeform, phase_id, nonce) is not None
 
 
+def _require_unrecorded_owner_state(shadeform, phase_id: str) -> None:
+    """Fail closed if any canonical owner appears during recovery."""
+
+    record, _ = shadeform.read_phase_ownership(phase_id)
+    if record is not None:
+        raise shadeform.ShadeformError(
+            "unrecorded watchdog recovery raced durable ownership"
+        )
+
+
 def _deadline_windows(*, now_monotonic: float, now_epoch: float, max_seconds: float, deadline_epoch: float | None) -> tuple[float, float]:
     """Return separate wake/work and hard teardown deadlines."""
 
@@ -162,17 +172,22 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
     while identity_alive(args.launcher_pid, args.launcher_start_marker) and time.monotonic() < work_deadline:
         time.sleep(args.poll_seconds)
-    record_path = ROOT / "experiments" / "runtime" / f"{args.phase_id}.json"
     launcher_owned = identity_alive(args.launcher_pid, args.launcher_start_marker)
-    if not launcher_owned and not record_path.exists():
+    try:
+        recorded_owner, _ = shadeform.read_phase_ownership(args.phase_id)
+    except (OSError, shadeform.ShadeformError, TypeError, ValueError):
+        return 1
+    if not launcher_owned and recorded_owner is None:
         if not args.allow_unrecorded_exact:
             return 0
         intent = _pending_intent(shadeform, args.phase_id, args.ownership_nonce)
         if intent is None:
             return 1
         try:
+            _require_unrecorded_owner_state(shadeform, args.phase_id)
             env = shadeform.load_env(args.env_file)
             api_key = shadeform.require_env(env, "SHADEFORM_API_KEY")
+            _require_unrecorded_owner_state(shadeform, args.phase_id)
             reconciled_key_id = shadeform.reconcile_ssh_key(
                 api_key, args.phase_id, expected_name=args.ssh_key_name or "",
                 expected_fingerprint=args.ssh_key_fingerprint,
@@ -191,6 +206,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 requires_eventual_reconciliation = intent.get("instance_create_intent") is True or intent.get("instance_id") != "attempt-" + (args.ownership_nonce or "")
                 while True:
+                    _require_unrecorded_owner_state(shadeform, args.phase_id)
                     exact_instance_id = shadeform.reconcile_instance_by_nonce(
                         api_key, args.phase_id, expected_name=args.instance_name,
                         nonce=args.ownership_nonce,
@@ -228,6 +244,7 @@ def main(argv: list[str] | None = None) -> int:
                     "ownership_nonce": args.ownership_nonce,
                     "retry_required": False,
                 })
+                _require_unrecorded_owner_state(shadeform, args.phase_id)
                 key_cleanup = shadeform.delete_owned_ssh_key_exact(
                     api_key,
                     args.phase_id,
@@ -308,6 +325,7 @@ def main(argv: list[str] | None = None) -> int:
                     created_at_utc=started_dt.isoformat(),
                     provider_delete_deadline_utc=provider_deadline.isoformat(),
                 )
+                _require_unrecorded_owner_state(shadeform, args.phase_id)
                 receipt = teardown_recovered_exact(
                     record, env_file=args.env_file, deadline=hard_deadline,
                 )
@@ -320,7 +338,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     result_code = 1
     try:
-        record = shadeform.read_owned_resource(args.phase_id)
+        record, _ = shadeform.read_phase_ownership(args.phase_id)
         if record is None:
             return 1
         if args.instance_id is not None and args.instance_id != record.instance_id:

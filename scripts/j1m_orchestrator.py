@@ -114,7 +114,7 @@ def _persist_lifecycle(phase_id: str, lifecycle: dict[str, Any]) -> None:
     payload = (json.dumps({"schema": "local_bmo.j1m.lifecycle-receipt.v1", **lifecycle}, sort_keys=True) + "\n").encode("utf-8")
     if len(payload) > MAX_RECEIPT_BYTES:
         raise ValueError("lifecycle receipt exceeds bound")
-    sf._durable_atomic_write(path, payload)
+    sf.private_durable_atomic_write(path, payload, label="J1M lifecycle receipt")
 
 
 def _progress(path: Path, event: str, **details: Any) -> None:

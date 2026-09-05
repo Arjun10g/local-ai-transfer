@@ -188,11 +188,7 @@ def _bind_owner_evidence(
     if len(data) > MAX_LOCAL_SALVAGE_BYTES:
         raise ValueError("deletion evidence index exceeds bound")
 
-    normal = shadeform.read_owned_resource(phase_id)
-    recovery = shadeform.read_recovery_owned_resource(phase_id)
-    if normal is not None and recovery is not None and _owner_binding(normal) != _owner_binding(recovery):
-        raise RuntimeError("normal and recovery ownership records conflict; manual recovery is required")
-    durable_owner = normal or recovery
+    durable_owner, _ = shadeform.read_phase_ownership(phase_id)
     if durable_owner is not None and _owner_binding(durable_owner) != expected["owner"]:
         raise RuntimeError("deletion evidence owner is not the durable phase owner")
 
@@ -202,7 +198,7 @@ def _bind_owner_evidence(
         # manufacture that trust anchor from a caller-supplied record.
         try:
             existing = shadeform.strict_json_object(
-                shadeform.bounded_stable_bytes(
+                shadeform.private_bounded_stable_bytes(
                     path, MAX_LOCAL_SALVAGE_BYTES, label="deletion evidence index",
                 ),
                 label="deletion evidence index",
@@ -216,11 +212,13 @@ def _bind_owner_evidence(
         return expected
 
     try:
-        shadeform.durable_create_new(path, data)
+        shadeform.private_durable_create_new(
+            path, data, label="deletion evidence index",
+        )
     except FileExistsError:
         try:
             existing = shadeform.strict_json_object(
-                shadeform.bounded_stable_bytes(
+                shadeform.private_bounded_stable_bytes(
                     path, MAX_LOCAL_SALVAGE_BYTES, label="deletion evidence index",
                 ),
                 label="deletion evidence index",
@@ -243,7 +241,7 @@ def _load_indexed_owner(
     path = _deletion_evidence_index_path(phase, exact)
     try:
         payload = shadeform.strict_json_object(
-            shadeform.bounded_stable_bytes(
+            shadeform.private_bounded_stable_bytes(
                 path, MAX_LOCAL_SALVAGE_BYTES, label="deletion evidence index",
             ),
             label="deletion evidence index",
@@ -385,7 +383,9 @@ def _write_deletion_receipt(phase_id: str, payload: dict[str, object], *, deadli
     data = (json.dumps(canonical, indent=2, sort_keys=True) + "\n").encode("utf-8")
     if len(data) > MAX_LOCAL_SALVAGE_BYTES:
         raise ValueError("deletion receipt exceeds bound")
-    shadeform._durable_atomic_write(path, data)
+    shadeform.private_durable_atomic_write(
+        path, data, label="deletion receipt",
+    )
     return canonical
 
 
@@ -429,7 +429,9 @@ def _load_deletion_receipt(phase_id: str, exact: str, record: shadeform.OwnedRes
     path = _deletion_receipt_path(phase_id, record)
     try:
         payload = shadeform.strict_json_object(
-            shadeform.bounded_stable_bytes(path, MAX_LOCAL_SALVAGE_BYTES, label="deletion receipt"),
+            shadeform.private_bounded_stable_bytes(
+                path, MAX_LOCAL_SALVAGE_BYTES, label="deletion receipt",
+            ),
             label="deletion receipt",
         )
         canonical = _canonical_deletion_receipt(phase_id, payload)
@@ -530,10 +532,15 @@ def _write_deletion_intent(
         else _deletion_confirmation_path(phase_id, record)
     )
     try:
-        shadeform.durable_create_new(path, data)
+        shadeform.private_durable_create_new(
+            path, data, label="deletion intent" if status == "dispatched" else "deletion confirmation",
+        )
     except FileExistsError:
         existing = shadeform.strict_json_object(
-            shadeform.bounded_stable_bytes(path, MAX_LOCAL_SALVAGE_BYTES, label="existing deletion evidence"),
+            shadeform.private_bounded_stable_bytes(
+                path, MAX_LOCAL_SALVAGE_BYTES,
+                label="existing deletion evidence",
+            ),
             label="existing deletion evidence",
         )
         if existing != payload:
@@ -546,7 +553,9 @@ def _load_deletion_intent(phase_id: str, record: shadeform.OwnedResource) -> dic
     path = _deletion_intent_path(phase_id, record)
     try:
         payload = shadeform.strict_json_object(
-            shadeform.bounded_stable_bytes(path, MAX_LOCAL_SALVAGE_BYTES, label="deletion intent"),
+            shadeform.private_bounded_stable_bytes(
+                path, MAX_LOCAL_SALVAGE_BYTES, label="deletion intent",
+            ),
             label="deletion intent",
         )
         dispatched = _deletion_intent_payload(
@@ -566,7 +575,7 @@ def _load_deletion_intent(phase_id: str, record: shadeform.OwnedResource) -> dic
     confirmation_path = _deletion_confirmation_path(phase_id, record)
     try:
         confirmation_payload = shadeform.strict_json_object(
-            shadeform.bounded_stable_bytes(
+            shadeform.private_bounded_stable_bytes(
                 confirmation_path, MAX_LOCAL_SALVAGE_BYTES,
                 label="deletion confirmation",
             ),
@@ -621,25 +630,19 @@ def _same_owner(left: shadeform.OwnedResource, right: shadeform.OwnedResource) -
 def _owned_state(phase_id: str, exact: str) -> tuple[shadeform.OwnedResource | None, bool]:
     """Return one exact normal/recovery record, refusing split ownership."""
 
-    normal = shadeform.read_owned_resource(phase_id)
-    recovery = shadeform.read_recovery_owned_resource(phase_id)
-    if normal is not None and recovery is not None and not _same_owner(normal, recovery):
-        raise RuntimeError("normal and recovery ownership records conflict; manual recovery is required")
-    record = normal or recovery
+    record, had_normal = shadeform.read_phase_ownership(phase_id)
     if record is not None and record.instance_id != exact:
         raise RuntimeError("refusing teardown: requested ID is not the exact phase-owned resource")
-    return record, normal is not None
+    return record, had_normal
 
 
 def _persist_recovery_owner(record: shadeform.OwnedResource) -> shadeform.OwnedResource:
     """Publish an alternate caller's full owner proof before any DELETE."""
 
-    normal = shadeform.read_owned_resource(record.phase_id)
-    recovery = shadeform.read_recovery_owned_resource(record.phase_id)
-    for existing in (normal, recovery):
-        if existing is not None and not _same_owner(existing, record):
-            raise RuntimeError("refusing recovery teardown for a differently owned phase")
-    if normal is None and recovery is None:
+    existing, _ = shadeform.read_phase_ownership(record.phase_id)
+    if existing is not None and not _same_owner(existing, record):
+        raise RuntimeError("refusing recovery teardown for a differently owned phase")
+    if existing is None:
         shadeform.write_recovery_owned_resource(record)
     persisted, _ = _owned_state(record.phase_id, record.instance_id)
     if persisted is None or not _same_owner(persisted, record):

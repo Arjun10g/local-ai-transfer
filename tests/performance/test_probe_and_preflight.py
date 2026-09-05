@@ -258,7 +258,7 @@ class RemoteExternalToolsGateTests(unittest.TestCase):
     def test_shared_legacy_deletion_preflight_is_read_only_and_clean_phase_passes(self):
         from scripts import shadeform_lifecycle as sf
         root = self.lifecycle_paths.runtime_root
-        root.mkdir(parents=True)
+        root.mkdir(parents=True, exist_ok=True)
         sf.preflight_legacy_deletion_evidence("clean-phase")
         (root / "legacy-phase.deletion-receipt.json").write_bytes(b"phase-only")
         with self.assertRaisesRegex(sf.ShadeformError, "legacy deletion evidence"):
@@ -270,7 +270,7 @@ class RemoteExternalToolsGateTests(unittest.TestCase):
     def test_j1m_legacy_evidence_blocks_before_any_provider_mutation(self):
         module = load_module(ROOT / "scripts/j1m_orchestrator.py", "j1m_legacy_evidence_gate")
         root = self.lifecycle_paths.runtime_root
-        root.mkdir(parents=True)
+        root.mkdir(parents=True, exist_ok=True)
         (root / "legacy-phase.deletion-intent.json").write_bytes(b"phase-only")
         with mock.patch.object(module.j1m_runner, "load_config") as load_config, \
              mock.patch.object(module.sf, "load_env") as load_env, \
@@ -288,7 +288,7 @@ class RemoteExternalToolsGateTests(unittest.TestCase):
     def test_remote_external_tools_legacy_evidence_blocks_before_any_provider_mutation(self):
         module = load_module(ROOT / "scripts/shadeform/remote_external_tools.py", "remote_external_tools_legacy_evidence_gate")
         root = self.lifecycle_paths.runtime_root
-        root.mkdir(parents=True)
+        root.mkdir(parents=True, exist_ok=True)
         (root / "legacy-phase.deletion-confirmation.json").write_bytes(b"phase-only")
         args = types.SimpleNamespace(phase_id="legacy-phase", env_file=root / "missing.env")
         with mock.patch.object(module, "REMOTE_EXECUTION_ENABLED", True), \

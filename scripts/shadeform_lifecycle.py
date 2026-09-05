@@ -303,23 +303,67 @@ def process_start_marker(pid: int | None) -> str | None:
 
 @contextmanager
 def phase_cleanup_lock(phase_id: str):
-    """Serialize launcher/watchdog teardown for one phase without account scope."""
+    """Serialize teardown through one private, identity-bound lock handle."""
 
     path = RUNTIME_ROOT / f"{validate_phase_id(phase_id)}.cleanup.lock"
     _ensure_durable_directory(path.parent)
-    with path.open("a+b") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    parent_descriptor = _open_private_canonical_parent(
+        path, label="phase cleanup lock",
+    )
+    descriptor = -1
+    created = False
+    try:
+        try:
+            descriptor = os.open(
+                path.name,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=parent_descriptor,
+            )
+            created = True
+        except FileExistsError:
+            descriptor = os.open(
+                path.name,
+                os.O_RDWR | os.O_NOFOLLOW,
+                dir_fd=parent_descriptor,
+            )
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        if created:
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+            os.fsync(parent_descriptor)
+        _require_private_file_identity(
+            descriptor, parent_descriptor=parent_descriptor, path=path,
+            label="phase cleanup lock", maximum_size=0,
+        )
         try:
             yield
         finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            # A path replacement while the critical section runs is not a
+            # successful lock acquisition.  The descriptor remains locked
+            # until after this final identity check.
+            _require_private_file_identity(
+                descriptor, parent_descriptor=parent_descriptor, path=path,
+                label="phase cleanup lock", maximum_size=0,
+            )
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    except OSError as exc:
+        raise ShadeformError("phase cleanup lock is unavailable or unsafe") from exc
+    finally:
+        if descriptor >= 0:
+            with contextlib.suppress(OSError):
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+        os.close(parent_descriptor)
 
 
 def read_owned_resource(phase_id: str) -> OwnedResource | None:
     path = runtime_ledger_path(phase_id)
     try:
         payload = strict_json_object(
-            bounded_stable_bytes(path, 65_536, label="phase ownership ledger"),
+            private_bounded_stable_bytes(
+                path, 65_536, label="phase ownership ledger",
+            ),
             label="phase ownership ledger",
         )
         if set(payload) != set(OwnedResource.__dataclass_fields__):
@@ -600,13 +644,177 @@ def durable_unlink(path: Path) -> None:
     _fsync_directory(path.parent)
 
 
+def private_durable_atomic_write(
+    path: Path, payload: bytes, *, label: str,
+) -> None:
+    """Replace authoritative runtime data through one private parent handle."""
+
+    if not isinstance(payload, bytes):
+        raise TypeError("private durable atomic payload must be bytes")
+    _ensure_durable_directory(path.parent)
+    parent_descriptor = _open_private_canonical_parent(path, label=label)
+    descriptor = -1
+    verification_descriptor = -1
+    temporary_name = f".{path.name}.{secrets.token_hex(16)}.tmp"
+    published = False
+    try:
+        fcntl.flock(parent_descriptor, fcntl.LOCK_EX)
+        # Never replace an unsafe pre-existing path.  A normal update may
+        # replace only another exact private regular file in this directory.
+        try:
+            existing_descriptor = os.open(
+                path.name, os.O_RDONLY | os.O_NOFOLLOW,
+                dir_fd=parent_descriptor,
+            )
+        except FileNotFoundError:
+            existing_descriptor = -1
+        except OSError as exc:
+            raise ShadeformError(f"{label} existing path is unsafe") from exc
+        if existing_descriptor >= 0:
+            try:
+                _require_private_file_identity(
+                    existing_descriptor, parent_descriptor=parent_descriptor,
+                    path=path, label=label,
+                )
+            finally:
+                os.close(existing_descriptor)
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=parent_descriptor,
+        )
+        os.fchmod(descriptor, 0o600)
+        written = 0
+        while written < len(payload):
+            count = os.write(descriptor, payload[written:])
+            if count <= 0:
+                raise OSError("private durable atomic write made no progress")
+            written += count
+        os.fsync(descriptor)
+        temporary_stat = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(temporary_stat.st_mode)
+            or temporary_stat.st_nlink != 1
+            or temporary_stat.st_uid != os.getuid()
+            or stat.S_IMODE(temporary_stat.st_mode) != 0o600
+            or temporary_stat.st_size != len(payload)
+        ):
+            raise ShadeformError(f"{label} temporary output is unsafe")
+        os.close(descriptor)
+        descriptor = -1
+        os.replace(
+            temporary_name, path.name,
+            src_dir_fd=parent_descriptor, dst_dir_fd=parent_descriptor,
+        )
+        published = True
+        os.fsync(parent_descriptor)
+        verification_descriptor = os.open(
+            path.name, os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=parent_descriptor,
+        )
+        if _read_private_file_at(
+            verification_descriptor, parent_descriptor=parent_descriptor,
+            path=path, limit=max(1, len(payload)), label=label,
+        ) != payload:
+            raise ShadeformError(f"{label} verification mismatch")
+    finally:
+        if verification_descriptor >= 0:
+            os.close(verification_descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
+        if not published:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary_name, dir_fd=parent_descriptor)
+                os.fsync(parent_descriptor)
+        with contextlib.suppress(OSError):
+            fcntl.flock(parent_descriptor, fcntl.LOCK_UN)
+        os.close(parent_descriptor)
+
+
+def private_durable_create_new(
+    path: Path, payload: bytes, *, label: str,
+) -> None:
+    """Create immutable authoritative runtime data through a private dirfd."""
+
+    if not isinstance(payload, bytes):
+        raise TypeError("private durable create payload must be bytes")
+    _ensure_durable_directory(path.parent)
+    parent_descriptor = _open_private_canonical_parent(path, label=label)
+    descriptor = -1
+    try:
+        fcntl.flock(parent_descriptor, fcntl.LOCK_EX)
+        descriptor = os.open(
+            path.name,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=parent_descriptor,
+        )
+        os.fchmod(descriptor, 0o600)
+        written = 0
+        while written < len(payload):
+            count = os.write(descriptor, payload[written:])
+            if count <= 0:
+                raise OSError("private durable create made no progress")
+            written += count
+        os.fsync(descriptor)
+        os.fsync(parent_descriptor)
+        if _read_private_file_at(
+            descriptor, parent_descriptor=parent_descriptor, path=path,
+            limit=max(1, len(payload)), label=label,
+        ) != payload:
+            raise ShadeformError(f"{label} verification mismatch")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        with contextlib.suppress(OSError):
+            fcntl.flock(parent_descriptor, fcntl.LOCK_UN)
+        os.close(parent_descriptor)
+
+
+def private_durable_unlink(path: Path, *, label: str) -> None:
+    """Unlink exactly the private authoritative file opened under its dirfd."""
+
+    parent_descriptor = _open_private_canonical_parent(path, label=label)
+    descriptor = -1
+    try:
+        fcntl.flock(parent_descriptor, fcntl.LOCK_EX)
+        descriptor = os.open(
+            path.name, os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=parent_descriptor,
+        )
+        opened = _require_private_file_identity(
+            descriptor, parent_descriptor=parent_descriptor, path=path,
+            label=label,
+        )
+        current = os.stat(
+            path.name, dir_fd=parent_descriptor, follow_symlinks=False,
+        )
+        if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            raise ShadeformError(f"{label} changed before unlink")
+        os.unlink(path.name, dir_fd=parent_descriptor)
+        os.fsync(parent_descriptor)
+        try:
+            os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise ShadeformError(f"{label} remained after unlink")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        with contextlib.suppress(OSError):
+            fcntl.flock(parent_descriptor, fcntl.LOCK_UN)
+        os.close(parent_descriptor)
+
+
 def write_owned_resource(record: OwnedResource) -> None:
     _validate_owned_resource(record)
     path = runtime_ledger_path(record.phase_id)
     payload = (json.dumps(asdict(record), indent=2, sort_keys=True) + "\n").encode("utf-8")
     if len(payload) > 65_536:
         raise ShadeformError("phase ownership ledger exceeds its byte bound")
-    _durable_atomic_write(path, payload)
+    private_durable_atomic_write(path, payload, label="phase ownership ledger")
     update_markdown_ledger(record)
 
 
@@ -617,7 +825,7 @@ def clear_owned_resource(phase_id: str, instance_id: str) -> None:
     if current.instance_id != validate_resource_id(instance_id):
         raise ShadeformError("refusing to clear a ledger for a different instance")
     path = runtime_ledger_path(phase_id)
-    durable_unlink(path)
+    private_durable_unlink(path, label="phase ownership ledger")
 
 
 RECOVERY_OWNED_SCHEMA = "local_bmo.shadeform.recovery-owned-resource.v1"
@@ -651,7 +859,9 @@ def write_recovery_owned_resource(record: OwnedResource) -> None:
             raise ShadeformError("refusing to replace a different recovery ownership record")
         return
     try:
-        durable_create_new(path, data)
+        private_durable_create_new(
+            path, data, label="recovery ownership record",
+        )
     except FileExistsError:
         existing = read_recovery_owned_resource(record.phase_id)
         if existing is None or asdict(existing) != asdict(record):
@@ -661,7 +871,9 @@ def write_recovery_owned_resource(record: OwnedResource) -> None:
 def read_recovery_owned_resource(phase_id: str) -> OwnedResource | None:
     path = recovery_owned_resource_path(phase_id)
     try:
-        data = bounded_stable_bytes(path, 65_536, label="recovery ownership record")
+        data = private_bounded_stable_bytes(
+            path, 65_536, label="recovery ownership record",
+        )
     except FileNotFoundError:
         return None
     payload = strict_json_object(
@@ -683,6 +895,38 @@ def read_recovery_owned_resource(phase_id: str) -> OwnedResource | None:
     return record
 
 
+def read_phase_ownership(
+    phase_id: str,
+) -> tuple[OwnedResource | None, bool]:
+    """Load one authoritative normal/recovery owner, rejecting conflicts."""
+
+    phase = validate_phase_id(phase_id)
+    normal = read_owned_resource(phase)
+    recovery = read_recovery_owned_resource(phase)
+    def immutable_owner(record: OwnedResource) -> tuple[Any, ...]:
+        fingerprint = record.ssh_public_key_fingerprint
+        if fingerprint is None and record.ssh_public_key is not None:
+            fingerprint = ssh_public_key_fingerprint(record.ssh_public_key)
+        return (
+            record.phase_id, record.instance_id, record.instance_name,
+            record.ownership_nonce, record.ssh_key_id, record.ssh_key_name,
+            fingerprint, record.gpu, record.cloud, record.region,
+            record.instance_type, record.gpu_count, record.vram_gb,
+            record.os_image, record.hourly_usd, record.created_at_utc,
+            record.provider_delete_deadline_utc,
+        )
+
+    if (
+        normal is not None
+        and recovery is not None
+        and immutable_owner(normal) != immutable_owner(recovery)
+    ):
+        raise ShadeformError(
+            "normal and recovery ownership records conflict; manual recovery is required"
+        )
+    return normal or recovery, normal is not None
+
+
 def clear_recovery_owned_resource(phase_id: str, instance_id: str) -> None:
     current = read_recovery_owned_resource(phase_id)
     if current is None:
@@ -690,7 +934,7 @@ def clear_recovery_owned_resource(phase_id: str, instance_id: str) -> None:
     if current.instance_id != validate_resource_id(instance_id):
         raise ShadeformError("refusing to clear a different recovery ownership record")
     path = recovery_owned_resource_path(phase_id)
-    durable_unlink(path)
+    private_durable_unlink(path, label="recovery ownership record")
 
 
 def _ledger_row(record: OwnedResource) -> str:
@@ -783,26 +1027,28 @@ def _canonical_cost_genesis(event: dict[str, Any]) -> dict[str, Any]:
     return canonical
 
 
-def _open_private_canonical_parent(path: Path) -> int:
+def _open_private_canonical_parent(
+    path: Path, *, label: str = "cost ledger",
+) -> int:
     """Open and identity-bind an existing private canonical parent directory."""
 
     if os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
-        raise ShadeformError("cost ledger requires POSIX no-follow directory handles")
+        raise ShadeformError(f"{label} requires POSIX no-follow directory handles")
     if not OPEN_SUPPORTS_DIR_FD or not STAT_SUPPORTS_DIR_FD:
-        raise ShadeformError("cost ledger requires handle-relative filesystem operations")
+        raise ShadeformError(f"{label} requires handle-relative filesystem operations")
     requested = Path(path)
     if not requested.is_absolute() or Path(os.path.abspath(requested)) != requested:
-        raise ShadeformError("cost ledger path must be absolute and normalized")
+        raise ShadeformError(f"{label} path must be absolute and normalized")
     parent = requested.parent
     try:
         if parent.resolve(strict=True) != parent:
-            raise ShadeformError("cost ledger parent must have no symlink ancestors")
+            raise ShadeformError(f"{label} parent must have no symlink ancestors")
     except OSError as exc:
-        raise ShadeformError("cost ledger parent is unavailable") from exc
+        raise ShadeformError(f"{label} parent is unavailable") from exc
     try:
         descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError as exc:
-        raise ShadeformError("cost ledger parent no-follow open failed") from exc
+        raise ShadeformError(f"{label} parent no-follow open failed") from exc
     try:
         opened = os.fstat(descriptor)
         current = os.stat(parent, follow_symlinks=False)
@@ -811,15 +1057,140 @@ def _open_private_canonical_parent(path: Path) -> int:
             or not stat.S_ISDIR(current.st_mode)
             or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
             or opened.st_uid != os.getuid()
+            or current.st_uid != os.getuid()
             or stat.S_IMODE(opened.st_mode) & 0o077
+            or stat.S_IMODE(current.st_mode) & 0o077
         ):
             raise ShadeformError(
-                "cost ledger parent must be identity-stable and owner-private"
+                f"{label} parent must be identity-stable and owner-private"
             )
         return descriptor
     except BaseException:
         os.close(descriptor)
         raise
+
+
+def _require_private_file_identity(
+    descriptor: int,
+    *,
+    parent_descriptor: int,
+    path: Path,
+    label: str,
+    maximum_size: int | None = None,
+) -> os.stat_result:
+    """Require one mode-0600 current-user file at an identity-stable path."""
+
+    try:
+        opened = os.fstat(descriptor)
+        relative = os.stat(
+            path.name, dir_fd=parent_descriptor, follow_symlinks=False,
+        )
+        current = os.stat(path, follow_symlinks=False)
+        parent_opened = os.fstat(parent_descriptor)
+        parent_current = os.stat(path.parent, follow_symlinks=False)
+    except OSError as exc:
+        raise ShadeformError(f"{label} path identity is unavailable") from exc
+    opened_identity = (opened.st_dev, opened.st_ino, opened.st_size)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or not stat.S_ISREG(relative.st_mode)
+        or not stat.S_ISREG(current.st_mode)
+        or opened.st_nlink != 1
+        or relative.st_nlink != 1
+        or current.st_nlink != 1
+        or opened.st_uid != os.getuid()
+        or relative.st_uid != os.getuid()
+        or current.st_uid != os.getuid()
+        or stat.S_IMODE(opened.st_mode) != 0o600
+        or stat.S_IMODE(relative.st_mode) != 0o600
+        or stat.S_IMODE(current.st_mode) != 0o600
+        or opened_identity != (relative.st_dev, relative.st_ino, relative.st_size)
+        or opened_identity != (current.st_dev, current.st_ino, current.st_size)
+        or not stat.S_ISDIR(parent_opened.st_mode)
+        or not stat.S_ISDIR(parent_current.st_mode)
+        or (parent_opened.st_dev, parent_opened.st_ino)
+        != (parent_current.st_dev, parent_current.st_ino)
+        or parent_opened.st_uid != os.getuid()
+        or parent_current.st_uid != os.getuid()
+        or stat.S_IMODE(parent_opened.st_mode) & 0o077
+        or stat.S_IMODE(parent_current.st_mode) & 0o077
+        or (maximum_size is not None and opened.st_size > maximum_size)
+    ):
+        raise ShadeformError(
+            f"{label} must be identity-stable owner-private single-link regular data"
+        )
+    return opened
+
+
+def _read_private_file_at(
+    descriptor: int,
+    *,
+    parent_descriptor: int,
+    path: Path,
+    limit: int,
+    label: str,
+) -> bytes:
+    """Read one already-open private file and revalidate its exact path."""
+
+    before = _require_private_file_identity(
+        descriptor, parent_descriptor=parent_descriptor, path=path,
+        label=label, maximum_size=limit,
+    )
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    total = 0
+    while total <= limit:
+        chunk = os.read(descriptor, min(65_536, limit + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > limit:
+            raise ShadeformError(f"{label} exceeds its byte bound")
+    after = _require_private_file_identity(
+        descriptor, parent_descriptor=parent_descriptor, path=path,
+        label=label, maximum_size=limit,
+    )
+    if (
+        (before.st_dev, before.st_ino, before.st_size)
+        != (after.st_dev, after.st_ino, after.st_size)
+        or total != after.st_size
+    ):
+        raise ShadeformError(f"{label} changed during bounded read")
+    return b"".join(chunks)
+
+
+def private_bounded_stable_bytes(path: Path, limit: int, *, label: str) -> bytes:
+    """Read authoritative runtime evidence through private dir/file handles."""
+
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        raise ValueError("bounded read limit must be positive")
+    parent_descriptor = _open_private_canonical_parent(path, label=label)
+    descriptor = -1
+    try:
+        fcntl.flock(parent_descriptor, fcntl.LOCK_SH)
+        try:
+            descriptor = os.open(
+                path.name, os.O_RDONLY | os.O_NOFOLLOW,
+                dir_fd=parent_descriptor,
+            )
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise ShadeformError(f"{label} no-follow open failed") from exc
+        fcntl.flock(descriptor, fcntl.LOCK_SH)
+        return _read_private_file_at(
+            descriptor, parent_descriptor=parent_descriptor, path=path,
+            limit=limit, label=label,
+        )
+    finally:
+        if descriptor >= 0:
+            with contextlib.suppress(OSError):
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+        with contextlib.suppress(OSError):
+            fcntl.flock(parent_descriptor, fcntl.LOCK_UN)
+        os.close(parent_descriptor)
 
 
 def _initialize_cost_ledger_genesis(
@@ -2702,13 +3073,8 @@ def _ssh_key_delete_owner(
             or record.ssh_key_name != expected_name
         ):
             raise ShadeformError("owned record does not match the SSH key delete owner")
-        durable_records = tuple(
-            item for item in (
-                read_owned_resource(phase), read_recovery_owned_resource(phase),
-            )
-            if item is not None
-        )
-        if not any(asdict(item) == asdict(record) for item in durable_records):
+        durable_record, _ = read_phase_ownership(phase)
+        if durable_record is None or asdict(durable_record) != asdict(record):
             raise ShadeformError("SSH key delete owner is not durably recorded")
 
     # The enriched pre-create reservation is the common durable authority for
@@ -2821,7 +3187,7 @@ def _read_ssh_key_delete_evidence(
 ) -> dict[str, Any] | None:
     path = _ssh_key_delete_evidence_path(owner, kind)
     try:
-        data = bounded_stable_bytes(
+        data = private_bounded_stable_bytes(
             path, MAX_SSH_KEY_DELETE_EVIDENCE_BYTES,
             label=f"SSH key deletion {kind}",
         )
@@ -2837,7 +3203,10 @@ def _create_ssh_key_delete_evidence(
     canonical = _canonical_ssh_key_delete_evidence(payload, owner=owner, kind=kind)
     data = (json.dumps(canonical, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
     try:
-        durable_create_new(_ssh_key_delete_evidence_path(owner, kind), data)
+        private_durable_create_new(
+            _ssh_key_delete_evidence_path(owner, kind), data,
+            label=f"SSH key deletion {kind}",
+        )
         return canonical, True
     except FileExistsError:
         existing = _read_ssh_key_delete_evidence(owner, kind)

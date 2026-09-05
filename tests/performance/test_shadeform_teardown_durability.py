@@ -92,6 +92,46 @@ class ShadeformTeardownDurabilityTests(unittest.TestCase):
         shared = (sf.ROOT / "scripts" / "shadeform_teardown.py").read_text(encoding="utf-8")
         self.assertEqual(shared.count("shadeform._delete_instance("), 2)
 
+    def test_authoritative_owner_files_require_private_parent_and_mode(self) -> None:
+        record = self.record(phase="private-owner-evidence")
+        sf.write_owned_resource(record)
+        owner_path = sf.runtime_ledger_path(record.phase_id)
+        owner_path.chmod(0o666)
+        with self.assertRaisesRegex(sf.ShadeformError, "owner-private"):
+            sf.read_owned_resource(record.phase_id)
+        owner_path.chmod(0o600)
+        self.root.joinpath("runtime").chmod(0o777)
+        with self.assertRaisesRegex(sf.ShadeformError, "owner-private"):
+            sf.read_owned_resource(record.phase_id)
+        self.root.joinpath("runtime").chmod(0o700)
+
+        recovery = self.record(
+            phase="private-recovery-evidence",
+            instance="instance-private-recovery",
+        )
+        sf.write_recovery_owned_resource(recovery)
+        recovery_path = sf.recovery_owned_resource_path(recovery.phase_id)
+        recovery_path.chmod(0o666)
+        with self.assertRaisesRegex(sf.ShadeformError, "owner-private"):
+            sf.read_recovery_owned_resource(recovery.phase_id)
+
+    def test_phase_cleanup_lock_rejects_symlink_and_unsafe_existing_file(self) -> None:
+        phase = "private-cleanup-lock"
+        path = sf.RUNTIME_ROOT / f"{phase}.cleanup.lock"
+        target = self.root / "outside-lock"
+        target.write_bytes(b"")
+        target.chmod(0o600)
+        path.symlink_to(target)
+        with self.assertRaises(sf.ShadeformError):
+            with sf.phase_cleanup_lock(phase):
+                self.fail("symlink lock must never be acquired")
+        path.unlink()
+        path.write_bytes(b"")
+        path.chmod(0o666)
+        with self.assertRaisesRegex(sf.ShadeformError, "owner-private"):
+            with sf.phase_cleanup_lock(phase):
+                self.fail("public lock must never be acquired")
+
     def test_dispatched_deleted_status_is_reconciled_without_second_delete_and_caps_cost(self) -> None:
         record = self.record()
         record.created_at_utc = "2026-01-01T00:00:00+00:00"
@@ -334,8 +374,9 @@ class ShadeformTeardownDurabilityTests(unittest.TestCase):
                     return {}
 
                 def delete_key(*_args, **_kwargs):
+                    order.append("key-verify")
                     order.append("key-delete")
-                    return {"success": True}
+                    return {"status": "confirmed"}
 
                 real_receipt_writer = teardown._write_deletion_receipt
 
@@ -457,7 +498,10 @@ class ShadeformTeardownDurabilityTests(unittest.TestCase):
         self.assertEqual(receipt["status"], "complete")
         self.assertEqual(sf.ledger_spend(), (3.0, []))
         rows = [json.loads(line) for line in sf.COST_LEDGER.read_text().splitlines()]
-        instance_rows = [row for row in rows if row["instance_id"] == record.instance_id]
+        instance_rows = [
+            row for row in rows
+            if row.get("instance_id") == record.instance_id
+        ]
         self.assertEqual([row["status"] for row in instance_rows], ["pending", "settled"])
         self.assertEqual(
             {row["owner_binding_sha256"] for row in instance_rows},
@@ -539,12 +583,56 @@ class ShadeformTeardownDurabilityTests(unittest.TestCase):
         )
 
         def complete(record: sf.OwnedResource) -> dict[str, object]:
+            self.assertIsNotNone(record.ssh_public_key)
+            public_key = str(record.ssh_public_key)
+            fingerprint = sf.ssh_public_key_fingerprint(public_key)
+            candidate = sf.Candidate(
+                record.gpu, record.cloud, record.region,
+                str(record.instance_type), record.hourly_usd,
+                int(record.vram_gb or 0), str(record.os_image), False,
+            )
+            for key_id in (None, record.ssh_key_id):
+                sf.reserve_create_attempt(
+                    phase, record.ownership_nonce, candidate,
+                    backstop_hours=3.0,
+                    public_key_sha256=hashlib.sha256(
+                        public_key.encode("utf-8")
+                    ).hexdigest(),
+                    expected_budget_cap_usd=50.0,
+                    public_key_fingerprint=fingerprint,
+                    ssh_key_id=key_id,
+                )
             sf.write_owned_resource(record)
+            delete_dispatched = False
+
+            def key_provider(_api, method, _path, **_kwargs):
+                nonlocal delete_dispatched
+                if method == "POST":
+                    delete_dispatched = True
+                    return {}
+                if delete_dispatched:
+                    raise sf.ShadeformHTTPError(404, "exact key absent")
+                return {
+                    "id": record.ssh_key_id,
+                    "name": record.ssh_key_name,
+                    "public_key": public_key,
+                    "status": "active",
+                }
+
+            with mock.patch.object(sf, "request", side_effect=key_provider):
+                key_result = sf.delete_owned_ssh_key_exact(
+                    "fixture-only", phase, record.ssh_key_id,
+                    ownership_nonce=record.ownership_nonce,
+                    expected_name=record.ssh_key_name,
+                    expected_public_key=public_key,
+                    expected_fingerprint=fingerprint,
+                    record=record,
+                )
+            self.assertEqual(key_result["status"], "confirmed")
             with mock.patch.object(sf, "verify_owned_instance_before_delete", return_value={}), \
                     mock.patch.object(sf, "_delete_instance", return_value={"success": True}), \
                     mock.patch.object(sf, "append_cost_event"), \
-                    mock.patch.object(sf, "verify_owned_ssh_key_before_delete", return_value={}), \
-                    mock.patch.object(sf, "delete_owned_ssh_key_exact", return_value={"status": "confirmed"}):
+                    mock.patch.object(sf, "verify_owned_ssh_key_before_delete", return_value={}):
                 return teardown.teardown_exact(phase, record.instance_id, env_file=self.env_file)
 
         first_receipt = complete(first)

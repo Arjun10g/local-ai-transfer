@@ -1291,9 +1291,13 @@ class StaticSafetyTests(unittest.TestCase):
         nonce = "0123456789abcdef0123456789abcdef"
         now = time.time()
         intent = {
+            "schema": sf.COST_EVENT_SCHEMA,
             "phase_id": phase, "ownership_nonce": nonce,
             "instance_id": "attempt-" + nonce, "instance_create_intent": True,
             "intent_schema": sf.INSTANCE_CREATE_INTENT_SCHEMA,
+            "owner_binding_sha256": sf.cost_owner_binding_sha256(
+                phase, nonce, "attempt-" + nonce,
+            ),
             "status": "pending", "estimated_cost_usd": 1.35,
             "reservation": "instance-create-intent", "instance_name": "ep-name",
             "ssh_key_id": "key-123456",
@@ -1307,6 +1311,7 @@ class StaticSafetyTests(unittest.TestCase):
         order = []
         with mock.patch.object(watchdog, "identity_alive", return_value=False), \
                 mock.patch.object(watchdog, "_pending_intent", return_value=intent), \
+                mock.patch.object(sf, "read_phase_ownership", return_value=(None, False)), \
                 mock.patch.object(sf, "load_env", return_value={"SHADEFORM_API_KEY": "api"}), \
                 mock.patch.object(sf, "require_env", return_value="api"), \
                 mock.patch.object(sf, "reconcile_instance_by_nonce", return_value="instance-reconciled"), \
@@ -1344,9 +1349,13 @@ class StaticSafetyTests(unittest.TestCase):
         nonce = "fedcba9876543210fedcba9876543210"
         now = time.time()
         intent = {
+            "schema": sf.COST_EVENT_SCHEMA,
             "phase_id": phase, "ownership_nonce": nonce,
             "instance_id": "attempt-" + nonce, "instance_create_intent": True,
             "intent_schema": sf.INSTANCE_CREATE_INTENT_SCHEMA,
+            "owner_binding_sha256": sf.cost_owner_binding_sha256(
+                phase, nonce, "attempt-" + nonce,
+            ),
             "status": "pending", "estimated_cost_usd": 1.35,
             "reservation": "instance-create-intent", "instance_name": "ep-name",
             "ssh_key_id": "key-123456",
@@ -1364,6 +1373,7 @@ class StaticSafetyTests(unittest.TestCase):
                 raise RuntimeError("ledger unavailable")
         with mock.patch.object(watchdog, "identity_alive", return_value=False), \
                 mock.patch.object(watchdog, "_pending_intent", return_value=intent), \
+                mock.patch.object(sf, "read_phase_ownership", return_value=(None, False)), \
                 mock.patch.object(sf, "load_env", return_value={"SHADEFORM_API_KEY": "api"}), \
                 mock.patch.object(sf, "require_env", return_value="api"), \
                 mock.patch.object(sf, "reconcile_instance_by_nonce", return_value="instance-cost-failure"), \
@@ -1400,9 +1410,13 @@ class StaticSafetyTests(unittest.TestCase):
         nonce = "00112233445566778899aabbccddeeff"
         now = time.time()
         intent = {
+            "schema": sf.COST_EVENT_SCHEMA,
             "phase_id": phase, "ownership_nonce": nonce,
             "instance_id": "attempt-" + nonce, "instance_create_intent": True,
             "intent_schema": sf.INSTANCE_CREATE_INTENT_SCHEMA,
+            "owner_binding_sha256": sf.cost_owner_binding_sha256(
+                phase, nonce, "attempt-" + nonce,
+            ),
             "status": "pending", "estimated_cost_usd": 1.35,
             "reservation": "instance-create-intent", "instance_name": "ep-name",
             "ssh_key_id": "key-123456",
@@ -1418,6 +1432,7 @@ class StaticSafetyTests(unittest.TestCase):
                 raise OSError("attempt ledger unavailable")
         with mock.patch.object(watchdog, "identity_alive", return_value=False), \
                 mock.patch.object(watchdog, "_pending_intent", return_value=intent), \
+                mock.patch.object(sf, "read_phase_ownership", return_value=(None, False)), \
                 mock.patch.object(sf, "load_env", return_value={"SHADEFORM_API_KEY": "api"}), \
                 mock.patch.object(sf, "require_env", return_value="api"), \
                 mock.patch.object(sf, "reconcile_instance_by_nonce", return_value="instance-attempt-failure"), \
@@ -1464,6 +1479,7 @@ class StaticSafetyTests(unittest.TestCase):
         order = []
         with mock.patch.object(watchdog, "identity_alive", return_value=False), \
                 mock.patch.object(watchdog, "_pending_intent", return_value=intent), \
+                mock.patch.object(sf, "read_phase_ownership", return_value=(None, False)), \
                 mock.patch.object(sf, "load_env", return_value={"SHADEFORM_API_KEY": "api"}), \
                 mock.patch.object(sf, "require_env", return_value="api"), \
                 mock.patch.object(sf, "reconcile_ssh_key", return_value="key-key-only"), \
@@ -1579,6 +1595,7 @@ class StaticSafetyTests(unittest.TestCase):
         attempt_id = "attempt-" + nonce
         write_owned_resource = orchestrator.sf.write_owned_resource
         owned_write_calls = 0
+        key_confirmed = False
 
         def fail_initial_owned_write(record):
             nonlocal owned_write_calls
@@ -1593,6 +1610,7 @@ class StaticSafetyTests(unittest.TestCase):
             return provider_info
 
         def delete_key(*_args, **_kwargs):
+            nonlocal key_confirmed
             instance_state = sf.exact_owner_cost_state(
                 "unrecorded-fallback", nonce, "instance-123456",
             )
@@ -1602,8 +1620,10 @@ class StaticSafetyTests(unittest.TestCase):
             self.assertEqual(instance_state["status"], "settled")
             self.assertEqual(attempt_state["status"], "settled")
             self.assertIsNotNone(sf.read_owned_resource("unrecorded-fallback"))
-            order.append("key-delete")
-            return {"success": True}
+            if not key_confirmed:
+                order.append("key-delete")
+                key_confirmed = True
+            return {"status": "confirmed"}
 
         with tempfile.TemporaryDirectory() as directory:
             identity = Path(directory) / "id_ed25519"
@@ -1651,7 +1671,7 @@ class StaticSafetyTests(unittest.TestCase):
                 events = sf._cost_ledger_events(data)
                 instance = [
                     event for event in events
-                    if event["instance_id"] == "instance-123456"
+                    if event.get("instance_id") == "instance-123456"
                 ]
                 self.assertEqual(
                     [event["status"] for event in instance],
@@ -1660,7 +1680,7 @@ class StaticSafetyTests(unittest.TestCase):
                 self.assertEqual(instance[0]["estimated_cost_usd"], 0.421875)
                 attempt = [
                     event for event in events
-                    if event["instance_id"] == attempt_id
+                    if event.get("instance_id") == attempt_id
                 ]
                 self.assertEqual(attempt[-1]["status"], "settled")
                 self.assertEqual(sf.ledger_spend()[1], [])
@@ -1691,6 +1711,7 @@ class StaticSafetyTests(unittest.TestCase):
         nonce = "b" * 32
         attempt_id = "attempt-" + nonce
         write_owned_resource = orchestrator.sf.write_owned_resource
+        append_cost_event = orchestrator.sf.append_cost_event
         owned_write_calls = 0
 
         def fail_initial_owned_write(record):
@@ -1702,8 +1723,12 @@ class StaticSafetyTests(unittest.TestCase):
 
         def append_cost(event):
             events.append(event)
-            if event["instance_id"] == attempt_id:
+            if (
+                event["instance_id"] == attempt_id
+                and event.get("status") == "settled"
+            ):
                 raise OSError("attempt settlement unavailable")
+            return append_cost_event(event)
         with tempfile.TemporaryDirectory() as directory:
             identity = Path(directory) / "id_ed25519"
             identity.write_text("private", encoding="utf-8")
@@ -1715,14 +1740,17 @@ class StaticSafetyTests(unittest.TestCase):
                     mock.patch.object(orchestrator.sf, "list_candidates", return_value=[candidate]),
                     mock.patch.object(orchestrator.sf, "create_ephemeral_ssh_key", return_value=(identity, "ssh-ed25519 AAAA")),
                     mock.patch.object(orchestrator.sf, "new_ownership_nonce", return_value=nonce),
-                    mock.patch.object(orchestrator.sf, "reserve_create_attempt", return_value=attempt_id),
                     mock.patch.object(orchestrator.sf, "add_ssh_key", return_value="key-654321"),
                     mock.patch.object(orchestrator.sf, "verify_ssh_key_ownership", return_value={}),
                     mock.patch.object(orchestrator.sf, "append_instance_create_intent"),
                     mock.patch.object(orchestrator.sf, "create_instance", return_value="instance-654321"),
                     mock.patch.object(orchestrator.sf, "process_start_marker", return_value=None),
                     mock.patch.object(orchestrator.sf, "write_owned_resource", side_effect=fail_initial_owned_write),
-                    mock.patch.object(orchestrator.sf, "append_cost_event", side_effect=append_cost),
+                    mock.patch.object(
+                        orchestrator.sf,
+                        "append_cost_event",
+                        side_effect=append_cost,
+                    ),
                     mock.patch.object(orchestrator.sf, "instance_info", return_value=provider_info),
                     mock.patch.object(orchestrator.sf, "verify_instance_ownership"),
                     mock.patch.object(orchestrator.sf, "_delete_instance", return_value={"success": True}),
