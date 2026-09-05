@@ -1,9 +1,9 @@
 import { makeToolResult } from '../agent/tool-envelope.mjs';
-import { ProviderToolError, exactObject, boundedArray, boundedBoolean, boundedInteger, boundedString, checkAborted, digest, failureResult, jsonResponse, normalizeText, own, providerError, result, safeArray } from './provider-common.mjs';
+import { ProviderToolError, exactObject, boundedArray, boundedBoolean, boundedString, checkAborted, digest, failureResult, jsonResponse, normalizeText, own, providerError, result } from './provider-common.mjs';
 import { MicrosoftDeviceCodeCredential, MicrosoftGraphHttpsTransport, GRAPH_ORIGIN } from './microsoft-graph-auth.mjs';
+import { graphReadDefinitions, graphReadScopes, isGraphReadTool, MicrosoftGraphReadBoundary, validateGraphReadArguments } from './microsoft-graph-reads.mjs';
 
 const API = '/v1.0';
-const FOLDERS = new Set(['inbox', 'sentitems', 'drafts', 'archive']);
 const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/u;
 const CAP_MAIL = 'microsoft.graph.mail';
 const CAP_TEAMS = 'microsoft.graph.teams';
@@ -22,58 +22,48 @@ const OPERATION_ID = /^act_[a-f0-9]{32}$/u;
 const DIGEST = /^[a-f0-9]{64}$/u;
 const LAE_OPERATION_HEADER = 'x-lae-operation';
 const GRAPH_TOOL_SCOPES = Object.freeze({
-  'mail.list_messages': Object.freeze(['Mail.Read']),
-  'mail.read_message': Object.freeze(['Mail.Read']),
+  ...graphReadScopes,
   'mail.create_draft': Object.freeze(['Mail.ReadWrite']),
   'mail.send_draft': Object.freeze(['Mail.Read', 'Mail.Send']),
   'mail.mark_read': Object.freeze(['Mail.ReadWrite']),
-  'teams.list_chats': Object.freeze(['Chat.Read']),
-  'teams.list_messages': Object.freeze(['Chat.Read']),
   'teams.send_message': Object.freeze(['ChatMessage.Send'])
 });
 const schema = (properties, required = []) => ({ type: 'object', additionalProperties: false, required, properties });
 const string = (max, extra = {}) => ({ type: 'string', maxLength: max, ...extra });
 const identifier = string(512, { minLength: 1 });
 const INPUT_SCHEMAS = Object.freeze({
-  'mail.list_messages': schema({ folder: string(32, { enum: [...FOLDERS] }), unread_only: { type: 'boolean' }, limit: { type: 'integer', minimum: 1, maximum: 25 } }),
-  'mail.read_message': schema({ message_id: identifier, max_bytes: { type: 'integer', minimum: 1, maximum: 65536 } }, ['message_id']),
   'mail.create_draft': schema({ to: { type: 'array', minItems: 1, maxItems: 20, items: string(320) }, cc: { type: 'array', maxItems: 20, items: string(320) }, subject: string(998), body: string(65536) }, ['to', 'subject', 'body']),
   'mail.send_draft': schema({ draft_id: identifier }, ['draft_id']),
   'mail.mark_read': schema({ message_id: identifier, is_read: { type: 'boolean' } }, ['message_id', 'is_read']),
-  'teams.list_chats': schema({ limit: { type: 'integer', minimum: 1, maximum: 25 } }),
-  'teams.list_messages': schema({ chat_id: identifier, limit: { type: 'integer', minimum: 1, maximum: 50 } }, ['chat_id']),
   'teams.send_message': schema({ chat_id: identifier, body: string(16384, { minLength: 1 }) }, ['chat_id', 'body'])
 });
 const descriptions = Object.freeze({
-  'mail.list_messages': 'List bounded Outlook messages from the signed-in user mailbox.', 'mail.read_message': 'Read bounded plain text from one Outlook message.', 'mail.create_draft': 'Create one Outlook draft after confirmation.', 'mail.send_draft': 'Send one existing Outlook draft after high-impact confirmation.', 'mail.mark_read': 'Change the read state of one Outlook message.',
-  'teams.list_chats': 'List bounded existing Teams chats for the signed-in user.', 'teams.list_messages': 'List bounded messages from one existing Teams chat.', 'teams.send_message': 'Send one message to an existing Teams chat after high-impact confirmation.'
+  'mail.create_draft': 'Create one Outlook draft after confirmation.', 'mail.send_draft': 'Send one existing Outlook draft after high-impact confirmation.', 'mail.mark_read': 'Change the read state of one Outlook message.',
+  'teams.send_message': 'Send one message to an existing Teams chat after high-impact confirmation.'
 });
 const defs = (name, risk, effect, egress, output = 65536) => ({ name, version: '0.1.0', description: descriptions[name], risk_tier: risk, side_effect: effect, network: true, data_egress: egress, requires_confirmation: risk !== 'T1', timeout_ms: 10000, output_limit: output, parameters: INPUT_SCHEMAS[name], input_schema: INPUT_SCHEMAS[name] });
 
 export const graphDefinitions = Object.freeze({
-  'mail.list_messages': defs('mail.list_messages', 'T1', 'read_mail', 'none'),
-  'mail.read_message': defs('mail.read_message', 'T1', 'read_mail', 'none'),
+  'mail.list_messages': graphReadDefinitions['mail.list_messages'],
+  'mail.search_messages': graphReadDefinitions['mail.search_messages'],
+  'mail.read_message': graphReadDefinitions['mail.read_message'],
   'mail.create_draft': defs('mail.create_draft', 'T2', 'create_draft', 'message_content', 8192),
   'mail.send_draft': defs('mail.send_draft', 'T3', 'send_mail', 'message_content', 8192),
   'mail.mark_read': defs('mail.mark_read', 'T2', 'modify_mail', 'none', 8192),
-  'teams.list_chats': defs('teams.list_chats', 'T1', 'read_teams', 'none'),
-  'teams.list_messages': defs('teams.list_messages', 'T1', 'read_teams', 'none'),
+  'teams.list_chats': graphReadDefinitions['teams.list_chats'],
+  'teams.list_messages': graphReadDefinitions['teams.list_messages'],
+  'teams.read_message': graphReadDefinitions['teams.read_message'],
+  'teams.list_channels': graphReadDefinitions['teams.list_channels'],
+  'teams.list_channel_messages': graphReadDefinitions['teams.list_channel_messages'],
+  'teams.read_channel_message': graphReadDefinitions['teams.read_channel_message'],
   'teams.send_message': defs('teams.send_message', 'T3', 'send_teams', 'message_content', 8192)
 });
 
 const argument = (name, input) => {
+  if (isGraphReadTool(name)) return validateGraphReadArguments(name, input);
   let args;
   const bodyArgument = (value, field, max, min = 0) => { if (typeof value !== 'string' || value.length < min || value.length > max || Buffer.byteLength(value, 'utf8') > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value)) throw new ProviderToolError('invalid_tool_arguments', `${field} must be a bounded body`); };
-  if (name === 'mail.list_messages') {
-    args = exactObject(input, ['folder', 'unread_only', 'limit']);
-    if (own(args, 'folder')) boundedString(args.folder, 'folder', { min: 1, max: 32 });
-    if (args.folder && !FOLDERS.has(args.folder)) throw new ProviderToolError('invalid_tool_arguments', 'folder is not allowlisted');
-    if (own(args, 'unread_only')) boundedBoolean(args.unread_only, 'unread_only');
-    if (own(args, 'limit')) boundedInteger(args.limit, 'limit', 1, 25);
-  } else if (name === 'mail.read_message') {
-    args = exactObject(input, ['message_id', 'max_bytes'], ['message_id']); boundedString(args.message_id, 'message_id', { min: 1, max: 512, identifier: true });
-    if (own(args, 'max_bytes')) boundedInteger(args.max_bytes, 'max_bytes', 1, 65536);
-  } else if (name === 'mail.create_draft') {
+  if (name === 'mail.create_draft') {
     args = exactObject(input, ['to', 'cc', 'subject', 'body'], ['to', 'subject', 'body']);
     const recipient = (value, field) => { boundedString(value, field, { min: 3, max: 320, identifier: true }); if (!EMAIL.test(value)) throw new ProviderToolError('invalid_tool_arguments', `${field} must be an email address`); };
     boundedArray(args.to, 'to', { min: 1, max: 20, item: recipient });
@@ -83,10 +73,6 @@ const argument = (name, input) => {
     args = exactObject(input, ['draft_id'], ['draft_id']); boundedString(args.draft_id, 'draft_id', { min: 1, max: 512, identifier: true });
   } else if (name === 'mail.mark_read') {
     args = exactObject(input, ['message_id', 'is_read'], ['message_id', 'is_read']); boundedString(args.message_id, 'message_id', { min: 1, max: 512, identifier: true }); boundedBoolean(args.is_read, 'is_read');
-  } else if (name === 'teams.list_chats') {
-    args = exactObject(input, ['limit']); if (own(args, 'limit')) boundedInteger(args.limit, 'limit', 1, 25);
-  } else if (name === 'teams.list_messages') {
-    args = exactObject(input, ['chat_id', 'limit'], ['chat_id']); boundedString(args.chat_id, 'chat_id', { min: 1, max: 512, identifier: true }); if (own(args, 'limit')) boundedInteger(args.limit, 'limit', 1, 50);
   } else if (name === 'teams.send_message') {
     args = exactObject(input, ['chat_id', 'body'], ['chat_id', 'body']); boundedString(args.chat_id, 'chat_id', { min: 1, max: 512, identifier: true }); bodyArgument(args.body, 'body', 16384, 1);
   } else throw new ProviderToolError('invalid_tool_arguments', `unknown Graph tool: ${name}`);
@@ -94,13 +80,8 @@ const argument = (name, input) => {
 };
 
 const address = value => ({ emailAddress: { address: value } });
-const projectionAddress = value => ({ name: typeof value?.name === 'string' ? value.name.slice(0, 256) : '', address: typeof value?.address === 'string' ? value.address.slice(0, 320) : '' });
 const previewText = (value, maxBytes) => {
   const bytes = Buffer.from(value, 'utf8'); const truncated = bytes.byteLength > maxBytes; let text = new TextDecoder().decode(bytes.subarray(0, maxBytes)); while (text.endsWith('\uFFFD')) text = text.slice(0, -1); return { text, truncated };
-};
-const safeTeamsUrl = value => {
-  if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > 2048) return null;
-  try { const url = new URL(value); if (url.protocol !== 'https:' || url.username || url.password || url.hash) return null; if (!(url.hostname === 'teams.microsoft.com' || url.hostname.endsWith('.teams.microsoft.com') || url.hostname === 'teams.live.com' || url.hostname.endsWith('.teams.live.com'))) return null; return url.toString(); } catch { return null; }
 };
 const graphDateTimeMs = value => {
   if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > 64) return NaN;
@@ -114,11 +95,6 @@ const graphDateTimeMs = value => {
   // fractional digits as a bounded sub-millisecond value and deterministically
   // floor any remaining OData precision rather than invoking permissive parsing.
   const timestamp = wall.getTime() + subMilliseconds; return Number.isFinite(timestamp) ? timestamp : NaN;
-};
-const projectionMessage = (value, maxPreview = 1024) => {
-  if (!value || typeof value !== 'object' || typeof value.id !== 'string') return null;
-  const preview = normalizeText(value.bodyPreview, maxPreview);
-  return { id: value.id.slice(0, 512), received_at: typeof value.receivedDateTime === 'string' ? value.receivedDateTime : null, from: projectionAddress(value.from?.emailAddress), subject: typeof value.subject === 'string' ? value.subject.slice(0, 998) : '', unread: value.isRead === false, importance: ['low', 'normal', 'high'].includes(value.importance) ? value.importance : 'normal', preview: preview.text, preview_truncated: preview.truncated };
 };
 const projectionDraft = value => {
   if (!value || typeof value !== 'object' || typeof value.id !== 'string' || value.id.length < 1) return null;
@@ -191,14 +167,14 @@ const uniqueProofMap = (values, mapItem) => {
   }
   return mapped;
 };
-const validGraphPath = path => typeof path === 'string' && path.length <= 2048 && /^\/v1\.0\/(?:me(?:\/mailFolders\/[^/]+\/messages|\/messages(?:\/[^/]+(?:\/send)?)?|\/chats)?|chats\/[^/]+\/messages)$/u.test(path) && !path.includes('..') && !/[\u0000-\u001f\u007f]/u.test(path);
+const validGraphPath = path => typeof path === 'string' && path.length <= 2048 && /^\/v1\.0\/(?:me(?:\/mailFolders\/[^/]+\/messages|\/messages(?:\/[^/]+(?:\/send)?)?|\/chats)?|chats\/[^/]+\/messages(?:\/[^/]+)?|teams\/[^/]+\/channels(?:\/[^/]+\/messages(?:\/[^/]+)?)?)$/u.test(path) && !path.includes('..') && !/[\u0000-\u001f\u007f]/u.test(path);
 const validGraphMethodPath = (method, path) => {
   if (!['GET', 'POST', 'PATCH'].includes(method) || !validGraphPath(path)) return false;
   if (method === 'GET') return true;
   if (method === 'PATCH') return /^\/v1\.0\/me\/messages\/[^/]+$/u.test(path);
   return /^\/v1\.0\/me\/messages$|^\/v1\.0\/me\/messages\/[^/]+\/send$|^\/v1\.0\/chats\/[^/]+\/messages$/u.test(path);
 };
-const requiredGraphScope = (method, path) => path === '/v1.0/me' ? 'User.Read' : path === '/v1.0/me/chats' || path.startsWith('/v1.0/chats/') && method === 'GET' ? 'Chat.Read' : path.startsWith('/v1.0/chats/') ? 'ChatMessage.Send' : method === 'PATCH' ? 'Mail.ReadWrite' : method === 'POST' && path.endsWith('/send') ? 'Mail.Send' : method === 'POST' ? 'Mail.ReadWrite' : 'Mail.Read';
+const requiredGraphScope = (method, path) => path === '/v1.0/me' ? 'User.Read' : path.includes('/channels/') && path.includes('/messages') ? 'ChannelMessage.Read.All' : /^\/v1\.0\/teams\/[^/]+\/channels$/u.test(path) ? 'Channel.ReadBasic.All' : path === '/v1.0/me/chats' || path.startsWith('/v1.0/chats/') && method === 'GET' ? 'Chat.Read' : path.startsWith('/v1.0/chats/') ? 'ChatMessage.Send' : method === 'PATCH' ? 'Mail.ReadWrite' : method === 'POST' && path.endsWith('/send') ? 'Mail.Send' : method === 'POST' ? 'Mail.ReadWrite' : 'Mail.Read';
 const scopeAllows = (scopes, required) => scopes.includes(required) || required === 'Mail.Read' && scopes.includes('Mail.ReadWrite') || required === 'Chat.Read' && scopes.includes('Chat.ReadWrite') || required === 'ChatMessage.Send' && scopes.includes('Chat.ReadWrite');
 
 export class MicrosoftGraphProvider {
@@ -209,7 +185,7 @@ export class MicrosoftGraphProvider {
     let parsed; try { parsed = new URL(origin); } catch { throw new TypeError('invalid Graph origin'); } if (parsed.origin !== 'https://graph.microsoft.com' || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) throw new TypeError('invalid Graph origin');
     if (credentialSource && (tenant !== undefined || clientId !== undefined || scopes !== undefined)) throw new TypeError('credential source and device-code settings are mutually exclusive');
     const graphTransport = transport ?? (tenant !== undefined || clientId !== undefined || scopes !== undefined ? new MicrosoftGraphHttpsTransport({ requestTimeoutMs, sleep }) : undefined);
-    this.enabled = enabled === true; Object.defineProperty(this, 'testOnly', { value: testOnly === true, enumerable: false }); this.credentialSource = credentialSource ?? (tenant !== undefined || clientId !== undefined || scopes !== undefined ? new MicrosoftDeviceCodeCredential({ tenant, clientId, scopes, transport: authTransport ?? graphTransport, now, sleep, requestTimeoutMs, onUserCode }) : undefined); this.transport = graphTransport; this.origin = parsed.origin; this.permissionProfile = permissionProfile; this.grantStore = grantStore; this.accountFingerprint = accountFingerprint; this.scope = scope; this.now = now; this.requestTimeoutMs = requestTimeoutMs; this.proposals = new Map(); this.writeLedger = new Map();
+    this.enabled = enabled === true; Object.defineProperty(this, 'testOnly', { value: testOnly === true, enumerable: false }); this.credentialSource = credentialSource ?? (tenant !== undefined || clientId !== undefined || scopes !== undefined ? new MicrosoftDeviceCodeCredential({ tenant, clientId, scopes, transport: authTransport ?? graphTransport, now, sleep, requestTimeoutMs, onUserCode }) : undefined); this.transport = graphTransport; this.origin = parsed.origin; this.permissionProfile = permissionProfile; this.grantStore = grantStore; this.accountFingerprint = accountFingerprint; this.scope = scope; this.now = now; this.requestTimeoutMs = requestTimeoutMs; this.proposals = new Map(); this.writeLedger = new Map(); this.readBoundary = new MicrosoftGraphReadBoundary({ request: request => this.request(request), accountFingerprint: () => this.getAccountFingerprint() });
   }
   state() { if (!this.enabled) return 'disabled'; if (!this.credentialSource || !this.transport) return 'unconfigured'; return 'ready'; }
   configuredToolNames() {
@@ -228,10 +204,10 @@ export class MicrosoftGraphProvider {
   authStatus() { if (!this.enabled) return { state: 'disabled', prompt: null, accountFingerprint: null }; if (!this.credentialSource || !this.transport) return { state: 'unconfigured', prompt: null, accountFingerprint: null }; if (!(this.credentialSource instanceof MicrosoftDeviceCodeCredential)) return { state: 'external', prompt: null, accountFingerprint: null }; const status = this.credentialSource.authStatus(); return { ...status, state: status.state === 'authenticated' && !this.authenticatedAccountFingerprint ? 'checking_account' : status.state, accountFingerprint: this.authenticatedAccountFingerprint ?? null }; }
   async startAuth(signal) { if (!this.enabled || !(this.credentialSource instanceof MicrosoftDeviceCodeCredential)) throw new ProviderToolError('provider_unconfigured'); await this.credentialSource.start(signal); if (await this.status(signal) !== 'ready') { this.clearAuth(); throw new ProviderToolError('provider_unauthorized'); } return this.getAccountFingerprint(); }
   authConfigured() { return this.enabled && this.credentialSource instanceof MicrosoftDeviceCodeCredential; }
-  cancelAuth() { if (this.credentialSource instanceof MicrosoftDeviceCodeCredential) this.credentialSource.cancel(); this.authenticatedAccountFingerprint = null; for (const capability of [CAP_MAIL, CAP_TEAMS]) this.grantStore?.revoke?.(capability); }
-  clearAuth() { if (this.credentialSource instanceof MicrosoftDeviceCodeCredential) this.credentialSource.clear(); this.authenticatedAccountFingerprint = null; for (const capability of [CAP_MAIL, CAP_TEAMS]) this.grantStore?.revoke?.(capability); }
+  cancelAuth() { if (this.credentialSource instanceof MicrosoftDeviceCodeCredential) this.credentialSource.cancel(); this.authenticatedAccountFingerprint = null; this.readBoundary.clear(); for (const capability of [CAP_MAIL, CAP_TEAMS]) this.grantStore?.revoke?.(capability); }
+  clearAuth() { if (this.credentialSource instanceof MicrosoftDeviceCodeCredential) this.credentialSource.clear(); this.authenticatedAccountFingerprint = null; this.readBoundary.clear(); for (const capability of [CAP_MAIL, CAP_TEAMS]) this.grantStore?.revoke?.(capability); }
   capability(name) { return name.startsWith('mail.') ? CAP_MAIL : CAP_TEAMS; }
-  isWrite(name) { return !['mail.list_messages', 'mail.read_message', 'teams.list_chats', 'teams.list_messages'].includes(name); }
+  isWrite(name) { return !isGraphReadTool(name); }
   grantValid(capability) { const grant = this.grantStore?.get(capability); if (this.credentialSource instanceof MicrosoftDeviceCodeCredential && (!this.authenticatedAccountFingerprint || this.accountFingerprint === 'unknown' || this.accountFingerprint !== this.authenticatedAccountFingerprint)) return false; return this.permissionProfile === 'full_access' && grant?.profile === 'full_access' && grant.provider === 'microsoft_graph' && grant.account_fingerprint === this.accountFingerprint && grant.scope === this.scope; }
   confirmationRequired(name) {
     const important = name === 'teams.send_message' || name === 'mail.send_draft';
@@ -361,20 +337,8 @@ export class MicrosoftGraphProvider {
     let args; try { args = this.validate(call.name, call.arguments); const value = await this._execute(call, args); return value; } catch (error) { if (error?.code === 'invalid_tool_arguments') throw error; return failureResult(call, error); }
   }
   async _execute(call, args) {
+    if (isGraphReadTool(call.name)) return this.readBoundary.execute(call, args);
     checkAborted(call.signal);
-    if (call.name === 'mail.list_messages') {
-      const folder = args.folder ?? 'inbox'; const query = { '$top': args.limit ?? 25, '$select': 'id,receivedDateTime,from,subject,isRead,importance,bodyPreview' }; if (args.unread_only) query.$filter = 'isRead eq false'; const body = (await this.request({ method: 'GET', path: `${API}/me/mailFolders/${encodeURIComponent(folder)}/messages`, query, signal: call.signal })).body;
-      const values = safeArray(body.value, args.limit ?? 25); const messages = values.map(value => projectionMessage(value)).filter(Boolean); return result(call, 'ok', { provider: 'microsoft_graph', state: 'ready', messages, truncated: Array.isArray(body.value) && body.value.length > values.length });
-    }
-    if (call.name === 'mail.read_message') {
-      const body = (await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(args.message_id)}`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$select': 'id,receivedDateTime,from,subject,isRead,importance,body' }, signal: call.signal })).body; const message = projectionMessage({ ...body, bodyPreview: body.body?.content }); const content = normalizeText(body.body?.content, Math.min(args.max_bytes ?? 60000, 60000)); return result(call, 'ok', { provider: 'microsoft_graph', state: 'ready', message: { ...message, text: content.text, text_truncated: content.truncated } }, { truncated: content.truncated });
-    }
-    if (call.name === 'teams.list_chats') {
-      const body = (await this.request({ method: 'GET', path: `${API}/me/chats`, query: { '$top': args.limit ?? 25, '$select': 'id,topic,chatType,lastUpdatedDateTime' }, signal: call.signal })).body; const values = safeArray(body.value, args.limit ?? 25); const chats = values.filter(value => value && typeof value.id === 'string').map(value => ({ id: value.id.slice(0, 512), topic: typeof value.topic === 'string' ? value.topic.slice(0, 512) : '', type: typeof value.chatType === 'string' ? value.chatType : 'unknown', last_updated: typeof value.lastUpdatedDateTime === 'string' ? value.lastUpdatedDateTime : null, participants: [] })); return result(call, 'ok', { provider: 'microsoft_graph', state: 'ready', chats, truncated: Array.isArray(body.value) && body.value.length > values.length });
-    }
-    if (call.name === 'teams.list_messages') {
-      const body = (await this.request({ method: 'GET', path: `${API}/chats/${encodeURIComponent(args.chat_id)}/messages`, query: { '$top': args.limit ?? 50 }, signal: call.signal })).body; const values = safeArray(body.value, args.limit ?? 50); const messages = values.filter(value => value && typeof value.id === 'string').map(value => { const content = normalizeText(value.body?.content, 512); return { id: value.id.slice(0, 512), time: typeof value.createdDateTime === 'string' ? value.createdDateTime : null, sender: typeof value.from?.user?.displayName === 'string' ? value.from.user.displayName.slice(0, 256) : '', text: content.text, text_truncated: content.truncated, importance: ['low', 'normal', 'high'].includes(value.importance) ? value.importance : 'normal', web_url: safeTeamsUrl(value.webUrl) }; }); return result(call, 'ok', { provider: 'microsoft_graph', state: 'ready', messages, truncated: Array.isArray(body.value) && body.value.length > values.length });
-    }
     const saved = this.assertProposal(call, args);
     const binding = journalBinding(call);
     const capability = this.capability(call.name);

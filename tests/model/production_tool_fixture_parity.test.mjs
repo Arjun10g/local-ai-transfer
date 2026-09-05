@@ -33,7 +33,7 @@ test('production evaluation fixture exactly matches the explicit definition cata
   const advertised = catalogDefinitions();
   const fixtureByName = new Map(fixture.tools.map(tool => [tool.function.name, tool.function]));
   const advertisedByName = new Map(advertised.map(tool => [tool.function.name, tool.function]));
-  assert.equal(fixtureByName.size, 28);
+  assert.equal(fixtureByName.size, 33);
   assert.deepEqual([...fixtureByName.keys()], [...advertisedByName.keys()]);
   for (const [name, fixtureFunction] of fixtureByName) {
     // The process provider intentionally uses null-prototype maps; compare

@@ -1,4 +1,5 @@
 import { ProviderToolError, checkAborted, digest } from './provider-common.mjs';
+import { parseStrictJson } from '../agent/tool-envelope.mjs';
 
 const LOGIN_ORIGIN = 'https://login.microsoftonline.com';
 const GRAPH_ORIGIN = 'https://graph.microsoft.com';
@@ -6,8 +7,8 @@ const DEVICE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code';
 const MAX_AUTH_BODY_BYTES = 256 * 1024;
 const MAX_AUTH_RETRIES = 2;
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
-const GRAPH_PATH = /^\/v1\.0\/(?:me(?:\/mailFolders\/[^/]+\/messages|\/messages(?:\/[^/]+(?:\/send)?)?|\/chats)?|chats\/[^/]+\/messages)$/u;
-const GRAPH_SCOPES = new Set(['User.Read', 'Mail.Read', 'Mail.ReadWrite', 'Mail.Send', 'Chat.Read', 'Chat.ReadWrite', 'ChatMessage.Send']);
+const GRAPH_PATH = /^\/v1\.0\/(?:me(?:\/mailFolders\/[^/]+\/messages|\/messages(?:\/[^/]+(?:\/send)?)?|\/chats)?|chats\/[^/]+\/messages(?:\/[^/]+)?|teams\/[^/]+\/channels(?:\/[^/]+\/messages(?:\/[^/]+)?)?)$/u;
+const GRAPH_SCOPES = new Set(['User.Read', 'Mail.Read', 'Mail.ReadWrite', 'Mail.Send', 'Chat.Read', 'Chat.ReadWrite', 'ChatMessage.Send', 'Channel.ReadBasic.All', 'ChannelMessage.Read.All']);
 const AUTH_HEADERS = new Set(['accept', 'authorization', 'content-type', 'prefer', 'if-match']);
 
 const safeTenant = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$/u.test(value) && !value.includes('..') && !/[.-]$/u.test(value);
@@ -22,7 +23,12 @@ async function readBoundedJson(response, maxBytes = MAX_AUTH_BODY_BYTES) {
   const chunks = []; let bytes = 0;
   for await (const chunk of response.body) { const buffer = Buffer.from(chunk); bytes += buffer.byteLength; if (bytes > maxBytes) throw new ProviderToolError('provider_response_too_large'); chunks.push(buffer); }
   if (!chunks.length) return { value: {}, bytes: 0 };
-  try { const value = JSON.parse(Buffer.concat(chunks).toString('utf8')); return { value: value && typeof value === 'object' && !Array.isArray(value) ? value : {}, bytes }; } catch { throw new ProviderToolError('provider_invalid_response'); }
+  try {
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
+    const value = parseStrictJson(text, { maxBytes, maxDepth: 10, maxString: 65536, maxArray: 64, maxObject: 64 });
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('response root must be an object');
+    return { value, bytes };
+  } catch { throw new ProviderToolError('provider_invalid_response'); }
 }
 
 const retryAfter = headers => { const raw = headers?.get?.('retry-after') ?? headers?.['retry-after']; const seconds = Number(raw); return Number.isFinite(seconds) && seconds >= 0 && seconds <= 30 ? seconds * 1000 : 500; };
@@ -40,7 +46,7 @@ export class MicrosoftGraphHttpsTransport {
     if (origin === GRAPH_ORIGIN && !GRAPH_PATH.test(path)) throw new ProviderToolError('provider_destination_rejected');
     if (origin === LOGIN_ORIGIN && !/^\/[A-Za-z0-9][A-Za-z0-9.-]{0,127}\/oauth2\/v2\.0\/(?:devicecode|token)$/u.test(path)) throw new ProviderToolError('provider_destination_rejected');
     if (origin === LOGIN_ORIGIN && method !== 'POST') throw new ProviderToolError('provider_destination_rejected');
-    if (!query || typeof query !== 'object' || Array.isArray(query) || Object.entries(query).some(([key, value]) => !/^[A-Za-z0-9_$.-]{1,64}$/u.test(key) || (typeof value === 'number' && !Number.isFinite(value)) || !['string', 'number', 'boolean'].includes(typeof value))) throw new ProviderToolError('provider_destination_rejected');
+    if (!query || typeof query !== 'object' || Array.isArray(query) || Object.entries(query).some(([key, value]) => !/^[A-Za-z0-9_$.-]{1,64}$/u.test(key) || (typeof value === 'number' && !Number.isFinite(value)) || !['string', 'number', 'boolean'].includes(typeof value) || Buffer.byteLength(String(value), 'utf8') > 8192 || /[\u0000-\u001f\u007f]/u.test(String(value)))) throw new ProviderToolError('provider_destination_rejected');
     const url = new URL(path, origin); for (const [key, value] of Object.entries(query)) url.searchParams.set(key, String(value));
     if (!headers || typeof headers !== 'object' || Array.isArray(headers) || Object.keys(headers).length > AUTH_HEADERS.size) throw new ProviderToolError('provider_destination_rejected');
     const requestHeaders = { accept: 'application/json' };

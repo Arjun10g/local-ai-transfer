@@ -14,10 +14,15 @@ while signed out so the separate guarded authentication bootstrap can work.
 be passed to the production controller.
 
 Graph requests are constrained to the fixed HTTPS Graph origin and `/me` mail,
-`/me/chats` listing, and `/chats/{id}/messages` existing-chat endpoint families.
-Mail body reads request Graph's plain-text projection and still sanitize HTML,
-entities, scripts, styles, UTF-8, and byte bounds defensively. Results are
-projections with no headers, attachments, tokens, or transport details. Writes
+`/me/chats`, `/chats/{id}/messages`, and
+`/teams/{id}/channels/{id}/messages` endpoint families. Outlook search uses a
+fixed `$search` template; Teams text filtering is explicitly limited to the
+current bounded Graph page. Mail and Teams body reads request selected fields
+only and sanitize HTML, entities, scripts, styles, UTF-8, and byte bounds.
+Strict projections reject unknown/malformed fields, duplicate item identities,
+invalid UTC dates, unsupported body types, attachments, and oversized pages.
+Results contain no headers, remote URLs, attachments, tokens, or transport
+details. Writes
 require a preview; send-draft previews fetch and bind the current projected
 draft identity/content/ETag, then revalidate it before dispatch. A bounded
 pre-dispatch ledger records every write attempt, so ambiguous failures cannot
@@ -29,7 +34,12 @@ allowlists only the Microsoft login device-code/token endpoints and the Graph ro
 uses injected HTTPS transport/clock/sleep hooks for tests, and keeps access tokens in memory
 only. Device-code UI callbacks receive only the bounded user code and verification URL; tokens
 are never written to configuration, logs, model messages, or UI callback payloads. Transport
-bodies, retries, polling, timeouts, cancellation, and response parsing are bounded. After
+bodies, retries, polling, timeouts, cancellation, and response parsing are bounded;
+Graph JSON must be strict duplicate-free UTF-8 with the expected JSON content type. A
+provider next link is accepted only when its origin, path, and fixed query values match
+the initiating request. The model receives a one-use opaque, in-memory page cursor rather
+than the provider URL, and that cursor is bound to the current account fingerprint and
+tool resource. After
 authentication, `status()` queries `/me` and exposes only a stable in-memory account fingerprint.
 The registry's bounded `providerAuthStatus()` control surface can be polled by the host/UI to
 obtain the current state and device `userCode`/verification URL; it contains no token or account
@@ -39,10 +49,17 @@ The default registry remains disabled and unconfigured until an operator supplie
 settings; no Microsoft account is contacted by tests or fixture launches.
 The Entra app registration must be an explicitly approved public client with public-client
 flows enabled; this path never accepts a client secret. The scope allowlist is limited to
-`User.Read`, `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `Chat.Read`, `Chat.ReadWrite`, and
-`ChatMessage.Send`; `User.Read` is mandatory for opaque account verification, and each Graph
+`User.Read`, `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `Chat.Read`, `Chat.ReadWrite`,
+`ChatMessage.Send`, `Channel.ReadBasic.All`, and `ChannelMessage.Read.All`; `User.Read` is
+mandatory for opaque account verification, and each Graph
 operation is rejected unless its least-privilege delegated scope (or documented higher scope)
 was configured and returned by the token response when a scope field is supplied.
+
+Every Graph read result carries an adapter-private attestation over its exact serialized
+safe projection. The controller verifies that call, tool, and payload digest after envelope
+validation. A generic, cloned, echoed, or modified result with a Graph read-tool name is
+replaced by the fixed `provider_read_unverified` summary; it cannot project arbitrary
+provider/tool JSON into model history.
 
 `OperatorGrantStore` is an in-memory, provider/account/scope-bound operator
 grant. `full_access` can suppress confirmation only for routine draft creation
@@ -83,7 +100,7 @@ until their subprocess launches use the approved native identity-pinned,
 minimal-environment broker. Only explicitly test-only provider injections may
 retain those tools for isolated mocked tests.
 
-Live Graph/Copilot authorization, organization approval, Windows process
+Live Graph/Copilot authorization, tenant scope consent, organization approval, Windows process
 evidence, and synthetic release-account evidence are not present in this
 fixture-only implementation. Until those gates pass, provider status is
 `disabled`, `unconfigured`, `mock`, or `unverified`, never `live`.

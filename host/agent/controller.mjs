@@ -4,6 +4,7 @@ import { makeToolResult, parseToolCall, validateToolResult, EnvelopeError } from
 import { createActionBinding } from './action-journal.mjs';
 import { readGraphAttestation, transferGraphAttestation } from '../providers/microsoft-graph.mjs';
 import { browserSafeCompletionDigest, projectBrowserResult, readBrowserAttestation, transferBrowserAttestation } from '../providers/browser-actions.mjs';
+import { isGraphReadTool, readGraphReadAttestation, transferGraphReadAttestation } from '../providers/microsoft-graph-reads.mjs';
 import { timeNowDefinition, timeNowTool } from '../tools/time-now.mjs';
 
 export const STATES = Object.freeze(['IDLE', 'BUILDING_PROMPT', 'INFERENCING', 'TOOL_PROPOSED', 'WAITING_CONFIRMATION', 'TOOL_RUNNING', 'CONTINUING_MODEL', 'COMPLETED', 'CANCELLED', 'FAILED']);
@@ -43,6 +44,14 @@ function modelVisibleToolResult(result) {
     if (item?.type !== 'text' || typeof item.text !== 'string') return item;
     try { return { ...item, text: JSON.stringify(stripPrivateJournalMetadata(JSON.parse(item.text))) }; } catch { return item; }
   }) };
+}
+function modelVisibleGraphReadResult(result, call) {
+  const attestation = readGraphReadAttestation(result);
+  const text = result?.content?.length === 1 && result.content[0]?.type === 'text' && typeof result.content[0].text === 'string' ? result.content[0].text : null;
+  if (!attestation || attestation.provider !== 'microsoft_graph' || attestation.kind !== 'read' || attestation.call_id !== call.id || attestation.tool_name !== call.name || text === null || attestation.payload_digest !== digestEvidence(text)) {
+    return makeToolResult({ id: result.id, name: result.name, status: 'failed', text: JSON.stringify({ provider: 'microsoft_graph', state: 'unverified', code: 'provider_read_unverified' }), durationMs: result.metadata?.duration_ms ?? 0 });
+  }
+  return result;
 }
 const SAFE_RECONCILIATIONS = new Set(['created_resource', 'unique_exact_draft', 'unique_sent_item', 'post_write_get_verified', 'timeout_get_verified', 'pre_read_already_desired']);
 function modelVisibleReconciliationResult(result, controllerVerified, binding) {
@@ -263,6 +272,7 @@ export class ConversationController {
         try { result = validateToolResult(result); } catch { throw Object.assign(new Error('invalid_tool_result'), { code: 'invalid_tool_result' }); }
         if (result.id !== call.id || result.name !== call.name) throw Object.assign(new Error('tool_result_mismatch'), { code: 'tool_result_mismatch' });
         transferGraphAttestation(hostResult, result); if (BROWSER_TOOL_NAMES.has(call.name)) transferBrowserAttestation(hostResult, result);
+        transferGraphReadAttestation(hostResult, result);
         let strictModelResult = false; let controllerVerified = false; let modelBinding = null;
         if (activeJournalOperation) {
           strictModelResult = activeJournalOperation.reconcile === true;
@@ -281,7 +291,7 @@ export class ConversationController {
           else await this.actionJournal.markUnknown(activeJournalOperation.id);
           activeJournalOperation = null;
         }
-        const modelResult = BROWSER_TOOL_NAMES.has(call.name) ? projectBrowserResult(result, { controllerVerified, reconciliationRequired: strictModelResult }) : strictModelResult ? modelVisibleReconciliationResult(result, controllerVerified, modelBinding) : modelVisibleToolResult(result);
+        const modelResult = BROWSER_TOOL_NAMES.has(call.name) ? projectBrowserResult(result, { controllerVerified, reconciliationRequired: strictModelResult }) : strictModelResult ? modelVisibleReconciliationResult(result, controllerVerified, modelBinding) : isGraphReadTool(call.name) ? modelVisibleGraphReadResult(result, call) : modelVisibleToolResult(result);
         emit('tool.completed', { result: modelResult });
         this._appendHistory(session, { role: 'assistant', content: callText });
         this._appendHistory(session, { role: 'tool', name: call.name, tool_call_id: call.id, content: modelResult.content[0]?.text ?? '' });
