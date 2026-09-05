@@ -1,0 +1,24 @@
+{
+  "schema_version": "lae.action-journal-helper-vector.v1",
+  "synthetic_only": true,
+  "bootstrap": {
+    "bytes": 304,
+    "sha256": "b867fcbb93202b677e489b822c79f2105805f24c2adaf330fec6d9c13ad72147",
+    "hex": "4c41454a524e48454c50424f4f5400000100000030010000921000000300000000c08976453cda01efcdab896745230100112233445566778899aabbccddeeff1032547698badcfeffeeddccbbaa99887766554433221100a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f00112233445566778899aabbccddeeff18000000200000000000000000000000000000000000000043003a005c00550073006500720073005c0046006900780074007500720065005c004a006f00750072006e0061006c0043003a005c00500072006f006700720061006d002000460069006c00650073005c006e006f00640065006a0073005c006e006f00640065002e00650078006500",
+    "expected_client_pid": 4242,
+    "expected_client_session_id": 3,
+    "expected_client_creation_time": "133485408000000000",
+    "storage_directory": "C:\\Users\\Fixture\\Journal",
+    "client_image_path": "C:\\Program Files\\nodejs\\node.exe"
+  },
+  "prepare_binding": {
+    "container_id_hex": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+    "operation_digest": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+    "canonical_body": "{\"arguments_digest\":\"c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2\",\"call_ref\":\"d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3\",\"operation_digest\":\"b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1\",\"preview_digest\":\"e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4\",\"request_ref\":\"f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5\",\"risk_tier\":\"T2\",\"side_effect\":\"write_sensitive\",\"tool_name\":\"graph.send_mail\"}",
+    "operation_id": "act_9dd9fffbbfc0e69eded5a5a494ea33b0",
+    "prepare_binding_digest": "77a77b2d508bd053ca2c5e4c3e93f00991550153863eef38edbd7e0bae9bc637"
+  },
+  "protocol_vectors": "contracts/action-journal/v0.1.0-vectors.json",
+  "container_contract": "contracts/action-journal-container/v0.1.0.json",
+  "storage_contract": "contracts/action-journal-storage/v0.1.0.json"
+}

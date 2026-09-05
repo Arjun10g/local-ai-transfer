@@ -470,7 +470,7 @@ function validateResponseAgainstRequest(response, request, nowMs) {
   if (!plainObject(request) || request.kind !== 'request') fail('invalid_request');
   validateEnvelope(request, 'request');
   if (response.request_id !== request.request_id || response.method !== request.method) fail('invalid_request');
-  if (nowMs > request.deadline_at_ms) fail('deadline_expired');
+  if (nowMs >= request.deadline_at_ms) fail('deadline_expired');
 
   if (request.method === 'prepare') {
     if (response.error === null) {
@@ -630,7 +630,7 @@ export function decodeFrame(frame, key, {
   if (seenRequestIds.size >= ACTION_JOURNAL_LIMITS.max_session_frames) fail('record_limit_exceeded');
   if (parsed.kind === 'request') {
     if (parsed.issued_at_ms > nowMs + ACTION_JOURNAL_LIMITS.max_clock_skew_ms) fail('invalid_request');
-    if (parsed.deadline_at_ms < nowMs) fail('deadline_expired');
+    if (parsed.deadline_at_ms <= nowMs) fail('deadline_expired');
   } else {
     if (expectedResponse === undefined) fail('invalid_request');
     validateResponseAgainstRequest(parsed, expectedResponse, nowMs);

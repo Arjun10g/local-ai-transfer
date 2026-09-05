@@ -344,6 +344,7 @@ test('nonce, sequence, request-id replay, and bounded session records are enforc
 });
 
 test('absolute deadline and future issue-time checks happen on authenticated requests', () => {
+  errorCode(() => decodeRequest(encodeEnvelope(requestFor('health', 0, 79), KEY), 0, new Set(), NOW + 5_000), 'deadline_expired');
   errorCode(() => decodeRequest(encodeEnvelope(requestFor('health', 0, 80), KEY), 0, new Set(), NOW + 5_001), 'deadline_expired');
   const future = requestFor('health', 0, 81, { issuedAtMs: NOW + ACTION_JOURNAL_LIMITS.max_clock_skew_ms + 1, deadlineAtMs: NOW + ACTION_JOURNAL_LIMITS.max_clock_skew_ms + 2 });
   errorCode(() => decodeRequest(encodeEnvelope(future, KEY)), 'invalid_request');

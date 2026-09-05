@@ -147,7 +147,7 @@
       "operation_id": "^act_[a-f0-9]{32}$",
       "mac": "^[a-f0-9]{64}$"
     },
-    "time": "0 <= issued_at_ms < deadline_at_ms <= 4102444800000; span <= 600000"
+    "time": "0 <= issued_at_ms < deadline_at_ms <= 4102444800000; span <= 600000; request is expired when receiver now >= deadline_at_ms"
   },
   "response_envelope": {
     "additionalProperties": false,
