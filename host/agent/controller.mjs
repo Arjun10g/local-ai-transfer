@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { makeEvent } from './assistant-events.mjs';
 import { makeToolResult, parseToolCall, validateToolResult, EnvelopeError } from './tool-envelope.mjs';
 import { createActionBinding } from './action-journal.mjs';
-import { readProviderAttestation, transferProviderAttestation } from './provider-attestation.mjs';
+import { readGraphAttestation, transferGraphAttestation } from '../providers/microsoft-graph.mjs';
 import { timeNowDefinition, timeNowTool } from '../tools/time-now.mjs';
 
 export const STATES = Object.freeze(['IDLE', 'BUILDING_PROMPT', 'INFERENCING', 'TOOL_PROPOSED', 'WAITING_CONFIRMATION', 'TOOL_RUNNING', 'CONTINUING_MODEL', 'COMPLETED', 'CANCELLED', 'FAILED']);
@@ -21,8 +21,9 @@ const EFFECT_TIERS = Object.freeze({
 const RECONCILIATION_REQUIRED_EFFECTS = new Set(['create_draft', 'send_mail', 'modify_mail', 'send_teams', 'browser_navigation', 'browser_input', 'browser_activation']);
 const PRIVATE_JOURNAL_KEYS = new Set(['operation_id', 'operation_digest', 'arguments_digest', 'preview_digest', 'response_digest', 'resource_digest']);
 const providerAttestationMatches = (result, expectedBinding, call) => {
-  const attestation = readProviderAttestation(result);
-  return result?.status === 'ok' && attestation?.provider === 'microsoft_graph' && attestation.call_id === call.id && attestation.tool_name === call.name && attestation.operation_id === expectedBinding.id && attestation.operation_digest === expectedBinding.operationDigest && attestation.arguments_digest === expectedBinding.argumentsDigest && attestation.preview_digest === expectedBinding.previewDigest && SAFE_RECONCILIATIONS.has(attestation.proof);
+  const attestation = readGraphAttestation(result);
+  let payload = null; try { payload = JSON.parse(result?.content?.[0]?.text ?? ''); } catch {}
+  return result?.status === 'ok' && payload && typeof payload === 'object' && payload.provider_completion === 'verified' && payload.state === 'completed' && payload.completed === true && payload.reconciliation === attestation?.proof && attestation?.provider === 'microsoft_graph' && attestation.call_id === call.id && attestation.tool_name === call.name && attestation.operation_id === expectedBinding.id && attestation.operation_digest === expectedBinding.operationDigest && attestation.arguments_digest === expectedBinding.argumentsDigest && attestation.preview_digest === expectedBinding.previewDigest && SAFE_RECONCILIATIONS.has(attestation.proof);
 };
 function stripPrivateJournalMetadata(value) {
   if (Array.isArray(value)) return value.map(stripPrivateJournalMetadata);
@@ -36,7 +37,7 @@ function modelVisibleToolResult(result) {
     try { return { ...item, text: JSON.stringify(stripPrivateJournalMetadata(JSON.parse(item.text))) }; } catch { return item; }
   }) };
 }
-const SAFE_RECONCILIATIONS = new Set(['created_resource', 'unique_exact_draft', 'unique_sent_item', 'post_write_get_verified', 'pre_read_already_desired']);
+const SAFE_RECONCILIATIONS = new Set(['created_resource', 'unique_exact_draft', 'unique_sent_item', 'post_write_get_verified', 'timeout_get_verified', 'pre_read_already_desired']);
 function modelVisibleReconciliationResult(result, controllerVerified, binding) {
   let payload;
   try { payload = JSON.parse(result?.content?.[0]?.text ?? ''); } catch { payload = null; }
@@ -254,7 +255,7 @@ export class ConversationController {
         const hostResult = result;
         try { result = validateToolResult(result); } catch { throw Object.assign(new Error('invalid_tool_result'), { code: 'invalid_tool_result' }); }
         if (result.id !== call.id || result.name !== call.name) throw Object.assign(new Error('tool_result_mismatch'), { code: 'tool_result_mismatch' });
-        transferProviderAttestation(hostResult, result);
+        transferGraphAttestation(hostResult, result);
         let strictModelResult = false; let controllerVerified = false; let modelBinding = null;
         if (activeJournalOperation) {
           strictModelResult = activeJournalOperation.reconcile === true;

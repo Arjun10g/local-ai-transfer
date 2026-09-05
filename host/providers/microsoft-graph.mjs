@@ -1,7 +1,6 @@
 import { makeToolResult } from '../agent/tool-envelope.mjs';
 import { ProviderToolError, exactObject, boundedArray, boundedBoolean, boundedInteger, boundedString, checkAborted, digest, failureResult, jsonResponse, normalizeText, own, providerError, result, safeArray } from './provider-common.mjs';
 import { MicrosoftDeviceCodeCredential, MicrosoftGraphHttpsTransport, GRAPH_ORIGIN } from './microsoft-graph-auth.mjs';
-import { attachProviderAttestation } from '../agent/provider-attestation.mjs';
 
 const API = '/v1.0';
 const FOLDERS = new Set(['inbox', 'sentitems', 'drafts', 'archive']);
@@ -138,12 +137,19 @@ const journalBinding = call => {
   if (!binding || typeof binding !== 'object' || Array.isArray(binding) || Object.keys(binding).sort().join(',') !== 'arguments_digest,operation_digest,operation_id,preview_digest' || !OPERATION_ID.test(binding.operation_id) || !DIGEST.test(binding.arguments_digest) || !DIGEST.test(binding.operation_digest) || !DIGEST.test(binding.preview_digest)) throw new ProviderToolError('provider_invalid_request', 'invalid internal journal binding');
   return Object.freeze({ operation_id: binding.operation_id, operation_digest: binding.operation_digest, arguments_digest: binding.arguments_digest, preview_digest: binding.preview_digest });
 };
+// The issuer is intentionally module-private. The controller can only read or
+// transfer an attestation already issued by this adapter; generic tools can
+// copy the JSON envelope but cannot manufacture this identity-bound marker.
+const graphAttestations = new WeakMap();
+const issueGraphAttestation = (result, attestation) => { graphAttestations.set(result, Object.freeze({ ...attestation })); return result; };
+export const readGraphAttestation = result => result && typeof result === 'object' ? graphAttestations.get(result) ?? null : null;
+export const transferGraphAttestation = (source, target) => { const attestation = readGraphAttestation(source); if (attestation && target && typeof target === 'object') graphAttestations.set(target, attestation); return target; };
 const operationMarker = binding => binding ? `${binding.operation_id}:${binding.operation_digest}` : null;
 const verifiedPayload = ({ response, resource, reconciliation = null, completed = true }) => ({ provider: 'microsoft_graph', state: completed ? 'completed' : 'reconciling', provider_completion: completed ? 'verified' : 'unverified', completion: completed ? 'provider_verified' : 'manual_required', http_status: response?.status ?? null, resource_id: typeof resource?.id === 'string' ? resource.id.slice(0, 512) : null, accepted: true, completed, reconciliation, timestamp: new Date().toISOString() });
 const reconcilingPayload = ({ response = null, reconciliation, resource = null }) => ({ provider: 'microsoft_graph', state: 'reconciling', provider_completion: 'unverified', completion: 'manual_required', accepted: true, completed: false, code: 'provider_action_reconciling', http_status: response?.status ?? null, resource_id: typeof resource?.id === 'string' ? resource.id.slice(0, 512) : null, reconciliation });
 const verifiedResult = ({ call, binding, response, resource, reconciliation }) => {
   const output = result(call, 'ok', verifiedPayload({ response, resource, reconciliation }));
-  if (binding) attachProviderAttestation(output, { provider: 'microsoft_graph', call_id: call.id, tool_name: call.name, operation_id: binding.operation_id, operation_digest: binding.operation_digest, arguments_digest: binding.arguments_digest, preview_digest: binding.preview_digest, proof: reconciliation });
+  if (binding) issueGraphAttestation(output, { provider: 'microsoft_graph', call_id: call.id, tool_name: call.name, operation_id: binding.operation_id, operation_digest: binding.operation_digest, arguments_digest: binding.arguments_digest, preview_digest: binding.preview_digest, proof: reconciliation });
   return output;
 };
 const validResource = (value, expectedId = null) => value && typeof value === 'object' && !Array.isArray(value) && typeof value.id === 'string' && value.id.length >= 1 && value.id.length <= 512 && (!expectedId || value.id === expectedId);
@@ -155,6 +161,16 @@ const proofCollection = (body, max = MAX_RECONCILIATION_ITEMS) => {
   if (!body || typeof body !== 'object' || Array.isArray(body) || !Array.isArray(body.value)) return { values: null, truncated: false };
   const truncated = body.value.length > max || Object.hasOwn(body, '@odata.nextLink');
   return { values: body.value.slice(0, max), truncated };
+};
+const uniqueProofMap = (values, mapItem) => {
+  if (!Array.isArray(values)) return null;
+  const ids = new Set(); const mapped = [];
+  for (const value of values) {
+    const item = mapItem(value);
+    if (!item || typeof item.id !== 'string' || ids.has(item.id)) return null;
+    ids.add(item.id); mapped.push(item);
+  }
+  return mapped;
 };
 const validGraphPath = path => typeof path === 'string' && path.length <= 2048 && /^\/v1\.0\/(?:me(?:\/mailFolders\/[^/]+\/messages|\/messages(?:\/[^/]+(?:\/send)?)?|\/chats)?|chats\/[^/]+\/messages)$/u.test(path) && !path.includes('..') && !/[\u0000-\u001f\u007f]/u.test(path);
 const validGraphMethodPath = (method, path) => {
@@ -256,18 +272,33 @@ export class MicrosoftGraphProvider {
     if (!marker) return { values: null, truncated: false };
     const response = await this.request({ method: 'GET', path: `${API}/me/mailFolders/drafts/messages`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$top': MAX_RECONCILIATION_ITEMS, '$select': 'id,subject,body,toRecipients,ccRecipients,internetMessageHeaders,changeKey' }, signal });
     const collection = proofCollection(response.body); if (!collection.values || collection.truncated) return { values: collection.values, truncated: collection.truncated };
-    return { values: collection.values.filter(value => Array.isArray(value?.internetMessageHeaders) && value.internetMessageHeaders.some(header => header && typeof header.name === 'string' && header.name.toLowerCase() === LAE_OPERATION_HEADER && header.value === marker)).map(value => projectionDraft(value)).filter(value => value && draftContentDigest(value) === expectedDigest), truncated: false };
+    const mapped = uniqueProofMap(collection.values, value => {
+      if (!Array.isArray(value?.internetMessageHeaders)) return null;
+      const draft = projectionDraft(value); if (!draft) return null;
+      return draft;
+    }); if (!mapped) return { values: null, truncated: false };
+    return { values: mapped.filter(value => value.operation_marker === marker && draftContentDigest(value) === expectedDigest), truncated: false };
   }
   async listSentForDigest(expectedDigest, existingIds, snapshotAt, sentMarker, signal) {
     const response = await this.request({ method: 'GET', path: `${API}/me/mailFolders/sentitems/messages`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$top': MAX_RECONCILIATION_ITEMS, '$orderby': 'sentDateTime desc', '$select': 'id,subject,body,toRecipients,ccRecipients,changeKey,sentDateTime,internetMessageHeaders' }, signal });
     const collection = proofCollection(response.body); if (!collection.values || collection.truncated) return { values: collection.values, truncated: collection.truncated };
     const upper = this.now() + 60000;
-    return { values: collection.values.map(value => { const item = projectionDraft(value); return item ? { ...item, sent_at_ms: typeof value?.sentDateTime === 'string' ? Date.parse(value.sentDateTime) : NaN } : null; }).filter(item => item && typeof sentMarker === 'string' && item.operation_marker === sentMarker && !existingIds?.has(item.id) && draftContentDigest(item) === expectedDigest && Number.isFinite(snapshotAt) && Number.isFinite(item.sent_at_ms) && item.sent_at_ms >= snapshotAt - 1000 && item.sent_at_ms <= upper), truncated: false };
+    const mapped = uniqueProofMap(collection.values, value => {
+      if (!Array.isArray(value?.internetMessageHeaders) || typeof value?.sentDateTime !== 'string') return null;
+      const item = projectionDraft(value); const sentAt = Date.parse(value.sentDateTime); if (!item || !Number.isFinite(sentAt)) return null;
+      return { ...item, sent_at_ms: sentAt };
+    }); if (!mapped) return { values: null, truncated: false };
+    return { values: mapped.filter(item => typeof sentMarker === 'string' && item.operation_marker === sentMarker && !existingIds?.has(item.id) && draftContentDigest(item) === expectedDigest && Number.isFinite(snapshotAt) && item.sent_at_ms >= snapshotAt - 1000 && item.sent_at_ms <= upper), truncated: false };
   }
   async listChatMessagesForProof(chatId, signal) {
     const response = await this.request({ method: 'GET', path: `${API}/chats/${encodeURIComponent(chatId)}/messages`, query: { '$top': MAX_RECONCILIATION_ITEMS }, signal });
     const collection = proofCollection(response.body); if (!collection.values || collection.truncated) return { values: collection.values, truncated: collection.truncated };
-    return { values: collection.values.filter(value => validResource(value) && value.body && typeof value.body === 'object' && typeof value.body.content === 'string').map(value => ({ id: value.id, content: value.body.content, content_type: value.body.contentType === 'text' ? 'text' : null, created: typeof value.createdDateTime === 'string' ? value.createdDateTime : null, created_ms: typeof value.createdDateTime === 'string' ? Date.parse(value.createdDateTime) : NaN, sender_id: typeof value.from?.user?.id === 'string' ? value.from.user.id.slice(0, 512) : null })), truncated: false };
+    const mapped = uniqueProofMap(collection.values, value => {
+      const createdMs = typeof value?.createdDateTime === 'string' ? Date.parse(value.createdDateTime) : NaN;
+      if (!validResource(value) || !value.body || typeof value.body !== 'object' || typeof value.body.content !== 'string' || value.body.contentType !== 'text' || !Number.isFinite(createdMs) || typeof value.from?.user?.id !== 'string' || !value.from.user.id.trim()) return null;
+      return { id: value.id, content: value.body.content, content_type: 'text', created: value.createdDateTime, created_ms: createdMs, sender_id: value.from.user.id.slice(0, 512) };
+    }); if (!mapped) return { values: null, truncated: false };
+    return { values: mapped, truncated: false };
   }
   teamsProofMatches(items, args, saved) {
     if (!saved.prewrite_verified || !saved.post_attempted || !saved.reconciliation_allowed || typeof saved.team_sender_id !== 'string' || !Number.isFinite(saved.team_prewrite_at)) return [];
@@ -352,7 +383,7 @@ export class MicrosoftGraphProvider {
       if (call.name === 'mail.send_draft') {
         saved.prewrite_verified = false; saved.post_attempted = false; saved.reconciliation_allowed = false;
         const currentResponse = await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(args.draft_id)}`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$select': 'id,subject,body,toRecipients,ccRecipients,internetMessageHeaders,changeKey' }, signal: operation.signal }); const current = projectionDraft(currentResponse.body); if (!current || !saved.draftIdentity?.etag || !saved.draftIdentity?.change_key || !current.etag || !current.change_key || current.id !== args.draft_id || draftContentDigest(current) !== saved.draftBinding || current.operation_marker !== saved.sent_marker || current.etag !== saved.draftIdentity.etag || current.change_key !== saved.draftIdentity.change_key) throw new ProviderToolError('provider_permission_insufficient', 'draft identity changed after preview');
-        const sentBefore = await this.request({ method: 'GET', path: `${API}/me/mailFolders/sentitems/messages`, query: { '$top': MAX_RECONCILIATION_ITEMS, '$orderby': 'sentDateTime desc', '$select': 'id,sentDateTime' }, signal: operation.signal }); const sentCollection = proofCollection(sentBefore.body); if (!sentCollection.values || sentCollection.truncated) throw new ProviderToolError('provider_invalid_response', sentCollection.truncated ? 'sent proof collection is incomplete' : 'sent proof collection unavailable'); saved.preexistingSentIds = new Set(sentCollection.values.filter(item => typeof item?.id === 'string').map(item => item.id)); saved.sent_snapshot_at = this.now(); saved.prewrite_verified = true; saved.reconciliation_allowed = true;
+        const sentBefore = await this.request({ method: 'GET', path: `${API}/me/mailFolders/sentitems/messages`, query: { '$top': MAX_RECONCILIATION_ITEMS, '$orderby': 'sentDateTime desc', '$select': 'id,sentDateTime' }, signal: operation.signal }); const sentCollection = proofCollection(sentBefore.body); if (!sentCollection.values || sentCollection.truncated) throw new ProviderToolError('provider_invalid_response', sentCollection.truncated ? 'sent proof collection is incomplete' : 'sent proof collection unavailable'); const sentSnapshot = uniqueProofMap(sentCollection.values, item => typeof item?.sentDateTime === 'string' && Number.isFinite(Date.parse(item.sentDateTime)) && typeof item.id === 'string' && item.id.length > 0 ? { id: item.id } : null); if (!sentSnapshot) throw new ProviderToolError('provider_invalid_response', 'sent proof collection contains an incomplete or duplicate item'); saved.preexistingSentIds = new Set(sentSnapshot.map(item => item.id)); saved.sent_snapshot_at = this.now(); saved.prewrite_verified = true; saved.reconciliation_allowed = true;
         const sendHeaders = { 'If-Match': saved.draftIdentity.etag }; response = await this.request({ method: 'POST', path: `${API}/me/messages/${encodeURIComponent(args.draft_id)}/send`, headers: sendHeaders, signal: operation.signal, onDispatch: () => { saved.post_attempted = true; } });
         return await this.reconcileSendDraft(call, args, binding, response, saved, operation.signal);
       }
