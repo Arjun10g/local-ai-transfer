@@ -30,6 +30,8 @@ inline constexpr std::size_t kMaxPayloadBytes = 65'532;
 inline constexpr std::size_t kMaxBufferedFrames = 8;
 inline constexpr std::size_t kMaxSessionFrames = 1'024;
 inline constexpr std::size_t kMaxPendingRequests = 8;
+inline constexpr std::uint32_t kMaxEventsPerOperation = 16;
+inline constexpr std::uint32_t kMaxDetailEvents = 16;
 inline constexpr std::uint64_t kMaximumDeadlineSpanMs = 600'000;
 inline constexpr std::uint64_t kMaximumFutureSkewMs = 30'000;
 

@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import {
+  ACTION_JOURNAL_LIMITS,
   PRODUCTION_ACTION_JOURNAL_PROTOCOL_AVAILABLE,
   journalEventDigest,
 } from '../../host/agent/action-journal-protocol.mjs';
@@ -102,6 +103,8 @@ test('machine contract exactly matches the fixed bounded layout and remains iner
     max_terminal_records: ACTION_JOURNAL_CONTAINER_LAYOUT.max_terminal_records,
   });
   assert.equal(contract.bank.event_cells, ACTION_JOURNAL_CONTAINER_LAYOUT.event_cells_per_bank);
+  assert.equal(contract.bank.event_cells, ACTION_JOURNAL_LIMITS.max_events_per_operation);
+  assert.equal(contract.bank.event_cells, ACTION_JOURNAL_LIMITS.max_detail_events);
   assert.equal(contract.bank.event_cell_bytes, ACTION_JOURNAL_CONTAINER_LAYOUT.event_cell_bytes);
   assert.equal(contract.bank.max_canonical_event_bytes, ACTION_JOURNAL_CONTAINER_LAYOUT.max_event_bytes);
   assert.deepEqual(contract.write_protocol.length, 8);

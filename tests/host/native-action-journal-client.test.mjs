@@ -7,7 +7,10 @@ import {
   NativeActionJournalClient,
   PRODUCTION_NATIVE_ACTION_JOURNAL_CLIENT_AVAILABLE,
 } from '../../host/agent/native-action-journal-client.mjs';
-import { encodeEnvelope } from '../../host/agent/action-journal-protocol.mjs';
+import {
+  ACTION_JOURNAL_LIMITS,
+  encodeEnvelope,
+} from '../../host/agent/action-journal-protocol.mjs';
 import {
   InMemoryJournalBlockDevice,
   formatJournalContainer,
@@ -182,6 +185,10 @@ test('slice is immutable false, test-only, absent from host, and contract is hon
     assert.equal(contract[field], false);
   }
   assert.equal(contract.cleanup_claim.immutable_js_strings_or_prior_factory_copies_erased, false);
+  assert.equal(contract.limits.max_detail_events, ACTION_JOURNAL_LIMITS.max_detail_events);
+  assert.equal(contract.limits.max_detail_events, 16);
+  assert.equal(contract.limits.max_events_per_operation, ACTION_JOURNAL_LIMITS.max_events_per_operation);
+  assert.equal(contract.limits.max_events_per_operation, 16);
   const host = await readFile(new URL('../../lae-host.mjs', import.meta.url), 'utf8');
   assert.equal(host.includes('native-action-journal-client'), false);
 });

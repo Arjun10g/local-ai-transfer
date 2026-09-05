@@ -85,7 +85,7 @@
       "FlushFileBuffers and exact committed-bank readback",
       "re-scan committed authority before acknowledging"
     ],
-    "caps": {"slots": 1024, "events_per_operation": 16, "active": 256, "terminal": 768}
+    "caps": {"slots": 1024, "events_per_operation": 16, "detail_page_events": 16, "active": 256, "terminal": 768}
   },
   "pipe": {
     "name": "fixed prefix plus decimal helper PID; contains no key or nonce",

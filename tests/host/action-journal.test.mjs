@@ -81,6 +81,25 @@ test('journal persists a bounded hash chain with private permissions and digest-
   const reopened = await ActionJournal.open({ directory: path, testOnly: true }); assert.deepEqual(reopened.health(), { state: 'ready', error: null }); assert.equal((await reopened.detail(receipt.operation_id)).receipt_hash, detail.receipt_hash);
 });
 
+test('pathname journal accepts exactly sixteen events and refuses the seventeenth', async t => {
+  assert.equal(ACTION_JOURNAL_LIMITS.max_events_per_operation, 16);
+  const path = await directory(t);
+  const journal = await ActionJournal.open(deterministicOptions(path));
+  const receipt = await prepared(journal);
+  await journal.authorize(receipt.operation_id, 'user_confirmation');
+  await journal.dispatch(receipt.operation_id);
+  for (let index = 0; index < 13; index++) {
+    if (index % 2 === 0) await journal.acknowledge(receipt.operation_id);
+    else await journal.beginReconciliation(receipt.operation_id);
+  }
+  assert.equal((await journal.detail(receipt.operation_id)).events.length, 16);
+  await assert.rejects(
+    journal.beginReconciliation(receipt.operation_id),
+    error => error?.code === 'action_journal_limit_exceeded',
+  );
+  assert.equal((await journal.detail(receipt.operation_id)).events.length, 16);
+});
+
 test('Windows and untrusted directory paths fail closed without creating or chmodding targets', async t => {
   const parent = await directory(t); const absent = join(parent, 'not-created');
   const windows = await ActionJournal.open({ directory: 'C:\\private\\journal', platform: 'win32' });
