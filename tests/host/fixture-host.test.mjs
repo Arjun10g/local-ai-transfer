@@ -218,7 +218,7 @@ test('authenticated operator grant API grants, projects, revokes, and rejects wi
 
 test('pending confirmation cancellation resolves immediately and cannot replay', async () => {
   const engine = { async *generate({ messages }) { if (!messages.some(m => m.role === 'tool')) { yield { kind: 'tool_call_chunk', text: '{"id":"call_cancel1","name":"test.confirm","arguments":{}}' }; return; } yield { kind: 'text_delta', text: 'unexpected continuation' }; } };
-  const controller = new ConversationController({ engine, confirmationTimeoutMs: 10000, toolRegistry: { 'test.confirm': { name: 'test.confirm', risk_tier: 'T2', requires_confirmation: true, execute: async () => { throw new Error('must not execute'); } } } });
+  const controller = new ConversationController({ engine, confirmationTimeoutMs: 10000, toolRegistry: { 'test.confirm': { name: 'test.confirm', risk_tier: 'T2', side_effect: 'none', requires_confirmation: true, execute: async () => { throw new Error('must not execute'); } } } });
   const events = []; const promise = controller.runTurn({ sessionId: 'ses_wait01', requestId: 'req_wait01', message: 'confirm', onEvent: event => events.push(event) });
   while (!events.some(e => e.event === 'tool.confirmation_required')) await new Promise(resolve => setTimeout(resolve, 1));
   const required = events.find(e => e.event === 'tool.confirmation_required'); assert.equal(controller.cancel('req_wait01'), true);
@@ -234,7 +234,7 @@ test('asset containment helper is separator-safe and connection cap is explicit'
 
 test('confirmation is request/call bound and denial continues as a safe tool result', async () => {
   const engine = { async *generate({ messages }) { if (!messages.some(m => m.role === 'tool')) { yield { kind: 'tool_call_chunk', text: '{"id":"call_safe1","name":"test.confirm","arguments":{}}' }; return; } yield { kind: 'text_delta', text: 'Denied safely.' }; yield { kind: 'done', finish_reason: 'stop' }; } };
-  const controller = new ConversationController({ engine, confirmationTimeoutMs: 1000, toolRegistry: { 'test.confirm': { name: 'test.confirm', risk_tier: 'T2', requires_confirmation: true, execute: async () => { throw new Error('must not execute'); } } } });
+  const controller = new ConversationController({ engine, confirmationTimeoutMs: 1000, toolRegistry: { 'test.confirm': { name: 'test.confirm', risk_tier: 'T2', side_effect: 'none', requires_confirmation: true, execute: async () => { throw new Error('must not execute'); } } } });
   const events = []; const promise = controller.runTurn({ sessionId: 'ses_confirm', requestId: 'req_confirm', message: 'do it', onEvent: event => events.push(event) });
   while (!events.some(e => e.event === 'tool.confirmation_required')) await new Promise(resolve => setTimeout(resolve, 1));
   const required = events.find(e => e.event === 'tool.confirmation_required'); assert.equal(controller.confirm(required.data.confirmation_id, true), false); assert.equal(controller.confirm(required.data.confirmation_id, true, { requestId: 'req_confirm' }), false); assert.equal(controller.confirm(required.data.confirmation_id, true, { callId: 'call_safe1' }), false); assert.equal(controller.confirm(required.data.confirmation_id, true, { requestId: 'req_other', callId: 'call_safe1' }), false); assert.equal(controller.confirm(required.data.confirmation_id, false, { requestId: 'req_confirm', callId: 'call_safe1' }), true);

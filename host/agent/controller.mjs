@@ -1,12 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { makeEvent } from './assistant-events.mjs';
 import { makeToolResult, parseToolCall, validateToolResult, EnvelopeError } from './tool-envelope.mjs';
+import { createActionBinding } from './action-journal.mjs';
 import { timeNowDefinition, timeNowTool } from '../tools/time-now.mjs';
 
 export const STATES = Object.freeze(['IDLE', 'BUILDING_PROMPT', 'INFERENCING', 'TOOL_PROPOSED', 'WAITING_CONFIRMATION', 'TOOL_RUNNING', 'CONTINUING_MODEL', 'COMPLETED', 'CANCELLED', 'FAILED']);
 const opaque = prefix => `${prefix}_${randomUUID().replaceAll('-', '')}`;
 const CANCELLED_CONFIRMATION = Symbol('cancelled-confirmation');
 const sessionIdPattern = /^[A-Za-z0-9_-]{8,96}$/;
+const DURABLE_ACTION_EFFECTS = new Set(['create', 'replace', 'write_sensitive', 'launch', 'external_navigation', 'process_execution', 'cloud_inference', 'create_draft', 'send_mail', 'modify_mail', 'send_teams', 'browser_navigation', 'browser_input', 'browser_activation']);
+const NON_ACTION_EFFECTS = new Set(['none', 'read_sensitive', 'read_mail', 'read_teams', 'browser_read', 'browser_close']);
+const RECONCILIATION_REQUIRED_EFFECTS = new Set(['create_draft', 'send_mail', 'modify_mail', 'send_teams', 'browser_navigation', 'browser_input', 'browser_activation']);
 
 // The model sees only the OpenAI-compatible function schema. Execution and
 // confirmation policy remain host-owned and never cross the native boundary.
@@ -67,6 +71,13 @@ function validateToolArgumentShape(tool, call) {
 }
 function publicToolCall(call) { return { id: call.id, name: call.name }; }
 
+export function requiresDurableAction(tool) {
+  if (DURABLE_ACTION_EFFECTS.has(tool?.side_effect)) return true;
+  if (NON_ACTION_EFFECTS.has(tool?.side_effect)) return false;
+  if (['T1', 'T2', 'T3', 'T4'].includes(tool?.risk_tier)) throw Object.assign(new Error('tool side effect is not classified'), { code: 'action_journal_classification_required' });
+  return false;
+}
+
 function executionRegistryEntries(toolRegistry) {
   if (toolRegistry === undefined) return [];
   if (!toolRegistry || typeof toolRegistry !== 'object' || Array.isArray(toolRegistry)) throw new TypeError('toolRegistry must be an object');
@@ -77,8 +88,6 @@ function executionRegistryEntries(toolRegistry) {
 }
 
 async function invokeWithTimeout(tool, operation, call, signal) {
-  // Tools must honor the supplied AbortSignal; the race bounds the controller
-  // even when a misbehaving implementation cannot be interrupted immediately.
   // Tools must honor the supplied AbortSignal; the race bounds the controller
   // even when a misbehaving implementation cannot be interrupted immediately.
   const timeoutMs = tool.timeout_ms ?? 30000;
@@ -92,11 +101,12 @@ async function invokeWithTimeout(tool, operation, call, signal) {
 }
 
 export class ConversationController {
-  constructor({ engine, maxToolCalls = 8, confirmationTimeoutMs = 30000, maxSessions = 4, maxHistoryMessages = 64, maxHistoryBytes = 262144, toolRegistry } = {}) {
+  constructor({ engine, maxToolCalls = 8, confirmationTimeoutMs = 30000, maxSessions = 4, maxHistoryMessages = 64, maxHistoryBytes = 262144, toolRegistry, actionJournal } = {}) {
     if (!engine?.generate) throw new TypeError('engine.generate is required');
     if (!Number.isInteger(maxSessions) || maxSessions < 1) throw new TypeError('maxSessions must be positive');
     if (!Number.isInteger(maxHistoryMessages) || maxHistoryMessages < 1 || !Number.isInteger(maxHistoryBytes) || maxHistoryBytes < 1024) throw new TypeError('history limits are invalid');
-    this.engine = engine; this.maxToolCalls = maxToolCalls; this.confirmationTimeoutMs = confirmationTimeoutMs; this.maxSessions = maxSessions; this.maxHistoryMessages = maxHistoryMessages; this.maxHistoryBytes = maxHistoryBytes; this.clock = 0;
+    if (actionJournal !== undefined && (!actionJournal || typeof actionJournal.health !== 'function' || typeof actionJournal.prepare !== 'function' || typeof actionJournal.authorize !== 'function' || typeof actionJournal.dispatch !== 'function' || typeof actionJournal.acknowledge !== 'function' || typeof actionJournal.beginReconciliation !== 'function' || typeof actionJournal.complete !== 'function' || typeof actionJournal.cancel !== 'function' || typeof actionJournal.failDefinitive !== 'function' || typeof actionJournal.markUnknown !== 'function')) throw new TypeError('actionJournal does not implement the durable transition contract');
+    this.engine = engine; this.maxToolCalls = maxToolCalls; this.confirmationTimeoutMs = confirmationTimeoutMs; this.maxSessions = maxSessions; this.maxHistoryMessages = maxHistoryMessages; this.maxHistoryBytes = maxHistoryBytes; this.actionJournal = actionJournal; this.clock = 0;
     this.sessions = new Map(); this.active = null; this.pending = new Map();
     this.tools = new Map([[timeNowDefinition.name, { ...timeNowDefinition, execute: ({ id, arguments: args }) => timeNowTool({ id, arguments: args }) }], ...executionRegistryEntries(toolRegistry)]);
   }
@@ -135,13 +145,14 @@ export class ConversationController {
     this.active = { requestId, sessionId: session.id, controller, confirmationId: null };
     const emit = this.emitFactory(requestId, session.id, onEvent);
     session.last_request_id = requestId; this._appendHistory(session, { role: 'user', content: message }); session.state = 'BUILDING_PROMPT';
-    let text = ''; let calls = 0;
-    const tools = modelToolDefinitions(this.tools);
+    let text = ''; let calls = 0; let activeJournalOperation = null;
     try {
       emit('message.started', { mode, state: session.state });
       while (true) {
         if (controller.signal.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' });
         session.state = calls ? 'CONTINUING_MODEL' : 'INFERENCING'; emit('message.started', { mode, state: session.state, continuation: calls > 0 });
+        const journalReady = this.actionJournal?.health().state === 'ready';
+        const tools = modelToolDefinitions(new Map([...this.tools].filter(([, tool]) => !requiresDurableAction(tool) || journalReady)));
         let callText = ''; let gotCall = false; let usage;
         for await (const frame of this.engine.generate({ requestId, sessionId: session.id, messages: session.history, tools, mode, signal: controller.signal })) {
           if (frame.kind === 'text_delta') { text += frame.text; emit('message.delta', { text: frame.text }); }
@@ -163,9 +174,15 @@ export class ConversationController {
           emit('tool.confirmation_required', { confirmation_id: confirmationId, call: publicToolCall(call), preview, phase: 'preview_access', risk_tier: 'T1', expires_in_ms: this.confirmationTimeoutMs });
           approved = await new Promise(resolve => { const timer = setTimeout(() => { this.pending.delete(confirmationId); resolve(false); }, this.confirmationTimeoutMs); this.pending.set(confirmationId, { resolve: answer => { clearTimeout(timer); resolve(answer); }, requestId, sessionId: session.id, callId: call.id }); });
           this.active.confirmationId = null;
-          if (approved === CANCELLED_CONFIRMATION) throw Object.assign(new Error('cancelled'), { code: 'cancelled' });
+          if (approved === CANCELLED_CONFIRMATION) { if (activeJournalOperation) { await this.actionJournal.cancel(activeJournalOperation.id, 'request_cancelled'); activeJournalOperation = null; } throw Object.assign(new Error('cancelled'), { code: 'cancelled' }); }
           if (!approved) { authorization = { kind: 'policy' }; previewAccessDenied = true; }
           else { preview = await invokeWithTimeout(tool, tool.preview, { ...call, authorization: { kind: 'user_confirmation' }, preview_authorized: true }, controller.signal); emit('tool.proposed', { call: publicToolCall(call), preview }); }
+        }
+        if (requiresDurableAction(tool)) {
+          if (!this.actionJournal) throw Object.assign(new Error('durable action journal is not configured'), { code: 'action_journal_unavailable' });
+          const binding = createActionBinding({ requestId, callId: call.id, toolName: call.name, arguments: call.arguments, preview });
+          const receipt = await this.actionJournal.prepare({ requestId, callId: call.id, toolName: call.name, riskTier: tool.risk_tier, sideEffect: tool.side_effect, argumentsDigest: binding.argumentsDigest, previewDigest: binding.previewDigest, operationDigest: binding.operationDigest });
+          activeJournalOperation = { id: receipt.operation_id, dispatched: false, reconcile: RECONCILIATION_REQUIRED_EFFECTS.has(tool.side_effect) };
         }
         const requiresConfirmation = !previewAccessDenied && (typeof tool.confirmationRequired === 'function' ? await tool.confirmationRequired(call, { preview }) : Boolean(tool.requires_confirmation));
         if (requiresConfirmation) {
@@ -173,9 +190,14 @@ export class ConversationController {
           this.active.confirmationId = confirmationId; emit('tool.confirmation_required', { confirmation_id: confirmationId, call: publicToolCall(call), preview, risk_tier: tool.risk_tier, expires_in_ms: this.confirmationTimeoutMs });
           approved = await new Promise(resolve => { const timer = setTimeout(() => { this.pending.delete(confirmationId); resolve(false); }, this.confirmationTimeoutMs); this.pending.set(confirmationId, { resolve: answer => { clearTimeout(timer); resolve(answer); }, requestId, sessionId: session.id, callId: call.id }); });
           this.active.confirmationId = null;
-          if (approved === CANCELLED_CONFIRMATION) throw Object.assign(new Error('cancelled'), { code: 'cancelled' });
+          if (approved === CANCELLED_CONFIRMATION) { if (activeJournalOperation) { await this.actionJournal.cancel(activeJournalOperation.id, 'request_cancelled'); activeJournalOperation = null; } throw Object.assign(new Error('cancelled'), { code: 'cancelled' }); }
           if (approved) authorization = { kind: 'user_confirmation' };
         } else { const autoAuthorization = tool.authorize ? await invokeWithTimeout(tool, tool.authorize, { ...call, preview }, controller.signal) : null; if (autoAuthorization && typeof autoAuthorization === 'object') authorization = autoAuthorization; }
+        if (activeJournalOperation && !approved) { await this.actionJournal.cancel(activeJournalOperation.id); activeJournalOperation = null; }
+        else if (activeJournalOperation) {
+          if (controller.signal.aborted) { await this.actionJournal.cancel(activeJournalOperation.id, 'request_cancelled'); activeJournalOperation = null; throw Object.assign(new Error('cancelled'), { code: 'cancelled' }); }
+          await this.actionJournal.authorize(activeJournalOperation.id, authorization.kind); await this.actionJournal.dispatch(activeJournalOperation.id); activeJournalOperation.dispatched = true;
+        }
         session.state = 'TOOL_RUNNING'; emit('tool.started', { call: publicToolCall(call), approved, authorization: authorization.kind });
         let result;
         if (!approved) result = makeToolResult({ id: call.id, name: call.name, status: 'denied', text: 'User denied this action.' });
@@ -188,12 +210,29 @@ export class ConversationController {
         }
         try { result = validateToolResult(result); } catch { throw Object.assign(new Error('invalid_tool_result'), { code: 'invalid_tool_result' }); }
         if (result.id !== call.id || result.name !== call.name) throw Object.assign(new Error('tool_result_mismatch'), { code: 'tool_result_mismatch' });
+        if (activeJournalOperation) {
+          if (result.status === 'ok') {
+            await this.actionJournal.acknowledge(activeJournalOperation.id);
+            if (activeJournalOperation.reconcile) {
+              await this.actionJournal.beginReconciliation(activeJournalOperation.id);
+              result = makeToolResult({ id: call.id, name: call.name, status: 'failed', text: JSON.stringify({ code: 'action_completion_unverified', operation_id: activeJournalOperation.id, state: 'reconciling' }) });
+            } else await this.actionJournal.complete(activeJournalOperation.id);
+          }
+          else await this.actionJournal.markUnknown(activeJournalOperation.id);
+          activeJournalOperation = null;
+        }
         emit('tool.completed', { result });
         this._appendHistory(session, { role: 'assistant', content: callText });
         this._appendHistory(session, { role: 'tool', name: call.name, tool_call_id: call.id, content: result.content[0]?.text ?? '' });
         session.state = 'CONTINUING_MODEL'; text = '';
       }
-    } catch (error) {
+    } catch (caught) {
+      let error = caught;
+      if (activeJournalOperation) {
+        try { if (activeJournalOperation.dispatched) await this.actionJournal.markUnknown(activeJournalOperation.id); else await this.actionJournal.failDefinitive(activeJournalOperation.id); }
+        catch (journalError) { error = journalError; }
+        activeJournalOperation = null;
+      }
       const cancelled = error?.code === 'cancelled' || controller.signal.aborted;
       session.state = cancelled ? 'CANCELLED' : 'FAILED';
       emit(cancelled ? 'request.cancelled' : 'request.failed', { code: cancelled ? 'cancelled' : (error.code ?? 'request_failed'), message: cancelled ? 'Request cancelled.' : 'Request failed.' });

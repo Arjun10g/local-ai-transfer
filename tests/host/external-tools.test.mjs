@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdtemp, readFile, mkdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, realpath, readFile, mkdir, rm, writeFile } from 'node:fs/promises';
 import { createExternalToolRegistry } from '../../host/providers/index.mjs';
 import { BrowserActionProvider, CdpClient, createBrowserActionTools, browserActionDefinitions, hostIsPrivate, publicAddress, publicUrl } from '../../host/providers/browser-actions.mjs';
 import { MicrosoftGraphProvider, MicrosoftDeviceCodeCredential, MicrosoftGraphHttpsTransport, createMicrosoftGraphTools } from '../../host/providers/microsoft-graph.mjs';
@@ -13,6 +13,7 @@ import { ConversationController } from '../../host/agent/controller.mjs';
 import { mergeConfig, validateConfig } from '../../host/agent/config.mjs';
 import { HostServer } from '../../host/server/host-server.mjs';
 import { createWorkspaceContextReader } from '../../host/providers/copilot-context.mjs';
+import { ActionJournal } from '../../host/agent/action-journal.mjs';
 
 class CopilotCliProvider extends ProductionCopilotCliProvider { constructor(options = {}) { super({ testOnly: true, protocol: 'legacy_stdin', ...options }); } }
 const createCopilotTool = options => options instanceof ProductionCopilotCliProvider ? productionCreateCopilotTool(options) : productionCreateCopilotTool({ testOnly: true, protocol: 'legacy_stdin', ...(options ?? {}) });
@@ -21,6 +22,7 @@ const call = (name, arguments_, id = `call_${name.replaceAll('.', '_')}`) => ({ 
 const value = result => JSON.parse(result.content[0].text);
 const revision = 'a'.repeat(64);
 const configuredWorkspace = () => ({ id: 'project', path: '/approved/workspace', read: true, write: true });
+async function journal(t) { const path = await realpath(await mkdtemp(join(tmpdir(), 'lae-external-journal-'))); await chmod(path, 0o700); t.after(() => rm(path, { recursive: true, force: true })); return ActionJournal.open({ directory: path }); }
 
 test('external contract publishes complete strict schemas for every tool', async () => {
   const contract = JSON.parse(await readFile(new URL('../../contracts/external-tools/v0.1.0.json', import.meta.url), 'utf8'));
@@ -179,17 +181,17 @@ test('Graph writes are at-most-once across concurrent and timeout retries', asyn
   const tools = createMicrosoftGraphTools({ enabled: true, requestTimeoutMs: 100, credentialSource: { getAccessToken: async () => 'synthetic-token' }, transport }); const draft = call('mail.create_draft', { to: ['alice@example.com'], subject: 'x', body: 'x' }, 'call_once'); await tools['mail.create_draft'].preview(draft); const authorization = { kind: 'user_confirmation' }; const first = tools['mail.create_draft'].execute({ ...draft, authorization }); await new Promise(resolve => setImmediate(resolve)); const concurrent = value(await tools['mail.create_draft'].execute({ ...draft, authorization })); assert.equal(concurrent.code, 'provider_write_already_attempted'); const timedOut = value(await first); assert.equal(timedOut.code, 'provider_timeout'); const retry = value(await tools['mail.create_draft'].execute({ ...draft, authorization })); assert.equal(retry.code, 'provider_timeout'); assert.equal(retry.idempotency, 'replayed'); assert.equal(dispatches, 1);
 });
 
-test('controller advertises external parameters and distinguishes operator authorization from user confirmation', async () => {
+test('controller advertises external parameters and distinguishes operator authorization from user confirmation', async t => {
   const grants = new OperatorGrantStore(); grants.grant({ capability: 'microsoft.graph.mail', provider: 'microsoft_graph', accountFingerprint: 'acct-controller', profile: 'full_access' }); let requests = 0; const provider = new MicrosoftGraphProvider({ enabled: true, permissionProfile: 'full_access', grantStore: grants, accountFingerprint: 'acct-controller', credentialSource: { getAccessToken: async () => 'synthetic-token' }, transport: { request: async () => { requests += 1; return { status: 201, body: { id: 'draft-controller' } }; } }, testOnly: true }); const registry = createMicrosoftGraphTools(provider); let advertised;
   const engine = { async *generate({ tools, messages }) { advertised = tools.find(item => item.function.name === 'mail.create_draft'); if (!messages.some(item => item.role === 'tool')) { yield { kind: 'tool_call_chunk', text: JSON.stringify({ id: 'call_controller', name: 'mail.create_draft', arguments: { to: ['alice@example.com'], subject: 'x', body: 'x' } }) }; return; } yield { kind: 'text_delta', text: 'done' }; yield { kind: 'done', finish_reason: 'stop' }; } };
-  const events = []; const controller = new ConversationController({ engine, toolRegistry: registry }); const output = await controller.runTurn({ sessionId: 'ses_controller', requestId: 'req_controller', message: 'draft a message', onEvent: event => events.push(event) }); assert.equal(output.state, 'COMPLETED'); assert.deepEqual(advertised.function.parameters, registry['mail.create_draft'].parameters); assert.equal(events.some(event => event.event === 'tool.confirmation_required'), false); assert.equal(events.find(event => event.event === 'tool.started').data.authorization, 'operator_grant'); assert.equal(requests, 1);
+  const events = []; const controller = new ConversationController({ engine, actionJournal: await journal(t), toolRegistry: registry }); const output = await controller.runTurn({ sessionId: 'ses_controller', requestId: 'req_controller', message: 'draft a message', onEvent: event => events.push(event) }); assert.equal(output.state, 'COMPLETED'); assert.deepEqual(advertised.function.parameters, registry['mail.create_draft'].parameters); assert.equal(events.some(event => event.event === 'tool.confirmation_required'), false); assert.equal(events.find(event => event.event === 'tool.started').data.authorization, 'operator_grant'); assert.equal(requests, 1);
 });
 
-test('controller stages private send-draft preview behind confirmation and emits only bounded public call data', async () => {
+test('controller stages private send-draft preview behind confirmation and emits only bounded public call data', async t => {
   let sends = 0; let draftReads = 0;
   const provider = new MicrosoftGraphProvider({ enabled: true, credentialSource: { getAccessToken: async () => 'synthetic-token' }, transport: { request: async request => { if (request.method === 'GET') { draftReads += 1; return { status: 200, body: { id: 'draft-stage', subject: 'Quarterly update', body: { content: 'A'.repeat(700) }, toRecipients: [{ emailAddress: { address: 'alice@example.com' } }], '@odata.etag': 'etag-stage' } }; } sends += 1; return { status: 202, body: {} }; } } });
   const tools = createMicrosoftGraphTools(provider); const engine = { async *generate({ messages }) { if (!messages.some(message => message.role === 'tool')) { yield { kind: 'tool_call_chunk', text: JSON.stringify(call('mail.send_draft', { draft_id: 'draft-stage' }, 'call_stage')) }; return; } yield { kind: 'text_delta', text: 'sent' }; yield { kind: 'done' }; } };
-  const events = []; const controller = new ConversationController({ engine, toolRegistry: tools }); const pending = controller.runTurn({ sessionId: 'ses_stage01', requestId: 'req_stage01', message: 'send it', onEvent: event => events.push(event) });
+  const events = []; const controller = new ConversationController({ engine, actionJournal: await journal(t), toolRegistry: tools }); const pending = controller.runTurn({ sessionId: 'ses_stage01', requestId: 'req_stage01', message: 'send it', onEvent: event => events.push(event) });
   while (events.filter(event => event.event === 'tool.confirmation_required').length < 1) await new Promise(resolve => setImmediate(resolve));
   const first = events.find(event => event.event === 'tool.confirmation_required'); assert.equal(first.data.phase, 'preview_access'); assert.deepEqual(first.data.call, { id: 'call_stage', name: 'mail.send_draft' }); assert.equal(first.data.call.arguments, undefined); assert.equal(draftReads, 0); assert.equal(controller.confirm(first.data.confirmation_id, true, { requestId: 'req_stage01', callId: 'call_stage' }), true);
   while (events.filter(event => event.event === 'tool.confirmation_required').length < 2) await new Promise(resolve => setImmediate(resolve));

@@ -125,7 +125,7 @@ test('FULL-ACCESS contract: grant expiry and revoke-all notify in-flight subscri
 
 test('FULL-ACCESS contract: confirmation decision precedes auto-authorization to close grant TOCTOU', async () => {
   let authorizeCalls = 0; let executed = 0;
-  const tool = { name: 'test.ordered_auth', risk_tier: 'T2', timeout_ms: 1000, requires_confirmation: true, confirmationRequired: () => true, authorize: async () => { authorizeCalls += 1; throw new Error('must not auto-authorize a confirmed action'); }, execute: async value => { executed += 1; assert.equal(value.authorization.kind, 'user_confirmation'); return makeToolResult({ id: value.id, name: value.name }); } };
+  const tool = { name: 'test.ordered_auth', risk_tier: 'T2', side_effect: 'none', timeout_ms: 1000, requires_confirmation: true, confirmationRequired: () => true, authorize: async () => { authorizeCalls += 1; throw new Error('must not auto-authorize a confirmed action'); }, execute: async value => { executed += 1; assert.equal(value.authorization.kind, 'user_confirmation'); return makeToolResult({ id: value.id, name: value.name }); } };
   const engine = { async *generate({ messages }) { if (!messages.some(message => message.role === 'tool')) { yield { kind: 'tool_call_chunk', text: JSON.stringify(call(tool.name, {}, 'call_authorder')) }; return; } yield { kind: 'text_delta', text: 'done' }; } };
   const controller = new ConversationController({ engine, toolRegistry: { [tool.name]: tool }, confirmationTimeoutMs: 1000 }); const events = [];
   const pending = controller.runTurn({ sessionId: 'ses_authorder', requestId: 'req_authorder', message: 'confirm it', onEvent: event => events.push(event) });
@@ -177,7 +177,7 @@ test('FULL-ACCESS contract: replacement makes an old grant generation replay-inv
 test('FULL-ACCESS contract: authorization is audited and emergency stop remains authoritative', async () => {
   let started = false;
   const tool = {
-    name: 'test.operator_action', risk_tier: 'T2', timeout_ms: 1000,
+    name: 'test.operator_action', risk_tier: 'T2', side_effect: 'none', timeout_ms: 1000,
     confirmationRequired: () => false,
     authorize: async () => ({ kind: 'operator_grant', generation: 'g'.repeat(32) }),
     execute: async value => await new Promise(resolve => {
@@ -212,7 +212,7 @@ test('FULL-ACCESS contract: revocation during a multi-step turn gates the next m
   grants.grant({ capability: 'test.multi', provider: 'test_provider', accountFingerprint: 'acct-multi' });
   let executions = 0;
   const tool = {
-    name: 'test.multi_write', risk_tier: 'T2', timeout_ms: 1000,
+    name: 'test.multi_write', risk_tier: 'T2', side_effect: 'none', timeout_ms: 1000,
     confirmationRequired: () => !grants.matches('test.multi', { provider: 'test_provider', accountFingerprint: 'acct-multi', scope: 'account' }),
     authorize: async () => grants.get('test.multi') ? { kind: 'operator_grant', generation: grants.get('test.multi').generation } : { kind: 'policy' },
     execute: async value => { executions += 1; grants.revoke('test.multi'); return makeToolResult({ id: value.id, name: value.name, text: 'done' }); }

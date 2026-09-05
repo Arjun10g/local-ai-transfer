@@ -130,7 +130,7 @@ test('confirmation expires into denial and cannot be replayed', async () => {
   const controller = new ConversationController({
     confirmationTimeoutMs: 10,
     engine: oneToolEngine(call('test.confirm', {}, 'call_expire1'), 'denied after expiry'),
-    toolRegistry: { 'test.confirm': { name: 'test.confirm', risk_tier: 'T2', requires_confirmation: true, execute: async () => { executions++; return makeToolResult({ id: 'call_expire1', name: 'test.confirm' }); } } }
+    toolRegistry: { 'test.confirm': { name: 'test.confirm', risk_tier: 'T2', side_effect: 'none', requires_confirmation: true, execute: async () => { executions++; return makeToolResult({ id: 'call_expire1', name: 'test.confirm' }); } } }
   });
   const events = [];
   const run = controller.runTurn({ sessionId: 'ses_expire', requestId: 'req_expire', message: 'confirm', onEvent: event => events.push(event) });
@@ -147,7 +147,7 @@ test('confirmation approval is bound to request and call and cancellation wins',
   const controller = new ConversationController({
     confirmationTimeoutMs: 1000,
     engine: oneToolEngine(call('test.confirm', {}, 'call_bind01')),
-    toolRegistry: { 'test.confirm': { name: 'test.confirm', risk_tier: 'T2', requires_confirmation: true, execute: async () => { executions++; return makeToolResult({ id: 'call_bind01', name: 'test.confirm' }); } } }
+    toolRegistry: { 'test.confirm': { name: 'test.confirm', risk_tier: 'T2', side_effect: 'none', requires_confirmation: true, execute: async () => { executions++; return makeToolResult({ id: 'call_bind01', name: 'test.confirm' }); } } }
   });
   const events = [];
   const run = controller.runTurn({ sessionId: 'ses_bind01', requestId: 'req_bind01', message: 'confirm', onEvent: event => events.push(event) });
@@ -372,7 +372,7 @@ test('HostServer strictly validates confirmation bodies and contains chat handle
 
 test('confirmation endpoint integration requires both correlation fields and rejects replay', async t => {
   const engine = oneToolEngine(call('test.confirm', {}, 'call_http01'));
-  const controller = new ConversationController({ engine, confirmationTimeoutMs: 1000, toolRegistry: { 'test.confirm': { name: 'test.confirm', risk_tier: 'T2', requires_confirmation: true, execute: async value => makeToolResult({ id: value.id, name: value.name }) } } });
+  const controller = new ConversationController({ engine, confirmationTimeoutMs: 1000, toolRegistry: { 'test.confirm': { name: 'test.confirm', risk_tier: 'T2', side_effect: 'none', requires_confirmation: true, execute: async value => makeToolResult({ id: value.id, name: value.name }) } } });
   const host = new HostServer({ controller, engine });
   const address = await host.listen(0);
   t.after(() => host.close());
