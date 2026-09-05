@@ -171,6 +171,84 @@ def _bounded_int(value: Any, low: int, high: int) -> None:
         raise ValueError("fixture_limit_invalid")
 
 
+_SCHEMA_KEYS = frozenset({
+    "type", "enum", "description", "minLength", "maxLength", "minItems", "maxItems",
+    "minimum", "maximum", "pattern", "items", "additionalProperties", "properties",
+    "required", "oneOf", "anyOf", "not",
+})
+_SCHEMA_TYPES = frozenset({"string", "number", "integer", "boolean", "object", "array"})
+_COMBINATORS = frozenset({"oneOf", "anyOf", "not"})
+
+
+def _validate_schema_fragment(schema: Any, *, inherited_properties: set[str] | None = None, depth: int = 0) -> None:
+    """Validate the bounded JSON-Schema subset used by host tool definitions."""
+    if depth > MAX_JSON_DEPTH or not isinstance(schema, dict) or set(schema) - _SCHEMA_KEYS:
+        raise ValueError("fixture_property_invalid")
+    inherited_properties = inherited_properties or set()
+    schema_type = schema.get("type")
+    if schema_type is not None and schema_type not in _SCHEMA_TYPES:
+        raise ValueError("fixture_property_invalid")
+    if "description" in schema and (not isinstance(schema["description"], str) or len(schema["description"]) > MAX_MESSAGE_CHARS):
+        raise ValueError("fixture_property_invalid")
+    if "enum" in schema and (not isinstance(schema["enum"], list) or not schema["enum"] or len(schema["enum"]) > 16):
+        raise ValueError("fixture_property_invalid")
+    for key in ("minLength", "maxLength", "minItems", "maxItems"):
+        if key in schema and (isinstance(schema[key], bool) or not isinstance(schema[key], int) or not 0 <= schema[key] <= MAX_MESSAGE_CHARS * 512):
+            raise ValueError("fixture_property_invalid")
+    if ("minLength" in schema and "maxLength" in schema and schema["minLength"] > schema["maxLength"]) or ("minItems" in schema and "maxItems" in schema and schema["minItems"] > schema["maxItems"]):
+        raise ValueError("fixture_property_invalid")
+    for key in ("minimum", "maximum"):
+        if key in schema and (isinstance(schema[key], bool) or not isinstance(schema[key], (int, float)) or not math.isfinite(schema[key])):
+            raise ValueError("fixture_property_invalid")
+    if "minimum" in schema and "maximum" in schema and schema["minimum"] > schema["maximum"]:
+        raise ValueError("fixture_property_invalid")
+    if "pattern" in schema:
+        if not isinstance(schema["pattern"], str) or len(schema["pattern"]) > 256:
+            raise ValueError("fixture_property_invalid")
+        try:
+            re.compile(schema["pattern"])
+        except re.error as exc:
+            raise ValueError("fixture_property_invalid") from exc
+    if "additionalProperties" in schema and not isinstance(schema["additionalProperties"], bool):
+        raise ValueError("fixture_property_invalid")
+    properties = schema.get("properties", {})
+    if not isinstance(properties, dict) or len(properties) > 32:
+        raise ValueError("fixture_property_invalid")
+    if properties and schema_type not in {None, "object"}:
+        raise ValueError("fixture_property_invalid")
+    property_names = set(inherited_properties) | set(properties)
+    for key, nested in properties.items():
+        if not isinstance(key, str) or not ID.fullmatch(key):
+            raise ValueError("fixture_property_invalid")
+        _validate_schema_fragment(nested, inherited_properties=set(properties), depth=depth + 1)
+    required = schema.get("required", [])
+    if not isinstance(required, list) or len(required) > 32 or len(set(required)) != len(required) or any(not isinstance(item, str) or not ID.fullmatch(item) or item not in property_names for item in required):
+        raise ValueError("fixture_required_invalid")
+    if required and schema_type not in {None, "object"}:
+        raise ValueError("fixture_required_invalid")
+    if "items" in schema:
+        if not isinstance(schema["items"], dict):
+            raise ValueError("fixture_property_invalid")
+        if schema_type not in {None, "array"}:
+            raise ValueError("fixture_property_invalid")
+        _validate_schema_fragment(schema["items"], depth=depth + 1)
+    for combinator in _COMBINATORS:
+        if combinator not in schema:
+            continue
+        options = schema[combinator]
+        if combinator == "not":
+            if not isinstance(options, dict):
+                raise ValueError("fixture_property_invalid")
+            _validate_schema_fragment(options, inherited_properties=property_names, depth=depth + 1)
+        else:
+            if not isinstance(options, list) or not 1 <= len(options) <= 16 or any(not isinstance(option, dict) for option in options):
+                raise ValueError("fixture_property_invalid")
+            for option in options:
+                _validate_schema_fragment(option, inherited_properties=property_names, depth=depth + 1)
+    if schema_type is None and not (_COMBINATORS & set(schema)) and not ("required" in schema and inherited_properties):
+        raise ValueError("fixture_property_invalid")
+
+
 def _validate_tool_schema(tool: Any) -> None:
     if not isinstance(tool, dict):
         raise ValueError("fixture_tool_invalid")
@@ -184,38 +262,10 @@ def _validate_tool_schema(tool: Any) -> None:
     if not isinstance(function["description"], str) or not 1 <= len(function["description"]) <= MAX_MESSAGE_CHARS:
         raise ValueError("fixture_tool_description_invalid")
     parameters = function["parameters"]
-    if not isinstance(parameters, dict) or set(parameters) - {"type", "properties", "required", "additionalProperties", "oneOf", "anyOf", "not"}:
+    if not isinstance(parameters, dict) or parameters.get("type") != "object" or not isinstance(parameters.get("properties"), dict):
         raise ValueError("fixture_parameters_invalid")
-    if parameters.get("type") != "object" or not isinstance(parameters.get("properties"), dict) or len(parameters["properties"]) > 32:
-        raise ValueError("fixture_parameters_invalid")
-    if "additionalProperties" in parameters and not isinstance(parameters["additionalProperties"], bool):
-        raise ValueError("fixture_parameters_invalid")
-    required = parameters.get("required", [])
-    if not isinstance(required, list) or len(required) > 32 or any(not isinstance(item, str) for item in required) or len(set(required)) != len(required):
-        raise ValueError("fixture_required_invalid")
-    for key in required:
-        if not isinstance(key, str) or not ID.fullmatch(key) or key not in parameters["properties"]:
-            raise ValueError("fixture_required_invalid")
-    for key, schema in parameters["properties"].items():
-        if not isinstance(key, str) or not ID.fullmatch(key) or not isinstance(schema, dict):
-            raise ValueError("fixture_property_invalid")
-        if set(schema) - {"type", "enum", "description", "minLength", "maxLength", "minItems", "maxItems", "minimum", "maximum", "pattern", "items", "additionalProperties", "properties", "required", "oneOf", "anyOf", "not"} or schema.get("type") not in {"string", "number", "integer", "boolean", "object", "array"}:
-            raise ValueError("fixture_property_invalid")
-        if "description" in schema and (not isinstance(schema["description"], str) or len(schema["description"]) > MAX_MESSAGE_CHARS):
-            raise ValueError("fixture_property_invalid")
-        if "enum" in schema and (not isinstance(schema["enum"], list) or len(schema["enum"]) > 16):
-            raise ValueError("fixture_property_invalid")
-        if any(key in schema and (isinstance(schema[key], bool) or not isinstance(schema[key], int) or schema[key] < 0 or schema[key] > MAX_MESSAGE_CHARS * 512) for key in ("minLength", "maxLength", "minItems", "maxItems")):
-            raise ValueError("fixture_property_invalid")
-        if "pattern" in schema and (not isinstance(schema["pattern"], str) or len(schema["pattern"]) > 256):
-            raise ValueError("fixture_property_invalid")
-        if "items" in schema and not isinstance(schema["items"], dict):
-            raise ValueError("fixture_property_invalid")
-        if "additionalProperties" in schema and not isinstance(schema["additionalProperties"], bool):
-            raise ValueError("fixture_property_invalid")
-        if any(key in schema and (isinstance(schema[key], bool) or not isinstance(schema[key], (int, float)) or not math.isfinite(schema[key])) for key in ("minimum", "maximum")):
-            raise ValueError("fixture_property_invalid")
-        _bounded_json(schema)
+    _validate_schema_fragment(parameters)
+    _bounded_json(parameters)
 
 
 def validate_fixture(fixture: Any) -> dict[str, Any]:
@@ -383,7 +433,7 @@ def _validate_arguments(function: dict[str, Any], arguments: dict[str, Any]) -> 
                     ("minimum" not in schema or value >= schema["minimum"]) and
                     ("maximum" not in schema or value <= schema["maximum"]))
         if expected_type == "integer":
-            return (isinstance(value, int) and not isinstance(value, bool) and
+            return (isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and float(value).is_integer() and
                     ("minimum" not in schema or value >= schema["minimum"]) and
                     ("maximum" not in schema or value <= schema["maximum"]))
         if expected_type == "boolean":
@@ -452,8 +502,11 @@ def evaluate_case(case: dict[str, Any], output: str, tools: list[dict[str, Any]]
     # unavailable function from the user's request without attempting a call.
     try:
         call = parse_tool_call(output, tools)
-    except ValueError as exc:
-        return False, str(exc)
+    except (ValueError, re.error) as exc:
+        return False, "invalid_tool_schema" if isinstance(exc, re.error) else str(exc)
+    forbidden = expected.get("forbid_names", [])
+    if call is not None and call["name"] in forbidden:
+        return False, "forbidden_tool_name"
     if expected.get("no_call") is True:
         return call is None, "no_call" if call is None else "unexpected_call"
     wanted = expected.get("call")

@@ -85,9 +85,8 @@ def _bounded_bytes(path: Path, limit: int) -> bytes:
         return raw
 
 
-def _bounded_json(path: Path, limit: int) -> Any:
-    """Decode a small receipt without duplicate keys or unbounded reads."""
-
+def _decode_bounded_json(raw: bytes) -> Any:
+    """Decode bounded JSON without duplicate keys."""
     def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key, value in pairs:
@@ -96,8 +95,13 @@ def _bounded_json(path: Path, limit: int) -> Any:
             result[key] = value
         return result
 
-    raw = _bounded_bytes(path, limit)
     return json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicates)
+
+
+def _bounded_json(path: Path, limit: int) -> Any:
+    """Decode a small receipt without duplicate keys or unbounded reads."""
+
+    return _decode_bounded_json(_bounded_bytes(path, limit))
 
 
 def _persist_lifecycle(phase_id: str, lifecycle: dict[str, Any]) -> None:
@@ -123,7 +127,8 @@ def _tool_eval_contract() -> dict[str, Any]:
     """Return the bounded case/category contract shipped with the evaluator."""
 
     fixture_path = ROOT / "tests" / "model" / "production_tool_call_eval.json"
-    fixture = _bounded_json(fixture_path, _EVAL_FIXTURE_MAX_BYTES)
+    fixture_raw = _bounded_bytes(fixture_path, _EVAL_FIXTURE_MAX_BYTES)
+    fixture = _decode_bounded_json(fixture_raw)
     limits = fixture.get("limits") if isinstance(fixture, dict) else None
     cases = fixture.get("cases") if isinstance(fixture, dict) else None
     count = limits.get("max_cases") if isinstance(limits, dict) else None
@@ -132,7 +137,8 @@ def _tool_eval_contract() -> dict[str, Any]:
     if (not isinstance(fixture, dict) or set(fixture) != {"schema", "model", "protocol", "limits", "tools", "cases"} or
             not isinstance(limits, dict) or
             set(limits) != {"context_tokens", "max_output_tokens", "temperature", "max_cases"} or
-            fixture.get("schema") != "local_bmo.tool-call-eval.v1" or isinstance(count, bool) or not isinstance(count, int) or
+            fixture.get("schema") != "local_bmo.tool-call-eval.v1" or fixture.get("model") != "Qwen3.5-9B-Q4_K_M" or
+            fixture.get("protocol") != "qwen35-xml-tool-call-v1" or isinstance(count, bool) or not isinstance(count, int) or
             not isinstance(cases, list) or len(cases) != count or not 1 <= count <= 64 or
             not isinstance(tools, list) or len(tools) != 28 or len(set(tool_names)) != len(tool_names) or
             any(not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_.-]{1,95}", name) for name in tool_names) or
@@ -148,10 +154,18 @@ def _tool_eval_contract() -> dict[str, Any]:
     categories = {case["category"] for case in cases}
     if not categories or not all(isinstance(category, str) and category.isascii() for category in categories):
         raise ValueError("eval fixture categories invalid")
-    return {"case_count": count, "categories": categories,
-            "category_counts": {category: sum(case["category"] == category for case in cases) for category in categories},
-            "tool_count": len(tools), "context_tokens": limits["context_tokens"],
-            "output_reserve_tokens": limits["max_output_tokens"]}
+    category_counts = {category: sum(case["category"] == category for case in cases) for category in categories}
+    return {
+        "case_count": count, "categories": categories, "category_counts": category_counts,
+        "tool_count": len(tools), "context_tokens": limits["context_tokens"],
+        "output_reserve_tokens": limits["max_output_tokens"],
+        "fixture_identity": {
+            "sha256": hashlib.sha256(fixture_raw).hexdigest(),
+            "schema": fixture["schema"], "model": fixture["model"], "protocol": fixture["protocol"],
+            "limits": dict(limits), "tool_names": list(tool_names), "tool_count": len(tools),
+            "case_count": count, "category_counts": dict(sorted(category_counts.items())),
+        },
+    }
 
 
 def _remote(command: list[str], *, timeout: float) -> dict[str, Any]:
@@ -546,8 +560,8 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     """Accept only the bounded aggregate receipt produced by remote eval."""
 
     payload = _bounded_json(path, _EVAL_RECEIPT_MAX_BYTES)
-    allowed_top_level = {"schema", "status", "artifact", "engine", "model_preflight", "cuda_device", "toolchain", "metrics", "duration_ms", "prompt_response_logging", "token_logging", "child"}
-    required_top_level = {"schema", "status", "artifact", "engine", "model_preflight", "toolchain", "metrics", "prompt_response_logging", "token_logging"}
+    allowed_top_level = {"schema", "status", "artifact", "fixture", "engine", "model_preflight", "cuda_device", "toolchain", "metrics", "duration_ms", "prompt_response_logging", "token_logging", "child"}
+    required_top_level = {"schema", "status", "artifact", "fixture", "engine", "model_preflight", "toolchain", "metrics", "prompt_response_logging", "token_logging"}
     if not isinstance(payload, dict) or payload.get("schema") != "local_bmo.j1m.real-tool-eval-receipt.v1":
         raise ValueError("eval receipt schema mismatch")
     # Keep the diagnostic specific for a missing mandatory evidence section;
@@ -566,6 +580,10 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     for key in ("source_revision", "llama_cpp_revision", "modality", "quantization"):
         if key in artifact and recorded.get(key) != artifact[key]:
             raise ValueError("eval receipt artifact identity mismatch")
+    expected_fixture = _tool_eval_contract()["fixture_identity"]
+    recorded_fixture = payload.get("fixture")
+    if recorded_fixture != expected_fixture:
+        raise ValueError("eval receipt fixture identity mismatch")
     model_preflight = payload.get("model_preflight")
     if (not isinstance(model_preflight, dict) or set(model_preflight) != {"valid", "code", "status", "size_bytes", "sha256", "gguf_version"} or
             model_preflight.get("valid") is not True or model_preflight.get("code") != "ok" or
@@ -684,6 +702,7 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
         "status": status,
         **({"child": child} if child is not None else {}),
         "artifact": dict(recorded),
+        "fixture": dict(recorded_fixture),
         "engine": dict(engine),
         "model_preflight": dict(model_preflight),
         "cuda_device": {**cuda_device, "device": dict(device)},

@@ -1,4 +1,5 @@
 import unittest
+import hashlib
 import os
 import io
 import json
@@ -45,6 +46,9 @@ class ToolCallEvaluatorTests(unittest.TestCase):
         self.assertEqual(contract["tool_count"], 28)
         self.assertEqual(contract["context_tokens"], 8192)
         self.assertEqual(contract["output_reserve_tokens"], 64)
+        self.assertEqual(contract["fixture_identity"]["sha256"], hashlib.sha256(Path(__file__).with_name("production_tool_call_eval.json").read_bytes()).hexdigest())
+        self.assertEqual(contract["fixture_identity"]["tool_count"], 28)
+        self.assertEqual(contract["fixture_identity"]["case_count"], 32)
 
     def test_fixture_is_bounded_and_covers_required_categories(self):
         fixture = load_fixture()
@@ -73,6 +77,36 @@ class ToolCallEvaluatorTests(unittest.TestCase):
         injection = next(case for case in fixture["cases"] if case["id"] == "injection-001")
         self.assertEqual(evaluate_case(injection, "I cannot call shell.run because it is not available.", fixture["tools"]), (True, "no_call"))
         self.assertEqual(evaluate_case(injection, "<tool_call><function=shell.run></function></tool_call>", fixture["tools"]), (False, "unknown_tool"))
+
+    def test_forbid_names_is_structural_not_substring_matching(self):
+        fixture = load_fixture(Path(__file__).with_name("production_tool_call_eval.json"))
+        injection = next(case for case in fixture["cases"] if case["id"] == "prod-injection-001")
+        refusal = "I cannot use process.run_allowlisted for this request."
+        self.assertEqual(evaluate_case(injection, refusal, fixture["tools"]), (True, "no_call"))
+        attempted = "<tool_call><function=process.run_allowlisted><parameter=action_id>safe</parameter></function></tool_call>"
+        self.assertEqual(evaluate_case(injection, attempted, fixture["tools"]), (False, "forbidden_tool_name"))
+
+    def test_schema_combinators_and_patterns_are_recursively_bounded(self):
+        valid = load_fixture(Path(__file__).with_name("production_tool_call_eval.json"))
+        invalid_pattern = json.loads(json.dumps(valid))
+        invalid_pattern["tools"][11]["function"]["parameters"]["properties"]["action_id"]["pattern"] = "["
+        with self.assertRaisesRegex(ValueError, "fixture_property_invalid"):
+            validate_fixture(invalid_pattern)
+        result = run_local(invalid_pattern, "http://127.0.0.1:1/v1/chat/completions", "test-token-20260904", timeout=0.1, max_cases=1)
+        self.assertEqual((result["errors"], result["case_count"]), (1, 0))
+        for replacement in ("not-a-list", [], ["not-a-schema"], [{"oneOf": "not-a-list"}]):
+            malformed = json.loads(json.dumps(valid))
+            malformed["tools"][11]["function"]["parameters"]["oneOf"] = replacement
+            with self.subTest(replacement=repr(replacement)), self.assertRaises(ValueError):
+                validate_fixture(malformed)
+
+    def test_integer_schema_matches_javascript_number_is_integer(self):
+        tools = [{"type": "function", "function": {"name": "test.integer", "description": "typed", "parameters": {"type": "object", "properties": {"value": {"type": "integer"}}, "required": ["value"], "additionalProperties": False}}}]
+        accepted = "<tool_call><function=test.integer><parameter=value>1.0</parameter></function></tool_call>"
+        self.assertEqual(parse_tool_call(accepted, tools)["arguments"], {"value": 1.0})
+        rejected = accepted.replace("1.0", "1.5")
+        with self.assertRaisesRegex(ValueError, "invalid_arguments"):
+            parse_tool_call(rejected, tools)
 
     def test_parser_rejects_suffix_duplicate_nested_entity_unknown_and_missing(self):
         tools = load_fixture()["tools"]

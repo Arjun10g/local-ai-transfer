@@ -647,7 +647,8 @@ def _fixture_contract(path: Path, *, deadline: float | None = None) -> dict[str,
     except (UnicodeDecodeError, ValueError, json.JSONDecodeError, RecursionError) as exc:
         raise ValueError("evaluator_fixture_invalid") from exc
     if (not isinstance(fixture, dict) or set(fixture) != {"schema", "model", "protocol", "limits", "tools", "cases"} or
-            fixture.get("schema") != "local_bmo.tool-call-eval.v1" or not isinstance(fixture.get("limits"), dict) or
+            fixture.get("schema") != "local_bmo.tool-call-eval.v1" or fixture.get("model") != "Qwen3.5-9B-Q4_K_M" or
+            fixture.get("protocol") != "qwen35-xml-tool-call-v1" or not isinstance(fixture.get("limits"), dict) or
             not isinstance(fixture.get("tools"), list) or not isinstance(fixture.get("cases"), list)):
         raise ValueError("evaluator_fixture_invalid")
     limits = fixture.get("limits")
@@ -662,6 +663,7 @@ def _fixture_contract(path: Path, *, deadline: float | None = None) -> dict[str,
     if (isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= MAX_EVAL_CASES or len(cases) != count or
             not isinstance(tools, list) or not 1 <= len(tools) <= 32 or isinstance(context_tokens, bool) or not isinstance(context_tokens, int) or not 1 <= context_tokens <= 16384 or
             isinstance(output_reserve_tokens, bool) or not isinstance(output_reserve_tokens, int) or not 1 <= output_reserve_tokens < context_tokens or
+            isinstance(limits.get("temperature"), bool) or not isinstance(limits.get("temperature"), (int, float)) or not math.isfinite(limits.get("temperature")) or not 0 <= limits["temperature"] <= 2 or
             any(not isinstance(name, str) or not TOOL_NAME.fullmatch(name) for name in tool_names) or len(set(tool_names)) != len(tool_names)):
         raise ValueError("evaluator_fixture_count_invalid")
     if any(not isinstance(case, dict) or set(case) != {"id", "category", "messages", "expected"} or
@@ -674,7 +676,19 @@ def _fixture_contract(path: Path, *, deadline: float | None = None) -> dict[str,
     if len(categories) == 0 or any(not category.isascii() for category in categories):
         raise ValueError("evaluator_fixture_categories_invalid")
     category_counts = {category: sum(case["category"] == category for case in cases) for category in categories}
+    fixture_identity = {
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "schema": fixture["schema"],
+        "model": fixture["model"],
+        "protocol": fixture["protocol"],
+        "limits": dict(limits),
+        "tool_names": list(tool_names),
+        "tool_count": len(tools),
+        "case_count": count,
+        "category_counts": dict(sorted(category_counts.items())),
+    }
     return {"case_count": count, "categories": categories, "category_counts": category_counts,
+            "fixture_identity": fixture_identity,
             "tool_count": len(tools), "context_tokens": context_tokens,
             "output_reserve_tokens": output_reserve_tokens}
 
@@ -977,6 +991,7 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any], dea
             "schema": "local_bmo.j1m.real-tool-eval-receipt.v1",
             "status": status,
             "artifact": artifact,
+            "fixture": fixture_contract["fixture_identity"],
             "engine": build_info,
             # Keep the original identity fields for receipt consumers while
             # adding the explicit verified status used by salvage.
@@ -1038,10 +1053,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     receipt: dict[str, Any]
     process_started = time.monotonic()
+    fixture_identity: dict[str, Any] | None = None
     try:
         if not 1 <= args.timeout <= EVAL_TOTAL_TIMEOUT:
             raise ValueError("eval_timeout_invalid")
         deadline = process_started + args.timeout
+        try:
+            fixture_identity = _fixture_contract(Path(args.fixture), deadline=deadline)["fixture_identity"]
+        except ValueError:
+            fixture_identity = None
         preflight_path = Path(args.preflight_receipt or Path(args.receipt).with_name("startup-preflight-receipt.json"))
         try:
             _write_preflight_receipt(preflight_path, status="not_started", error_code="engine_model_preflight_not_started")
@@ -1055,6 +1075,8 @@ def main(argv: list[str] | None = None) -> int:
         status = 0 if receipt["status"] in {"verified", "completed_with_failures"} else 1
     except (OSError, ValueError, TypeError, KeyError, IndexError, RecursionError, OverflowError, subprocess.SubprocessError) as exc:
         receipt = {"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "failed", "error_type": type(exc).__name__, "error_code": _safe_error_code(exc), "prompt_response_logging": False, "token_logging": False}
+        if fixture_identity is not None:
+            receipt["fixture"] = fixture_identity
         preflight = getattr(args, "_preflight_summary", None)
         if isinstance(preflight, dict):
             receipt["preflight"] = preflight

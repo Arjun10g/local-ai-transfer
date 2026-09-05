@@ -27,14 +27,16 @@ test('production fixture exactly matches configured host tool names and schemas'
   assert.equal(fixture.limits.max_output_tokens, 64);
   assert.ok(fixture.cases.length <= 64);
   const advertised = configuredDefinitions();
-  const fixtureByName = new Map(fixture.tools.map(tool => [tool.function.name, tool.function.parameters]));
-  const advertisedByName = new Map(advertised.map(tool => [tool.function.name, tool.function.parameters]));
+  const fixtureByName = new Map(fixture.tools.map(tool => [tool.function.name, tool.function]));
+  const advertisedByName = new Map(advertised.map(tool => [tool.function.name, tool.function]));
   assert.equal(fixtureByName.size, 28);
   assert.deepEqual([...fixtureByName.keys()], [...advertisedByName.keys()]);
-  for (const [name, schema] of fixtureByName) {
+  for (const [name, fixtureFunction] of fixtureByName) {
     // The process provider intentionally uses null-prototype maps; compare
     // the JSON contract rather than implementation object prototypes.
-    assert.equal(JSON.stringify(schema), JSON.stringify(advertisedByName.get(name)), name);
+    const advertisedFunction = advertisedByName.get(name);
+    assert.equal(fixtureFunction.description, advertisedFunction.description, `${name}: description`);
+    assert.equal(JSON.stringify(fixtureFunction.parameters), JSON.stringify(advertisedFunction.parameters), name);
   }
 });
 

@@ -1497,10 +1497,11 @@ class StaticSafetyTests(unittest.TestCase):
         category_counts = {category: sum(case["category"] == category for case in fixture["cases"]) for category in {case["category"] for case in fixture["cases"]}}
         category_summary = {category: {"case_count": count, "passed": count, "failed": 0, "errors": 0} for category, count in category_counts.items()}
         case_count = len(fixture["cases"])
+        fixture_identity = orchestrator._tool_eval_contract()["fixture_identity"]
         with tempfile.TemporaryDirectory() as directory:
             receipt = Path(directory) / "eval-receipt.json"
             receipt.write_text(json.dumps({
-                "schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "verified", "artifact": artifact,
+                "schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "verified", "artifact": artifact, "fixture": fixture_identity,
                 "engine": {"engine_version": "0.1.0", "api_version": "0.1.0", "compiled_backend": f"llama.cpp/{config['llama_cpp']['revision'][:8]}/cuda", "llama_cpp_revision": config["llama_cpp"]["revision"], "model": "qwen35-9b-q4-k-m"},
                 "model_preflight": {"valid": True, "code": "ok", "status": "verified", "size_bytes": 4, "sha256": "a" * 64, "gguf_version": 3},
                 "cuda_device": {"schema": "local_bmo.j1m.cuda-device-receipt.v1", "status": "verified", "selector": "CUDA0", "device_count": 1, "device": {"index": 0, "name": "NVIDIA A100 80GB", "memory_total_mib": 81920, "driver_version": "550.1"}, "source": "nvidia-smi bounded query"},
@@ -1510,7 +1511,7 @@ class StaticSafetyTests(unittest.TestCase):
             }), encoding="utf-8")
             selected = orchestrator._verify_eval_receipt(receipt, artifact)
             self.assertEqual(selected["metrics"]["case_count"], case_count)
-            self.assertEqual(set(selected), {"status", "artifact", "engine", "model_preflight", "cuda_device", "metrics", "toolchain"})
+            self.assertEqual(set(selected), {"status", "artifact", "fixture", "engine", "model_preflight", "cuda_device", "metrics", "toolchain"})
             self.assertEqual(selected["artifact"]["modality"], "text_only_no_mmproj")
             self.assertEqual(selected["artifact"]["quantization"], "Q4_K_M")
             self.assertEqual(set(selected["toolchain"]["versions"]), {"python3", "git", "cmake", "g++", "nvcc"})
@@ -1522,6 +1523,12 @@ class StaticSafetyTests(unittest.TestCase):
             }
             receipt.write_text(json.dumps(hostile_quality), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "quality diagnostics"):
+                orchestrator._verify_eval_receipt(receipt, artifact)
+            receipt.write_text(json.dumps(valid_payload), encoding="utf-8")
+            hostile_fixture = json.loads(json.dumps(valid_payload))
+            hostile_fixture["fixture"]["sha256"] = "0" * 64
+            receipt.write_text(json.dumps(hostile_fixture), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "fixture identity"):
                 orchestrator._verify_eval_receipt(receipt, artifact)
             receipt.write_text(json.dumps(valid_payload), encoding="utf-8")
             redistributed = json.loads(json.dumps(valid_payload))
