@@ -136,3 +136,38 @@ S0/S4 should independently review `host/agent/action-journal.mjs`, controller tr
   Microsoft Graph create message, send mail, update message, chat messages,
   and list messages documentation (all under `learn.microsoft.com/graph`).
 - **State:** IN_PROGRESS.
+
+## Graph action reconciliation evidence (2026-09-05)
+
+- **Implementation commits:** `daeea60` (Graph provider/controller,
+  transport header policy, contract/journal documentation, mocked tests) and
+  `549904f` (ambiguous Teams timeout regression).
+- The controller now passes a private `internal.journal_binding` containing
+  only operation/digest metadata after the journal dispatch barrier. The model
+  schema, model call, events, and provider result contain no authority token or
+  message content beyond the existing bounded preview.
+- Generic `Idempotency-Key` is removed from the Graph adapter and HTTPS header
+  allowlist. In-memory success replay is removed; attempted duplicate writes
+  are refused, while `mail.mark_read` is safely repeatable through GET desired-
+  state verification.
+- Draft creation sends a bounded `x-lae-operation` Internet header and can
+  verify one exact `/me/mailFolders/drafts/messages` marker match after an
+  ambiguous response. Draft send binds the complete bounded normalized draft
+  digest plus ETag/change key; `202`/timeout requires draft disappearance and
+  one new matching Sent Items proof. Teams send has no idempotency claim or
+  automatic retry and accepts only a validated `201` resource or bounded
+  unique chat proof. Unproven effects remain `reconciling`.
+- Official references are recorded in
+  `host/providers/MICROSOFT_GRAPH_RECONCILIATION.md`.
+- **Focused evidence:**
+  `node --check host/providers/microsoft-graph.mjs
+  host/providers/microsoft-graph-auth.mjs host/agent/controller.mjs` — PASS;
+  `node --test tests/host/external-tools.test.mjs` — 56 pass, 0 fail before
+  the final Teams test addition; `node --test tests/host/external-tools.test.mjs
+  --test-name-pattern='Graph|Teams send|controller carries'` — 57 pass, 0 fail;
+  `node --test tests/host/external-tools.test.mjs tests/host/action-journal.test.mjs`
+  — 77 pass, 0 fail; `git diff --check` — PASS.
+- No real credential/account/provider call, live network, browser/model/native
+  build, or broad/heavy suite was used. Production journal/provider readiness
+  remains gated by the fail-closed durable journal and live-account review.
+- **State:** READY_FOR_REVIEW.
