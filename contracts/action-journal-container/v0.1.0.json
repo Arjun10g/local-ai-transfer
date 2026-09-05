@@ -1,0 +1,106 @@
+{
+  "schema_version": "lae.action-journal-container-layout.v1",
+  "$id": "lae://contracts/action-journal-container/0.1.0",
+  "title": "Local Assistant fixed ActionJournal container layout",
+  "version": "0.1.0",
+  "status": "reference_only_not_enabled",
+  "production_available": false,
+  "native_helper_added": false,
+  "filesystem_backend_added": false,
+  "transport_added": false,
+  "production_import_added": false,
+  "byte_order": "little_endian",
+  "checksum": "sha256",
+  "container": {
+    "bytes": 33558528,
+    "header_bytes": 4096,
+    "slot_count": 1024,
+    "banks_per_slot": 2,
+    "slot_bytes": 32768,
+    "bank_bytes": 16384,
+    "bank_body_bytes": 15360,
+    "bank_marker_bytes": 1024,
+    "max_active_records": 256,
+    "max_terminal_records": 768
+  },
+  "header": {
+    "magic_ascii_nul_padded": "LAEJRNLCONTAINER",
+    "format_version": 1,
+    "endian_marker": 16909060,
+    "container_id_bytes": 32,
+    "protocol": "lae.action-journal.v0.1.0",
+    "checksum_offset": 4064,
+    "checksum_formula": "SHA-256(container-domain || 'header' || NUL || container-id || bytes[0:4064])",
+    "reserved_bytes": "must_be_zero",
+    "initialization": "new exact-size all-zero container only; write full header; FlushFileBuffers; exact readback; never overwrite an existing or ambiguous container"
+  },
+  "bank": {
+    "descriptor_bytes": 1024,
+    "event_cells": 16,
+    "event_cell_bytes": 896,
+    "max_canonical_event_bytes": 768,
+    "body_checksum_formula": "SHA-256(container-domain || 'bank-body' || NUL || container-id || full-15360-byte-body)",
+    "event_digest_formula": "SHA-256('lae.action-journal.v0.1.0' || NUL || 'event' || NUL || canonical-protocol-event-json)",
+    "events_digest_formula": "SHA-256(container-domain || 'events' || NUL || container-id || concat(uint32-le-length || event-digest || canonical-event-bytes))",
+    "unused_and_padding_bytes": "must_be_zero",
+    "event_sequence": "one to sixteen exact v0.1.0 protocol events, beginning prepare/prepared at sequence zero and following exact action/state/resolution/authorization transitions"
+  },
+  "marker": {
+    "bytes": 1024,
+    "states": {"staging": 1, "committed": 2},
+    "fields": [
+      "magic",
+      "format_version",
+      "state",
+      "slot_index",
+      "bank_index",
+      "generation_uint64",
+      "previous_generation_uint64",
+      "body_digest",
+      "previous_commit_digest",
+      "commit_digest"
+    ],
+    "commit_digest_offset": 112,
+    "commit_digest_formula": "SHA-256(container-domain || 'bank-marker' || NUL || container-id || marker-with-zero-commit-digest)",
+    "staging_body_digest": "all_zero",
+    "committed_body_digest": "exact_nonzero_bank_body_checksum",
+    "reserved_bytes": "must_be_zero"
+  },
+  "generation": {
+    "type": "unsigned_64_bit",
+    "first": "0",
+    "maximum": "18446744073709551615",
+    "increment": "exactly_one",
+    "wrap": "refuse_before_any_write",
+    "two_committed_banks": "higher generation must be exactly lower plus one and bind lower generation, commit digest, operation id, and exact one-event history extension",
+    "equal_gap_or_mismatched_authority": "fail_closed"
+  },
+  "write_protocol": [
+    "validate event, exact history extension, capacity, generation, offsets, and fixed sizes before writes",
+    "write a checksummed STAGING marker into the inactive bank",
+    "FlushFileBuffers and exact-readback the STAGING marker",
+    "write the entire fixed-size inactive bank body",
+    "FlushFileBuffers and exact-readback plus validate the bank body",
+    "write the checksummed COMMITTED marker containing the body digest",
+    "FlushFileBuffers and exact-readback plus validate the complete bank",
+    "only then acknowledge the append"
+  ],
+  "startup": {
+    "unused_bank": "marker and body are all zero",
+    "staged_bank": "valid marker only; ignore its body and retain the exact predecessor committed authority",
+    "committed_bank": "marker, body, checksums, slot/bank/generation, operation id, event cells, event digests, and event history all validate",
+    "selection": "select the highest exact valid committed bank",
+    "malformed_marker_or_orphan_body": "fail_closed",
+    "conflicting_committed_authority": "fail_closed",
+    "duplicate_operation_across_slots": "fail_closed",
+    "caps": "fail closed above 256 active or 768 terminal records"
+  },
+  "future_windows_requirements": {
+    "handle": "precreated identity-validated regular file held for helper lifetime with deny-write/delete sharing",
+    "path": "owner, DACL, reparse, volume, file-id, link-count, exact-size, and path/handle identity validation before activation",
+    "writes": "checked offsets and complete bounded writes only",
+    "durability": "FlushFileBuffers at every specified barrier; exact handle-based readback after each flush",
+    "crash_acceptance": "power-loss, process-death, storage-fault, and sector-write behavior must be independently tested on exact Windows target before activation"
+  },
+  "reference_model": "tests/reference/action-journal-container-model.mjs"
+}
