@@ -1,7 +1,8 @@
 #pragma once
 
-// Inert, source-only Win32 read boundary. This header is intentionally absent
-// from CMake, host imports, package manifests, and all production registries.
+// Inert, source-only Win32 read boundary. It is absent from the default and
+// product CMake graph, host imports, package manifests, and all production
+// registries. An OFF-by-default compile-check target is not activation.
 #ifndef _WIN32
 #error "The Windows read-only filesystem boundary is Windows-only"
 #endif

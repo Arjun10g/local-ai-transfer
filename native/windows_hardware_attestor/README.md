@@ -1,7 +1,9 @@
 # Windows native hardware attestor (inert source)
 
 This directory is a source/protocol slice, not an executable feature. It is
-absent from CMake, packages, the host, and capability registries. The checked-in
+absent from the default/product CMake graph, packages, the host, and capability
+registries. An OFF-by-default static compile-check target may compile this
+source on an approved remote Windows SDK worker but cannot activate it. The checked-in
 trust anchor is empty, global blocking-call supervision is unavailable, and
 vPro/integrated-GPU classification is unproven. Consequently, the public entry
 point stops before hardware access and produces only a `NOT_READY` diagnostic

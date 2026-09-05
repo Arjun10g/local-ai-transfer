@@ -7,6 +7,7 @@ if(LAE_ENABLE_LLAMA_CPP)
 else()
   set(_LAE_FIXTURE_CLI_DEFAULT ON)
 endif()
+
 option(LAE_ENABLE_FIXTURE_CLI "Expose fixture-cpu through the engine CLI (test builds only)" ${_LAE_FIXTURE_CLI_DEFAULT})
 
 add_library(lae_runtime
@@ -157,4 +158,24 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME lae-real-model-smoke
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tests/native/real_model_smoke.py $<TARGET_FILE:lae-engine>)
   endif()
+endif()
+
+# Source-review boundaries are deliberately absent from the product graph.
+# This opt-in graph exists only so an approved remote Windows SDK worker can
+# compile and statically analyze the four independently audited inert slices.
+# OFF is the immutable product/default posture; nothing below is installed,
+# packaged, imported by lae_runtime, or linked into lae-engine.
+option(LAE_ENABLE_INERT_WINDOWS_COMPILE_CHECKS
+  "Compile/analyze selected inert Windows boundaries (never a product feature)"
+  OFF)
+if(LAE_ENABLE_INERT_WINDOWS_COMPILE_CHECKS)
+  if(NOT WIN32)
+    message(FATAL_ERROR
+      "LAE_ENABLE_INERT_WINDOWS_COMPILE_CHECKS requires a Windows SDK target")
+  endif()
+  if(NOT MSVC)
+    message(FATAL_ERROR
+      "LAE_ENABLE_INERT_WINDOWS_COMPILE_CHECKS requires an MSVC-compatible frontend")
+  endif()
+  include(cmake/inert_windows_compile_checks.cmake)
 endif()
