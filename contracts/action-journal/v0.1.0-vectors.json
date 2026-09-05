@@ -1,0 +1,67 @@
+{
+  "schema_version": "lae.action-journal-vectors.v1",
+  "protocol": "lae.action-journal.v0.1.0",
+  "synthetic_only": true,
+  "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "session_nonce": "00112233445566778899aabbccddeeff",
+  "vectors": [
+    {
+      "name": "health_request",
+      "direction": "request",
+      "sequence": 0,
+      "canonical_without_mac": "{\"body\":{},\"deadline_at_ms\":1700000005000,\"issued_at_ms\":1700000000000,\"kind\":\"request\",\"method\":\"health\",\"nonce\":\"00112233445566778899aabbccddeeff\",\"operation_id\":null,\"request_id\":\"req_0123456789abcdef0123456789abcdef\",\"sequence\":0,\"version\":1}",
+      "mac_hex": "8f7e73cfa23db5077b55138c35f1bdeb7a7030d5d2b3ecd705db133e44bfe56e",
+      "envelope": {
+        "body": {},
+        "deadline_at_ms": 1700000005000,
+        "issued_at_ms": 1700000000000,
+        "kind": "request",
+        "mac": "8f7e73cfa23db5077b55138c35f1bdeb7a7030d5d2b3ecd705db133e44bfe56e",
+        "method": "health",
+        "nonce": "00112233445566778899aabbccddeeff",
+        "operation_id": null,
+        "request_id": "req_0123456789abcdef0123456789abcdef",
+        "sequence": 0,
+        "version": 1
+      },
+      "frame_hex": "0000013f7b22626f6479223a7b7d2c22646561646c696e655f61745f6d73223a313730303030303030353030302c226973737565645f61745f6d73223a313730303030303030303030302c226b696e64223a2272657175657374222c226d6163223a2238663765373363666132336462353037376235353133386333356631626465623761373033306435643262336563643730356462313333653434626665353665222c226d6574686f64223a226865616c7468222c226e6f6e6365223a223030313132323333343435353636373738383939616162626363646465656666222c226f7065726174696f6e5f6964223a6e756c6c2c22726571756573745f6964223a227265715f3031323334353637383961626364656630313233343536373839616263646566222c2273657175656e6365223a302c2276657273696f6e223a317d"
+    },
+    {
+      "name": "health_response",
+      "direction": "response",
+      "sequence": 0,
+      "canonical_without_mac": "{\"body\":{\"platform_available\":false,\"production_enabled\":false,\"recovery_count\":0,\"status\":\"unavailable\"},\"error\":null,\"kind\":\"response\",\"method\":\"health\",\"nonce\":\"00112233445566778899aabbccddeeff\",\"operation_id\":null,\"request_id\":\"req_0123456789abcdef0123456789abcdef\",\"sequence\":0,\"state\":null,\"version\":1}",
+      "mac_hex": "237167a1ecf8cf79017393907d70b2e85cfa12fed914b4761d753c1ba65a19df",
+      "envelope": {
+        "body": {
+          "platform_available": false,
+          "production_enabled": false,
+          "recovery_count": 0,
+          "status": "unavailable"
+        },
+        "error": null,
+        "kind": "response",
+        "mac": "237167a1ecf8cf79017393907d70b2e85cfa12fed914b4761d753c1ba65a19df",
+        "method": "health",
+        "nonce": "00112233445566778899aabbccddeeff",
+        "operation_id": null,
+        "request_id": "req_0123456789abcdef0123456789abcdef",
+        "sequence": 0,
+        "state": null,
+        "version": 1
+      },
+      "frame_hex": "0000017d7b22626f6479223a7b22706c6174666f726d5f617661696c61626c65223a66616c73652c2270726f64756374696f6e5f656e61626c6564223a66616c73652c227265636f766572795f636f756e74223a302c22737461747573223a22756e617661696c61626c65227d2c226572726f72223a6e756c6c2c226b696e64223a22726573706f6e7365222c226d6163223a2232333731363761316563663863663739303137333933393037643730623265383563666131326665643931346234373631643735336331626136356131396466222c226d6574686f64223a226865616c7468222c226e6f6e6365223a223030313132323333343435353636373738383939616162626363646465656666222c226f7065726174696f6e5f6964223a6e756c6c2c22726571756573745f6964223a227265715f3031323334353637383961626364656630313233343536373839616263646566222c2273657175656e6365223a302c227374617465223a6e756c6c2c2276657273696f6e223a317d"
+    }
+  ],
+  "semantic_scenarios": {
+    "lost_ack": "reconnect_with_new_key_and_nonce_then_detail_never_redispatch",
+    "noncancellable_commit": "cancel_returns_commit_non_cancellable_then_detail",
+    "startup_recovery": {
+      "prepared": "cancelled",
+      "authorized": "cancelled",
+      "dispatching": "unknown_manual",
+      "acknowledged": "unknown_manual",
+      "reconciling": "unknown_manual"
+    }
+  }
+}
