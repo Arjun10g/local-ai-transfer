@@ -63,14 +63,20 @@
   currently spawn configured/bare executable paths without equivalent canonical
   identity checks and inherit the host environment. The visible browser opener
   uses bare `rundll32.exe`; the application config does not require an absolute
-  path. These boundaries are mocked on non-Windows hosts only.
+  path. These boundaries are mocked on non-Windows hosts only. An independently
+  reviewed native broker contract and source skeleton is merged, but it contains
+  no process-creation implementation, has empty trust/containment/confinement
+  activation prerequisites, is excluded from build/package/host integration,
+  and is explicitly `QUARANTINED` / `NOT_READY`.
 - Impact: a path replacement/search-path race can change executed bytes, and a
   launched application can inherit provider credentials or other host secrets.
   Current process/app/browser/clipboard tests do not establish safe laptop
   execution.
 - Workaround: keep these launch-capable tools disabled in the Windows product
-  profile. Introduce one native identity-pinned, minimal-environment, Job-bound
-  process broker used by every Windows subprocess path, then run real Windows
-  cancellation/orphan/path-replacement acceptance.
+  profile. Complete the quarantined skeleton with an authenticated supervisor,
+  pre-child containment, real least-privilege confinement, identity-pinned
+  executable handling, and minimal environment; independently review its host
+  integration, then run real Windows cancellation/orphan/path-replacement
+  acceptance.
 - Needed from: S1/S3 implementation, S4 security review, and target operator.
 - State: OPEN; blocks Phase 3/4/6 readiness and full laptop-control claims.
