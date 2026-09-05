@@ -1,0 +1,140 @@
+{
+  "cases": [
+    {
+      "accepted": true,
+      "dxgi_adapters": [
+        {"software": false, "tuple": "PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"},
+        {"software": true, "tuple": null}
+      ],
+      "name": "one_exact_hardware_match_with_closed_exclusions",
+      "setup_devices": [
+        {"hardware_ids": [], "pci_tuples": ["PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"]},
+        {"hardware_ids": ["ROOT\\BASICRENDER"], "pci_tuples": []},
+        {"hardware_ids": ["ROOT\\RDPIDD"], "pci_tuples": []}
+      ]
+    },
+    {
+      "accepted": false,
+      "dxgi_adapters": [
+        {"software": false, "tuple": "PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"}
+      ],
+      "name": "unmatched_extra_intel_setup_device",
+      "setup_devices": [
+        {"hardware_ids": [], "pci_tuples": ["PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"]},
+        {"hardware_ids": [], "pci_tuples": ["PCI;DEV=56A0;REV=01;SUBSYS=00008086;VEN=8086"]}
+      ]
+    },
+    {
+      "accepted": false,
+      "dxgi_adapters": [
+        {"software": false, "tuple": "PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"}
+      ],
+      "name": "unmatched_extra_discrete_setup_device",
+      "setup_devices": [
+        {"hardware_ids": [], "pci_tuples": ["PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"]},
+        {"hardware_ids": [], "pci_tuples": ["PCI;DEV=2684;REV=A1;SUBSYS=16F210DE;VEN=10DE"]}
+      ]
+    },
+    {
+      "accepted": false,
+      "dxgi_adapters": [
+        {"software": false, "tuple": "PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"}
+      ],
+      "name": "unknown_setup_display_identity",
+      "setup_devices": [
+        {"hardware_ids": [], "pci_tuples": ["PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"]},
+        {"hardware_ids": ["ROOT\\VENDOR_DISPLAY"], "pci_tuples": []}
+      ]
+    },
+    {
+      "accepted": false,
+      "dxgi_adapters": [
+        {"software": false, "tuple": "PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"}
+      ],
+      "name": "missing_setup_identifiers",
+      "setup_devices": [
+        {"hardware_ids": [], "pci_tuples": []}
+      ]
+    },
+    {
+      "accepted": false,
+      "dxgi_adapters": [
+        {"software": false, "tuple": "PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"}
+      ],
+      "name": "ambiguous_setup_pci_identifiers",
+      "setup_devices": [
+        {"hardware_ids": [], "pci_tuples": ["PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086", "PCI;DEV=56A0;REV=01;SUBSYS=00008086;VEN=8086"]}
+      ]
+    },
+    {
+      "accepted": false,
+      "dxgi_adapters": [
+        {"software": false, "tuple": "PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"}
+      ],
+      "name": "duplicate_pci_identifier_in_one_setup_device",
+      "setup_devices": [
+        {"hardware_ids": [], "pci_tuples": ["PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086", "PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"]}
+      ]
+    },
+    {
+      "accepted": false,
+      "dxgi_adapters": [
+        {"software": false, "tuple": "PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"}
+      ],
+      "name": "duplicate_setup_tuple_is_ambiguous",
+      "setup_devices": [
+        {"hardware_ids": [], "pci_tuples": ["PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"]},
+        {"hardware_ids": [], "pci_tuples": ["PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"]}
+      ]
+    },
+    {
+      "accepted": false,
+      "dxgi_adapters": [
+        {"software": false, "tuple": "PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"}
+      ],
+      "name": "mixed_excluded_and_unknown_identifiers",
+      "setup_devices": [
+        {"hardware_ids": [], "pci_tuples": ["PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"]},
+        {"hardware_ids": ["ROOT\\BASICDISPLAY", "ROOT\\UNREVIEWED_MIRROR"], "pci_tuples": []}
+      ]
+    },
+    {
+      "accepted": false,
+      "dxgi_adapters": [
+        {"software": false, "tuple": "PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"}
+      ],
+      "name": "unapproved_indirect_display_not_excluded",
+      "setup_devices": [
+        {"hardware_ids": [], "pci_tuples": ["PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"]},
+        {"hardware_ids": ["ROOT\\INDIRECTDISPLAY"], "pci_tuples": []}
+      ]
+    },
+    {
+      "accepted": false,
+      "dxgi_adapters": [
+        {"software": false, "tuple": "PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"},
+        {"software": false, "tuple": "PCI;DEV=2684;REV=A1;SUBSYS=16F210DE;VEN=10DE"}
+      ],
+      "name": "unmatched_nonsoftware_dxgi_adapter",
+      "setup_devices": [
+        {"hardware_ids": [], "pci_tuples": ["PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"]}
+      ]
+    },
+    {
+      "accepted": false,
+      "dxgi_adapters": [
+        {"software": false, "tuple": "PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"},
+        {"software": false, "tuple": "PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"}
+      ],
+      "name": "duplicate_dxgi_match_is_ambiguous",
+      "setup_devices": [
+        {"hardware_ids": [], "pci_tuples": ["PCI;DEV=7D55;REV=08;SUBSYS=03901028;VEN=8086"]}
+      ]
+    }
+  ],
+  "policy": {
+    "excluded_indirect_hardware_ids": [],
+    "excluded_remote_hardware_ids": ["ROOT\\RDPIDD", "ROOT\\RDPIDD_INDIRECTDISPLAY"],
+    "excluded_software_hardware_ids": ["ROOT\\BASICDISPLAY", "ROOT\\BASICRENDER"]
+  }
+}

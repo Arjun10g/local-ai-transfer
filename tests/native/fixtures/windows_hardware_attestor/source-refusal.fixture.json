@@ -1,0 +1,106 @@
+{
+  "checks": {
+    "authenticode_valid": false,
+    "board_exact": false,
+    "cpu_exact": false,
+    "deadline_supervised": false,
+    "display_driver_exact": false,
+    "dxgi_pnp_correlation_exact": false,
+    "manifest_identity": false,
+    "memory_exact": false,
+    "operating_system_supported": false,
+    "script_identity": false,
+    "secure_boot_enabled": false,
+    "self_identity": false,
+    "vpro_authoritative": false,
+    "vulkan_runtime_present": false
+  },
+  "collector": {
+    "abi_version": 1,
+    "configured": false,
+    "offline_authenticode": true,
+    "profile": "dell-039nng-a00-core-ultra-7-vpro-intel-graphics",
+    "source_only": true
+  },
+  "executed_on_target": false,
+  "expected": {
+    "board_product": "039NNG",
+    "board_revision": "A00",
+    "cpu_description": "Intel Core Ultra 7 vPro Enterprise",
+    "cpu_exact_sku": null,
+    "display_driver": "32.0.101.8247",
+    "display_vendor_id": 32902,
+    "memory_bytes": 34359738368,
+    "memory_configured_speed_mts": 5600,
+    "memory_type": 34,
+    "windows_architecture": "x64"
+  },
+  "fixture": true,
+  "generated_at_utc": null,
+  "observed": {
+    "adapters": [],
+    "bios": {
+      "board_manufacturer": null,
+      "board_product": null,
+      "board_revision": null,
+      "release_date": null,
+      "system_manufacturer": null,
+      "system_product": null,
+      "vendor": null,
+      "version": null
+    },
+    "computer": {
+      "total_physical_memory": 0
+    },
+    "cpu": {
+      "aes": false,
+      "avx": false,
+      "avx2": false,
+      "bmi1": false,
+      "bmi2": false,
+      "brand": null,
+      "efficiency_cores": 0,
+      "family": 0,
+      "fma": false,
+      "logical_processors": 0,
+      "model": 0,
+      "performance_cores": 0,
+      "physical_cores": 0,
+      "popcnt": false,
+      "sse42": false,
+      "stepping": 0,
+      "topology_complete": false,
+      "vendor": null
+    },
+    "display_devices": [],
+    "memory_modules": [],
+    "operating_system": {
+      "architecture": null,
+      "build": null,
+      "secure_boot": null,
+      "version": null
+    },
+    "self": {
+      "authenticode_valid": false,
+      "executable_sha256": null,
+      "manifest_sha256": null,
+      "script_sha256": null,
+      "signer_certificate_sha256": null
+    },
+    "vpro": {
+      "authoritative": false,
+      "status": "unproven"
+    },
+    "vulkan": {
+      "present": false,
+      "sha256": null
+    }
+  },
+  "reason_codes": [
+    "target_trust_anchor_unavailable"
+  ],
+  "receipt_kind": "diagnostic_only",
+  "schema_version": "lae.windows-native-hardware-attestation.v1",
+  "target_evidence_accepted": false,
+  "verdict": "NOT_READY"
+}

@@ -1,0 +1,53 @@
+{
+  "abi_version": 1,
+  "activation": {
+    "cmake_target_present": false,
+    "host_import_present": false,
+    "package_entry_present": false,
+    "production_available": false
+  },
+  "collector": "lae_windows_hardware_attestor",
+  "display_correlation_policy": {
+    "excluded_indirect_hardware_ids": [],
+    "excluded_remote_hardware_ids": [
+      "ROOT\\RDPIDD",
+      "ROOT\\RDPIDD_INDIRECTDISPLAY"
+    ],
+    "excluded_software_hardware_ids": [
+      "ROOT\\BASICDISPLAY",
+      "ROOT\\BASICRENDER"
+    ],
+    "exclusion_rule": "a display without exactly one normalized PCI tuple is excluded only when every hardware ID is the same closed software, remote, or indirect category; mixed or unknown exclusion identities refuse",
+    "relevant_device_rule": "every present SetupAPI display with an exact normalized PCI vendor/device/subsystem/revision tuple must have exactly one non-software DXGI match",
+    "unmatched_relevant_device": "refuse"
+  },
+  "input": {
+    "caller_supplied_expected_identity": false,
+    "environment_configuration": false,
+    "file_output": false,
+    "network": false,
+    "runtime_override": false
+  },
+  "limits": {
+    "adapters": 8,
+    "deadline_ms": 30000,
+    "display_devices": 16,
+    "executable_bytes": 67108864,
+    "firmware_bytes": 1048576,
+    "manifest_bytes": 65536,
+    "memory_devices": 16,
+    "receipt_bytes": 1048576,
+    "runtime_dll_bytes": 16777216,
+    "topology_bytes": 1048576
+  },
+  "receipt_schema": "contracts/windows-hardware-attestor/v1/receipt.schema.json",
+  "required_activation_evidence": [
+    "audited_nonempty_compile_time_trust_anchor",
+    "audited_offline_authenticode_policy",
+    "remote_windows_build_and_signature_receipt",
+    "supervised_process_wide_30_second_deadline",
+    "target_binary_acceptance",
+    "target_driver_and_pnp_correlation_acceptance"
+  ],
+  "status": "SOURCE_ONLY_NOT_READY"
+}

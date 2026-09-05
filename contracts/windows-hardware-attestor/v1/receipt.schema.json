@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local-assistant.invalid/contracts/windows-hardware-attestor/v1/receipt.schema.json",
+  "title": "Inert Windows native hardware attestation receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["checks", "collector", "executed_on_target", "expected", "fixture", "generated_at_utc", "observed", "reason_codes", "receipt_kind", "schema_version", "target_evidence_accepted", "verdict"],
+  "properties": {
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authenticode_valid", "board_exact", "cpu_exact", "deadline_supervised", "display_driver_exact", "dxgi_pnp_correlation_exact", "manifest_identity", "memory_exact", "operating_system_supported", "script_identity", "secure_boot_enabled", "self_identity", "vpro_authoritative", "vulkan_runtime_present"],
+      "properties": {
+        "authenticode_valid": {"type": "boolean"},
+        "board_exact": {"type": "boolean"},
+        "cpu_exact": {"type": "boolean"},
+        "deadline_supervised": {"type": "boolean"},
+        "display_driver_exact": {"type": "boolean"},
+        "dxgi_pnp_correlation_exact": {"type": "boolean"},
+        "manifest_identity": {"type": "boolean"},
+        "memory_exact": {"type": "boolean"},
+        "operating_system_supported": {"type": "boolean"},
+        "script_identity": {"type": "boolean"},
+        "secure_boot_enabled": {"type": "boolean"},
+        "self_identity": {"type": "boolean"},
+        "vpro_authoritative": {"type": "boolean"},
+        "vulkan_runtime_present": {"type": "boolean"}
+      }
+    },
+    "collector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["abi_version", "configured", "offline_authenticode", "profile", "source_only"],
+      "properties": {
+        "abi_version": {"const": 1},
+        "configured": {"type": "boolean"},
+        "offline_authenticode": {"const": true},
+        "profile": {"const": "dell-039nng-a00-core-ultra-7-vpro-intel-graphics"},
+        "source_only": {"const": true}
+      }
+    },
+    "executed_on_target": {"type": "boolean"},
+    "expected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["board_product", "board_revision", "cpu_description", "cpu_exact_sku", "display_driver", "display_vendor_id", "memory_bytes", "memory_configured_speed_mts", "memory_type", "windows_architecture"],
+      "properties": {
+        "board_product": {"const": "039NNG"},
+        "board_revision": {"const": "A00"},
+        "cpu_description": {"const": "Intel Core Ultra 7 vPro Enterprise"},
+        "cpu_exact_sku": {"type": "null"},
+        "display_driver": {"const": "32.0.101.8247"},
+        "display_vendor_id": {"const": 32902},
+        "memory_bytes": {"const": 34359738368},
+        "memory_configured_speed_mts": {"const": 5600},
+        "memory_type": {"const": 34},
+        "windows_architecture": {"const": "x64"}
+      }
+    },
+    "fixture": {"type": "boolean"},
+    "generated_at_utc": {"anyOf": [{"type": "null"}, {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"}]},
+    "observed": {"$ref": "#/$defs/observed"},
+    "reason_codes": {
+      "type": "array",
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {
+        "enum": ["cpu_exact_sku_unconfigured", "display_device_identity_ambiguous", "display_driver_signature_unproven", "dxgi_pnp_correlation_incomplete", "integrated_gpu_classification_unproven", "invalid_collection_context", "offline_authenticode_policy_unreviewed", "supervised_global_deadline_unavailable", "target_trust_anchor_unavailable", "vpro_status_unproven", "vulkan_runtime_unavailable"]
+      }
+    },
+    "receipt_kind": {"const": "diagnostic_only"},
+    "schema_version": {"const": "lae.windows-native-hardware-attestation.v1"},
+    "target_evidence_accepted": {"const": false},
+    "verdict": {"const": "NOT_READY"}
+  },
+  "$defs": {
+    "nullableString": {"anyOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 512}]},
+    "sha256": {"anyOf": [{"type": "null"}, {"type": "string", "pattern": "^[0-9a-f]{64}$"}]},
+    "adapter": {
+      "type": "object", "additionalProperties": false,
+      "required": ["correlation_exact", "dedicated_system_bytes", "dedicated_video_bytes", "device_id", "driver_version", "integrated_classification", "luid_high", "luid_low", "name", "ordinal", "pnp_hardware_tuple_sha256", "revision", "shared_system_bytes", "software", "subsystem_id", "vendor_id"],
+      "properties": {
+        "correlation_exact": {"type": "boolean"}, "dedicated_system_bytes": {"type": "integer", "minimum": 0}, "dedicated_video_bytes": {"type": "integer", "minimum": 0}, "device_id": {"type": "integer", "minimum": 0, "maximum": 65535}, "driver_version": {"$ref": "#/$defs/nullableString"}, "integrated_classification": {"enum": ["integrated", "discrete", "unproven"]}, "luid_high": {"type": "integer", "minimum": 0, "maximum": 4294967295}, "luid_low": {"type": "integer", "minimum": 0, "maximum": 4294967295}, "name": {"$ref": "#/$defs/nullableString"}, "ordinal": {"type": "integer", "minimum": 0, "maximum": 7}, "pnp_hardware_tuple_sha256": {"$ref": "#/$defs/sha256"}, "revision": {"type": "integer", "minimum": 0, "maximum": 255}, "shared_system_bytes": {"type": "integer", "minimum": 0}, "software": {"type": "boolean"}, "subsystem_id": {"type": "integer", "minimum": 0, "maximum": 4294967295}, "vendor_id": {"type": "integer", "minimum": 0, "maximum": 65535}
+      }
+    },
+    "displayDevice": {
+      "type": "object", "additionalProperties": false,
+      "required": ["correlation_disposition", "device_id", "driver_date", "driver_signature_status", "driver_version", "hardware_tuple_sha256", "provider", "revision", "subsystem_id", "vendor_id"],
+      "properties": {"correlation_disposition": {"enum": ["excluded_indirect", "excluded_remote", "excluded_software", "relevant_pci"]}, "device_id": {"type": "integer", "minimum": 0, "maximum": 65535}, "driver_date": {"$ref": "#/$defs/nullableString"}, "driver_signature_status": {"const": "unproven"}, "driver_version": {"$ref": "#/$defs/nullableString"}, "hardware_tuple_sha256": {"$ref": "#/$defs/sha256"}, "provider": {"$ref": "#/$defs/nullableString"}, "revision": {"type": "integer", "minimum": 0, "maximum": 255}, "subsystem_id": {"type": "integer", "minimum": 0, "maximum": 4294967295}, "vendor_id": {"type": "integer", "minimum": 0, "maximum": 65535}}
+    },
+    "memory": {
+      "type": "object", "additionalProperties": false,
+      "required": ["capacity_bytes", "configured_speed_mts", "data_width", "memory_type", "slot_index", "speed_mts"],
+      "properties": {"capacity_bytes": {"type": "integer", "minimum": 1}, "configured_speed_mts": {"type": "integer", "minimum": 0}, "data_width": {"type": "integer", "minimum": 0}, "memory_type": {"type": "integer", "minimum": 0, "maximum": 255}, "slot_index": {"type": "integer", "minimum": 0, "maximum": 15}, "speed_mts": {"type": "integer", "minimum": 0}}
+    },
+    "observed": {
+      "type": "object", "additionalProperties": false,
+      "required": ["adapters", "bios", "computer", "cpu", "display_devices", "memory_modules", "operating_system", "self", "vpro", "vulkan"],
+      "properties": {
+        "adapters": {"type": "array", "maxItems": 8, "items": {"$ref": "#/$defs/adapter"}},
+        "bios": {"type": "object", "additionalProperties": false, "required": ["board_manufacturer", "board_product", "board_revision", "release_date", "system_manufacturer", "system_product", "vendor", "version"], "properties": {"board_manufacturer": {"$ref": "#/$defs/nullableString"}, "board_product": {"$ref": "#/$defs/nullableString"}, "board_revision": {"$ref": "#/$defs/nullableString"}, "release_date": {"$ref": "#/$defs/nullableString"}, "system_manufacturer": {"$ref": "#/$defs/nullableString"}, "system_product": {"$ref": "#/$defs/nullableString"}, "vendor": {"$ref": "#/$defs/nullableString"}, "version": {"$ref": "#/$defs/nullableString"}}},
+        "computer": {"type": "object", "additionalProperties": false, "required": ["total_physical_memory"], "properties": {"total_physical_memory": {"type": "integer", "minimum": 0}}},
+        "cpu": {"type": "object", "additionalProperties": false, "required": ["aes", "avx", "avx2", "bmi1", "bmi2", "brand", "efficiency_cores", "family", "fma", "logical_processors", "model", "performance_cores", "physical_cores", "popcnt", "sse42", "stepping", "topology_complete", "vendor"], "properties": {"aes": {"type": "boolean"}, "avx": {"type": "boolean"}, "avx2": {"type": "boolean"}, "bmi1": {"type": "boolean"}, "bmi2": {"type": "boolean"}, "brand": {"$ref": "#/$defs/nullableString"}, "efficiency_cores": {"type": "integer", "minimum": 0}, "family": {"type": "integer", "minimum": 0}, "fma": {"type": "boolean"}, "logical_processors": {"type": "integer", "minimum": 0}, "model": {"type": "integer", "minimum": 0}, "performance_cores": {"type": "integer", "minimum": 0}, "physical_cores": {"type": "integer", "minimum": 0}, "popcnt": {"type": "boolean"}, "sse42": {"type": "boolean"}, "stepping": {"type": "integer", "minimum": 0}, "topology_complete": {"type": "boolean"}, "vendor": {"$ref": "#/$defs/nullableString"}}},
+        "display_devices": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/displayDevice"}},
+        "memory_modules": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/memory"}},
+        "operating_system": {"type": "object", "additionalProperties": false, "required": ["architecture", "build", "secure_boot", "version"], "properties": {"architecture": {"anyOf": [{"type": "null"}, {"const": "x64"}]}, "build": {"$ref": "#/$defs/nullableString"}, "secure_boot": {"type": ["boolean", "null"]}, "version": {"$ref": "#/$defs/nullableString"}}},
+        "self": {"type": "object", "additionalProperties": false, "required": ["authenticode_valid", "executable_sha256", "manifest_sha256", "script_sha256", "signer_certificate_sha256"], "properties": {"authenticode_valid": {"type": "boolean"}, "executable_sha256": {"$ref": "#/$defs/sha256"}, "manifest_sha256": {"$ref": "#/$defs/sha256"}, "script_sha256": {"$ref": "#/$defs/sha256"}, "signer_certificate_sha256": {"$ref": "#/$defs/sha256"}}},
+        "vpro": {"type": "object", "additionalProperties": false, "required": ["authoritative", "status"], "properties": {"authoritative": {"const": false}, "status": {"const": "unproven"}}},
+        "vulkan": {"type": "object", "additionalProperties": false, "required": ["present", "sha256"], "properties": {"present": {"type": "boolean"}, "sha256": {"$ref": "#/$defs/sha256"}}}
+      }
+    }
+  }
+}
