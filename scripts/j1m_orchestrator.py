@@ -36,7 +36,7 @@ _EVAL_RECEIPT_MAX_BYTES = 64 * 1024
 _EVAL_ARTIFACT_RECEIPT_MAX_BYTES = 8 * 1024
 _PREFLIGHT_RECEIPT_MAX_BYTES = 1024
 _MAX_OUTPUT_RESERVE_TOKENS = 256
-_DELETION_RESERVE_SECONDS = 480.0
+_DELETION_RESERVE_SECONDS = 660.0
 # This is source-controlled acceptance data, not a value supplied by a run
 # configuration.  The config repeats it for operator visibility/parity checks,
 # but a caller cannot turn an arbitrary manifest plus a self-authored lock into
@@ -965,6 +965,38 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 public_key_fingerprint=key_fingerprint,
             )
             attempt_reserved = True
+            # Prearm exact recovery before the first SSH-key provider POST.
+            # The watcher starts from the durable nonce/name/fingerprint and
+            # can later reconcile a possibly-created instance.
+            launcher_pid = os.getpid()
+            launcher_start_marker = sf.process_start_marker(launcher_pid)
+            deadline_started = time.monotonic()
+            provider_deadline = deadline_started + float(config["modes"][mode]["provider_backstop_hours"]) * 3600
+            run_deadline = deadline_started + runtime * 3600
+            watchdog_deadline = deadline_started + float(config["modes"][mode]["external_watchdog_seconds"])
+            execution_deadline = min(provider_deadline, run_deadline, watchdog_deadline)
+            watchdog_seconds = execution_deadline - time.monotonic() - _DELETION_RESERVE_SECONDS
+            if watchdog_seconds < 1.0:
+                raise TimeoutError("insufficient deadline for pre-create recovery watchdog")
+            expected_instance_name = sf.owned_instance_name(run_id, nonce)
+            watchdog_command = [
+                os.sys.executable, str(ROOT / "scripts" / "shadeform_watchdog.py"),
+                "--phase-id", phase_id, "--launcher-pid", str(launcher_pid),
+                "--max-seconds", str(watchdog_seconds),
+                "--deadline-epoch", str(time.time() + execution_deadline - time.monotonic()),
+                "--env-file", str(env_file), "--ownership-nonce", nonce,
+                "--ssh-key-name", f"j1m-{nonce}", "--ssh-key-fingerprint", key_fingerprint,
+                "--allow-unrecorded-exact", "--key-only-recovery",
+                "--instance-name", expected_instance_name, "--precreate-recovery",
+                "--cloud", candidate.cloud, "--region", candidate.region,
+                "--instance-type", candidate.instance_type, "--hourly-usd", str(candidate.hourly_usd),
+                "--gpu", candidate.gpu, "--gpu-count", "1", "--vram-gb", str(candidate.vram_gb),
+                "--os-image", candidate.os_image,
+            ]
+            if launcher_start_marker is not None:
+                watchdog_command.extend(["--launcher-start-marker", launcher_start_marker])
+            watchdog = subprocess.Popen(watchdog_command)
+            lifecycle["watchdog_pid"] = watchdog.pid
             try:
                 key_id = sf.add_ssh_key(api_key, phase_id, f"j1m-{nonce}", public_key)
             except sf.AmbiguousProviderOutcome as exc:
@@ -1012,13 +1044,15 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 public_key_fingerprint=key_fingerprint,
                 ssh_key_id=key_id,
             )
+            create_intent_started = sf.utc_now().isoformat()
+            sf.append_instance_create_intent(
+                phase_id, nonce, instance_name=expected_instance_name, ssh_key_id=key_id,
+                hourly_usd=candidate.hourly_usd,
+                backstop_hours=float(config["modes"][mode]["provider_backstop_hours"]),
+                started_at_utc=create_intent_started,
+            )
             try:
                 instance_id = sf.create_instance(api_key, env, phase_id=phase_id, run_id=run_id, candidate=candidate, ssh_key_id=key_id, nonce=nonce, max_runtime_hours=runtime)
-                created_monotonic = time.monotonic()
-                provider_deadline = created_monotonic + float(config["modes"][mode]["provider_backstop_hours"]) * 3600
-                run_deadline = created_monotonic + runtime * 3600
-                watchdog_deadline = created_monotonic + float(config["modes"][mode]["external_watchdog_seconds"])
-                execution_deadline = min(provider_deadline, run_deadline, watchdog_deadline)
             except Exception as exc:
                 incident = {
                     "phase_id": phase_id,
@@ -1043,31 +1077,13 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     pass
                 raise
             lifecycle["instance_id"] = instance_id
-            launcher_pid = os.getpid()
-            launcher_start_marker = sf.process_start_marker(launcher_pid)
             activation_seconds = int(config["modes"][mode].get("activation_timeout_seconds", 1800))
             record = sf.OwnedResource(phase_id=phase_id, run_id=run_id, instance_id=instance_id, ownership_nonce=nonce, ssh_key_id=key_id, ssh_key_name=f"j1m-{nonce}", gpu=candidate.gpu, cloud=candidate.cloud, region=candidate.region, hourly_usd=candidate.hourly_usd, created_at_utc=sf.utc_now().isoformat(), active_deadline_utc=(sf.utc_now() + sf.timedelta(seconds=activation_seconds)).isoformat(), run_deadline_utc=(sf.utc_now() + sf.timedelta(hours=runtime)).isoformat(), instance_type=candidate.instance_type, gpu_count=1, vram_gb=candidate.vram_gb, os_image=candidate.os_image, ssh_public_key=public_key, launcher_pid=launcher_pid, launcher_start_marker=launcher_start_marker, ssh_public_key_fingerprint=key_fingerprint)
             # Ownership record is written before any poll/upload. If this
             # fails, the fallback below still deletes the exact returned ID.
             sf.write_owned_resource(record)
             recorded = True
-            # Start the external watchdog immediately after ownership and
-            # before any fallible cost-ledger append. It protects the long
-            # pending_provider interval as well as later SSH/build stages.
-            watchdog_command = [
-                os.sys.executable, str(ROOT / "scripts" / "shadeform_watchdog.py"),
-                "--phase-id", phase_id, "--instance-id", instance_id,
-                "--launcher-pid", str(launcher_pid), "--max-seconds", str(config["modes"][mode]["external_watchdog_seconds"]),
-                "--env-file", str(env_file),
-            ]
-            if launcher_start_marker is not None:
-                watchdog_command.extend(["--launcher-start-marker", launcher_start_marker])
-            watchdog_started = time.monotonic()
-            watchdog = subprocess.Popen(watchdog_command)
-            watchdog_deadline = watchdog_started + float(config["modes"][mode]["external_watchdog_seconds"])
-            execution_deadline = min(provider_deadline, run_deadline, watchdog_deadline)
-            lifecycle["watchdog_pid"] = watchdog.pid
-            sf.append_cost_event({"instance_id": instance_id, "phase_id": phase_id, "status": "pending", "estimated_cost_usd": round(candidate.hourly_usd * float(config["modes"][mode]["provider_backstop_hours"]), 6)})
+            sf.append_cost_event({"instance_id": instance_id, "phase_id": phase_id, "ownership_nonce": nonce, "create_started_at_utc": create_intent_started, "status": "pending", "estimated_cost_usd": round(candidate.hourly_usd * float(config["modes"][mode]["provider_backstop_hours"]), 6)})
             # The instance reservation is now superseded by its exact
             # ownership/billing row. Keep the pre-create reservation history
             # but settle it to zero only after both durable writes and the

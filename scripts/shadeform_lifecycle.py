@@ -536,6 +536,49 @@ def reserve_create_attempt(phase_id: str, nonce: str, candidate: Candidate, *, b
     return attempt_id
 
 
+def append_instance_create_intent(
+    phase_id: str,
+    nonce: str,
+    *,
+    instance_name: str,
+    ssh_key_id: str,
+    hourly_usd: float,
+    backstop_hours: float,
+    started_at_utc: str | None = None,
+) -> str:
+    """Persist the exact instance POST intent immediately before dispatch."""
+
+    validate_phase_id(phase_id)
+    validate_nonce(nonce)
+    validate_resource_id(ssh_key_id, field="SSH key id")
+    if (not isinstance(instance_name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", instance_name)
+            or not _valid_cost(hourly_usd) or not isinstance(backstop_hours, (int, float))
+            or isinstance(backstop_hours, bool) or not math.isfinite(float(backstop_hours)) or backstop_hours <= 0):
+        raise ValueError("invalid instance create intent")
+    started = started_at_utc or utc_now().isoformat()
+    try:
+        parsed = datetime.fromisoformat(started)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("instance create intent timestamp is invalid") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("instance create intent timestamp must be timezone-aware")
+    append_cost_event({
+        "instance_id": f"attempt-{nonce}",
+        "phase_id": phase_id,
+        "ownership_nonce": nonce,
+        "status": "pending",
+        "estimated_cost_usd": round(float(hourly_usd) * float(backstop_hours), 6),
+        "reservation": "instance-create-intent",
+        "instance_create_intent": True,
+        "instance_name": instance_name,
+        "ssh_key_id": ssh_key_id,
+        "hourly_usd": float(hourly_usd),
+        "backstop_hours": float(backstop_hours),
+        "create_started_at_utc": parsed.isoformat(),
+    })
+    return f"attempt-{nonce}"
+
+
 def append_incident(event: dict[str, Any]) -> None:
     """Persist bounded incident metadata without recording secret material."""
 

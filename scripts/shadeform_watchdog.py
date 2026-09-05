@@ -11,10 +11,12 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TEARDOWN_RESERVE_SECONDS = 660.0
+INSTANCE_RECONCILIATION_WINDOW_SECONDS = 120.0
 if __package__ in {None, ""}:
     sys.path.insert(0, str(ROOT))
 
@@ -40,28 +42,35 @@ def identity_alive(pid: int, marker: str | None) -> bool:
     return shadeform.process_start_marker(pid) == marker
 
 
-def _has_pending_intent(shadeform, phase_id: str, nonce: str | None) -> bool:
-    """Return the state of the latest bounded reservation event only."""
+def _pending_intent(shadeform, phase_id: str, nonce: str | None) -> dict[str, object] | None:
+    """Return the latest bounded pending reservation/create event."""
     if nonce is None or not shadeform.NONCE.fullmatch(nonce):
-        return False
-    latest: dict[str, object] | None = None
+        return None
+    latest: dict[str, dict[str, object]] = {}
     try:
         if shadeform.COST_LEDGER.stat().st_size > 1_048_576:
-            return False
+            return None
         with shadeform.COST_LEDGER.open("r", encoding="utf-8") as handle:
             for index, line in enumerate(handle):
                 if index >= 4096:
-                    return False
+                    return None
                 event = json.loads(line)
                 if not isinstance(event, dict):
-                    return False
+                    return None
                 if (event.get("phase_id") == phase_id
                         and event.get("ownership_nonce") == nonce
-                        and event.get("instance_id") == "attempt-" + nonce):
-                    latest = event
+                        and isinstance(event.get("instance_id"), str)):
+                    latest[event["instance_id"]] = event
     except (OSError, json.JSONDecodeError, TypeError):
-        return False
-    return bool(latest and latest.get("status") == "pending")
+        return None
+    pending = [event for event in latest.values() if event.get("status") == "pending"]
+    if not pending:
+        return None
+    return next((event for event in pending if event.get("instance_create_intent") is True), pending[-1])
+
+
+def _has_pending_intent(shadeform, phase_id: str, nonce: str | None) -> bool:
+    return _pending_intent(shadeform, phase_id, nonce) is not None
 
 
 def _deadline_windows(*, now_monotonic: float, now_epoch: float, max_seconds: float, deadline_epoch: float | None) -> tuple[float, float]:
@@ -156,7 +165,8 @@ def main(argv: list[str] | None = None) -> int:
     if not launcher_owned and not record_path.exists():
         if not args.allow_unrecorded_exact:
             return 0
-        if not _has_pending_intent(shadeform, args.phase_id, args.ownership_nonce):
+        intent = _pending_intent(shadeform, args.phase_id, args.ownership_nonce)
+        if intent is None:
             return 1
         try:
             env = shadeform.load_env(args.env_file)
@@ -172,15 +182,29 @@ def main(argv: list[str] | None = None) -> int:
             # outcome; an exact nonce/profile match is cleaned in full.
             exact_instance_id = args.instance_id
             if exact_instance_id is None:
-                exact_instance_id = shadeform.reconcile_instance_by_nonce(
-                    api_key, args.phase_id, expected_name=args.instance_name,
-                    nonce=args.ownership_nonce,
-                    ssh_key_id=reconciled_key_id, expected_cloud=args.cloud,
-                    expected_region=args.region, expected_instance_type=args.instance_type,
-                    expected_hourly_usd=args.hourly_usd, expected_gpu=args.gpu,
-                    expected_gpu_count=args.gpu_count, expected_vram_gb=args.vram_gb,
-                    expected_os_image=args.os_image, allow_absent=True,
+                consistency_deadline = min(
+                    time.monotonic() + INSTANCE_RECONCILIATION_WINDOW_SECONDS,
+                    hard_deadline - TEARDOWN_RESERVE_SECONDS,
                 )
+                requires_eventual_reconciliation = intent.get("instance_create_intent") is True or intent.get("instance_id") != "attempt-" + (args.ownership_nonce or "")
+                while True:
+                    exact_instance_id = shadeform.reconcile_instance_by_nonce(
+                        api_key, args.phase_id, expected_name=args.instance_name,
+                        nonce=args.ownership_nonce,
+                        ssh_key_id=reconciled_key_id, expected_cloud=args.cloud,
+                        expected_region=args.region, expected_instance_type=args.instance_type,
+                        expected_hourly_usd=args.hourly_usd, expected_gpu=args.gpu,
+                        expected_gpu_count=args.gpu_count, expected_vram_gb=args.vram_gb,
+                        expected_os_image=args.os_image, allow_absent=True,
+                    )
+                    if exact_instance_id is not None or not requires_eventual_reconciliation:
+                        break
+                    if time.monotonic() >= consistency_deadline:
+                        # One absent account response after an instance POST
+                        # is not negative proof. Keep the pending intent/key
+                        # recovery alive for a later exact retry.
+                        return 1
+                    time.sleep(min(5.0, consistency_deadline - time.monotonic()))
             if exact_instance_id is None:
                 remaining = hard_deadline - time.monotonic()
                 if remaining <= 0:
@@ -211,6 +235,24 @@ def main(argv: list[str] | None = None) -> int:
                 expected_gpu_count=args.gpu_count, expected_vram_gb=args.vram_gb,
                 expected_os_image=args.os_image,
             )
+            started_at = intent.get("create_started_at_utc")
+            try:
+                started_dt = datetime.fromisoformat(started_at) if isinstance(started_at, str) else None
+                if started_dt is None or started_dt.tzinfo is None:
+                    raise ValueError("missing create intent timestamp")
+                elapsed_hours = max(0.0, (datetime.now(timezone.utc) - started_dt).total_seconds() / 3600.0)
+                hourly_usd = float(intent.get("hourly_usd", args.hourly_usd))
+                backstop_hours = float(intent.get("backstop_hours", 0.0))
+                if not math.isfinite(hourly_usd) or hourly_usd <= 0 or not math.isfinite(backstop_hours) or backstop_hours <= 0:
+                    raise ValueError("invalid create intent cost binding")
+                shadeform.append_cost_event({
+                    "instance_id": exact_instance_id, "phase_id": args.phase_id,
+                    "ownership_nonce": args.ownership_nonce, "status": "pending",
+                    "estimated_cost_usd": round(hourly_usd * max(backstop_hours, elapsed_hours), 6),
+                    "reservation": "watchdog-reconciled-instance",
+                })
+            except (TypeError, ValueError, OverflowError):
+                return 1
             deleted = shadeform._delete_instance(api_key, args.phase_id, exact_instance_id, deadline=hard_deadline)
             if deleted.get("success") is not True:
                 return 1
@@ -222,6 +264,12 @@ def main(argv: list[str] | None = None) -> int:
                     timeout=min(90.0, hard_deadline - time.monotonic()),
                 )
                 shadeform.delete_ssh_key(api_key, args.phase_id, reconciled_key_id, deadline=hard_deadline)
+            shadeform.append_cost_event({
+                "instance_id": exact_instance_id, "phase_id": args.phase_id,
+                "ownership_nonce": args.ownership_nonce, "status": "settled",
+                "actual_cost_usd": round(hourly_usd * elapsed_hours, 6),
+                "reservation": "watchdog-reconciled-instance",
+            })
             shadeform.append_cost_event({
                 "instance_id": "attempt-" + (args.ownership_nonce or ""),
                 "phase_id": args.phase_id, "status": "settled", "actual_cost_usd": 0.0,

@@ -751,6 +751,10 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertIn("if deletion_confirmed():\n                stop_watchdog()", cleanup)
         self.assertIn('deletion.get("retry_required") is not True', source)
 
+    def test_watchdog_is_prearmed_before_ssh_key_mutation(self):
+        source = (ROOT / "scripts" / "j1m_orchestrator.py").read_text(encoding="utf-8")
+        self.assertLess(source.index("watchdog = subprocess.Popen(watchdog_command)"), source.index("key_id = sf.add_ssh_key"))
+
     def test_execute_captures_teardown_failure_before_final_persistence(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_teardown_behavior")
         from scripts import shadeform_lifecycle as sf

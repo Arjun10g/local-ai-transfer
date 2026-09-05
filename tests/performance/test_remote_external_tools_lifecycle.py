@@ -160,6 +160,42 @@ class RemoteExternalToolsReceiptTests(unittest.TestCase):
             with self.assertRaisesRegex(self.module.RunnerError, "byte bound"):
                 self.module._bounded_file(path, 32)
 
+    def test_repository_commit_supports_normal_git_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".git").mkdir()
+            (root / ".git" / "HEAD").write_text("a" * 40, encoding="ascii")
+            with mock.patch.object(self.module.subprocess, "run", return_value=types.SimpleNamespace(stdout="")):
+                self.assertEqual(self.module._repository_commit(root), "a" * 40)
+
+    def test_repository_commit_supports_linked_worktree_gitfile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            git_dir = root / "linked-git"
+            common = root / "common-git"
+            (common / "refs" / "heads").mkdir(parents=True)
+            git_dir.mkdir()
+            (root / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+            (git_dir / "commondir").write_text(str(common), encoding="ascii")
+            (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="ascii")
+            (common / "refs" / "heads" / "main").write_text("b" * 40, encoding="ascii")
+            with mock.patch.object(self.module.subprocess, "run", return_value=types.SimpleNamespace(stdout="")):
+                self.assertEqual(self.module._repository_commit(root), "b" * 40)
+
+    def test_instance_post_intent_is_bound_before_dispatch(self):
+        events = []
+        candidate = self.module.shadeform.Candidate("A100", "cloud", "region", "type", 1.0, 80, "ubuntu", False)
+        with mock.patch.object(self.module.shadeform, "append_cost_event", side_effect=events.append):
+            result = self.module.shadeform.append_instance_create_intent(
+                "qa-remote-tools", "a" * 32, instance_name="ep-run-" + "a" * 32,
+                ssh_key_id="key-123456", hourly_usd=candidate.hourly_usd,
+                backstop_hours=0.3125, started_at_utc="2026-09-05T00:00:00+00:00",
+            )
+        self.assertEqual(result, "attempt-" + "a" * 32)
+        self.assertEqual(events[0]["reservation"], "instance-create-intent")
+        self.assertEqual(events[0]["instance_name"], "ep-run-" + "a" * 32)
+        self.assertEqual(events[0]["ssh_key_id"], "key-123456")
+
     def test_salvage_path_rejects_malformed_and_oversize_receipts(self):
         for payload in (b"{malformed", b"x" * (self.module.MAX_RECEIPT_BYTES + 1)):
             with self.subTest(size=len(payload)), tempfile.TemporaryDirectory() as directory:
@@ -487,6 +523,20 @@ class ExternalLifecycleBoundaryTests(unittest.TestCase):
                     "--instance-type", "type", "--hourly-usd", "1", "--gpu", "A100",
                     "--gpu-count", "1", "--vram-gb", "80", "--os-image", "ubuntu",
                 ])
+
+    def test_watchdog_pending_intent_includes_unrecorded_instance_event(self):
+        watchdog = load_watchdog_module()
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Path(directory) / "cost.jsonl"
+            nonce = "a" * 32
+            ledger.write_text(
+                json.dumps({"phase_id": "qa-remote-tools", "ownership_nonce": nonce, "instance_id": "attempt-" + nonce, "status": "settled"}) + "\n"
+                + json.dumps({"phase_id": "qa-remote-tools", "ownership_nonce": nonce, "instance_id": "instance-123456", "status": "pending", "create_started_at_utc": "2026-09-05T00:00:00+00:00"}) + "\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(self.module.shadeform, "COST_LEDGER", ledger):
+                intent = watchdog._pending_intent(self.module.shadeform, "qa-remote-tools", nonce)
+            self.assertEqual(intent["instance_id"], "instance-123456")
 
     def test_instance_reconciliation_requires_one_exact_nonce_match(self):
         expected_name = self.module.shadeform.owned_instance_name("run", "a" * 32)

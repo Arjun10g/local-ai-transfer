@@ -322,10 +322,26 @@ def freeze_closure(root: Path, destination: Path) -> list[dict[str, object]]:
 
 
 def _repository_commit(root: Path = ROOT) -> str:
+    dot_git = root / ".git"
     try:
-        git_marker = (root / ".git").read_text(encoding="utf-8").strip()
-        git_dir = Path(git_marker[7:].strip()).resolve() if git_marker.startswith("gitdir:") else root / ".git"
-        common = (git_dir / (git_dir / "commondir").read_text(encoding="ascii").strip()).resolve() if (git_dir / "commondir").exists() else git_dir
+        if dot_git.is_dir():
+            git_dir = dot_git.resolve()
+        elif dot_git.is_file():
+            git_marker = dot_git.read_text(encoding="utf-8").strip()
+            if not git_marker.startswith("gitdir:"):
+                raise RunnerError("repository gitfile marker is invalid")
+            marker_path = Path(git_marker[7:].strip())
+            git_dir = (root / marker_path).resolve() if not marker_path.is_absolute() else marker_path.resolve()
+            if not git_dir.is_dir():
+                raise RunnerError("repository gitfile target is unavailable")
+        else:
+            raise RunnerError("repository metadata is unavailable")
+        commondir_file = git_dir / "commondir"
+        if commondir_file.is_file():
+            common_marker = Path(commondir_file.read_text(encoding="ascii").strip())
+            common = (git_dir / common_marker).resolve() if not common_marker.is_absolute() else common_marker.resolve()
+        else:
+            common = git_dir
         head = (git_dir / "HEAD").read_text(encoding="ascii").strip()
         if head.startswith("ref: "):
             revision = (common / head[5:]).read_text(encoding="ascii").strip()
@@ -944,6 +960,15 @@ def execute(args: argparse.Namespace) -> dict[str, object]:
                 ssh_key_id=key_id,
             )
             lifecycle["stage"] = "instance_create"
+            create_intent_started = shadeform.utc_now().isoformat()
+            shadeform.append_instance_create_intent(
+                args.phase_id, nonce,
+                instance_name=expected_instance_name,
+                ssh_key_id=key_id,
+                hourly_usd=candidate.hourly_usd,
+                backstop_hours=provider_backstop_hours,
+                started_at_utc=create_intent_started,
+            )
             try:
                 instance_id = shadeform.create_instance(api_key, env, phase_id=args.phase_id, run_id=args.run_id, candidate=candidate, ssh_key_id=key_id, nonce=nonce, max_runtime_hours=args.runtime_hours)
                 exact_created_at = time.monotonic()
@@ -954,6 +979,8 @@ def execute(args: argparse.Namespace) -> dict[str, object]:
                 }
                 shadeform.append_cost_event({
                     "instance_id": instance_id, "phase_id": args.phase_id,
+                    "ownership_nonce": nonce,
+                    "create_started_at_utc": create_intent_started,
                     "status": "pending",
                     "estimated_cost_usd": round(candidate.hourly_usd * provider_backstop_hours, 6),
                 })
