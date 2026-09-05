@@ -382,11 +382,11 @@ MutationAttemptState mutation_state_for_lookup(
     JournalLookupState state) noexcept {
   switch (state) {
     case JournalLookupState::kNotDispatched:
-    case JournalLookupState::kFailedBeforeMutation:
-      return MutationAttemptState::kNotAttempted;
     case JournalLookupState::kDispatched:
     case JournalLookupState::kMutationPrepared:
       return MutationAttemptState::kMayHaveBeenAttempted;
+    case JournalLookupState::kFailedBeforeMutation:
+      return MutationAttemptState::kNotAttempted;
     case JournalLookupState::kApplied:
     case JournalLookupState::kMutationAttemptFailed:
     case JournalLookupState::kUnknownAfterMutation:
@@ -400,6 +400,9 @@ Result result(Status status, Operation operation) {
   output.status = status;
   output.receipt.operation = operation_name(operation);
   output.receipt.status = status_name(status);
+  output.receipt.mutation_attempt_state = operation == Operation::kWrite
+      ? MutationAttemptState::kMayHaveBeenAttempted
+      : MutationAttemptState::kNotAttempted;
   return output;
 }
 
@@ -895,6 +898,15 @@ Result journaled_unknown(Operation operation, const Receipt& receipt) {
   return output;
 }
 
+Result journaled_result(Status status, Operation operation,
+                        const Receipt& receipt) {
+  Result output = result(status, operation);
+  output.receipt = receipt;
+  output.receipt.operation = operation_name(operation);
+  output.receipt.status = status_name(status);
+  return output;
+}
+
 bool confirm_durable_failed_before_mutation(
     JournalPort& journal,
     const BrokerClipboardCapability& capability,
@@ -996,6 +1008,12 @@ Result execute_write(const BrokerClipboardCapability& capability,
   // Once dispatch is durable no cancellation result may imply no mutation.
   status = stop_status(context, deadline);
   if (status != Status::kOk) return result(status, Operation::kWrite);
+  // From immediately before the journal call onward, a lost acknowledgement
+  // means dispatch may have become durable. Every subsequent return carries
+  // this receipt and may downgrade it only after an exact durable negative
+  // readback through confirm_durable_failed_before_mutation().
+  receipt.mutation_attempt_state =
+      MutationAttemptState::kMayHaveBeenAttempted;
   const JournalDispatch dispatch = journal.dispatch_write(
       capability.operation_id(), capability.request_digest(), content_digest,
       receipt.sequence_before);
@@ -1006,23 +1024,25 @@ Result execute_write(const BrokerClipboardCapability& capability,
     if (dispatch == JournalDispatch::kDispatched ||
         dispatch == JournalDispatch::kAlreadyDispatched) {
       receipt.journal_dispatch_durable = true;
-      receipt.mutation_attempt_state =
-          MutationAttemptState::kMayHaveBeenAttempted;
-      return journaled_unknown(Operation::kWrite, receipt);
     }
-    return result(Status::kSessionRefused, Operation::kWrite);
+    return journaled_unknown(Operation::kWrite, receipt);
   }
   if (dispatch == JournalDispatch::kAlreadyDispatched) {
-    Result output = result(Status::kAlreadyDispatched, Operation::kWrite);
-    output.receipt = receipt;
-    output.receipt.status = status_name(output.status);
-    output.receipt.journal_dispatch_durable = true;
-    output.receipt.mutation_attempt_state =
-        MutationAttemptState::kMayHaveBeenAttempted;
-    return output;
+    receipt.journal_dispatch_durable = true;
+    return journaled_result(Status::kAlreadyDispatched, Operation::kWrite,
+                            receipt);
   }
-  if (dispatch != JournalDispatch::kDispatched)
-    return result(Status::kJournalUnavailable, Operation::kWrite);
+  if (dispatch != JournalDispatch::kDispatched) {
+    clipboard.close_or_fail_stop();
+    const bool exact_failed_before = confirm_durable_failed_before_mutation(
+        journal, capability, identity, receipt.sequence_before, false);
+    if (!exact_failed_before)
+      return journaled_unknown(Operation::kWrite, receipt);
+    receipt.journal_outcome_durable = true;
+    receipt.mutation_attempt_state = MutationAttemptState::kNotAttempted;
+    return journaled_result(Status::kJournalUnavailable, Operation::kWrite,
+                            receipt);
+  }
   receipt.journal_dispatch_durable = true;
   // Dispatch without a durable terminal record is conservatively unknown on
   // restart. Never publish a false "not attempted" assertion for it.
@@ -1050,10 +1070,8 @@ Result execute_write(const BrokerClipboardCapability& capability,
       return journaled_unknown(Operation::kWrite, receipt);
     }
     receipt.mutation_attempt_state = MutationAttemptState::kNotAttempted;
-    Result output = result(Status::kSessionRefused, Operation::kWrite);
-    output.receipt = receipt;
-    output.receipt.status = status_name(output.status);
-    return output;
+    return journaled_result(Status::kSessionRefused, Operation::kWrite,
+                            receipt);
   }
 
   // Persist the last pre-mutation boundary. Failure refuses the Win32 call;
@@ -1085,10 +1103,8 @@ Result execute_write(const BrokerClipboardCapability& capability,
       return journaled_unknown(Operation::kWrite, receipt);
     }
     receipt.mutation_attempt_state = MutationAttemptState::kNotAttempted;
-    Result output = result(Status::kSessionRefused, Operation::kWrite);
-    output.receipt = receipt;
-    output.receipt.status = status_name(output.status);
-    return output;
+    return journaled_result(Status::kSessionRefused, Operation::kWrite,
+                            receipt);
   }
 
   const BOOL emptied = EmptyClipboard();
@@ -1107,10 +1123,8 @@ Result execute_write(const BrokerClipboardCapability& capability,
     receipt.journal_outcome_durable = saved;
     if (!saved || !identity_after_journal)
       return journaled_unknown(Operation::kWrite, receipt);
-    Result output = result(Status::kClipboardBusy, Operation::kWrite);
-    output.receipt = receipt;
-    output.receipt.status = status_name(output.status);
-    return output;
+    return journaled_result(Status::kClipboardBusy, Operation::kWrite,
+                            receipt);
   }
   if (!revalidate_interactive_identity(identity) ||
       GetClipboardOwner() != owner.get()) {
@@ -1155,10 +1169,7 @@ Result execute_write(const BrokerClipboardCapability& capability,
   receipt.journal_outcome_durable = saved;
   if (!exact_sequence || !saved || !identity_after_journal)
     return journaled_unknown(Operation::kWrite, receipt);
-  Result output = result(Status::kOk, Operation::kWrite);
-  output.receipt = receipt;
-  output.receipt.status = status_name(output.status);
-  return output;
+  return journaled_result(Status::kOk, Operation::kWrite, receipt);
 }
 
 }  // namespace
@@ -1293,6 +1304,11 @@ ReconciliationResult query_write_status(
   ReconciliationResult output;
   output.receipt.operation = "clipboard.write.status";
   output.receipt.status = status_name(Status::kPlatformUnavailable);
+  // This API always refers to write status. Initialize conservatively before
+  // the immutable gate and before inspecting any caller pointer. Missing
+  // context/journal/authentication cannot disprove a prior durable dispatch.
+  output.receipt.mutation_attempt_state =
+      MutationAttemptState::kMayHaveBeenAttempted;
   // Same immutable first boundary as execute(): no pointer, clock, session,
   // clipboard, or journal access when production authority is absent.
   if (!trust_anchor::activation_prerequisites_available()) {
@@ -1306,11 +1322,6 @@ ReconciliationResult query_write_status(
       output.receipt.status = status_name(output.status);
       return output;
     }
-    // From this point a caller is querying a concrete write operation. Until
-    // authenticated, exact journal evidence proves otherwise, every failure
-    // path must conservatively preserve possible prior mutation.
-    output.receipt.mutation_attempt_state =
-        MutationAttemptState::kMayHaveBeenAttempted;
     std::uint64_t deadline = 0;
     InteractiveIdentityLease identity;
     Status status = validate_common(*capability, *context, Operation::kWrite,

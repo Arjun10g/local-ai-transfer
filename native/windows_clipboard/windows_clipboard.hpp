@@ -93,8 +93,11 @@ struct JournalLookup final {
 
 // A production implementation must durably persist dispatch before returning
 // kDispatched, the mutation-prepared marker before returning true, and every
-// terminal outcome before returning true. FailedAfterMutation is reconstructed
-// as kUnknownAfterMutation. This source supplies no implementation and its
+// terminal outcome before returning true. kRefused, kUnavailable, and an
+// invalid value are transport observations, not durable proof that dispatch
+// did not occur; a lost acknowledgement is therefore reconciled through an
+// exact lookup. FailedAfterMutation is reconstructed as
+// kUnknownAfterMutation. This source supplies no implementation and its
 // journal availability gate is false.
 class JournalPort {
  public:
@@ -212,8 +215,11 @@ struct Receipt final {
   std::uint32_t sequence_after = 0;
   bool sensitive = true;
   bool content_logged = false;
+  // Conservative by construction. A write operation ID can name an earlier
+  // invocation whose durable dispatch acknowledgement was lost. Only an exact
+  // durable failed-before-mutation readback may downgrade this value.
   MutationAttemptState mutation_attempt_state =
-      MutationAttemptState::kNotAttempted;
+      MutationAttemptState::kMayHaveBeenAttempted;
   bool journal_dispatch_durable = false;
   bool journal_mutation_prepared_durable = false;
   bool journal_outcome_durable = false;

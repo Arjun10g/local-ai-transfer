@@ -148,7 +148,7 @@
   "fixture_only": true,
   "mutation_attempt_cases": [
     {
-      "expected_mutation_attempt_state": "not_attempted",
+      "expected_mutation_attempt_state": "may_have_been_attempted",
       "name": "durable_start_only_not_dispatched",
       "state": {"journal_state": "not_dispatched"}
     },
@@ -196,6 +196,140 @@
       "expected_mutation_attempt_state": "may_have_been_attempted",
       "name": "corrupt_failed_before_record",
       "state": {"corrupt": true, "journal_state": "failed_before_mutation"}
+    }
+  ],
+  "post_dispatch_return_cases": [
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "dispatch_ack_then_identity_lost",
+      "state": {"dispatch": "dispatched", "identity_after_dispatch": false}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "already_dispatched",
+      "state": {"dispatch": "already", "identity_after_dispatch": true}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "unavailable_may_be_lost_ack",
+      "state": {"dispatch": "unavailable", "identity_after_dispatch": true}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "refused_may_be_lost_ack",
+      "state": {"dispatch": "refused", "identity_after_dispatch": true}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "invalid_dispatch_enum",
+      "state": {"dispatch": "invalid", "identity_after_dispatch": true}
+    },
+    {
+      "expected_mutation_attempt_state": "not_attempted",
+      "name": "unavailable_with_exact_durable_negative",
+      "state": {"dispatch": "unavailable", "exact_failed_before": true, "identity_after_dispatch": true}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "mutation_prepare_persistence_failure",
+      "state": {"dispatch": "dispatched", "identity_after_dispatch": true, "stage": "prepared_persist_failed"}
+    },
+    {
+      "expected_mutation_attempt_state": "not_attempted",
+      "name": "exact_failed_before_after_dispatch",
+      "state": {"dispatch": "dispatched", "exact_failed_before": true, "identity_after_dispatch": true, "stage": "failed_before"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "crash_after_mutation_prepared",
+      "state": {"dispatch": "dispatched", "identity_after_dispatch": true, "stage": "prepared_crash"}
+    },
+    {
+      "expected_mutation_attempt_state": "attempted",
+      "name": "emptyclipboard_returned_failure",
+      "state": {"dispatch": "dispatched", "identity_after_dispatch": true, "stage": "empty_returned"}
+    },
+    {
+      "expected_mutation_attempt_state": "attempted",
+      "name": "applied_terminal",
+      "state": {"dispatch": "dispatched", "identity_after_dispatch": true, "stage": "applied"}
+    }
+  ],
+  "query_dependency_cases": [
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "activation_unavailable_before_pointer_access",
+      "state": {"activation": false}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "missing_capability",
+      "state": {"capability": "missing"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "missing_context_for_write_capability",
+      "state": {"capability": "write", "context": false}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "missing_journal_for_write_capability",
+      "state": {"capability": "write", "journal": false}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "capability_authentication_failure",
+      "state": {"authenticated": false, "capability": "write"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "deadline_before_lookup",
+      "state": {"capability": "write", "deadline": false}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "lookup_failure",
+      "state": {"capability": "write", "lookup_result": "failure"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "corrupt_lookup",
+      "state": {"capability": "write", "corrupt": true, "journal_state": "failed_before_mutation"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "not_dispatched_is_not_terminal_negative",
+      "state": {"capability": "write", "journal_state": "not_dispatched"}
+    },
+    {
+      "expected_mutation_attempt_state": "not_attempted",
+      "name": "exact_durable_failed_before",
+      "state": {"capability": "write", "journal_state": "failed_before_mutation"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "durable_dispatch_only",
+      "state": {"capability": "write", "journal_state": "dispatched"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "durable_mutation_prepared",
+      "state": {"capability": "write", "journal_state": "mutation_prepared"}
+    },
+    {
+      "expected_mutation_attempt_state": "attempted",
+      "name": "durable_mutation_attempt_failed",
+      "state": {"capability": "write", "journal_state": "mutation_attempt_failed"}
+    },
+    {
+      "expected_mutation_attempt_state": "attempted",
+      "name": "durable_applied",
+      "state": {"capability": "write", "journal_state": "applied"}
+    },
+    {
+      "expected_mutation_attempt_state": "attempted",
+      "name": "durable_unknown_after_mutation",
+      "state": {"capability": "write", "journal_state": "unknown_after_mutation"}
     }
   ],
   "schema": "lae.windows-clipboard-static-cases.v1"

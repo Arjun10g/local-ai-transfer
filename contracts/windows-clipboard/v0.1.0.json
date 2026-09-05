@@ -101,7 +101,7 @@
     "mutation_attempt_state_semantics": {
       "attempted": "live_EmptyClipboard_returned_or_durable_terminal_requires_invocation",
       "may_have_been_attempted": "durable_dispatch_or_mutation_prepared_without_terminal_evidence",
-      "not_attempted": "not_dispatched_or_durable_failed_before_mutation_only"
+      "not_attempted": "exact_durable_failed_before_mutation_only"
     },
     "mutation_attempt_state_table": {
       "corrupt_or_unknown_lookup": "may_have_been_attempted",
@@ -110,7 +110,7 @@
       "durable_failed_before_mutation": "not_attempted",
       "durable_mutation_attempt_failed": "attempted",
       "durable_mutation_prepared": "may_have_been_attempted",
-      "durable_start_not_dispatched": "not_attempted",
+      "durable_start_not_dispatched": "may_have_been_attempted",
       "durable_unknown_after_mutation": "attempted",
       "lookup_failure_or_unavailable": "may_have_been_attempted"
     },

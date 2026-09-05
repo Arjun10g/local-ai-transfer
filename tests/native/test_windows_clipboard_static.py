@@ -154,13 +154,53 @@ def modeled_mutation_attempt_state(state):
     ):
         return "may_have_been_attempted"
     journal_state = state.get("journal_state")
-    if journal_state in {"dispatched", "mutation_prepared"}:
+    if journal_state in {"not_dispatched", "dispatched", "mutation_prepared"}:
         return "may_have_been_attempted"
     if journal_state in {"applied", "mutation_attempt_failed", "unknown_after_mutation"}:
         return "attempted"
-    if journal_state in {"not_dispatched", "failed_before_mutation"}:
+    if journal_state == "failed_before_mutation":
         return "not_attempted"
     raise ValueError("unknown fixture journal state")
+
+
+def modeled_post_dispatch_attempt_state(state):
+    """Conservative state after dispatch_write has been invoked.
+
+    Dispatch return values are transport observations. Only an exact durable
+    failed-before-mutation readback can establish the negative state.
+    """
+    if not state.get("identity_after_dispatch", True):
+        return "may_have_been_attempted"
+    dispatch = state.get("dispatch", "invalid")
+    if dispatch == "already":
+        return "may_have_been_attempted"
+    if dispatch != "dispatched":
+        return (
+            "not_attempted"
+            if state.get("exact_failed_before", False)
+            else "may_have_been_attempted"
+        )
+    stage = state.get("stage", "dispatch_only")
+    if stage == "failed_before" and state.get("exact_failed_before", False):
+        return "not_attempted"
+    if stage in {"empty_returned", "applied", "failed_after", "unknown_after"}:
+        return "attempted"
+    return "may_have_been_attempted"
+
+
+def modeled_query_dependency_attempt_state(state):
+    """Status-query state when dependencies and evidence fail independently."""
+    if not state.get("activation", True):
+        return "may_have_been_attempted"
+    if (
+        state.get("capability", "write") != "write"
+        or not state.get("context", True)
+        or not state.get("journal", True)
+        or not state.get("authenticated", True)
+        or not state.get("deadline", True)
+    ):
+        return "may_have_been_attempted"
+    return modeled_mutation_attempt_state(state)
 
 
 class WindowsClipboardStaticTests(unittest.TestCase):
@@ -755,25 +795,42 @@ class WindowsClipboardStaticTests(unittest.TestCase):
         lookup_failure = query[query.index("if (!lookup_ok)") : shape]
         self.assertNotIn("kNotAttempted", lookup_failure)
 
-    def test_not_attempted_after_dispatch_requires_exact_durable_readback(self):
+    def test_post_dispatch_control_flow_preserves_one_conservative_receipt(self):
         write = self.cpp[
             self.cpp.index("Result execute_write") :
             self.cpp.index("}  // namespace\n\nBrokerClipboardAuthority::~")
         ]
-        self.assertEqual(
-            write.count("MutationAttemptState::kNotAttempted"), 2
+        dispatch = write.index("journal.dispatch_write")
+        conservative = write.rfind(
+            "MutationAttemptState::kMayHaveBeenAttempted", 0, dispatch
         )
-        self.assertEqual(
-            write.count("confirm_durable_failed_before_mutation("), 2
-        )
+        self.assertGreater(conservative, write.index("Receipt receipt"))
+        post_dispatch = write[dispatch:]
+        self.assertNotIn("return result(", post_dispatch)
+        return_expressions = [
+            " ".join(match.group(1).split())
+            for match in re.finditer(r"\breturn\s+(.+?);", post_dispatch, re.S)
+        ]
+        self.assertGreaterEqual(len(return_expressions), 12)
+        for expression in return_expressions:
+            with self.subTest(expression=expression):
+                self.assertRegex(expression, r"^journaled_(?:unknown|result)\(")
+
+        # Every negative assertion after the journal call is structurally
+        # downstream of an exact durable readback guard. This examines the
+        # actual control-flow region rather than counting assignment tokens.
         for match in re.finditer(
             r"receipt\.mutation_attempt_state\s*=\s*"
             r"MutationAttemptState::kNotAttempted",
-            write,
+            post_dispatch,
         ):
-            guard = write.rfind("if (!exact_failed_before)", 0, match.start())
-            record = write.rfind("JournalOutcome::kFailedBeforeMutation", 0, match.start())
-            self.assertGreater(guard, record)
+            prefix = post_dispatch[:match.start()]
+            exact_readback = prefix.rfind(
+                "confirm_durable_failed_before_mutation("
+            )
+            guard = prefix.rfind("exact_failed_before")
+            self.assertGreaterEqual(exact_readback, 0)
+            self.assertGreater(guard, exact_readback)
         verifier = self.cpp[
             self.cpp.index("bool confirm_durable_failed_before_mutation") :
             self.cpp.index("Result execute_write")
@@ -789,6 +846,87 @@ class WindowsClipboardStaticTests(unittest.TestCase):
             "revalidate_interactive_identity(identity)",
         ):
             self.assertIn(marker, verifier)
+
+    def test_post_dispatch_adversarial_state_table_is_exhaustive(self):
+        cases = self.cases["post_dispatch_return_cases"]
+        dispatch_observations = set()
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                self.assertEqual(
+                    modeled_post_dispatch_attempt_state(case["state"]),
+                    case["expected_mutation_attempt_state"],
+                )
+                dispatch_observations.add(case["state"]["dispatch"])
+        self.assertEqual(
+            dispatch_observations,
+            {"already", "dispatched", "invalid", "refused", "unavailable"},
+        )
+        by_name = {case["name"]: case for case in cases}
+        for name in (
+            "dispatch_ack_then_identity_lost",
+            "unavailable_may_be_lost_ack",
+            "refused_may_be_lost_ack",
+            "invalid_dispatch_enum",
+            "mutation_prepare_persistence_failure",
+            "crash_after_mutation_prepared",
+        ):
+            self.assertEqual(
+                by_name[name]["expected_mutation_attempt_state"],
+                "may_have_been_attempted",
+            )
+        self.assertEqual(
+            by_name["unavailable_with_exact_durable_negative"][
+                "expected_mutation_attempt_state"
+            ],
+            "not_attempted",
+        )
+
+    def test_query_dependency_matrix_never_inherits_false_default(self):
+        cases = self.cases["query_dependency_cases"]
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                self.assertEqual(
+                    modeled_query_dependency_attempt_state(case["state"]),
+                    case["expected_mutation_attempt_state"],
+                )
+        by_name = {case["name"]: case for case in cases}
+        for name in (
+            "activation_unavailable_before_pointer_access",
+            "missing_capability",
+            "missing_context_for_write_capability",
+            "missing_journal_for_write_capability",
+            "capability_authentication_failure",
+            "deadline_before_lookup",
+            "lookup_failure",
+            "corrupt_lookup",
+            "not_dispatched_is_not_terminal_negative",
+        ):
+            self.assertEqual(
+                by_name[name]["expected_mutation_attempt_state"],
+                "may_have_been_attempted",
+            )
+        self.assertEqual(
+            by_name["exact_durable_failed_before"][
+                "expected_mutation_attempt_state"
+            ],
+            "not_attempted",
+        )
+
+        query = self.cpp[self.cpp.index("ReconciliationResult query_write_status(") :]
+        conservative = query.index("MutationAttemptState::kMayHaveBeenAttempted")
+        gate = query.index("!trust_anchor::activation_prerequisites_available()")
+        null_dependencies = query.index("if (!capability || !context || !journal")
+        self.assertLess(conservative, gate)
+        self.assertLess(gate, null_dependencies)
+        receipt = re.search(r"struct Receipt final \{(.+?)\n\};", self.hpp, re.S).group(1)
+        self.assertIn(
+            "MutationAttemptState::kMayHaveBeenAttempted", receipt
+        )
+        factory = self.cpp[
+            self.cpp.index("Result result(") : self.cpp.index("Result activation_refusal(")
+        ]
+        self.assertIn("operation == Operation::kWrite", factory)
+        self.assertIn("MutationAttemptState::kMayHaveBeenAttempted", factory)
 
     def test_no_process_shell_network_or_generic_clipboard_surface(self):
         for forbidden in (
