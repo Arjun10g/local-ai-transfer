@@ -25,7 +25,11 @@ constexpr std::size_t kHeaderChecksumOffset = 4'064;
 constexpr std::size_t kProtocolOffset = 84;
 constexpr std::size_t kProtocolBytes = 64;
 constexpr std::size_t kContainerIdOffset = 152;
-constexpr DWORD kDirectoryShare = FILE_SHARE_READ | FILE_SHARE_WRITE;
+// A pathname is used for the fixed leaf only while every existing component
+// is held. Denying both write and delete sharing makes an already-open writer,
+// rename, junction/reparse conversion, DACL/attribute mutation, or replacement
+// conflict with acquisition and prevents a new one for the lease lifetime.
+constexpr DWORD kDirectoryShare = FILE_SHARE_READ;
 constexpr DWORD kFileShare = FILE_SHARE_READ;  // Deny WRITE and DELETE.
 constexpr DWORD kPrivateAccess = FILE_ALL_ACCESS;
 constexpr char kProtocol[] = "lae.action-journal.v0.1.0";
@@ -794,9 +798,24 @@ StorageStatus acquire_storage(const StorageRequest& request,
                              directory_volume))
       return fail(StorageStatus::kPrivateDirectoryRequired);
 
+    StorageStatus status = StorageStatus::kInternal;
+    DWORD filesystem_serial = 0;
+    std::string filesystem;
+    status = filesystem_policy(candidate->directories.back().handle.get(), root,
+                               candidate->volume, filesystem,
+                               filesystem_serial);
+    if (status != StorageStatus::kOkOpened) return fail(status);
+    if (static_cast<DWORD>(directory_volume.volume_serial) != filesystem_serial)
+      return fail(StorageStatus::kIdentityMismatch);
+
     PrivateSecurityDescriptor security;
     if (!build_private_security(user.sid, security))
       return fail(StorageStatus::kSecurityUnavailable);
+    // Recheck after every pre-create policy query. Together with the retained
+    // no-write/no-delete-share handles, this makes a parent race fail before
+    // CREATE_NEW can create the fixed leaf or any genesis byte can be written.
+    if (!directories_stable(candidate->directories, user.sid))
+      return fail(StorageStatus::kIdentityMismatch);
     HANDLE raw = CreateFileW(
         path.c_str(), GENERIC_READ | GENERIC_WRITE | READ_CONTROL, kFileShare,
         create ? &security.attributes : nullptr, create ? CREATE_NEW : OPEN_EXISTING,
@@ -805,7 +824,7 @@ StorageStatus acquire_storage(const StorageRequest& request,
     if (raw == INVALID_HANDLE_VALUE) return fail(open_error(create));
     candidate->file.reset(raw);
 
-    StorageStatus status = file_shape(candidate->file.get(), create ? 0 : kContainerBytes, true);
+    status = file_shape(candidate->file.get(), create ? 0 : kContainerBytes, true);
     if (status != StorageStatus::kOkOpened) return fail(status);
     std::wstring observed_path;
     if (!final_path(candidate->file.get(), observed_path) || !equal_path(path, observed_path))
@@ -815,12 +834,15 @@ StorageStatus acquire_storage(const StorageRequest& request,
     if (!get_identity(candidate->file.get(), candidate->identity) ||
         candidate->identity.volume_serial != directory_volume.volume_serial)
       return fail(StorageStatus::kIdentityMismatch);
-    DWORD filesystem_serial = 0;
-    std::string filesystem;
-    status = filesystem_policy(candidate->file.get(), root, candidate->volume,
-                               filesystem, filesystem_serial);
+    DWORD leaf_filesystem_serial = 0;
+    std::string leaf_filesystem;
+    status = validate_volume(candidate->file.get(), candidate->volume.get(), root,
+                             filesystem_serial, true, leaf_filesystem,
+                             leaf_filesystem_serial);
     if (status != StorageStatus::kOkOpened) return fail(status);
-    if (static_cast<DWORD>(candidate->identity.volume_serial) != filesystem_serial)
+    if (leaf_filesystem != filesystem ||
+        static_cast<DWORD>(candidate->identity.volume_serial) !=
+            leaf_filesystem_serial)
       return fail(StorageStatus::kIdentityMismatch);
     if (open && !same_identity(candidate->identity, request.expected_identity))
       return fail(StorageStatus::kIdentityMismatch);

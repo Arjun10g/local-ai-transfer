@@ -51,11 +51,12 @@
       "relative_path",
       "noncanonical_alias"
     ],
-    "ancestors": "open existing with FILE_FLAG_OPEN_REPARSE_POINT, reject reparse, retain handles denying delete",
+    "ancestors": "open existing with FILE_FLAG_OPEN_REPARSE_POINT, reject reparse, retain handles denying write and delete before any leaf create/open",
     "leaf_open": "FILE_FLAG_OPEN_REPARSE_POINT with FILE_SHARE_READ only",
     "after_acquisition": "all data and metadata operations use retained handles; pathname is used once more only for held-handle identity reopen proof"
   },
   "volume_policy": {
+    "pre_leaf_check": "validate the retained parent handle and held volume before CREATE_NEW or OPEN_EXISTING",
     "drive_type": "DRIVE_FIXED",
     "filesystem_allowlist": ["NTFS"],
     "required_flags": ["FILE_PERSISTENT_ACLS"],

@@ -58,12 +58,17 @@ def storage_decision(state):
         trace.append("open_ancestor_no_follow")
         if not ancestor.get("plain") or not ancestor.get("stable"):
             return "reparse_refused", trace
+        trace.append("hold_ancestor_deny_write_delete")
     if not state.get("parent_private", True):
         return "private_directory_required", trace
+    if not state.get("parent_share_locked", True):
+        return "identity_mismatch", trace
     if not state.get("fixed_volume", True) or state.get("hotplug", False):
         return "unsafe_volume", trace
     if state.get("filesystem", "NTFS") != "NTFS":
         return "unsupported_filesystem", trace
+    if not state.get("parent_stable_before_leaf", True):
+        return "identity_mismatch", trace
     trace.append("open_fixed_leaf")
     if not state.get("leaf_plain", True):
         return "reparse_refused", trace
@@ -163,7 +168,11 @@ class WindowsActionJournalStorageStaticTests(unittest.TestCase):
 
     def test_ancestors_and_leaf_are_nofollow_identity_held_with_strict_sharing(self):
         self.assertIn("FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT", self.cpp)
-        self.assertIn("constexpr DWORD kDirectoryShare = FILE_SHARE_READ | FILE_SHARE_WRITE", self.cpp)
+        self.assertIn("constexpr DWORD kDirectoryShare = FILE_SHARE_READ;", self.cpp)
+        self.assertNotRegex(
+            self.cpp,
+            r"kDirectoryShare\s*=\s*[^;]*(?:FILE_SHARE_WRITE|FILE_SHARE_DELETE)",
+        )
         self.assertIn("constexpr DWORD kFileShare = FILE_SHARE_READ;", self.cpp)
         self.assertNotIn("FILE_SHARE_DELETE", self.cpp)
         self.assertIn("std::vector<HeldDirectory> directories", self.cpp)
@@ -189,6 +198,17 @@ class WindowsActionJournalStorageStaticTests(unittest.TestCase):
             "filesystem_serial, true",
         ):
             self.assertIn(token, self.cpp)
+        pre_leaf = re.search(
+            r"filesystem_policy\(candidate->directories\.back\(\)\.handle\.get\(\)"
+            r"[\s\S]+?directories_stable\(candidate->directories, user\.sid\)"
+            r"[\s\S]+?HANDLE raw = CreateFileW",
+            self.cpp,
+        )
+        self.assertIsNotNone(pre_leaf)
+        self.assertLess(
+            self.cpp.index("status = validate_volume(candidate->file.get()"),
+            self.cpp.index("status = zero_initialize(candidate->file.get())"),
+        )
 
     def test_leaf_refuses_reparse_unsupported_attributes_links_and_delete_pending(self):
         for token in (
@@ -234,6 +254,20 @@ class WindowsActionJournalStorageStaticTests(unittest.TestCase):
                 self.assertEqual(status, expected)
                 self.assertNotIn("write_zero_container", trace)
                 self.assertNotIn("write_header", trace)
+
+    def test_validated_parent_reparse_race_refuses_before_leaf_create_or_genesis(self):
+        status, trace = storage_decision({
+            "mode": "create",
+            "ancestors": [{"plain": True, "stable": True}],
+            "parent_private": True,
+            "parent_share_locked": True,
+            "parent_stable_before_leaf": False,
+        })
+        self.assertEqual(status, "identity_mismatch")
+        self.assertIn("hold_ancestor_deny_write_delete", trace)
+        self.assertNotIn("open_fixed_leaf", trace)
+        self.assertNotIn("write_zero_container", trace)
+        self.assertNotIn("write_header", trace)
 
     def test_file_and_identity_tamper_model_fail_closed(self):
         cases = [
