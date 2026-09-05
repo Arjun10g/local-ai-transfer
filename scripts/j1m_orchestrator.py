@@ -52,7 +52,9 @@ _EVAL_DIAGNOSTIC_CODES = frozenset({
 _EVAL_QUALITY_CODES = frozenset({
     "forbidden_tool_name", "malformed_call", "unknown_tool", "malformed_parameter",
     "parameter_too_large", "invalid_json_argument", "invalid_tool_schema",
-    "invalid_arguments", "missing_call", "unexpected_call", "call_mismatch",
+    "invalid_arguments", "missing_argument", "extra_argument",
+    "argument_type_mismatch", "argument_value_mismatch", "missing_call",
+    "unexpected_call", "wrong_tool", "call_mismatch",
     "quality_unknown",
 })
 
@@ -143,7 +145,7 @@ def _tool_eval_contract() -> dict[str, Any]:
             not isinstance(tools, list) or len(tools) != 28 or len(set(tool_names)) != len(tool_names) or
             any(not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_.-]{1,95}", name) for name in tool_names) or
             not isinstance(limits.get("context_tokens"), int) or not 1 <= limits["context_tokens"] <= 16384 or
-            not isinstance(limits.get("max_output_tokens"), int) or not 1 <= limits["max_output_tokens"] < limits["context_tokens"]):
+            isinstance(limits.get("max_output_tokens"), bool) or not isinstance(limits.get("max_output_tokens"), int) or not 1 <= limits["max_output_tokens"] <= 256 or limits["max_output_tokens"] >= limits["context_tokens"]):
         raise ValueError("eval fixture count invalid")
     if any(not isinstance(case, dict) or set(case) != {"id", "category", "messages", "expected"} or
            not isinstance(case.get("id"), str) or not 1 <= len(case["id"]) <= 128 or

@@ -71,7 +71,9 @@ EVAL_DIAGNOSTIC_CODES = frozenset({
 EVAL_QUALITY_CODES = frozenset({
     "forbidden_tool_name", "malformed_call", "unknown_tool", "malformed_parameter",
     "parameter_too_large", "invalid_json_argument", "invalid_tool_schema",
-    "invalid_arguments", "missing_call", "unexpected_call", "call_mismatch",
+    "invalid_arguments", "missing_argument", "extra_argument",
+    "argument_type_mismatch", "argument_value_mismatch", "missing_call",
+    "unexpected_call", "wrong_tool", "call_mismatch",
     "quality_unknown",
 })
 TAIL_LIMIT = 1200
@@ -662,7 +664,7 @@ def _fixture_contract(path: Path, *, deadline: float | None = None) -> dict[str,
     tool_names = [tool.get("function", {}).get("name") if isinstance(tool, dict) and isinstance(tool.get("function"), dict) else None for tool in tools]
     if (isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= MAX_EVAL_CASES or len(cases) != count or
             not isinstance(tools, list) or not 1 <= len(tools) <= 32 or isinstance(context_tokens, bool) or not isinstance(context_tokens, int) or not 1 <= context_tokens <= 16384 or
-            isinstance(output_reserve_tokens, bool) or not isinstance(output_reserve_tokens, int) or not 1 <= output_reserve_tokens < context_tokens or
+            isinstance(output_reserve_tokens, bool) or not isinstance(output_reserve_tokens, int) or not 1 <= output_reserve_tokens <= 256 or output_reserve_tokens >= context_tokens or
             isinstance(limits.get("temperature"), bool) or not isinstance(limits.get("temperature"), (int, float)) or not math.isfinite(limits.get("temperature")) or not 0 <= limits["temperature"] <= 2 or
             any(not isinstance(name, str) or not TOOL_NAME.fullmatch(name) for name in tool_names) or len(set(tool_names)) != len(tool_names)):
         raise ValueError("evaluator_fixture_count_invalid")

@@ -40,7 +40,9 @@ DIAGNOSTIC_CODES = frozenset({
 QUALITY_CODES = frozenset({
     "forbidden_tool_name", "malformed_call", "unknown_tool", "malformed_parameter",
     "parameter_too_large", "invalid_json_argument", "invalid_tool_schema",
-    "invalid_arguments", "missing_call", "unexpected_call", "call_mismatch",
+    "invalid_arguments", "missing_argument", "extra_argument",
+    "argument_type_mismatch", "argument_value_mismatch", "missing_call",
+    "unexpected_call", "wrong_tool", "call_mismatch",
     "quality_unknown",
 })
 FIXTURE_MAX_BYTES = 256 * 1024
@@ -283,7 +285,7 @@ def validate_fixture(fixture: Any) -> dict[str, Any]:
     if set(limits) != LIMIT_KEYS:
         raise ValueError("fixture_limits_shape")
     _bounded_int(limits["context_tokens"], 1, 16384)
-    _bounded_int(limits["max_output_tokens"], 1, 64)
+    _bounded_int(limits["max_output_tokens"], 1, 256)
     _bounded_int(limits["max_cases"], 1, MAX_EVAL_CASES)
     if isinstance(limits["temperature"], bool) or not isinstance(limits["temperature"], (int, float)) or not math.isfinite(limits["temperature"]) or not 0 <= limits["temperature"] <= 2:
         raise ValueError("fixture_temperature_invalid")
@@ -447,7 +449,62 @@ def _validate_arguments(function: dict[str, Any], arguments: dict[str, Any]) -> 
         raise ValueError("invalid_tool_schema")
 
     if not matches(parameters, arguments):
-        raise ValueError("invalid_arguments")
+        raise ValueError(_argument_failure_code(parameters, arguments, matches))
+
+
+def _argument_failure_code(
+    parameters: dict[str, Any],
+    arguments: dict[str, Any],
+    matches: Any,
+) -> str:
+    """Classify a rejected argument set without exposing schema content.
+
+    The evaluator's receipts intentionally carry only this finite vocabulary.
+    Names, values, IDs, URLs, and hashes must never escape in a diagnostic.
+    """
+    required = parameters.get("required", [])
+    if isinstance(required, list) and any(key not in arguments for key in required):
+        return "missing_argument"
+    properties = parameters.get("properties", {})
+    if isinstance(properties, dict) and parameters.get("additionalProperties") is False:
+        if any(key not in properties for key in arguments):
+            return "extra_argument"
+
+    def type_matches(schema: Any, value: Any) -> bool:
+        if not isinstance(schema, dict):
+            return False
+        expected = schema.get("type")
+        if expected == "object":
+            return isinstance(value, dict)
+        if expected == "array":
+            return isinstance(value, list)
+        if expected == "string":
+            return isinstance(value, str)
+        if expected == "boolean":
+            return isinstance(value, bool)
+        if expected == "number":
+            return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+        if expected == "integer":
+            return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and float(value).is_integer()
+        return True
+
+    if isinstance(properties, dict):
+        for key, value in arguments.items():
+            schema = properties.get(key)
+            if schema is not None and not type_matches(schema, value):
+                return "argument_type_mismatch"
+    # A oneOf branch can make an otherwise present argument set incomplete.
+    # Report that as missing only when a branch's required fields are absent;
+    # mutually-exclusive or constraint failures remain value mismatches.
+    options = parameters.get("oneOf")
+    if isinstance(options, list) and not matches(parameters, arguments):
+        branch_required = [
+            option.get("required", []) for option in options
+            if isinstance(option, dict) and isinstance(option.get("required", []), list)
+        ]
+        if branch_required and all(any(key not in arguments for key in fields) for fields in branch_required):
+            return "missing_argument"
+    return "argument_value_mismatch"
 
 
 def parse_tool_call(text: str, tools: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
@@ -516,7 +573,38 @@ def evaluate_case(case: dict[str, Any], output: str, tools: list[dict[str, Any]]
     wanted = expected.get("call")
     if not isinstance(wanted, dict) or call is None:
         return False, "missing_call"
-    return call == wanted, "exact_call" if call == wanted else "call_mismatch"
+    if call.get("name") != wanted.get("name"):
+        return False, "wrong_tool"
+    actual_arguments = call.get("arguments", {})
+    wanted_arguments = wanted.get("arguments", {})
+    if not isinstance(actual_arguments, dict) or not isinstance(wanted_arguments, dict):
+        return False, "malformed_call"
+    if set(wanted_arguments) - set(actual_arguments):
+        return False, "missing_argument"
+    if set(actual_arguments) - set(wanted_arguments):
+        return False, "extra_argument"
+
+    def value_type(value: Any) -> str:
+        if isinstance(value, bool):
+            return "boolean"
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return "number"
+        if isinstance(value, str):
+            return "string"
+        if isinstance(value, list):
+            return "array"
+        if isinstance(value, dict):
+            return "object"
+        if value is None:
+            return "null"
+        return "other"
+
+    for key in wanted_arguments:
+        if value_type(actual_arguments[key]) != value_type(wanted_arguments[key]):
+            return False, "argument_type_mismatch"
+        if actual_arguments[key] != wanted_arguments[key]:
+            return False, "argument_value_mismatch"
+    return True, "exact_call"
 
 
 def _quality_code(reason: str) -> str:

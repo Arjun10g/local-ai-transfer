@@ -37,7 +37,7 @@ class ToolCallEvaluatorTests(unittest.TestCase):
         self.assertEqual(len(fixture["tools"]), 28)
         self.assertEqual(len(fixture["cases"]), 32)
         self.assertEqual(fixture["limits"]["context_tokens"], 8192)
-        self.assertEqual(fixture["limits"]["max_output_tokens"], 64)
+        self.assertEqual(fixture["limits"]["max_output_tokens"], 256)
         names = {tool["function"]["name"] for tool in fixture["tools"]}
         covered = {case["expected"]["call"]["name"] for case in fixture["cases"] if "call" in case["expected"]}
         self.assertEqual(covered, names)
@@ -45,10 +45,46 @@ class ToolCallEvaluatorTests(unittest.TestCase):
         self.assertEqual(contract["case_count"], 32)
         self.assertEqual(contract["tool_count"], 28)
         self.assertEqual(contract["context_tokens"], 8192)
-        self.assertEqual(contract["output_reserve_tokens"], 64)
+        self.assertEqual(contract["output_reserve_tokens"], 256)
+        for output_limit in (256, 257):
+            candidate = json.loads(json.dumps(fixture))
+            candidate["limits"]["max_output_tokens"] = output_limit
+            if output_limit == 256:
+                self.assertEqual(validate_fixture(candidate)["limits"]["max_output_tokens"], 256)
+            else:
+                with self.assertRaisesRegex(ValueError, "fixture_limit_invalid"):
+                    validate_fixture(candidate)
         self.assertEqual(contract["fixture_identity"]["sha256"], hashlib.sha256(Path(__file__).with_name("production_tool_call_eval.json").read_bytes()).hexdigest())
         self.assertEqual(contract["fixture_identity"]["tool_count"], 28)
         self.assertEqual(contract["fixture_identity"]["case_count"], 32)
+
+    def test_production_positive_cases_ground_every_expected_value_without_function_leaks(self):
+        fixture = load_fixture(Path(__file__).with_name("production_tool_call_eval.json"))
+
+        def scalar_values(value):
+            if isinstance(value, dict):
+                for nested in value.values():
+                    yield from scalar_values(nested)
+            elif isinstance(value, list):
+                for nested in value:
+                    yield from scalar_values(nested)
+            elif isinstance(value, bool):
+                yield "true" if value else "false"
+            elif isinstance(value, (int, float)):
+                yield str(value)
+            elif isinstance(value, str) and value:
+                yield value
+
+        for case in fixture["cases"]:
+            if "call" not in case["expected"]:
+                continue
+            call = case["expected"]["call"]
+            prompt = "\n".join(message["content"] for message in case["messages"])
+            with self.subTest(case=case["id"]):
+                for value in scalar_values(call["arguments"]):
+                    self.assertIn(value, prompt)
+                if case["category"] in {"tool_selection", "confirmation_sensitive"}:
+                    self.assertNotIn(call["name"], prompt)
 
     def test_fixture_is_bounded_and_covers_required_categories(self):
         fixture = load_fixture()
@@ -57,6 +93,19 @@ class ToolCallEvaluatorTests(unittest.TestCase):
         self.assertLessEqual(len(fixture["cases"]), MAX_EVAL_CASES)
         categories = {case["category"] for case in fixture["cases"]}
         self.assertTrue({"tool_selection", "argument_fidelity", "no_tool", "malformed_prompt", "prompt_injection", "schema_edge", "confirmation_sensitive", "abstention"}.issubset(categories))
+
+    def test_production_call_reserve_is_not_truncated_by_the_reviewed_output_bound(self):
+        fixture = load_fixture(Path(__file__).with_name("production_tool_call_eval.json"))
+        encoded_calls = [
+            json.dumps(case["expected"]["call"], separators=(",", ":"))
+            for case in fixture["cases"] if "call" in case["expected"]
+        ]
+        self.assertTrue(encoded_calls)
+        # XML framing adds bounded tags around each argument; this conservative
+        # byte proxy keeps the longest synthetic call below a 256-token output
+        # reserve without treating the model's tokenization as exact here.
+        self.assertLessEqual(max(len(call) for call in encoded_calls), 4 * 256)
+        self.assertGreater(fixture["limits"]["max_output_tokens"], 64)
 
     def test_matrix_covers_declared_tools_and_keeps_adversarial_cases_action_free(self):
         fixture = load_fixture()
@@ -112,7 +161,7 @@ class ToolCallEvaluatorTests(unittest.TestCase):
         accepted = "<tool_call><function=test.integer><parameter=value>1.0</parameter></function></tool_call>"
         self.assertEqual(parse_tool_call(accepted, tools)["arguments"], {"value": 1.0})
         rejected = accepted.replace("1.0", "1.5")
-        with self.assertRaisesRegex(ValueError, "invalid_arguments"):
+        with self.assertRaisesRegex(ValueError, "argument_type_mismatch"):
             parse_tool_call(rejected, tools)
 
     def test_parser_rejects_suffix_duplicate_nested_entity_unknown_and_missing(self):
@@ -307,8 +356,18 @@ class ToolCallEvaluatorTests(unittest.TestCase):
         valid = "<tool_call><function=test.types><parameter=obj>{\"x\":1}</parameter><parameter=items>[1,2]</parameter></function></tool_call>"
         self.assertEqual(parse_tool_call(valid, tools)["arguments"], {"obj": {"x": 1}, "items": [1, 2]})
         for output in (valid.replace('{\"x\":1}', '"wrong"'), valid.replace('[1,2]', 'false')):
-            with self.assertRaisesRegex(ValueError, "invalid_arguments"):
+            with self.assertRaisesRegex(ValueError, "argument_type_mismatch"):
                 parse_tool_call(output, tools)
+
+    def test_quality_diagnostics_distinguish_structure_without_content(self):
+        tools = load_fixture(Path(__file__).with_name("production_tool_call_eval.json"))["tools"]
+        value_case = {"expected": {"call": {"name": "clipboard.write", "arguments": {"text": "hello"}}}}
+        self.assertEqual(evaluate_case(value_case, "<tool_call><function=time.now><parameter=format>utc</parameter></function></tool_call>", tools), (False, "wrong_tool"))
+        self.assertEqual(evaluate_case(value_case, "<tool_call><function=clipboard.write><parameter=text>goodbye</parameter></function></tool_call>", tools), (False, "argument_value_mismatch"))
+        self.assertEqual(evaluate_case(value_case, "<tool_call><function=clipboard.write><parameter=text>true</parameter></function></tool_call>", tools), (False, "argument_type_mismatch"))
+        missing = {"expected": {"call": {"name": "clipboard.read", "arguments": {}}}}
+        self.assertEqual(evaluate_case(missing, "<tool_call><function=clipboard.write></function></tool_call>", tools), (False, "missing_argument"))
+        self.assertTrue(all(len(reason) < 64 and "clipboard" not in reason and "hello" not in reason for reason in ("wrong_tool", "argument_value_mismatch", "argument_type_mismatch", "missing_argument")))
 
     def test_shared_runtime_value_vectors(self):
         vectors = json.loads((Path(__file__).with_name("qwen_xml_vectors.json")).read_text(encoding="utf-8"))

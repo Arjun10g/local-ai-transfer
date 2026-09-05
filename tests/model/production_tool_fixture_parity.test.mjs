@@ -24,7 +24,7 @@ function configuredDefinitions() {
 test('production fixture exactly matches configured host tool names and schemas', () => {
   assert.equal(fixture.schema, 'local_bmo.tool-call-eval.v1');
   assert.equal(fixture.limits.context_tokens, 8192);
-  assert.equal(fixture.limits.max_output_tokens, 64);
+  assert.equal(fixture.limits.max_output_tokens, 256);
   assert.ok(fixture.cases.length <= 64);
   const advertised = configuredDefinitions();
   const fixtureByName = new Map(fixture.tools.map(tool => [tool.function.name, tool.function]));

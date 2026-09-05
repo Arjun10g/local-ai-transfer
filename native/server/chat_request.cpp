@@ -266,7 +266,7 @@ bool parse_chat_request(const std::string& body, ChatRequest& request, std::stri
       request.stream = stream->boolean;
     } else request.stream = false;
     if (const JsonValue* max_tokens = field(root, "max_tokens")) {
-      if (!is_type(max_tokens, JsonValue::Type::Number) || max_tokens->number < 1 || max_tokens->number > 64) throw ParseFailure("max_tokens out of range", false);
+      if (!is_type(max_tokens, JsonValue::Type::Number) || max_tokens->number < 1 || max_tokens->number > 256) throw ParseFailure("max_tokens out of range", false);
       request.generation.max_tokens = static_cast<unsigned>(max_tokens->number);
     } else request.generation.max_tokens = 8;
     if (const JsonValue* mode = field(root, "mode")) {

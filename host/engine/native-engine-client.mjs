@@ -58,12 +58,12 @@ async function* sseEvents(response, signal) {
 }
 
 export class NativeEngineClient {
-  constructor({ endpoint, token, model, backend, timeoutMs = 120000, maxTokens = 64 } = {}) {
+  constructor({ endpoint, token, model, backend, timeoutMs = 120000, maxTokens = 256 } = {}) {
     this.baseUrl = endpointUrl(endpoint); if (typeof token !== 'string' || token.length < 16 || token.length > 512) throw new NativeEngineError('invalid_engine_token', 'engine bearer token is invalid');
     if (typeof model !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(model)) throw new NativeEngineError('invalid_engine_model', 'native model identity is required');
     if (typeof backend !== 'string' || !/^[A-Za-z0-9._/-]{1,128}$/.test(backend)) throw new NativeEngineError('invalid_engine_backend', 'native backend identity is required');
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120000) throw new NativeEngineError('invalid_engine_timeout', 'native engine timeout must be 1000-120000ms');
-    if (!Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > 64) throw new NativeEngineError('invalid_engine_max_tokens', 'native maxTokens must be 1-64');
+    if (!Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > 256) throw new NativeEngineError('invalid_engine_max_tokens', 'native maxTokens must be 1-256');
     this.token = token; this.model = model; this.backend = backend; this.timeoutMs = timeoutMs; this.maxTokens = maxTokens; this.sessions = new Map(); this.active = new Map(); this.closed = false;
   }
   headers(extra = {}) { return { authorization: `Bearer ${this.token}`, ...extra }; }
