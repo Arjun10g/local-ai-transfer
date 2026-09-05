@@ -8,7 +8,8 @@
     "licenses/README.md", "THIRD_PARTY_NOTICES.md", "node-provenance.json", "SBOM.spdx.json", "RELEASE_MANIFEST.json",
     "CHECKSUMS.sha256", "README-OPERATOR.md"
   ],
-  "native_windows_launch": "UNPROVEN",
+  "package_build": "REFUSED-NOT_READY",
+  "native_windows_launch": "REFUSED-NOT_READY",
   "real_engine": "UNPROVEN",
   "model_artifact": "EXTERNAL_AND_VERIFIED_SEPARATELY"
 }

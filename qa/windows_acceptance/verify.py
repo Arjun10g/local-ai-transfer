@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Fail-closed verifier for exact Dell clean-machine acceptance receipts.
 
-This verifier does not turn fixture declarations into evidence.  READY requires
-a non-fixture receipt generated on Windows, exact target identity, successful
-CPU/portable checks, a recorded Vulkan disposition, and separately consented
-synthetic live checks for every full-access capability.
+This verifier diagnoses historical receipt shapes, but cannot establish current
+readiness while the package builder, hardware collector, native launcher, and
+acceptance producer are deliberately disabled.
 """
 
 from __future__ import annotations
@@ -37,6 +36,7 @@ PNP_INTEL = re.compile(r"(?i)^PCI\\.*VEN_8086&DEV_[0-9A-F]{4}")
 CPU_NAME = re.compile(r"(?i)Intel.*Core.*Ultra\s*7")
 GPU_NAME = re.compile(r"(?i)Intel.*Graphics")
 WINDOWS_X64 = {"x64", "amd64", "64-bit", "64 bit"}
+PORTABLE_RUNTIME_BLOCKER = "portable package, identity-pinned launcher, bounded hardware collector, and acceptance producer are unavailable"
 REQUIRED_LIVE_CHECKS = (
     "mail.read_message",
     "teams.list_messages",
@@ -75,13 +75,21 @@ def _parse_receipt_bytes(data: bytes) -> dict[str, Any]:
     return value
 
 
+def _read_bounded(path: Path, maximum: int = MAX_RECEIPT_BYTES) -> bytes:
+    try:
+        with path.open("rb") as stream:
+            data = stream.read(maximum + 1)
+    except OSError as exc:
+        raise ReceiptError("receipt could not be read") from exc
+    if len(data) > maximum:
+        raise ReceiptError("receipt exceeds the 2 MiB bound")
+    return data
+
+
 def load_receipt(path: Path) -> dict[str, Any]:
     if path.is_symlink() or not path.is_file():
         raise ReceiptError("receipt must be a regular non-link file")
-    try:
-        return _parse_receipt_bytes(path.read_bytes())
-    except OSError as exc:
-        raise ReceiptError("receipt could not be read") from exc
+    return _parse_receipt_bytes(_read_bounded(path))
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -205,7 +213,9 @@ def _hardware_reasons(hardware: dict[str, Any]) -> list[str]:
 
 
 def evaluate_receipt(receipt: dict[str, Any], *, hardware_source_bytes: bytes | None = None) -> dict[str, Any]:
-    reasons: list[str] = []
+    # Continue parsing for bounded historical diagnostics, but make a fabricated
+    # or stale receipt incapable of authorizing an unavailable runtime path.
+    reasons: list[str] = [PORTABLE_RUNTIME_BLOCKER]
     hardware_binding_valid = False
     if hardware_source_bytes is not None:
         try:
@@ -291,7 +301,7 @@ def evaluate_receipt(receipt: dict[str, Any], *, hardware_source_bytes: bytes | 
         if safety.get(key) is not True:
             reasons.append(f"acceptance safety did not prove {key}")
 
-    core_ready = not reasons
+    core_ready = False
     live_reasons: list[str] = []
     live = _mapping(receipt.get("live_actions"))
     live_keys = {"opt_in", "explicit_consent", "synthetic_accounts_only", "disposable_workspace_only", "secrets_logged", "content_logged", "checks"}
@@ -313,17 +323,21 @@ def evaluate_receipt(receipt: dict[str, Any], *, hardware_source_bytes: bytes | 
         item = records.get(check_id)
         if not item or set(item) != {"id", "status", "operator_confirmed", "synthetic_target", "observed_at_utc"} or item.get("status") != "PASS" or item.get("operator_confirmed") is not True or item.get("synthetic_target") is not True or not _timestamp(item.get("observed_at_utc")):
             live_reasons.append(f"live check is not proven: {check_id}")
-    full_access_ready = core_ready and not live_reasons
+    live_reasons.append("full access is unavailable while Windows package and acceptance producers are disabled")
+    full_access_ready = False
     return {
         "schema": "local_bmo.windows-acceptance-verdict.v1",
         "status": "READY" if full_access_ready else "NOT_READY",
         "core_ready": core_ready,
         "full_access_ready": full_access_ready,
-        "cpu_disposition": "ACCEPTED" if not any(reason.startswith("mandatory CPU") or reason.startswith("CPU check") for reason in reasons) else "UNPROVEN_OR_REJECTED",
-        "vulkan_disposition": vulkan_check.get("status", "UNPROVEN"),
+        "cpu_disposition": "UNPROVEN_OR_REJECTED",
+        "vulkan_disposition": "UNPROVEN_OR_REJECTED",
         "reasons": reasons,
         "live_reasons": live_reasons,
-        "limitations": ["Vulkan PASS is target candidate evidence only; promotion still requires the full independent correctness/performance/soak gate."],
+        "limitations": [
+            "Historical receipt fields are diagnostic only and cannot authorize the disabled product path.",
+            "A native identity-pinned launcher, bounded hardware collector, safe package builder, and real Windows acceptance remain required.",
+        ],
     }
 
 
@@ -336,7 +350,7 @@ def main(argv: list[str] | None = None) -> int:
         hardware_path = args.receipt.with_name("hardware-receipt.json")
         if hardware_path.is_symlink() or not hardware_path.is_file():
             raise ReceiptError("hardware receipt must be a regular non-link file")
-        verdict = evaluate_receipt(receipt, hardware_source_bytes=hardware_path.read_bytes())
+        verdict = evaluate_receipt(receipt, hardware_source_bytes=_read_bounded(hardware_path))
     except (ReceiptError, OSError) as exc:
         verdict = {"schema": "local_bmo.windows-acceptance-verdict.v1", "status": "NOT_READY", "core_ready": False, "full_access_ready": False, "reasons": [str(exc)], "live_reasons": []}
     print(json.dumps(verdict, indent=2, sort_keys=True))

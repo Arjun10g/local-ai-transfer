@@ -1,4 +1,4 @@
-"""Importable portable-package scanner facade."""
+"""Importable advisory Windows-source scanner facade."""
 
 from __future__ import annotations
 
@@ -20,3 +20,11 @@ scan_secrets = _module.scan_secrets
 scan_tree = _module.scan_tree
 scan_binary_dependencies = _module.scan_binary_dependencies
 checksums = _module.checksums
+BoundedFileError = _module.BoundedFileError
+FORBIDDEN_PACKAGE_PATHS = _module.FORBIDDEN_PACKAGE_PATHS
+MAX_BINARY_BYTES = _module.MAX_BINARY_BYTES
+MAX_MANIFEST_BYTES = _module.MAX_MANIFEST_BYTES
+MAX_TREE_ENTRIES = _module.MAX_TREE_ENTRIES
+is_reparse = _module.is_reparse
+path_chain_has_reparse = _module.path_chain_has_reparse
+read_bounded_file = _module.read_bounded_file

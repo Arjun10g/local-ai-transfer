@@ -1,6 +1,10 @@
 {
   "schema": "local_bmo.windows-target-profile.v1",
-  "status": "reported-values-awaiting-exact-receipt",
+  "status": "not-ready-producers-and-launcher-disabled",
+  "package_builder": "disabled-before-path-access",
+  "portable_launch": "disabled-before-process-creation",
+  "hardware_collection": "disabled-before-management-query",
+  "acceptance_producer": "disabled-before-input-access",
   "computer": {
     "manufacturer_regex": "(?i)^Dell(?: Inc\\.)?$",
     "board_product": "039NNG",
