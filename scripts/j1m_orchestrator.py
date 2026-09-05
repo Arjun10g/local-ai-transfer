@@ -1046,7 +1046,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             launcher_pid = os.getpid()
             launcher_start_marker = sf.process_start_marker(launcher_pid)
             activation_seconds = int(config["modes"][mode].get("activation_timeout_seconds", 1800))
-            record = sf.OwnedResource(phase_id=phase_id, run_id=run_id, instance_id=instance_id, ownership_nonce=nonce, ssh_key_id=key_id, ssh_key_name=f"j1m-{nonce}", gpu=candidate.gpu, cloud=candidate.cloud, region=candidate.region, hourly_usd=candidate.hourly_usd, created_at_utc=sf.utc_now().isoformat(), active_deadline_utc=(sf.utc_now() + sf.timedelta(seconds=activation_seconds)).isoformat(), run_deadline_utc=(sf.utc_now() + sf.timedelta(hours=runtime)).isoformat(), instance_type=candidate.instance_type, launcher_pid=launcher_pid, launcher_start_marker=launcher_start_marker, ssh_public_key_fingerprint=key_fingerprint)
+            record = sf.OwnedResource(phase_id=phase_id, run_id=run_id, instance_id=instance_id, ownership_nonce=nonce, ssh_key_id=key_id, ssh_key_name=f"j1m-{nonce}", gpu=candidate.gpu, cloud=candidate.cloud, region=candidate.region, hourly_usd=candidate.hourly_usd, created_at_utc=sf.utc_now().isoformat(), active_deadline_utc=(sf.utc_now() + sf.timedelta(seconds=activation_seconds)).isoformat(), run_deadline_utc=(sf.utc_now() + sf.timedelta(hours=runtime)).isoformat(), instance_type=candidate.instance_type, gpu_count=1, vram_gb=candidate.vram_gb, os_image=candidate.os_image, ssh_public_key=public_key, launcher_pid=launcher_pid, launcher_start_marker=launcher_start_marker, ssh_public_key_fingerprint=key_fingerprint)
             # Ownership record is written before any poll/upload. If this
             # fails, the fallback below still deletes the exact returned ID.
             sf.write_owned_resource(record)
@@ -1299,6 +1299,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     finally:
                         if key_id is not None:
                             try:
+                                sf.verify_ssh_key_ownership(api_key, phase_id, key_id, expected_name=f"j1m-{nonce}", expected_public_key=public_key)
                                 lifecycle["key_cleanup"] = sf.delete_ssh_key(api_key, phase_id, key_id)
                             except Exception as exc:
                                 lifecycle["key_cleanup"] = {"status": "failed", "error_type": type(exc).__name__}
@@ -1312,6 +1313,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             elif key_id is not None and not ambiguous_create:
                 # Key creation succeeded but instance creation did not.
                 try:
+                    sf.verify_ssh_key_ownership(api_key, phase_id, key_id, expected_name=f"j1m-{nonce}", expected_public_key=public_key)
                     lifecycle["key_cleanup"] = sf.delete_ssh_key(api_key, phase_id, key_id)
                 except Exception as exc:
                     lifecycle["key_cleanup"] = {"status": "failed", "error_type": type(exc).__name__}

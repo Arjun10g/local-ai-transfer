@@ -547,10 +547,13 @@ class StaticSafetyTests(unittest.TestCase):
             sf.write_owned_resource(sf.OwnedResource(
                 phase_id=phase, run_id="test", instance_id="instance-cost-1", ownership_nonce="0123456789abcdef0123456789abcdef",
                 ssh_key_id="key-cost-1", ssh_key_name="key", gpu="A100", cloud="hyperstack", region="r", hourly_usd=1.0,
-                created_at_utc=sf.utc_now().isoformat(),
+                created_at_utc=sf.utc_now().isoformat(), instance_type="a100", gpu_count=1,
+                vram_gb=80, os_image="ubuntu", ssh_public_key="ssh-ed25519 AAAA",
             ))
             try:
-                with mock.patch.object(teardown.shadeform, "_delete_instance", return_value={"success": True}), \
+                with mock.patch.object(teardown.shadeform, "verify_owned_instance_before_delete", return_value={}), \
+                        mock.patch.object(teardown.shadeform, "verify_owned_ssh_key_before_delete", return_value={}), \
+                        mock.patch.object(teardown.shadeform, "_delete_instance", return_value={"success": True}), \
                         mock.patch.object(teardown.shadeform, "append_cost_event", side_effect=ValueError("ledger shape")), \
                         mock.patch.object(teardown.shadeform, "delete_ssh_key", return_value={"success": True}) as key_delete:
                     receipt = teardown.teardown_exact(phase, "instance-cost-1", env_file=env)
@@ -577,9 +580,11 @@ class StaticSafetyTests(unittest.TestCase):
             salvage_source = root / "receipt.json"
             salvage_source.write_text("receipt", encoding="utf-8")
             sf.write_owned_resource(sf.OwnedResource(
-                phase_id=phase, run_id="test", instance_id="instance-fail-1", ownership_nonce="0123456789abcdef0123456789abcdef", ssh_key_id="key-fail-1", ssh_key_name="key", gpu="A100", cloud="hyperstack", region="r", hourly_usd=1.0, created_at_utc=sf.utc_now().isoformat(), launcher_pid=None,
+                phase_id=phase, run_id="test", instance_id="instance-fail-1", ownership_nonce="0123456789abcdef0123456789abcdef", ssh_key_id="key-fail-1", ssh_key_name="key", gpu="A100", cloud="hyperstack", region="r", hourly_usd=1.0, created_at_utc=sf.utc_now().isoformat(), instance_type="a100", gpu_count=1, vram_gb=80, os_image="ubuntu", ssh_public_key="ssh-ed25519 AAAA", launcher_pid=None,
             ))
-            with mock.patch.object(teardown.shadeform, "_delete_instance", side_effect=RuntimeError("delete transport")) as delete, mock.patch.object(teardown.shadeform, "delete_ssh_key", return_value={"success": True}) as key_delete:
+            with mock.patch.object(teardown.shadeform, "verify_owned_instance_before_delete", return_value={}), \
+                    mock.patch.object(teardown.shadeform, "verify_owned_ssh_key_before_delete", return_value={}), \
+                    mock.patch.object(teardown.shadeform, "_delete_instance", side_effect=RuntimeError("delete transport")) as delete, mock.patch.object(teardown.shadeform, "delete_ssh_key", return_value={"success": True}) as key_delete:
                 with self.assertRaises(RuntimeError):
                     teardown.teardown_exact(phase, "instance-fail-1", env_file=env, salvage=salvage_source, salvage_destination=bad_destination)
             delete.assert_called_once()
@@ -1749,13 +1754,17 @@ class LoopbackLifecycleTests(unittest.TestCase):
         from scripts import shadeform_lifecycle as sf
 
         calls: list[str] = []
+        instance_delete_requested = False
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *_args):
                 pass
 
             def do_POST(self):
+                nonlocal instance_delete_requested
                 calls.append(self.path)
+                if self.path == "/instances/instance-loopback-1/delete":
+                    instance_delete_requested = True
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -1763,6 +1772,30 @@ class LoopbackLifecycleTests(unittest.TestCase):
 
             def do_GET(self):
                 calls.append(self.path)
+                if self.path == "/sshkeys/key-loopback-1/info":
+                    body = b'{"id":"key-loopback-1","name":"j1m-test-key","public_key":"ssh-ed25519 AAAA"}'
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if self.path == "/instances/instance-loopback-1/info" and not instance_delete_requested:
+                    payload = {
+                        "id": "instance-loopback-1",
+                        "name": "ep-j1m-test-0123456789abcdef0123456789abcdef",
+                        "tags": ["local-bmo-j1m", "ep-phase-j1m-loopback-no-orphan", "ep-run-0123456789abcdef0123456789abcdef"],
+                        "ssh_key_id": "key-loopback-1", "public_key": "ssh-ed25519 AAAA", "cloud": "hyperstack", "region": "Montreal",
+                        "shade_instance_type": "a100", "hourly_price": 135,
+                        "configuration": {"gpu_type": "A100_80G", "num_gpus": 1, "vram_per_gpu_in_gb": 80, "os": "ubuntu"},
+                    }
+                    body = json.dumps(payload).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 self.send_response(404)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -1787,7 +1820,7 @@ class LoopbackLifecycleTests(unittest.TestCase):
                 phase_id=phase, run_id="j1m-test", instance_id="instance-loopback-1",
                 ownership_nonce="0123456789abcdef0123456789abcdef", ssh_key_id="key-loopback-1",
                 ssh_key_name="j1m-test-key", gpu="A100_80G", cloud="hyperstack", region="Montreal",
-                hourly_usd=1.35, created_at_utc=sf.utc_now().isoformat(), launcher_pid=launcher.pid,
+                hourly_usd=1.35, created_at_utc=sf.utc_now().isoformat(), instance_type="a100", gpu_count=1, vram_gb=80, os_image="ubuntu", ssh_public_key="ssh-ed25519 AAAA", launcher_pid=launcher.pid,
             ))
             launcher.kill()
             launcher.wait(timeout=5)

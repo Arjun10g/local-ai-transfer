@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import math
 import os
 import signal
 import subprocess
@@ -12,6 +14,9 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+TEARDOWN_RESERVE_SECONDS = 660.0
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(ROOT))
 
 
 def alive(pid: int) -> bool:
@@ -35,29 +40,215 @@ def identity_alive(pid: int, marker: str | None) -> bool:
     return shadeform.process_start_marker(pid) == marker
 
 
+def _has_pending_intent(shadeform, phase_id: str, nonce: str | None) -> bool:
+    """Return the state of the latest bounded reservation event only."""
+    if nonce is None or not shadeform.NONCE.fullmatch(nonce):
+        return False
+    latest: dict[str, object] | None = None
+    try:
+        if shadeform.COST_LEDGER.stat().st_size > 1_048_576:
+            return False
+        with shadeform.COST_LEDGER.open("r", encoding="utf-8") as handle:
+            for index, line in enumerate(handle):
+                if index >= 4096:
+                    return False
+                event = json.loads(line)
+                if not isinstance(event, dict):
+                    return False
+                if (event.get("phase_id") == phase_id
+                        and event.get("ownership_nonce") == nonce
+                        and event.get("instance_id") == "attempt-" + nonce):
+                    latest = event
+    except (OSError, json.JSONDecodeError, TypeError):
+        return False
+    return bool(latest and latest.get("status") == "pending")
+
+
+def _deadline_windows(*, now_monotonic: float, now_epoch: float, max_seconds: float, deadline_epoch: float | None) -> tuple[float, float]:
+    """Return separate wake/work and hard teardown deadlines."""
+
+    work_deadline = now_monotonic + max_seconds
+    hard_deadline = now_monotonic + max_seconds + TEARDOWN_RESERVE_SECONDS if deadline_epoch is None else now_monotonic + max(0.0, deadline_epoch - now_epoch)
+    if hard_deadline <= work_deadline:
+        raise ValueError("hard provider deadline does not preserve watchdog teardown reserve")
+    return work_deadline, hard_deadline
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--phase-id", required=True)
-    parser.add_argument("--instance-id", required=True)
+    parser.add_argument("--instance-id")
     parser.add_argument("--launcher-pid", required=True, type=int)
     parser.add_argument("--max-seconds", required=True, type=float)
+    parser.add_argument("--deadline-epoch", type=float)
     parser.add_argument("--env-file", type=Path, default=ROOT / ".env")
     parser.add_argument("--launcher-start-marker")
+    parser.add_argument("--ownership-nonce")
+    parser.add_argument("--ssh-key-id")
+    parser.add_argument("--ssh-key-name")
+    parser.add_argument("--ssh-key-fingerprint")
+    parser.add_argument("--allow-unrecorded-exact", action="store_true")
+    parser.add_argument("--key-only-recovery", action="store_true")
+    parser.add_argument("--instance-name")
+    parser.add_argument("--precreate-recovery", action="store_true")
+    parser.add_argument("--cloud")
+    parser.add_argument("--region")
+    parser.add_argument("--instance-type")
+    parser.add_argument("--hourly-usd", type=float)
+    parser.add_argument("--gpu")
+    parser.add_argument("--gpu-count", type=int)
+    parser.add_argument("--vram-gb", type=int)
+    parser.add_argument("--os-image")
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     args = parser.parse_args(argv)
-    deadline = time.monotonic() + args.max_seconds
-    while identity_alive(args.launcher_pid, args.launcher_start_marker) and time.monotonic() < deadline:
+    from scripts import shadeform_lifecycle as shadeform
+    try:
+        shadeform.validate_phase_id(args.phase_id)
+    except (TypeError, ValueError) as exc:
+        parser.error(str(exc))
+    if not args.instance_id and not args.instance_name:
+        parser.error("one of --instance-id or --instance-name is required")
+    if args.precreate_recovery and not args.instance_name:
+        parser.error("precreate recovery requires --instance-name")
+    if not (math.isfinite(args.max_seconds) and args.max_seconds > 0) or not (math.isfinite(args.poll_seconds) and 0 < args.poll_seconds <= 60):
+        parser.error("watchdog durations are outside their bounded range")
+    if args.deadline_epoch is not None:
+        if not (math.isfinite(args.deadline_epoch) and args.deadline_epoch > 0):
+            parser.error("--deadline-epoch must be a finite positive epoch")
+        pass
+    else:
+        args.deadline_epoch = None
+    if args.allow_unrecorded_exact:
+        # An unrecorded path is permitted only for nonce reconciliation.  A
+        # caller-supplied instance ID would bypass the provider info/profile
+        # proof and turn this watchdog into an account-scoped delete primitive.
+        if args.instance_id is not None:
+            parser.error("--allow-unrecorded-exact requires nonce reconciliation; direct instance IDs are forbidden")
+        required_profile = (args.cloud, args.region,
+                            args.instance_type, args.hourly_usd, args.gpu,
+                            args.gpu_count, args.vram_gb, args.os_image)
+        if any(value is None for value in required_profile):
+            parser.error("unrecorded recovery requires the complete approved instance profile")
+        if (not math.isfinite(args.hourly_usd) or args.hourly_usd <= 0 or
+                args.gpu_count <= 0 or args.vram_gb <= 0 or
+                any(not isinstance(value, str) or not value or len(value) > 256
+                    for value in (args.cloud, args.region, args.instance_type, args.gpu, args.os_image))):
+            parser.error("unrecorded recovery profile is malformed")
+        if args.key_only_recovery:
+            if args.instance_id is not None or not args.ssh_key_name or not args.ssh_key_fingerprint:
+                parser.error("key-only recovery requires no instance ID and exact key identity")
+        elif args.ssh_key_id is None:
+            parser.error("instance recovery requires an SSH key ID")
+    # max-seconds is the work/wake deadline.  The absolute epoch is the hard
+    # provider teardown deadline and is intentionally kept separate so the
+    # reserve remains available after the launcher disappears.
+    try:
+        work_deadline, hard_deadline = _deadline_windows(
+            now_monotonic=time.monotonic(), now_epoch=time.time(),
+            max_seconds=args.max_seconds, deadline_epoch=args.deadline_epoch,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    while identity_alive(args.launcher_pid, args.launcher_start_marker) and time.monotonic() < work_deadline:
         time.sleep(args.poll_seconds)
     record_path = ROOT / "experiments" / "runtime" / f"{args.phase_id}.json"
-    if not alive(args.launcher_pid) and not record_path.exists():
-        return 0
+    launcher_owned = identity_alive(args.launcher_pid, args.launcher_start_marker)
+    if not launcher_owned and not record_path.exists():
+        if not args.allow_unrecorded_exact:
+            return 0
+        if not _has_pending_intent(shadeform, args.phase_id, args.ownership_nonce):
+            return 1
+        try:
+            env = shadeform.load_env(args.env_file)
+            api_key = shadeform.require_env(env, "SHADEFORM_API_KEY")
+            reconciled_key_id = shadeform.reconcile_ssh_key(
+                api_key, args.phase_id, expected_name=args.ssh_key_name or "",
+                expected_fingerprint=args.ssh_key_fingerprint,
+            ) if args.key_only_recovery else args.ssh_key_id
+            if reconciled_key_id is None:
+                return 1
+            # A key-only watcher also checks for an instance that may have
+            # been created after the key POST. Zero is the safe key-only
+            # outcome; an exact nonce/profile match is cleaned in full.
+            exact_instance_id = args.instance_id
+            if exact_instance_id is None:
+                exact_instance_id = shadeform.reconcile_instance_by_nonce(
+                    api_key, args.phase_id, expected_name=args.instance_name,
+                    nonce=args.ownership_nonce,
+                    ssh_key_id=reconciled_key_id, expected_cloud=args.cloud,
+                    expected_region=args.region, expected_instance_type=args.instance_type,
+                    expected_hourly_usd=args.hourly_usd, expected_gpu=args.gpu,
+                    expected_gpu_count=args.gpu_count, expected_vram_gb=args.vram_gb,
+                    expected_os_image=args.os_image, allow_absent=True,
+                )
+            if exact_instance_id is None:
+                remaining = hard_deadline - time.monotonic()
+                if remaining <= 0:
+                    return 1
+                shadeform.verify_ssh_key_fingerprint(
+                    api_key, args.phase_id, reconciled_key_id,
+                    expected_name=args.ssh_key_name or "",
+                    expected_fingerprint=args.ssh_key_fingerprint or "",
+                    timeout=min(90.0, remaining),
+                )
+                shadeform.delete_ssh_key(api_key, args.phase_id, reconciled_key_id, deadline=hard_deadline)
+                shadeform.append_cost_event({
+                    "instance_id": "attempt-" + (args.ownership_nonce or ""),
+                    "phase_id": args.phase_id, "status": "settled", "actual_cost_usd": 0.0,
+                    "reservation": "pre-create-key-reconciled",
+                })
+                return 0
+            remaining = hard_deadline - time.monotonic()
+            if remaining <= 0:
+                return 1
+            info = shadeform.instance_info(api_key, args.phase_id, exact_instance_id, timeout=min(90.0, remaining))
+            shadeform.verify_instance_ownership(
+                info, instance_id=exact_instance_id, phase_id=args.phase_id,
+                nonce=args.ownership_nonce or "", expected_name=args.instance_name,
+                ssh_key_id=reconciled_key_id, expected_cloud=args.cloud,
+                expected_region=args.region, expected_instance_type=args.instance_type,
+                expected_hourly_usd=args.hourly_usd, expected_gpu=args.gpu,
+                expected_gpu_count=args.gpu_count, expected_vram_gb=args.vram_gb,
+                expected_os_image=args.os_image,
+            )
+            deleted = shadeform._delete_instance(api_key, args.phase_id, exact_instance_id, deadline=hard_deadline)
+            if deleted.get("success") is not True:
+                return 1
+            if reconciled_key_id:
+                shadeform.verify_ssh_key_fingerprint(
+                    api_key, args.phase_id, reconciled_key_id,
+                    expected_name=args.ssh_key_name or "",
+                    expected_fingerprint=args.ssh_key_fingerprint or "",
+                    timeout=min(90.0, hard_deadline - time.monotonic()),
+                )
+                shadeform.delete_ssh_key(api_key, args.phase_id, reconciled_key_id, deadline=hard_deadline)
+            shadeform.append_cost_event({
+                "instance_id": "attempt-" + (args.ownership_nonce or ""),
+                "phase_id": args.phase_id, "status": "settled", "actual_cost_usd": 0.0,
+                "reservation": "pre-create-instance-reconciled",
+            })
+            return 0
+        except Exception:
+            return 1
     result_code = 1
     try:
-        result = subprocess.run([
+        record = shadeform.read_owned_resource(args.phase_id)
+        if record is None:
+            return 1
+        if args.instance_id is not None and args.instance_id != record.instance_id:
+            return 1
+        exact_instance_id = record.instance_id
+        teardown_argv = [
             sys.executable, str(ROOT / "scripts" / "shadeform_teardown.py"),
-            "--phase-id", args.phase_id, "--instance-id", args.instance_id,
+            "--phase-id", args.phase_id, "--instance-id", exact_instance_id,
             "--env-file", str(args.env_file),
-        ], timeout=900)
+        ]
+        if args.deadline_epoch is not None:
+            teardown_argv.extend(["--deadline-epoch", str(args.deadline_epoch)])
+        remaining = hard_deadline - time.monotonic()
+        if remaining <= 0:
+            return 1
+        result = subprocess.run(teardown_argv, timeout=remaining)
         result_code = result.returncode
     finally:
         if identity_alive(args.launcher_pid, args.launcher_start_marker):

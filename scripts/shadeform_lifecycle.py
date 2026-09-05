@@ -51,6 +51,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 API_BASE = "https://api.shadeform.ai/v1"
+MAX_PROVIDER_RESPONSE_BYTES = 1_048_576
 RUNTIME_ROOT = ROOT / "experiments" / "runtime"
 MARKDOWN_LEDGER = ROOT / "experiments" / "LEDGER.md"
 COST_LEDGER = ROOT / "experiments" / "runtime" / "cost-ledger.jsonl"
@@ -146,6 +147,10 @@ class OwnedResource:
     active_deadline_utc: str | None = None
     run_deadline_utc: str | None = None
     instance_type: str | None = None
+    gpu_count: int | None = None
+    vram_gb: int | None = None
+    os_image: str | None = None
+    ssh_public_key: str | None = None
     launcher_start_marker: str | None = None
     ssh_public_key_fingerprint: str | None = None
 
@@ -315,6 +320,25 @@ def _validate_owned_resource(record: OwnedResource) -> None:
             (not isinstance(record.ssh_public_key_fingerprint, str) or
              re.fullmatch(r"[A-Za-z0-9+/]{43}", record.ssh_public_key_fingerprint) is None)):
         raise ValueError("malformed ledger SSH public-key fingerprint")
+    if record.gpu_count is not None and (
+        isinstance(record.gpu_count, bool) or not isinstance(record.gpu_count, int)
+        or not 1 <= record.gpu_count <= 16
+    ):
+        raise ValueError("ledger gpu_count is invalid")
+    if record.vram_gb is not None and (
+        isinstance(record.vram_gb, bool) or not isinstance(record.vram_gb, int)
+        or not 1 <= record.vram_gb <= 4096
+    ):
+        raise ValueError("ledger vram_gb is invalid")
+    if record.os_image is not None and (
+        not isinstance(record.os_image, str) or not 1 <= len(record.os_image) <= 256
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in record.os_image)
+    ):
+        raise ValueError("ledger os_image is invalid")
+    if record.ssh_public_key is not None:
+        algorithm, material = _canonical_public_key(record.ssh_public_key)
+        if record.ssh_public_key_fingerprint is not None and ssh_public_key_fingerprint(record.ssh_public_key) != record.ssh_public_key_fingerprint:
+            raise ValueError("ledger SSH public-key fingerprint does not match key material")
 
 
 def write_owned_resource(record: OwnedResource) -> None:
@@ -393,25 +417,30 @@ def ledger_spend() -> tuple[float, list[str]]:
 
     if COST_LEDGER.is_file():
         latest: dict[str, dict[str, Any]] = {}
-        for number, line in enumerate(COST_LEDGER.read_text(encoding="utf-8").splitlines(), 1):
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ShadeformError(f"cost ledger line {number} is invalid JSON") from exc
-            if not isinstance(event, dict):
-                raise ShadeformError(f"cost ledger line {number} is not an object")
-            status = event.get("status")
-            if status not in {"pending", "settled"}:
-                raise ShadeformError(f"cost ledger line {number} has an unknown status")
-            if status == "pending":
-                if "actual_cost_usd" in event or not _valid_cost(event.get("estimated_cost_usd")):
-                    raise ShadeformError(f"cost ledger line {number} has an invalid pending cost")
-            elif "estimated_cost_usd" in event or not _valid_cost(event.get("actual_cost_usd")):
-                raise ShadeformError(f"cost ledger line {number} has an invalid settled cost")
-            instance_id = event.get("instance_id")
-            if not isinstance(instance_id, str) or not instance_id or len(instance_id) > 256:
-                raise ShadeformError(f"cost ledger line {number} has no bounded instance identity")
-            latest[instance_id] = event
+        if COST_LEDGER.stat().st_size > 1_048_576:
+            raise ShadeformError("cost ledger exceeds the bounded recovery size")
+        with COST_LEDGER.open("r", encoding="utf-8") as handle:
+            for number, line in enumerate(handle, 1):
+                if number > 4096:
+                    raise ShadeformError("cost ledger exceeds the bounded recovery line count")
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ShadeformError(f"cost ledger line {number} is invalid JSON") from exc
+                if not isinstance(event, dict):
+                    raise ShadeformError(f"cost ledger line {number} is not an object")
+                status = event.get("status")
+                if status not in {"pending", "settled"}:
+                    raise ShadeformError(f"cost ledger line {number} has an unknown status")
+                if status == "pending":
+                    if "actual_cost_usd" in event or not _valid_cost(event.get("estimated_cost_usd")):
+                        raise ShadeformError(f"cost ledger line {number} has an invalid pending cost")
+                elif "estimated_cost_usd" in event or not _valid_cost(event.get("actual_cost_usd")):
+                    raise ShadeformError(f"cost ledger line {number} has an invalid settled cost")
+                instance_id = event.get("instance_id")
+                if not isinstance(instance_id, str) or not instance_id or len(instance_id) > 256:
+                    raise ShadeformError(f"cost ledger line {number} has no bounded instance identity")
+                latest[instance_id] = event
         spent = 0.0
         pending: list[str] = []
         for instance_id, event in latest.items():
@@ -655,16 +684,47 @@ def request(
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:
-            raw = response.read().decode("utf-8", errors="replace")
+            raw = _read_provider_response(response).decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
-        message = exc.read().decode("utf-8", errors="replace")[:1000]
+        try:
+            message = _read_provider_response(exc).decode("utf-8", errors="replace")[:1000]
+        except MalformedProviderResponse:
+            message = "provider error body exceeded the bounded response size"
         raise ShadeformHTTPError(exc.code, message.replace(api_key, "<redacted>")) from exc
     except (OSError, TimeoutError) as exc:
         raise ShadeformError(f"Shadeform request failed for {method} {path}: {exc}") from exc
+    if len(raw.encode("utf-8")) > MAX_PROVIDER_RESPONSE_BYTES:
+        raise MalformedProviderResponse("Shadeform response exceeded the bounded response size")
     parsed = json.loads(raw or "{}")
     if not isinstance(parsed, dict):
         raise MalformedProviderResponse("Shadeform response was not a JSON object")
     return parsed
+
+
+def _read_provider_response(stream: Any) -> bytes:
+    """Read provider success/error bodies with a hard pre-parse byte cap."""
+
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = stream.read(min(65_536, MAX_PROVIDER_RESPONSE_BYTES + 1 - total))
+        if not chunk:
+            break
+        if not isinstance(chunk, (bytes, bytearray)):
+            raise MalformedProviderResponse("Shadeform response body is not bytes")
+        total += len(chunk)
+        if total > MAX_PROVIDER_RESPONSE_BYTES:
+            raise MalformedProviderResponse("Shadeform response exceeded the bounded response size")
+        chunks.append(bytes(chunk))
+    return b"".join(chunks)
+
+
+def _reject_provider_failure(response: object, action: str) -> dict[str, Any]:
+    if not isinstance(response, dict):
+        raise MalformedProviderResponse(f"Shadeform {action} response was not an object")
+    if any(response.get(field) is False for field in ("success", "accepted", "ok")) or response.get("status") in {"failed", "failure", "error"} or response.get("error"):
+        raise ShadeformError(f"Shadeform {action} was not accepted")
+    return response
 
 
 def _csv(value: str) -> list[str]:
@@ -1028,21 +1088,25 @@ def reconcile_ssh_key(api_key: str, phase_id: str, *, expected_name: str, expect
     return matches[0]
 
 
-def delete_ssh_key(api_key: str, phase_id: str, key_id: str) -> dict[str, Any]:
+def delete_ssh_key(api_key: str, phase_id: str, key_id: str, *, deadline: float | None = None) -> dict[str, Any]:
     exact = validate_resource_id(key_id, field="SSH key id")
+    timeout = min(90.0, deadline - time.monotonic()) if deadline is not None else 90.0
+    if timeout < 1.0:
+        raise TimeoutError("SSH key deletion deadline exhausted")
     try:
-        return request(api_key, "POST", f"/sshkeys/{exact}/delete", phase_id=phase_id)
+        response = request(api_key, "POST", f"/sshkeys/{exact}/delete", phase_id=phase_id, timeout=timeout)
+        return _reject_provider_failure(response, "SSH key deletion")
     except ShadeformHTTPError as exc:
         if exc.status == 404:
             return {"already_absent": True}
         raise
 
 
-def verify_ssh_key_ownership(api_key: str, phase_id: str, key_id: str, *, expected_name: str, expected_public_key: str) -> dict[str, Any]:
+def verify_ssh_key_ownership(api_key: str, phase_id: str, key_id: str, *, expected_name: str, expected_public_key: str, timeout: float = 90) -> dict[str, Any]:
     """Verify the exact newly-created key through its provider info endpoint."""
 
     exact = validate_resource_id(key_id, field="SSH key id")
-    info = request(api_key, "GET", f"/sshkeys/{exact}/info", phase_id=phase_id)
+    info = request(api_key, "GET", f"/sshkeys/{exact}/info", phase_id=phase_id, timeout=timeout)
     if validate_resource_id(info.get("id"), field="SSH key info id") != exact:
         raise ShadeformError("provider returned a different SSH key ID")
     try:
@@ -1052,6 +1116,29 @@ def verify_ssh_key_ownership(api_key: str, phase_id: str, key_id: str, *, expect
         raise ShadeformError(f"provider SSH key is malformed: {exc}") from None
     if info.get("name") != expected_name or provider_key != expected_key:
         raise ShadeformError("provider SSH key info does not match this ephemeral ownership record")
+    return info
+
+
+def verify_ssh_key_fingerprint(
+    api_key: str,
+    phase_id: str,
+    key_id: str,
+    *,
+    expected_name: str,
+    expected_fingerprint: str,
+    timeout: float = 90,
+) -> dict[str, Any]:
+    """Verify key identity immediately before revocation when private material is unavailable."""
+
+    exact = validate_resource_id(key_id, field="SSH key id")
+    if re.fullmatch(r"[A-Za-z0-9+/]{43}", expected_fingerprint) is None:
+        raise ValueError("expected SSH key fingerprint is malformed")
+    info = request(api_key, "GET", f"/sshkeys/{exact}/info", phase_id=phase_id, timeout=timeout)
+    if validate_resource_id(info.get("id"), field="SSH key info id") != exact or info.get("name") != expected_name:
+        raise ShadeformError("provider SSH key identity does not match the deletion record")
+    actual = ssh_public_key_fingerprint(info.get("public_key"))
+    if actual != expected_fingerprint:
+        raise ShadeformError("provider SSH key fingerprint does not match the deletion record")
     return info
 
 
@@ -1155,8 +1242,13 @@ def create_instance(
         response = request(
             api_key, "POST", "/instances/create", payload, phase_id=phase_id, timeout=180
         )
-    except ShadeformHTTPError:
-        # A non-2xx response is definitive: the provider rejected the create.
+    except ShadeformHTTPError as exc:
+        # A 5xx response is not proof that the provider did not commit the
+        # create.  Keep the durable nonce reservation pending so a later
+        # exact reconciliation can inspect only this name/nonce; never allow
+        # the caller to treat it as a safe, definitive rejection.
+        if exc.status >= 500 or exc.status in {408, 409, 425, 429}:
+            raise AmbiguousProviderOutcome("instance create outcome is unknown after a possibly committed provider response") from exc
         raise
     except (ShadeformError, TimeoutError, OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
         # The request wrapper deliberately preserves its transport cause. Only
@@ -1180,6 +1272,75 @@ def owned_instance_name(run_id: str, nonce: str) -> str:
     validate_nonce(nonce)
     safe_run = re.sub(r"[^a-z0-9-]", "-", run_id.lower()).strip("-")[:14] or "run"
     return f"ep-{safe_run}-{nonce}"
+
+
+def reconcile_instance_by_nonce(
+    api_key: str, phase_id: str, *, expected_name: str, nonce: str,
+    ssh_key_id: str | None = None, expected_cloud: str | None = None,
+    expected_region: str | None = None, expected_instance_type: str | None = None,
+    expected_hourly_usd: float | None = None, expected_gpu: str | None = None,
+    expected_gpu_count: int | None = None, expected_vram_gb: int | None = None,
+    expected_os_image: str | None = None,
+    allow_absent: bool = False,
+) -> str | None:
+    """Find exactly one instance with the phase/name/nonce ownership tuple.
+
+    The provider endpoint is account-scoped, so the query is deliberately
+    narrow and the response is still filtered locally before any deletion.
+    Zero, duplicate, malformed, or unsupported results remain ambiguous.
+    """
+
+    validate_phase_id(phase_id)
+    validate_nonce(nonce)
+    if not isinstance(expected_name, str) or len(expected_name) > 128 or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", expected_name) is None:
+        raise ValueError("invalid expected instance name")
+    if any(value is None for value in (
+        ssh_key_id, expected_cloud, expected_region, expected_instance_type,
+        expected_hourly_usd, expected_gpu, expected_gpu_count, expected_vram_gb,
+        expected_os_image,
+    )):
+        raise ValueError("exact instance reconciliation requires the complete approved profile")
+    response = request(
+        api_key, "GET", "/instances",
+        {"name": expected_name, "tag": f"ep-run-{nonce}"},
+        phase_id=phase_id, timeout=90,
+    )
+    if not isinstance(response, dict):
+        raise AmbiguousProviderOutcome("instance reconciliation response is malformed")
+    entries = response.get("instances", response.get("data", response.get("value")))
+    if not isinstance(entries, list) or len(entries) > 256:
+        raise AmbiguousProviderOutcome("instance reconciliation response is unavailable or unbounded")
+    matches: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise AmbiguousProviderOutcome("instance reconciliation entry is malformed")
+        if entry.get("name") != expected_name:
+            continue
+        tags = entry.get("tags")
+        if not isinstance(tags, list) or len(tags) > 32 or f"ep-run-{nonce}" not in tags or f"ep-phase-{phase_id}" not in tags:
+            continue
+        try:
+            matches.append(validate_resource_id(entry.get("id"), field="reconciled instance id"))
+        except (TypeError, ValueError) as exc:
+            raise AmbiguousProviderOutcome("matching instance identity is malformed") from exc
+    if not matches and allow_absent:
+        return None
+    if len(matches) != 1:
+        raise AmbiguousProviderOutcome("instance reconciliation did not identify exactly one nonce-bound instance")
+    # A list response is only a locator.  Before deletion, bind the exact ID
+    # through the provider's authoritative info response and the full approved
+    # profile; never delete from a name/tag match alone.
+    info = instance_info(api_key, phase_id, matches[0])
+    verify_instance_ownership(
+        info, instance_id=matches[0], phase_id=phase_id, nonce=nonce,
+        expected_name=expected_name, ssh_key_id=ssh_key_id,
+        expected_cloud=expected_cloud, expected_region=expected_region,
+        expected_instance_type=expected_instance_type,
+        expected_hourly_usd=expected_hourly_usd, expected_gpu=expected_gpu,
+        expected_gpu_count=expected_gpu_count, expected_vram_gb=expected_vram_gb,
+        expected_os_image=expected_os_image,
+    )
+    return matches[0]
 
 
 def instance_info(api_key: str, phase_id: str, instance_id: str, *, timeout: float = 90) -> dict[str, Any]:
@@ -1256,6 +1417,63 @@ def verify_instance_ownership(
     return info
 
 
+def verify_owned_instance_before_delete(
+    api_key: str,
+    phase_id: str,
+    record: OwnedResource,
+    *,
+    deadline: float | None = None,
+) -> dict[str, Any]:
+    """Rebind a phase-owned record to authoritative provider identity before delete."""
+
+    _validate_owned_resource(record)
+    if record.gpu_count is None or record.vram_gb is None or record.os_image is None or record.instance_type is None:
+        raise ShadeformError("owned record lacks the complete deletion profile")
+    timeout = 90.0 if deadline is None else min(90.0, deadline - time.monotonic())
+    if timeout < 1.0:
+        raise TimeoutError("instance ownership verification deadline exhausted")
+    info = instance_info(api_key, phase_id, record.instance_id, timeout=timeout)
+    return verify_instance_ownership(
+        info,
+        instance_id=record.instance_id,
+        phase_id=phase_id,
+        nonce=record.ownership_nonce,
+        expected_name=owned_instance_name(record.run_id, record.ownership_nonce),
+        ssh_key_id=record.ssh_key_id,
+        expected_cloud=record.cloud,
+        expected_region=record.region,
+        expected_instance_type=record.instance_type,
+        expected_hourly_usd=record.hourly_usd,
+        expected_gpu=record.gpu,
+        expected_gpu_count=record.gpu_count,
+        expected_vram_gb=record.vram_gb,
+        expected_os_image=record.os_image,
+    )
+
+
+def verify_owned_ssh_key_before_delete(
+    api_key: str,
+    phase_id: str,
+    record: OwnedResource,
+    *,
+    deadline: float | None = None,
+) -> dict[str, Any]:
+    _validate_owned_resource(record)
+    if record.ssh_public_key is None:
+        raise ShadeformError("owned record lacks SSH public-key material for deletion proof")
+    timeout = 90.0 if deadline is None else min(90.0, deadline - time.monotonic())
+    if timeout < 1.0:
+        raise TimeoutError("SSH key ownership verification deadline exhausted")
+    return verify_ssh_key_ownership(
+        api_key,
+        phase_id,
+        record.ssh_key_id,
+        expected_name=record.ssh_key_name,
+        expected_public_key=record.ssh_public_key,
+        timeout=timeout,
+    )
+
+
 def wait_active(
     api_key: str,
     phase_id: str,
@@ -1302,7 +1520,10 @@ def _delete_instance(api_key: str, phase_id: str, instance_id: str, *, deadline:
     if request_timeout < 1.0:
         return {"success": False, "instance_id": exact, "error_type": "deletion_deadline_exhausted"}
     try:
-        response = request(api_key, "POST", f"/instances/{exact}/delete", phase_id=phase_id, timeout=request_timeout)
+        response = _reject_provider_failure(
+            request(api_key, "POST", f"/instances/{exact}/delete", phase_id=phase_id, timeout=request_timeout),
+            "instance deletion",
+        )
     except ShadeformHTTPError as exc:
         if exc.status == 404:
             return {"success": True, "already_absent": True}
