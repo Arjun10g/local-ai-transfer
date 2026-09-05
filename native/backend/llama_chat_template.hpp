@@ -7,6 +7,14 @@
 
 namespace lae {
 
+// Apply the product-owned schema-abstention instruction before the model's
+// chat-template rendering. This is deliberately independent of llama.cpp so
+// fixture/runtime tests can exercise the exact message policy in disabled
+// builds as well.
+std::vector<GenerationRequest::ChatMessage> apply_schema_abstention_policy(
+    const std::vector<GenerationRequest::ChatMessage>& messages,
+    const std::vector<GenerationRequest::ToolDefinition>& tools);
+
 // Product wrapper around the pinned upstream Jinja/Minja evaluator. The
 // template source always comes from llama_model_chat_template (GGUF metadata).
 class PinnedChatTemplate final {
