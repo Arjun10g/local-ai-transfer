@@ -3,65 +3,40 @@
 - **Session:** S3
 - **Required model:** GPT-5.6 Luna
 - **Role:** Agent/Tools — durable generic action-journal core and controller dispatch barrier
-- **Timestamp (UTC):** 2026-09-05T02:51:46Z
+- **Timestamp (UTC):** 2026-09-05T03:21:19Z
 - **Branch/worktree:** `luna/durable-action-journal-core` / `wt-action-journal-core`
-- **Current phase:** Phase 4/6 autonomous mutation recovery hardening
+- **Current phase:** Phase 4/6 autonomous action recovery hardening
 - **Primary task ID:** TOOL-032
-- **Secondary task ID, if any:** none
-- **Task state:** IN_PROGRESS
-- **Last merged `main` commit:** `37a134f`
+- **Task state:** READY_FOR_REVIEW
+- **Base:** exact `main` `37a134f`
 
-## Objective for this work interval
+## Outcome
 
-Implement only the provider-independent durable action-journal core: bounded secret-minimized state, crash-safe mutation transition barriers, generic ConversationController enforcement for confirmed mutating tools, bounded operator-authenticated inspection/resolution endpoints, and deterministic mocked crash tests. Provider-specific Graph/browser reconciliation remains out of scope.
+Implemented a provider-independent, bounded per-operation JSONL/hash-chain journal and made its fsynced `dispatching` transition a hard controller barrier for side-effecting tools and confirmed Copilot egress. Missing or unhealthy journals remove those tools from every model generation and still reject hostile direct proposals. Reads remain unjournaled.
 
-## Inputs and dependencies
+The POSIX store requires a precreated canonical current-user `0700` directory, creates `0600` records, uses bounded/O_NOFOLLOW/identity-checked I/O, and fails closed on malformed/torn/over-limit state. Windows is explicitly unavailable until a native ACL/reparse-safe handle-relative store exists. Receipts export digests, never request/call IDs, arguments, previews, content, results, prompts, or credentials.
 
-- Contract/version: assistant/tool envelopes v0.1.0; existing request/call-bound confirmation policy
-- Required commits: exact `main` `37a134f`; Sol assignment for durable action-journal core
-- Model/build/profile IDs: none; fixture/mock host only
-- Handoffs consumed: audited durable-state transition design in the Sol assignment
+Startup cancels pre-dispatch records, changes `dispatching` to `unknown_manual`, and never manufactures completion from `acknowledged`/`reconciling`. Exact unresolved tool+argument retries are refused across request/call IDs and nondeterministic preview revisions. Terminal records are durably pruned oldest-first; active records are never pruned.
 
-## Work completed
-
-- Read the mandatory repository, governance, execution, live coordination, and S3 session instructions.
-- Created a fresh branch/worktree at exact current `main` `37a134f`; no product edit preceded this packet.
+Authenticated loopback summary/detail endpoints and assertion-only terminal resolution are bounded. Reconciliation returns typed HTTP 501 and never invokes/replays a provider. Unverified Graph/browser acknowledgements remain `reconciling` and are surfaced to the model as `action_completion_unverified`.
 
 ## Evidence
 
-- Commit: pending startup packet commit
-- Commands: documentation and source inspection only
-- Tests: none yet
-- Machine: local macOS development host; deterministic mocked/static evidence only
-- Artifact/index: this status packet
-- Metrics: no provider, account, browser, model, network, native build, or broad test activity
+- Product commit: `2cf1f8bd4f5499e0091d663047b6aa6495cc070e`
+- Focused syntax checks: `node --check` for journal, controller, HostServer, and launcher — PASS
+- `node --test tests/host/action-journal.test.mjs tests/host/tool-chain-vertical.test.mjs` — 21 pass, 0 fail
+- Targeted provider/controller compatibility: `node --test --test-name-pattern='controller advertises|controller stages|process schema' tests/host/external-tools.test.mjs tests/host/process-run.test.mjs` — 3 pass, 0 fail
+- Additional mocked/static regression run before final commit: 58 pass, 1 unrelated pre-existing Copilot test-fixture failure, 1 TODO. The failure occurs during `CopilotCliProvider` construction because that older test injects `readContext` without the now-required `testOnly` gate, before any journal/controller code executes.
+- No native build, model/provider/account/browser access, broad/heavy suite, or external network was used.
 
-## Findings and changed assumptions
+## Residual blockers
 
-- Generic journaling will use host-owned risk/side-effect metadata rather than provider payload inspection, and will never persist arguments, previews, tool results, prompt text, or credentials.
-- Compatibility must be explicit: confirmed mutating tools fail closed without a configured healthy journal; reads are not silently journaled.
+- Windows journal execution is NOT READY and intentionally fails `action_journal_platform_unavailable`; a native ACL/reparse-safe, handle-relative protected store is required.
+- Graph/browser provider idempotency and reconciliation adapters are not implemented. Their mutations cannot be represented as completed by this core.
+- Changing action arguments can evade core argument-digest duplicate refusal; provider-semantic idempotency/reconciliation remains mandatory.
+- Deployment must provision the canonical private POSIX journal directory and set `LAE_ACTION_JOURNAL_DIR`; without it all durable actions/egress are truthfully hidden and fail closed.
+- This slice does not establish provider, browser, model, target-laptop, or release readiness.
 
-## Blockers
+## Handoff
 
-- Fact/evidence: provider-specific reconciliation and idempotency contracts are not part of this bounded core slice.
-- Impact: this work alone cannot close B-003 or establish Graph/browser/live mutation readiness.
-- What was tried: not applicable before implementation.
-- Proposed workaround: expose typed reconciliation-unavailable state and leave provider adapters disabled until their follow-on integration passes independent review.
-- Decision/asset needed: S0/S4 review and later provider-specific adapters.
-- Owner: S0/S3/S4 follow-on lanes.
-- Independent work continuing: durable core, controller barrier, operator endpoints, and crash tests.
-
-## Handoffs
-
-- To: S0/S4 and future provider integration owner
-- Handoff file: this packet; final implementation/test paths pending
-- Required by: B-003 follow-on reconciliation work
-- Acknowledged: S0 assignment received
-
-## Next bounded action
-
-Inspect the current controller/host configuration boundary, then implement the smallest durable journal API and crash-injection tests without provider integration.
-
-## Sol action requested
-
-None until the bounded core is ready for review.
+S0/S4 should independently review `host/agent/action-journal.mjs`, controller transition ordering, operator endpoint authorization/status mapping, and the crash-injection suite. Follow-on owners must add provider completion proof/reconciliation and the native Windows store before enabling those target paths.
