@@ -50,6 +50,8 @@ test('Graph read arguments reject ambiguous IDs, OData fragments, unsafe search,
     ['teams.list_messages', { chat_id: 'chat/other' }],
     ['teams.read_channel_message', { team_id: 'team?x', channel_id: 'channel', message_id: 'message' }],
     ['mail.search_messages', { query: '" OR from:anyone' }],
+    ['mail.search_messages', { query: 'hidden\u202equery' }],
+    ['teams.list_messages', { chat_id: 'chat-1', search_text: 'hidden\u0085query' }],
     ['mail.list_messages', { page_cursor: `gpg_${'a'.repeat(32)}`, limit: 1 }],
     ['teams.list_channels', { limit: 1 }]
   ];
@@ -81,7 +83,7 @@ test('outbound Outlook search cannot bypass preview and confirmation under ask-b
   let requests = 0;
   const graph = new MicrosoftGraphProvider({ enabled: true, permissionProfile: 'ask_before_writes', credentialSource, accountFingerprint: 'acct-read', testOnly: true, transport: { request: async request => {
     requests += 1;
-    if (requests !== 1) return { status: 200, body: collection([mail()]) };
+    if (requests !== 1) return { status: 200, body: collection([mail(`mail-${requests}`)]) };
     const next = new URL(`https://graph.microsoft.com${request.path}`);
     for (const [key, value] of Object.entries(request.query)) next.searchParams.set(key, String(value));
     next.searchParams.set('$skiptoken', 'next-search-page');
@@ -164,6 +166,58 @@ test('opaque pagination accepts only exact Graph origin/path/static query and is
   assert.equal(payload(await changingTools['mail.list_messages'].execute(call('mail.list_messages', { page_cursor: cursor }))).code, 'provider_invalid_request');
 });
 
+test('caller limit retains every sanitized provider item before advancing Graph pagination', async () => {
+  let requests = 0;
+  const graph = provider({ request: async request => {
+    requests += 1;
+    if (requests === 1) {
+      const next = new URL(request.path, 'https://graph.microsoft.com');
+      for (const [key, value] of Object.entries(request.query)) next.searchParams.set(key, String(value));
+      next.searchParams.set('$skiptoken', 'provider-page-2');
+      return { status: 200, body: collection([mail('m1'), mail('m2'), mail('m3')], next.toString()) };
+    }
+    if (requests === 2) {
+      assert.equal(request.query.$skiptoken, 'provider-page-2');
+      const next = new URL(request.path, 'https://graph.microsoft.com');
+      for (const [key, value] of Object.entries(request.query)) next.searchParams.set(key, String(value));
+      next.searchParams.set('$skiptoken', 'provider-page-3');
+      return { status: 200, body: collection([mail('m4')], next.toString()) };
+    }
+    assert.equal(request.query.$skiptoken, 'provider-page-3');
+    return { status: 200, body: collection([mail('m5')]) };
+  } });
+  const tools = createMicrosoftGraphTools(graph);
+  const first = payload(await tools['mail.list_messages'].execute(call('mail.list_messages', { limit: 1 }, 'limit_page_1')));
+  const second = payload(await tools['mail.list_messages'].execute(call('mail.list_messages', { page_cursor: first.next_page }, 'limit_page_2')));
+  const third = payload(await tools['mail.list_messages'].execute(call('mail.list_messages', { page_cursor: second.next_page }, 'limit_page_3')));
+  assert.deepEqual([first.messages[0].id, second.messages[0].id, third.messages[0].id], ['m1', 'm2', 'm3']);
+  assert.equal(requests, 1);
+  const fourth = payload(await tools['mail.list_messages'].execute(call('mail.list_messages', { page_cursor: third.next_page }, 'limit_page_4')));
+  assert.equal(fourth.messages[0].id, 'm4'); assert.match(fourth.next_page, /^gpg_[a-f0-9]{32}$/u); assert.equal(requests, 2);
+  const fifth = payload(await tools['mail.list_messages'].execute(call('mail.list_messages', { page_cursor: fourth.next_page }, 'limit_page_5')));
+  assert.equal(fifth.messages[0].id, 'm5'); assert.equal(fifth.next_page, null); assert.equal(requests, 3);
+});
+
+test('local filtering retains matching leftovers without skips and rejects provider cross-page duplicates', async () => {
+  let requests = 0;
+  const graph = provider({ request: async request => {
+    requests += 1;
+    if (requests === 1) {
+      const next = new URL(request.path, 'https://graph.microsoft.com');
+      for (const [key, value] of Object.entries(request.query)) next.searchParams.set(key, String(value));
+      next.searchParams.set('$skiptoken', 'teams-page-2');
+      return { status: 200, body: collection([teamMessage('m1', 'alpha one'), teamMessage('m2', 'beta'), teamMessage('m3', 'alpha three')], next.toString()) };
+    }
+    return { status: 200, body: collection([teamMessage('m3', 'alpha duplicate')]) };
+  } });
+  const tools = createMicrosoftGraphTools(graph);
+  const first = payload(await tools['teams.list_messages'].execute(call('teams.list_messages', { chat_id: 'chat-1', search_text: 'alpha', limit: 1 }, 'filter_page_1')));
+  const second = payload(await tools['teams.list_messages'].execute(call('teams.list_messages', { page_cursor: first.next_page }, 'filter_page_2')));
+  assert.deepEqual([first.messages[0].id, second.messages[0].id], ['m1', 'm3']); assert.equal(requests, 1);
+  const duplicate = payload(await tools['teams.list_messages'].execute(call('teams.list_messages', { page_cursor: second.next_page }, 'filter_page_3')));
+  assert.equal(duplicate.code, 'provider_invalid_response'); assert.equal(requests, 2);
+});
+
 test('hostile nextLink origin, path, duplicate, unknown, missing, and static-query changes fail closed', async () => {
   const links = [
     'https://evil.example/v1.0/me/mailFolders/inbox/messages?%24top=1&%24select=id%2CreceivedDateTime%2Cfrom%2Csubject%2CisRead%2Cimportance%2CbodyPreview&%24skip=1',
@@ -218,6 +272,42 @@ test('safe text removes encoded, nested, malformed, and unclosed active content 
     assert.equal(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/u.test(result.message.text), false);
     assert.equal(/script|style|alert|secret|nested|malformed|encoded|double|numeric|unclosed/iu.test(result.message.text), false);
   }
+});
+
+test('quote-aware visible-text projection never exposes attributes or transformed control fields', async () => {
+  const bodies = [
+    ['<div title="hidden > attribute">visible</div>', 'visible'],
+    ['before&lt;div data-note=&quot;hidden &gt; attribute&quot;&gt;visible&lt;/div&gt;after', 'before visible after'],
+    ['<script data-note="hidden > attribute">secret()</script>safe', 'safe'],
+    ["before<style data-note='hidden > attribute'>secret", 'before'],
+    ['before<div title="hidden > attribute" after', 'before']
+  ];
+  for (const [content, expected] of bodies) {
+    const tools = createMicrosoftGraphTools(provider({ request: async () => ({ status: 200, body: mailDetail(content) }) }));
+    const result = payload(await tools['mail.read_message'].execute(call('mail.read_message', { message_id: 'mail-1' })));
+    assert.equal(result.message.text, expected, content);
+    assert.equal(JSON.stringify(result).includes('hidden > attribute'), false, content);
+    assert.equal(/[\p{Cc}\p{Cf}]/u.test(JSON.stringify(result)), false, content);
+  }
+
+  const tools = createMicrosoftGraphTools(provider({ request: async request => {
+    if (request.path === '/v1.0/me/chats') return { status: 200, body: collection([{ id: 'chat-1', topic: 'Topic&#x202e;<b title="hidden > topic">Visible</b>', chatType: 'group', lastUpdatedDateTime: '2026-09-05T12:00:00Z' }]) };
+    if (request.path.endsWith('/channels')) return { status: 200, body: collection([{ id: 'channel-1', displayName: 'Gen&#x85;eral<style>hidden</style>', description: 'Desc&#x1b;ription', membershipType: 'standard' }]) };
+    if (request.path.endsWith('/messages')) return { status: 200, body: collection([{ ...teamMessage(), from: { user: { id: 'user-1', displayName: 'Coll&#x202e;eague<script>hidden</script>' } } }]) };
+    return { status: 200, body: { ...mailDetail('safe'), subject: 'Sub&#x85;ject<script>hidden</script>', from: { emailAddress: { name: 'Send&#x202e;er', address: 'sender&#x1b;@example.com' } } } };
+  } }));
+  const chat = payload(await tools['teams.list_chats'].execute(call('teams.list_chats', {})));
+  const channel = payload(await tools['teams.list_channels'].execute(call('teams.list_channels', { team_id: 'team-1' })));
+  const team = payload(await tools['teams.list_messages'].execute(call('teams.list_messages', { chat_id: 'chat-1' })));
+  const detail = payload(await tools['mail.read_message'].execute(call('mail.read_message', { message_id: 'mail-1' })));
+  const visible = JSON.stringify({ chat, channel, team, detail });
+  assert.equal(/[\p{Cc}\p{Cf}]/u.test(visible), false);
+  assert.equal(visible.includes('hidden'), false);
+  assert.equal(chat.chats[0].topic, 'Topic Visible');
+  assert.equal(channel.channels[0].name, 'Gen eral');
+  assert.equal(team.messages[0].sender.name, 'Coll eague');
+  assert.equal(detail.message.subject, 'Sub ject');
+  assert.deepEqual(detail.message.from, { name: 'Send er', address: 'sender @example.com' });
 });
 
 test('Graph HTTPS fake-fetch rejects duplicate JSON, invalid UTF-8, wrong content type, and oversized bodies', async () => {

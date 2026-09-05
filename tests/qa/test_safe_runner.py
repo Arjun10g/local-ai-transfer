@@ -28,6 +28,26 @@ class SafeRunnerTests(unittest.TestCase):
         self.assertNotIn("subprocess.run", source)
         self.assertNotIn("cmake --build", source)
 
+    def test_test_inventory_literal_has_no_duplicate_paths(self):
+        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+        assignment = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "TEST_INVENTORY"
+                for target in node.targets
+            )
+        )
+        self.assertIsInstance(assignment.value, ast.Dict)
+        paths = [
+            key.value
+            for key in assignment.value.keys
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        ]
+        self.assertEqual(len(paths), len(assignment.value.keys))
+        self.assertEqual(len(paths), len(set(paths)))
+
     def test_safe_plan_does_not_call_process_runner_and_blocks_execution(self):
         with patch.object(runner, "scan_tree", return_value={"status": "PASS", "findings": []}) as scan:
             plan = runner.safe_plan(ROOT, skip_native=True)

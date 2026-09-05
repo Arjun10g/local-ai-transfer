@@ -13,6 +13,9 @@ const GRAPH_ID = /^[A-Za-z0-9][A-Za-z0-9._~:@!$'()*+,;=-]{0,511}$/u;
 const PAGE_CURSOR = /^gpg_[a-f0-9]{32}$/u;
 const GRAPH_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,12})?Z$/u;
 const MAX_CURSOR_RECORDS = 128;
+const MAX_CURSOR_PROJECTED_BYTES = 60 * 1024;
+const MAX_CURSOR_SEEN_ITEMS = 2048;
+const MAX_CURSOR_PROVIDER_PAGES = 64;
 const MAX_NEXT_LINK_BYTES = 8192;
 const MAX_PAGE_ITEMS = 50;
 const MAX_ITEM_TEXT_BYTES = 4096;
@@ -89,7 +92,7 @@ function identifierArgument(value, field) {
 
 function searchArgument(value, field) {
   boundedString(value, field, { min: 1, max: 128 });
-  if (Buffer.byteLength(value, 'utf8') > 256 || /["\\]/u.test(value) || !value.trim()) throw new ProviderToolError('invalid_tool_arguments', `${field} is not a safe search phrase`);
+  if (Buffer.byteLength(value, 'utf8') > 256 || /["\\\p{Cc}\p{Cf}]/u.test(value) || !value.trim()) throw new ProviderToolError('invalid_tool_arguments', `${field} is not a safe search phrase`);
 }
 
 export function validateGraphReadArguments(name, input) {
@@ -174,30 +177,56 @@ function decodeEntities(value) {
   return text;
 }
 
+function scanTag(value, start) {
+  let quote = null;
+  for (let offset = start + 1; offset < value.length; offset++) {
+    const character = value[offset];
+    if (quote !== null) {
+      if (character === quote) quote = null;
+      continue;
+    }
+    if (character === '"' || character === "'") { quote = character; continue; }
+    if (character !== '>') continue;
+    const token = value.slice(start + 1, offset);
+    let visible = ''; quote = null;
+    for (const item of token) {
+      if (quote !== null) { if (item === quote) quote = null; continue; }
+      if (item === '"' || item === "'") { quote = item; continue; }
+      visible += item;
+    }
+    const direct = /^\s*(\/?)\s*([a-z][a-z0-9:-]*)\b/iu.exec(visible);
+    const dangerous = [];
+    for (const match of visible.matchAll(/(?:^|<)\s*(\/?)\s*(script|style)\b/giu)) dangerous.push({ closing: match[1] === '/', name: match[2].toLowerCase() });
+    return { end: offset + 1, closing: direct?.[1] === '/', name: direct?.[2]?.toLowerCase() ?? null, dangerous };
+  }
+  return null;
+}
+
 function stripMarkup(value) {
   let output = ''; let offset = 0; let blocked = null;
   while (offset < value.length) {
-    if (blocked !== null) {
-      const close = new RegExp(`<\\s*\\/\\s*${blocked}\\b[^>]*>`, 'iu');
-      const match = close.exec(value.slice(offset));
-      if (!match) break;
-      offset += match.index + match[0].length; blocked = null; output += ' '; continue;
-    }
     if (value.startsWith('<!--', offset)) {
       const end = value.indexOf('-->', offset + 4);
       if (end < 0) break;
-      offset = end + 3; output += ' '; continue;
+      offset = end + 3;
+      if (blocked === null) output += ' ';
+      continue;
     }
-    if (value[offset] !== '<') { output += value[offset++]; continue; }
-    const end = value.indexOf('>', offset + 1);
-    if (end < 0) break;
-    const tag = value.slice(offset + 1, end);
-    const closing = /^\s*\//u.test(tag);
-    const tagName = /^\s*\/?\s*([a-z][a-z0-9:-]*)/iu.exec(tag)?.[1]?.toLowerCase();
-    const nestedDangerous = /<\s*\/?\s*(script|style)\b/iu.exec(tag)?.[1]?.toLowerCase();
-    const dangerous = ['script', 'style'].includes(tagName) ? tagName : nestedDangerous ?? null;
-    offset = end + 1; output += ' ';
-    if (!closing && dangerous !== null) blocked = dangerous;
+    if (value[offset] !== '<') {
+      if (blocked === null) output += value[offset];
+      offset += 1;
+      continue;
+    }
+    const tag = scanTag(value, offset);
+    if (tag === null) break;
+    offset = tag.end;
+    if (blocked !== null) {
+      if (tag.closing && tag.name === blocked) { blocked = null; output += ' '; }
+      continue;
+    }
+    output += ' ';
+    const openingDanger = tag.dangerous.find(item => !item.closing);
+    if (openingDanger) blocked = openingDanger.name;
   }
   return output;
 }
@@ -205,9 +234,9 @@ function stripMarkup(value) {
 function normalizedSafeText(value) {
   const withoutMarkup = stripMarkup(decodeEntities(value));
   return withoutMarkup
-    .replace(/[\p{Cc}\p{Cf}]/gu, character => character === '\n' ? '\n' : ' ')
-    .replace(/[ \t\r\f]+/gu, ' ')
-    .replace(/\n{3,}/gu, '\n\n')
+    .normalize('NFKC')
+    .replace(/[\p{Cc}\p{Cf}]/gu, ' ')
+    .replace(/[\p{Z}\s]+/gu, ' ')
     .trim();
 }
 
@@ -226,12 +255,18 @@ function safeText(value, maxBytes) {
   return truncateUtf8(normalizedSafeText(value), maxBytes);
 }
 
+function safeScalar(value, maxBytes, { nullable = false, optional = false } = {}) {
+  if ((value === null && nullable) || (value === undefined && optional)) return '';
+  providerString(value, maxBytes);
+  return truncateUtf8(normalizedSafeText(value), maxBytes).text;
+}
+
 function address(value) {
   if (value === null || value === undefined) return { name: '', address: '' };
   exactProviderObject(value, ['emailAddress'], ['emailAddress']);
   const email = exactProviderObject(value.emailAddress, ['name', 'address'], ['address']);
-  const name = providerString(email.name, 256, { optional: true }) ?? '';
-  const emailAddress = providerString(email.address, 320);
+  const name = safeScalar(email.name, 256, { optional: true });
+  const emailAddress = safeScalar(email.address, 320);
   return { name, address: emailAddress };
 }
 
@@ -241,7 +276,7 @@ function mailSummary(value) {
   const preview = safeText(value.bodyPreview ?? '', 1024);
   const importance = value.importance === undefined ? 'normal' : value.importance;
   if (!['low', 'normal', 'high'].includes(importance) || value.isRead !== undefined && typeof value.isRead !== 'boolean') throw new ProviderToolError('provider_invalid_response');
-  return { id: providerId(value.id), received_at: graphDate(value.receivedDateTime, true), from: address(value.from), subject: providerString(value.subject, 998, { optional: true }) ?? '', unread: value.isRead === false, importance, preview: preview.text, preview_truncated: preview.truncated };
+  return { id: providerId(value.id), received_at: graphDate(value.receivedDateTime, true), from: address(value.from), subject: safeScalar(value.subject, 998, { optional: true }), unread: value.isRead === false, importance, preview: preview.text, preview_truncated: preview.truncated };
 }
 
 function mailDetail(value, expectedId, maxBytes) {
@@ -260,7 +295,7 @@ function chatSummary(value) {
   if (own(value, '@odata.etag')) providerString(value['@odata.etag'], 512);
   const type = providerString(value.chatType, 32);
   if (!['oneOnOne', 'group', 'meeting', 'unknownFutureValue'].includes(type)) throw new ProviderToolError('provider_invalid_response');
-  return { id: providerId(value.id), topic: providerString(value.topic, 512, { nullable: true, optional: true }) ?? '', type, last_updated: graphDate(value.lastUpdatedDateTime, true) };
+  return { id: providerId(value.id), topic: safeScalar(value.topic, 512, { nullable: true, optional: true }), type, last_updated: graphDate(value.lastUpdatedDateTime, true) };
 }
 
 function sender(value) {
@@ -269,7 +304,7 @@ function sender(value) {
   const entries = ['user', 'application', 'device'].filter(key => value[key] !== undefined && value[key] !== null);
   if (entries.length !== 1) throw new ProviderToolError('provider_invalid_response');
   const kind = entries[0]; const identity = exactProviderObject(value[kind], ['id', 'displayName'], ['id']);
-  providerId(identity.id); return { kind, name: providerString(identity.displayName, 256, { optional: true }) ?? '' };
+  providerId(identity.id); return { kind, name: safeScalar(identity.displayName, 256, { optional: true }) };
 }
 
 function teamsMessage(value, expectedId = null, maxBytes = 1024) {
@@ -290,7 +325,7 @@ function channelSummary(value) {
   const membership = value.membershipType === undefined ? 'standard' : providerString(value.membershipType, 32);
   if (!['standard', 'private', 'shared', 'unknownFutureValue'].includes(membership)) throw new ProviderToolError('provider_invalid_response');
   const description = safeText(value.description ?? '', 1024);
-  return { id: providerId(value.id), name: providerString(value.displayName, 256), description: description.text, description_truncated: description.truncated, membership };
+  return { id: providerId(value.id), name: safeScalar(value.displayName, 256), description: description.text, description_truncated: description.truncated, membership };
 }
 
 function collection(value, mapItem, max) {
@@ -302,16 +337,16 @@ function collection(value, mapItem, max) {
   return { items, nextLink: value['@odata.nextLink'] };
 }
 
-function parseNextLink(raw, expectedPath, expectedQuery) {
+function parseNextLink(raw, expectedPath, expectedStaticQuery) {
   providerString(raw, MAX_NEXT_LINK_BYTES);
   let url; try { url = new URL(raw); } catch { throw new ProviderToolError('provider_invalid_response'); }
   if (url.origin !== 'https://graph.microsoft.com' || url.username || url.password || url.hash || url.pathname !== expectedPath) throw new ProviderToolError('provider_invalid_response');
   const query = {}; const seen = new Set();
   for (const [key, value] of url.searchParams.entries()) {
-    if (seen.has(key) || ![...Object.keys(expectedQuery), '$skiptoken', '$skip'].includes(key) || Buffer.byteLength(value, 'utf8') > 4096) throw new ProviderToolError('provider_invalid_response');
+    if (seen.has(key) || ![...Object.keys(expectedStaticQuery), '$skiptoken', '$skip'].includes(key) || Buffer.byteLength(value, 'utf8') > 4096) throw new ProviderToolError('provider_invalid_response');
     seen.add(key); query[key] = value;
   }
-  for (const [key, value] of Object.entries(expectedQuery)) if (query[key] !== String(value)) throw new ProviderToolError('provider_invalid_response');
+  for (const [key, value] of Object.entries(expectedStaticQuery)) if (query[key] !== String(value)) throw new ProviderToolError('provider_invalid_response');
   if (Number(seen.has('$skiptoken')) + Number(seen.has('$skip')) !== 1) throw new ProviderToolError('provider_invalid_response');
   return { path: expectedPath, query };
 }
@@ -326,12 +361,16 @@ export class MicrosoftGraphReadBoundary {
     this.request = request; this.accountFingerprint = accountFingerprint; this.pages = new Map();
   }
   clear() { this.pages.clear(); }
-  rememberPage(name, identity, path, query, rawNextLink) {
-    if (rawNextLink === undefined || rawNextLink === null) return null;
-    const next = parseNextLink(rawNextLink, path, query);
+  rememberPage(name, { identity, path, staticQuery, nextQuery, leftovers, seenItemDigests, providerPages }) {
+    if (leftovers.length === 0 && nextQuery === null) return null;
+    if (leftovers.length > MAX_PAGE_ITEMS || seenItemDigests.length > MAX_CURSOR_SEEN_ITEMS || providerPages < 1 || providerPages > MAX_CURSOR_PROVIDER_PAGES || Buffer.byteLength(JSON.stringify(leftovers), 'utf8') > MAX_CURSOR_PROJECTED_BYTES) throw new ProviderToolError('provider_response_too_large');
     const pageCursor = `gpg_${randomBytes(16).toString('hex')}`;
     if (this.pages.size >= MAX_CURSOR_RECORDS) this.pages.delete(this.pages.keys().next().value);
-    this.pages.set(pageCursor, Object.freeze({ name, identity, account: this.accountFingerprint(), path: next.path, query: Object.freeze({ ...next.query }) }));
+    this.pages.set(pageCursor, Object.freeze({
+      name, identity: Object.freeze({ ...identity }), account: this.accountFingerprint(), path,
+      staticQuery: Object.freeze({ ...staticQuery }), nextQuery: nextQuery === null ? null : Object.freeze({ ...nextQuery }),
+      leftovers: Object.freeze(structuredClone(leftovers)), seenItemDigests: Object.freeze([...seenItemDigests]), providerPages
+    }));
     return pageCursor;
   }
   resolvePage(name, args) {
@@ -355,16 +394,40 @@ export class MicrosoftGraphReadBoundary {
     const saved = this.resolvePage(call.name, args);
     const identity = saved?.identity ?? spec.identity;
     const path = saved?.path ?? spec.path;
-    const query = saved?.query ?? spec.query;
-    const response = await this.request({ method: 'GET', path, query, ...(spec.headers ? { headers: spec.headers } : {}), signal: call.signal });
-    if (response.status !== 200) throw new ProviderToolError('provider_invalid_response');
-    const projected = collection(response.body, spec.mapItem, spec.max);
-    let items = projected.items;
-    if (identity.unread_only === true) items = items.filter(item => item.unread === true);
-    if (identity.search_text) { const needle = identity.search_text.toLocaleLowerCase('en-US'); items = items.filter(item => item.text.toLocaleLowerCase('en-US').includes(needle)); }
-    items = items.slice(0, identity.limit);
-    const nextPage = this.rememberPage(call.name, identity, path, query, projected.nextLink);
-    return readResult(call, 'ok', { provider: 'microsoft_graph', state: 'ready', source_untrusted: true, kind: spec.kind, account_scope: 'signed_in_user', [spec.field]: items, item_count: items.length, next_page: nextPage, search_scope: identity.search_text ? 'current_graph_page' : null });
+    const staticQuery = saved?.staticQuery ?? spec.query;
+    let available = saved?.leftovers ?? [];
+    let nextQuery = saved?.nextQuery ?? null;
+    let providerPages = saved?.providerPages ?? 0;
+    const seenItemDigests = new Set(saved?.seenItemDigests ?? []);
+    if (available.length === 0) {
+      if (saved && nextQuery === null) throw new ProviderToolError('provider_invalid_request');
+      if (providerPages >= MAX_CURSOR_PROVIDER_PAGES) throw new ProviderToolError('provider_invalid_response');
+      const query = saved ? nextQuery : spec.query;
+      const response = await this.request({ method: 'GET', path, query, ...(spec.headers ? { headers: spec.headers } : {}), signal: call.signal });
+      if (response.status !== 200) throw new ProviderToolError('provider_invalid_response');
+      const projected = collection(response.body, spec.mapItem, spec.max);
+      if (Buffer.byteLength(JSON.stringify(projected.items), 'utf8') > MAX_CURSOR_PROJECTED_BYTES) throw new ProviderToolError('provider_response_too_large');
+      for (const item of projected.items) {
+        const itemDigest = digest({ tool: call.name, id: item.id });
+        if (seenItemDigests.has(itemDigest) || seenItemDigests.size >= MAX_CURSOR_SEEN_ITEMS) throw new ProviderToolError('provider_invalid_response');
+        seenItemDigests.add(itemDigest);
+      }
+      available = projected.items;
+      if (identity.unread_only === true) available = available.filter(item => item.unread === true);
+      if (identity.search_text) { const needle = identity.search_text.toLocaleLowerCase('en-US'); available = available.filter(item => item.text.toLocaleLowerCase('en-US').includes(needle)); }
+      providerPages += 1;
+      nextQuery = projected.nextLink === undefined || projected.nextLink === null ? null : parseNextLink(projected.nextLink, path, staticQuery).query;
+      if (nextQuery !== null && providerPages >= MAX_CURSOR_PROVIDER_PAGES) throw new ProviderToolError('provider_invalid_response');
+    }
+    const items = available.slice(0, identity.limit);
+    const leftovers = available.slice(identity.limit);
+    const nextPage = this.rememberPage(call.name, { identity, path, staticQuery, nextQuery, leftovers, seenItemDigests: [...seenItemDigests], providerPages });
+    try {
+      return readResult(call, 'ok', { provider: 'microsoft_graph', state: 'ready', source_untrusted: true, kind: spec.kind, account_scope: 'signed_in_user', [spec.field]: items, item_count: items.length, next_page: nextPage, search_scope: identity.search_text ? 'current_graph_page' : null });
+    } catch (error) {
+      if (nextPage !== null) this.pages.delete(nextPage);
+      throw error;
+    }
   }
   async _execute(call, args) {
     const next = own(args, 'page_cursor');

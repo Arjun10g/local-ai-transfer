@@ -41,7 +41,12 @@ Graph JSON must be strict duplicate-free UTF-8 with the expected JSON content ty
 provider next link is accepted only when its origin, path, and fixed query values match
 the initiating request. The model receives a one-use opaque, in-memory page cursor rather
 than the provider URL, and that cursor is bound to the current account fingerprint and
-tool resource. After
+tool/resource/path/query identity. Sanitized items beyond a smaller caller limit remain
+in that bounded cursor and are returned before a provider next link is fetched; bounded
+cross-page item digests reject cycles or duplicates. Provider-derived visible text uses
+a bounded quote-aware tokenizer, discards tag attributes and script/style content, and
+removes all Unicode control/format characters after entity decoding and normalization.
+After
 authentication, `status()` queries `/me` and exposes only a stable in-memory account fingerprint.
 The registry's bounded `providerAuthStatus()` control surface can be polled by the host/UI to
 obtain the current state and device `userCode`/verification URL; it contains no token or account
