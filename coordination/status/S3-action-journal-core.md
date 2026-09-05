@@ -162,11 +162,9 @@ S0/S4 should independently review `host/agent/action-journal.mjs`, controller tr
 - **Focused evidence:**
   `node --check host/providers/microsoft-graph.mjs
   host/providers/microsoft-graph-auth.mjs host/agent/controller.mjs` — PASS;
-  `node --test tests/host/external-tools.test.mjs` — 56 pass, 0 fail before
-  the final Teams test addition; `node --test tests/host/external-tools.test.mjs
-  --test-name-pattern='Graph|Teams send|controller carries'` — 57 pass, 0 fail;
+  `node --test tests/host/external-tools.test.mjs` — 57 pass, 0 fail;
   `node --test tests/host/external-tools.test.mjs tests/host/action-journal.test.mjs`
-  — 77 pass, 0 fail; `git diff --check` — PASS.
+  — 78 pass, 0 fail; `git diff --check` — PASS.
 - No real credential/account/provider call, live network, browser/model/native
   build, or broad/heavy suite was used. Production journal/provider readiness
   remains gated by the fail-closed durable journal and live-account review.
