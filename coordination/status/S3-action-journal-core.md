@@ -113,3 +113,26 @@ S0/S4 should independently review `host/agent/action-journal.mjs`, controller tr
   adversarial.test.mjs` (16 pass); `node --test tests/security/tool-calling-
   adversarial.test.mjs tests/host/fixture-host.test.mjs` (43 pass, 1 existing
   TODO); action-journal targeted checks and syntax/diff checks remain green.
+
+## Graph action reconciliation startup packet (2026-09-05)
+
+- **Role:** S3 Agent/Tools; provider-specific Microsoft Graph action
+  reconciliation.
+- **Branch/worktree:** `luna/graph-action-reconciliation` /
+  `wt-graph-action-reconciliation`; starting from `main` `65decba`.
+- **Claimed scope:** remove generic `Idempotency-Key` and in-memory
+  idempotent-success claims; bind provider calls to the controller's durable
+  journal operation/digest metadata without exposing authority to the model;
+  add conservative mocked reconciliation for Graph mail drafts, mark-read,
+  draft sends, and Teams sends.
+- **Dependencies:** current Graph provider, controller action-journal barrier,
+  strict external-tool schemas, and test-only journal seams. Production
+  durable action execution remains fail-closed until the handle-relative store
+  is available.
+- **Safety assumptions:** no credentials, live accounts, provider calls,
+  browser/model/native builds, or broad/heavy suites. Provider evidence must be
+  bounded and digest-only; ambiguous effects remain `reconciling`/manual.
+- **Official references to record in implementation docs:**
+  Microsoft Graph create message, send mail, update message, chat messages,
+  and list messages documentation (all under `learn.microsoft.com/graph`).
+- **State:** IN_PROGRESS.
