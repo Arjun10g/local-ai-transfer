@@ -1,0 +1,67 @@
+{
+  "schema": "lae.windows-supervisor.contract.v1",
+  "status": "SOURCE_ONLY_NOT_READY",
+  "production_available": false,
+  "native_target_registered": false,
+  "cmake_registered": false,
+  "launcher_registered": false,
+  "host_registered": false,
+  "package_registered": false,
+  "activation_permitted": false,
+  "trust": {
+    "release_manifest_sha256_pinned": false,
+    "self_authenticode_pinned": false,
+    "package_identity_pinned": false,
+    "cancellable_io_proven": false,
+    "durable_journal_authority": false,
+    "nested_job_policy_proven": false,
+    "broker_issued_identity_proven": false,
+    "retained_executing_section_identity_proven": false
+  },
+  "transport": {
+    "kind": "loopback_metadata_only",
+    "bearer_issued": false,
+    "external_network": false
+  },
+  "limits": {
+    "max_children": 8,
+    "max_capability_lifetime_ms": 300000,
+    "max_frame_bytes": 65536,
+    "max_registry_entries": 8,
+    "max_wait_ms": 120000
+  },
+  "capability": {
+    "id_encoding": "lower_hex_256",
+    "nonce_encoding": "lower_hex_256",
+    "mac_encoding": "lower_hex_256",
+    "scope_encoding": "closed_enum:process_launch|broker_session|external_action",
+    "mac_binding": ["id", "nonce", "expires_at_ms", "scope", "session_id", "operation_id", "operation_digest", "argument_digest", "preview_digest"],
+    "nonce_replay_bound": 64,
+    "secrets_persisted": false,
+    "secrets_logged": false,
+    "secrets_in_process_arguments": false,
+    "secrets_in_environment": false
+  },
+  "journal": {
+    "dispatch_status_values": [
+      "pre_dispatch_failure",
+      "dispatched_unknown",
+      "terminal_failure",
+      "terminal_success",
+      "persistence_failure"
+    ],
+    "persistence_failure_is_unknown": true,
+    "durable_start_recovery": "dispatched_unknown",
+    "next_operation_requires_terminal_record": true,
+    "sequence_reservation_before_callback": 2
+  },
+  "redacted_receipt_fields": [
+    "schema", "status", "operation_class", "capability_scope",
+    "session_bound", "journal_bound", "resource_count"
+  ],
+  "forbidden_receipt_fields": [
+    "key", "mac_key", "nonce", "bearer", "argv", "environment",
+    "path", "command_line", "token", "sid", "pid", "file_id"
+  ],
+  "unknown_outcome_policy": "manual_or_refuse"
+}
