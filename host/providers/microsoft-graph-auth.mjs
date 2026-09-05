@@ -8,7 +8,7 @@ const MAX_AUTH_RETRIES = 2;
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const GRAPH_PATH = /^\/v1\.0\/(?:me(?:\/mailFolders\/[^/]+\/messages|\/messages(?:\/[^/]+(?:\/send)?)?|\/chats)?|chats\/[^/]+\/messages)$/u;
 const GRAPH_SCOPES = new Set(['User.Read', 'Mail.Read', 'Mail.ReadWrite', 'Mail.Send', 'Chat.Read', 'Chat.ReadWrite', 'ChatMessage.Send']);
-const AUTH_HEADERS = new Set(['accept', 'authorization', 'content-type', 'prefer', 'idempotency-key', 'if-match']);
+const AUTH_HEADERS = new Set(['accept', 'authorization', 'content-type', 'prefer', 'if-match']);
 
 const safeTenant = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$/u.test(value) && !value.includes('..') && !/[.-]$/u.test(value);
 const safeClientId = value => typeof value === 'string' && GUID.test(value);
