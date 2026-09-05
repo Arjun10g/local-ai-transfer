@@ -149,8 +149,18 @@
   "mutation_attempt_cases": [
     {
       "expected_mutation_attempt_state": "not_attempted",
-      "name": "never_dispatched",
+      "name": "durable_start_only_not_dispatched",
       "state": {"journal_state": "not_dispatched"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "journal_lookup_failure_after_operation_id",
+      "state": {"lookup_result": "failure"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "journal_lookup_unavailable_after_operation_id",
+      "state": {"lookup_result": "unavailable"}
     },
     {
       "expected_mutation_attempt_state": "may_have_been_attempted",
@@ -181,6 +191,11 @@
       "expected_mutation_attempt_state": "not_attempted",
       "name": "failed_before_mutation_terminal",
       "state": {"journal_state": "failed_before_mutation"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "corrupt_failed_before_record",
+      "state": {"corrupt": true, "journal_state": "failed_before_mutation"}
     }
   ],
   "schema": "lae.windows-clipboard-static-cases.v1"

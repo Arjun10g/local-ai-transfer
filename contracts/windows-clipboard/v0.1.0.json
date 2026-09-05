@@ -103,6 +103,17 @@
       "may_have_been_attempted": "durable_dispatch_or_mutation_prepared_without_terminal_evidence",
       "not_attempted": "not_dispatched_or_durable_failed_before_mutation_only"
     },
+    "mutation_attempt_state_table": {
+      "corrupt_or_unknown_lookup": "may_have_been_attempted",
+      "durable_applied": "attempted",
+      "durable_dispatch_only": "may_have_been_attempted",
+      "durable_failed_before_mutation": "not_attempted",
+      "durable_mutation_attempt_failed": "attempted",
+      "durable_mutation_prepared": "may_have_been_attempted",
+      "durable_start_not_dispatched": "not_attempted",
+      "durable_unknown_after_mutation": "attempted",
+      "lookup_failure_or_unavailable": "may_have_been_attempted"
+    },
     "mutation_attempt_state_values": [
       "attempted",
       "may_have_been_attempted",
@@ -113,6 +124,8 @@
   "reconciliation": {
     "applied_requires": "durable exact operation-bound applied outcome",
     "dispatched_only_exact_postcondition": "manual_resolution_no_replay",
+    "failed_before_negative_requires": "successful_exact_readback_of_durable_failed_before_mutation_state",
+    "lookup_failure_attempt_state": "may_have_been_attempted",
     "mutation_prepared_exact_postcondition": "manual_resolution_no_replay",
     "repeats_write": false,
     "sequence_and_content_are_compared": true

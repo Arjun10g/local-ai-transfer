@@ -149,6 +149,10 @@ def modeled_decision(state):
 
 
 def modeled_mutation_attempt_state(state):
+    if state.get("lookup_result", "success") != "success" or state.get(
+        "corrupt", False
+    ):
+        return "may_have_been_attempted"
     journal_state = state.get("journal_state")
     if journal_state in {"dispatched", "mutation_prepared"}:
         return "may_have_been_attempted"
@@ -685,7 +689,7 @@ class WindowsClipboardStaticTests(unittest.TestCase):
 
     def test_restart_attempt_state_is_tri_state_and_never_false_for_dispatch(self):
         attempt_cases = self.cases["mutation_attempt_cases"]
-        self.assertGreaterEqual(len(attempt_cases), 6)
+        self.assertGreaterEqual(len(attempt_cases), 9)
         for case in attempt_cases:
             with self.subTest(case=case["name"]):
                 self.assertEqual(
@@ -705,6 +709,86 @@ class WindowsClipboardStaticTests(unittest.TestCase):
             ],
             "may_have_been_attempted",
         )
+        self.assertEqual(
+            by_name["journal_lookup_failure_after_operation_id"][
+                "expected_mutation_attempt_state"
+            ],
+            "may_have_been_attempted",
+        )
+        self.assertEqual(
+            by_name["corrupt_failed_before_record"][
+                "expected_mutation_attempt_state"
+            ],
+            "may_have_been_attempted",
+        )
+        contract_cases = {
+            "corrupt_or_unknown_lookup": "corrupt_failed_before_record",
+            "durable_applied": "applied_terminal",
+            "durable_dispatch_only": "crash_after_dispatch_before_marker",
+            "durable_failed_before_mutation": "failed_before_mutation_terminal",
+            "durable_mutation_attempt_failed": "empty_returned_failure",
+            "durable_mutation_prepared": "crash_inside_empty_after_marker",
+            "durable_start_not_dispatched": "durable_start_only_not_dispatched",
+            "durable_unknown_after_mutation": "unknown_after_mutation_terminal",
+            "lookup_failure_or_unavailable": "journal_lookup_failure_after_operation_id",
+        }
+        fixture_table = {
+            contract_key: by_name[fixture_name]["expected_mutation_attempt_state"]
+            for contract_key, fixture_name in contract_cases.items()
+        }
+        self.assertEqual(
+            fixture_table,
+            self.contract["receipt"]["mutation_attempt_state_table"],
+        )
+
+        query = self.cpp[self.cpp.index("ReconciliationResult query_write_status(") :]
+        conservative = query.index(
+            "MutationAttemptState::kMayHaveBeenAttempted"
+        )
+        validate = query.index("validate_common(")
+        lookup = query.index("journal->lookup_write")
+        shape = query.index("const bool lookup_shape", lookup)
+        exact_mapping = query.index("mutation_state_for_lookup", shape)
+        self.assertLess(conservative, validate)
+        self.assertLess(validate, lookup)
+        self.assertLess(shape, exact_mapping)
+        lookup_failure = query[query.index("if (!lookup_ok)") : shape]
+        self.assertNotIn("kNotAttempted", lookup_failure)
+
+    def test_not_attempted_after_dispatch_requires_exact_durable_readback(self):
+        write = self.cpp[
+            self.cpp.index("Result execute_write") :
+            self.cpp.index("}  // namespace\n\nBrokerClipboardAuthority::~")
+        ]
+        self.assertEqual(
+            write.count("MutationAttemptState::kNotAttempted"), 2
+        )
+        self.assertEqual(
+            write.count("confirm_durable_failed_before_mutation("), 2
+        )
+        for match in re.finditer(
+            r"receipt\.mutation_attempt_state\s*=\s*"
+            r"MutationAttemptState::kNotAttempted",
+            write,
+        ):
+            guard = write.rfind("if (!exact_failed_before)", 0, match.start())
+            record = write.rfind("JournalOutcome::kFailedBeforeMutation", 0, match.start())
+            self.assertGreater(guard, record)
+        verifier = self.cpp[
+            self.cpp.index("bool confirm_durable_failed_before_mutation") :
+            self.cpp.index("Result execute_write")
+        ]
+        for marker in (
+            "journal.lookup_write",
+            "capability.operation_id()",
+            "capability.request_digest()",
+            "JournalLookupState::kFailedBeforeMutation",
+            "verification.sequence_before == sequence_before",
+            "verification.sequence_after == 0",
+            "verification.mutation_prepared_durable == mutation_prepared_durable",
+            "revalidate_interactive_identity(identity)",
+        ):
+            self.assertIn(marker, verifier)
 
     def test_no_process_shell_network_or_generic_clipboard_surface(self):
         for forbidden in (
