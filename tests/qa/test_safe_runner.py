@@ -77,6 +77,13 @@ class SafeRunnerTests(unittest.TestCase):
             "tests/host/windows-fs-refusal-slice.test.mjs",
             inventory["discovered"],
         )
+        for path in (
+            "tests/performance/test_cost_ledger_genesis.py",
+            "tests/performance/test_remote_external_tools_lifecycle.py",
+            "tests/performance/test_shadeform_teardown_durability.py",
+        ):
+            self.assertIn(path, inventory["discovered"])
+            self.assertEqual(inventory["classes"].get(path), "lifecycle")
 
     def test_model_and_lifecycle_are_explicitly_skipped(self):
         with patch.object(runner, "scan_tree", return_value={"status": "PASS", "findings": []}):
