@@ -32,8 +32,11 @@ const operatorGrants = new OperatorGrantControl({ store: grantStore, bindings: b
 const externalTools = createExternalToolRegistry({ config: config.providers, workspaceRoots: config.workspace_roots, graph: { grantStore } });
 const processEnvironment = Object.fromEntries(['SystemRoot', 'WINDIR'].filter(key => typeof process.env[key] === 'string').map(key => [key, process.env[key]]));
 const actionJournal = process.env.LAE_ACTION_JOURNAL_DIR ? await ActionJournal.open({ directory: process.env.LAE_ACTION_JOURNAL_DIR }) : undefined;
-const controller = new ConversationController({ engine, actionJournal, toolRegistry: { ...createLocalToolRegistry({ workspaces: config.workspace_roots, applications: config.applications, process_actions: config.process_actions, processEnvironment, networkProvider: config.network.provider, grantControl: operatorGrants }), ...externalTools } });
-const host = new HostServer({ controller, engine, config, providers: externalTools.providerStatus, providerAuth: externalTools.providerAuthControl, providerShutdown: externalTools.shutdown, operatorGrants, actionJournal });
+const localTools = createLocalToolRegistry({ workspaces: config.workspace_roots, applications: config.applications, process_actions: config.process_actions, processEnvironment, networkProvider: config.network.provider, grantControl: operatorGrants });
+const localCapabilities = localTools.capabilitySnapshot;
+const toolRegistry = { ...localTools, ...externalTools };
+const controller = new ConversationController({ engine, actionJournal, toolRegistry });
+const host = new HostServer({ controller, engine, config, providers: externalTools.providerStatus, providerAuth: externalTools.providerAuthControl, providerShutdown: externalTools.shutdown, operatorGrants, actionJournal, localCapabilities });
 const address = await host.listen(Number(process.env.LAE_PORT ?? 0));
 if (process.env.LAE_REVEAL_BOOTSTRAP_URL === '1') console.log(address.bootstrap_url);
 else console.log(JSON.stringify({ ready: true, host: address.host, port: address.port, bootstrap: 'hidden-use-approved-launcher', engine: mode, network: config.network.provider, action_journal: actionJournal?.health().state ?? 'unavailable' }));

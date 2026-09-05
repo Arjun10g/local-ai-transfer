@@ -33,6 +33,7 @@ HOST_RUNTIME_FILES = frozenset({
     "host/tools/local/argument-validation.mjs",
     "host/tools/local/filesystem.mjs",
     "host/tools/local/index.mjs",
+    "host/tools/local/platform-safety.mjs",
     "host/tools/local/process-run.mjs",
     "host/tools/local/system-tools.mjs",
     "host/tools/local/workspace-policy.mjs",

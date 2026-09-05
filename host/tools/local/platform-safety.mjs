@@ -15,3 +15,7 @@ export function filesystemSafetyError() {
   error.code = WINDOWS_FILESYSTEM_ERROR;
   return error;
 }
+
+export function assertFilesystemPlatformSafe(platform) {
+  if (platform === 'win32') throw filesystemSafetyError();
+}

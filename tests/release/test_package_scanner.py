@@ -37,6 +37,8 @@ class PackageScannerTests(unittest.TestCase):
         self.assertEqual("REFUSED-NOT_READY", manifest["native_windows_launch"])
         self.assertTrue(FORBIDDEN_PACKAGE_PATHS.isdisjoint(PACKAGE_ALLOWLIST))
         self.assertTrue(FORBIDDEN_PACKAGE_PATHS.isdisjoint(HOST_RUNTIME_FILES))
+        self.assertIn("host/tools/local/platform-safety.mjs", HOST_RUNTIME_FILES)
+        self.assertIn("host/tools/local/platform-safety.mjs", PACKAGE_ALLOWLIST)
         self.assertNotIn("lae-host.mjs", manifest["files"])
 
         notices = (ROOT / "release/windows/THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
