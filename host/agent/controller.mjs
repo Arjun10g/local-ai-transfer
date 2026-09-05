@@ -266,7 +266,11 @@ export class ConversationController {
           // `policy` is host-internal bookkeeping, not a model/provider
           // authorization object. Only pass concrete user/grant proof across
           // the provider boundary.
-          const internal = activeJournalOperation?.reconcile ? { journal_binding: { operation_id: activeJournalOperation.id, operation_digest: activeJournalOperation.operationDigest, arguments_digest: activeJournalOperation.argumentsDigest, preview_digest: activeJournalOperation.previewDigest } } : undefined;
+          // Every durable action receives the host-only journal binding. The
+          // Copilot ACP egress path is not reconcilable, but it still needs a
+          // durable operation guard; providers must never infer authority from
+          // model-visible arguments.
+          const internal = activeJournalOperation ? { journal_binding: { operation_id: activeJournalOperation.id, operation_digest: activeJournalOperation.operationDigest, arguments_digest: activeJournalOperation.argumentsDigest, preview_digest: activeJournalOperation.previewDigest } } : undefined;
           result = await invokeWithTimeout(tool, tool.execute, { ...call, ...(authorization.kind === 'policy' ? {} : { authorization }), ...(internal ? { internal } : {}) }, controller.signal);
         }
         const hostResult = result;
