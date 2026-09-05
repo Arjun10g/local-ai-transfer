@@ -52,7 +52,8 @@
     ],
     "persistence_failure_is_unknown": true,
     "durable_start_recovery": "dispatched_unknown",
-    "next_operation_requires_terminal_record": true
+    "next_operation_requires_terminal_record": true,
+    "sequence_reservation_before_callback": 2
   },
   "redacted_receipt_fields": [
     "schema", "status", "operation_class", "capability_scope",

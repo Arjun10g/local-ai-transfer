@@ -64,6 +64,7 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
         )
         self.assertTrue(self.contract["journal"]["persistence_failure_is_unknown"])
         self.assertTrue(self.contract["journal"]["next_operation_requires_terminal_record"])
+        self.assertEqual(self.contract["journal"]["sequence_reservation_before_callback"], 2)
         for key in (
             "production_available", "native_target_registered", "cmake_registered",
             "launcher_registered", "host_registered", "package_registered",
@@ -303,6 +304,23 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
         self.assertIn("DispatchStatus::kTerminalSuccess", self.cpp)
         self.assertIn("DispatchStatus::kPersistenceFailure", self.cpp)
         self.assertIn("return JournalOutcome{DispatchStatus::kPersistenceFailure", self.cpp)
+
+    def test_journal_reserves_both_sequences_before_callback(self):
+        dispatch = self.cpp[self.cpp.index("JournalOutcome dispatch"):
+                            self.cpp.index("JournalState query()", self.cpp.index("JournalOutcome dispatch"))]
+        self.assertIn("kRequiredJournalSequences = 2", self.cpp)
+        self.assertIn("can_reserve_sequences(kRequiredJournalSequences)", dispatch)
+        self.assertLess(dispatch.index("can_reserve_sequences"), dispatch.index("JournalRecord start"))
+        self.assertIn("std::numeric_limits<std::uint64_t>::max() - count", self.cpp)
+        self.assertIn("return JournalOutcome{DispatchStatus::kPreDispatchFailure, state_, 0}", dispatch)
+        self.assertIn("return JournalOutcome{DispatchStatus::kPersistenceFailure, state_,", dispatch)
+
+    def test_opposite_pipe_access_requires_exact_access_denied(self):
+        pipe = self.cpp[self.cpp.index("bool anonymous_pipe_handle"):
+                        self.cpp.index("bool validate_bootstrap", self.cpp.index("bool anonymous_pipe_handle"))]
+        self.assertIn("GetLastError() != ERROR_ACCESS_DENIED", pipe)
+        self.assertIn("const DWORD opposite", pipe)
+        self.assertIn("if (DuplicateHandle", pipe)
 
     def test_job_registry_cleanup_is_bounded_and_whole_tree(self):
         for token in (

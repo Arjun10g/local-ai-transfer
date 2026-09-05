@@ -34,6 +34,9 @@ constexpr std::size_t kMaxFrameBytes = 65536;
 constexpr std::size_t kCapabilityBytes = 32;
 constexpr std::size_t kMaxDigestBytes = 32;
 constexpr std::size_t kMaxJournalRecords = 64;
+// Each operation needs one durable start plus one durable terminal/unknown
+// record. Reserve both sequence numbers before invoking provider code.
+constexpr std::uint64_t kRequiredJournalSequences = 2;
 constexpr std::size_t kMaxIdentityFileBytes = 67'108'864;
 constexpr std::uint32_t kScopeProcessLaunch = 1u;
 constexpr std::uint32_t kScopeBrokerSession = 2u;
@@ -326,6 +329,10 @@ bool anonymous_pipe_handle(const PipeBinding& pipe,
     CloseHandle(raw_opposite);
     return false;
   }
+  // A failed duplicate proves absence of the opposite access only for the
+  // documented access-denied result. Resource exhaustion, invalid handles,
+  // and transient failures are unproven and refuse this bootstrap.
+  if (GetLastError() != ERROR_ACCESS_DENIED) return false;
   if (!SetHandleInformation(candidate.get(), HANDLE_FLAG_INHERIT, 0))
     return false;
   if (GetFileType(candidate.get()) != FILE_TYPE_PIPE ||
@@ -1008,6 +1015,12 @@ class JournalAuthority final {
     if (!trust_gates_open() || !persist || !operation || state_ != JournalState::kIdle ||
         capability.operation_id == 0 || !valid_scope(capability.operation_scope))
       return outcome;
+    // Sequence exhaustion must be decided before the operation callback. At
+    // UINT64_MAX-1 (and UINT64_MAX), no provider code may be invoked.
+    if (!can_reserve_sequences(kRequiredJournalSequences)) {
+      state_ = JournalState::kUnknown;
+      return JournalOutcome{DispatchStatus::kPreDispatchFailure, state_, 0};
+    }
     JournalRecord start = record(capability, JournalState::kStartDurable, 0);
     if (start.sequence == 0) {
       state_ = JournalState::kUnknown;
@@ -1024,7 +1037,8 @@ class JournalAuthority final {
       JournalRecord failed = record(capability, JournalState::kTerminalDurable, 1);
       if (failed.sequence == 0) {
         state_ = JournalState::kUnknown;
-        return outcome;
+        return JournalOutcome{DispatchStatus::kPersistenceFailure, state_,
+                              sequence_};
       }
       if (!persist(failed)) {
         state_ = JournalState::kUnknown;
@@ -1038,7 +1052,8 @@ class JournalAuthority final {
       JournalRecord unknown = record(capability, JournalState::kUnknown, 2);
       if (unknown.sequence == 0) {
         state_ = JournalState::kUnknown;
-        return outcome;
+        return JournalOutcome{DispatchStatus::kPersistenceFailure, state_,
+                              sequence_};
       }
       if (!persist(unknown)) {
         state_ = JournalState::kUnknown;
@@ -1059,7 +1074,8 @@ class JournalAuthority final {
     JournalRecord completed = record(capability, JournalState::kTerminalDurable, error);
     if (completed.sequence == 0) {
       state_ = JournalState::kUnknown;
-      return outcome;
+      return JournalOutcome{DispatchStatus::kPersistenceFailure, state_,
+                            sequence_};
     }
     if (!persist(completed)) {
       state_ = JournalState::kUnknown;
@@ -1114,6 +1130,11 @@ class JournalAuthority final {
   }
 
  private:
+  bool can_reserve_sequences(std::uint64_t count) const noexcept {
+    return count != 0 && sequence_ <=
+        std::numeric_limits<std::uint64_t>::max() - count;
+  }
+
   JournalRecord record(const IssuedCapability& capability, JournalState state,
                        std::uint32_t error) noexcept {
     JournalRecord value{};
