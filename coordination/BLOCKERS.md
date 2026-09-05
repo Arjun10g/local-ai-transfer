@@ -15,3 +15,38 @@
 - Workaround: use explicit `UNASSESSED` states, synthetic data, HF source only on Shadeform, and keep live web/provider behavior disabled by default.
 - Needed from: user/organization before release sign-off.
 - State: OPEN; does not block implementation or non-sensitive evidence.
+
+## B-003 — Production external-tool chain is not yet restart-safe or identity-bound
+
+- Fact: production model evaluation proves only tool proposal/arguments. The
+  hostile external-tools harness uses injected Graph/CDP/Copilot fakes and does
+  not execute a real account, browser, Copilot service, or Windows process.
+  Disabled/unconfigured provider definitions are still advertised to the model;
+  Graph/browser/Copilot proposal and replay state is memory-only; no durable
+  secret-free user-action receipt exists; and browser/Copilot executable paths
+  are not bound to immutable file identity across preview and spawn.
+- Impact: a passing model score or mocked provider run cannot establish safe
+  end-to-end mail, Teams, browser-action, or Copilot readiness. A host restart
+  after an ambiguous provider write can permit duplicate work, and a mutable
+  executable can change after preview/version inspection.
+- Workaround: keep all external providers disabled by default and all writes
+  confirmation-bound. Add deterministic HostServer/controller vertical tests,
+  active-tool filtering, durable ambiguous-write/idempotency state and action
+  receipts, and executable identity pinning before any write-capable live test.
+- Needed from: S3 implementation, S4 independent review, and S0 gate decision.
+- State: OPEN; blocks Phase 4/6 readiness and all full-access claims.
+
+## B-004 — Current A100 provider profile is activation-unreliable
+
+- Fact: two consecutive bounded corrected-evaluator attempts (`remote-l` and
+  `remote-m`) timed out before the instance became active. Neither reached HF
+  acquisition, conversion, or evaluation. Exact cleanup succeeded, the cost
+  ledger is settled with zero pending reservations, and cumulative remote spend
+  is `$6.767912`.
+- Impact: the corrected production tool-quality result is unavailable. Further
+  blind retries would spend budget without testing the model or product.
+- Workaround: stop retrying this profile. Use a fresh read-only catalogue, then
+  a cheaper non-A100 activation/SSH/CUDA canary with no model download. Only a
+  candidate that passes that canary is eligible for the HF-backed evaluator.
+- Needed from: S2 candidate plan, S4 lifecycle review, and S0 authorization.
+- State: OPEN; does not block local mocked/source hardening.
