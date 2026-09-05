@@ -222,6 +222,9 @@ class UniqueHandle final {
 
 struct DrainContext final {
   HANDLE source = INVALID_HANDLE_VALUE;
+  HANDLE cancellation = nullptr;
+  const std::atomic<bool>* shutting_down = nullptr;
+  std::uint64_t deadline_at_ms = 0;
   std::array<std::byte, kMaxCapturedBytesPerStream> bytes{};
   DWORD limit = 0;
   std::atomic<DWORD> captured{0};
@@ -230,6 +233,14 @@ struct DrainContext final {
 
   ~DrainContext() { SecureZeroMemory(bytes.data(), bytes.size()); }
 };
+
+bool drain_result_usable(const DrainContext& context) noexcept {
+  return context.shutting_down &&
+      !context.shutting_down->load(std::memory_order_acquire) &&
+      GetTickCount64() < context.deadline_at_ms &&
+      (!context.cancellation ||
+       WaitForSingleObject(context.cancellation, 0) == WAIT_TIMEOUT);
+}
 
 // CreateThread receives a raw context pointer. This owner therefore refuses
 // normal destruction while that pointer could still be in use. The context is
@@ -975,6 +986,12 @@ DWORD WINAPI drain_child_pipe(void* opaque) noexcept {
         context->error.store(error, std::memory_order_release);
         return error;
       }
+      if (!drain_result_usable(*context)) {
+        SecureZeroMemory(&probe, sizeof(probe));
+        context->error.store(ERROR_OPERATION_ABORTED,
+                             std::memory_order_release);
+        return ERROR_OPERATION_ABORTED;
+      }
       SecureZeroMemory(&probe, sizeof(probe));
       if (read == 0) {
         context->captured.store(total, std::memory_order_release);
@@ -998,6 +1015,12 @@ DWORD WINAPI drain_child_pipe(void* opaque) noexcept {
       context->captured.store(total, std::memory_order_release);
       context->error.store(error, std::memory_order_release);
       return error;
+    }
+    if (!drain_result_usable(*context)) {
+      SecureZeroMemory(context->bytes.data() + total, read);
+      context->error.store(ERROR_OPERATION_ABORTED,
+                           std::memory_order_release);
+      return ERROR_OPERATION_ABORTED;
     }
     if (read == 0) {
       context->captured.store(total, std::memory_order_release);
@@ -1275,6 +1298,9 @@ class DurableJournalAdapter {
       JournalRecord& record) noexcept = 0;
 };
 
+using OwnedJournalPersist = bool (*)(DurableJournalAdapter&,
+                                     const JournalRecord&, void*) noexcept;
+
 class JournalAuthority final {
  public:
   JournalOutcome dispatch(const IssuedCapability& capability, JournalPersist persist,
@@ -1292,13 +1318,14 @@ class JournalAuthority final {
 
   JournalOutcome dispatch_owned(const IssuedCapability& capability,
                                 DurableJournalAdapter& adapter,
+                                OwnedJournalPersist persist,
                                 OwnedDispatchOperation operation,
                                 void* context) noexcept {
-    if (!adapter.authority_ready() || !operation) return {};
+    if (!adapter.authority_ready() || !persist || !operation) return {};
     return dispatch_impl(
         capability,
-        [&adapter](const JournalRecord& record) noexcept {
-          return adapter.append_and_readback_exact(record);
+        [&adapter, persist, context](const JournalRecord& record) noexcept {
+          return persist(adapter, record, context);
         },
         [operation, context](const IssuedCapability& issued) noexcept {
           return operation(issued, context);
@@ -1545,10 +1572,16 @@ bool stop_supervisor(SupervisorState& state, DWORD deadline_ms) noexcept {
     return false;
   const std::uint64_t cleanup_deadline_at_ms = now + deadline_ms;
   ProcessLaunchAuthority& launch = process_launch_authority();
-  launch.shutting_down.store(true, std::memory_order_release);
+  {
+    // This is the shutdown linearization point shared with process creation,
+    // resume, and journal-transition claims. Publish before signalling, so a
+    // failed SetEvent still stops every later fenced mutation/checkpoint.
+    std::lock_guard fence(launch.mutation_fence);
+    launch.shutting_down.store(true, std::memory_order_release);
+    if (!SetEvent(state.cancellation.get())) return false;
+  }
   // Signal before waiting for the transaction or registry lock so a monitor
   // holding the registry lock can leave its wait and retain/settle ownership.
-  if (!SetEvent(state.cancellation.get())) return false;
   std::unique_lock<std::mutex> transaction_lock(launch.mutex, std::defer_lock);
   while (!transaction_lock.try_lock()) {
     const std::uint64_t observed = GetTickCount64();

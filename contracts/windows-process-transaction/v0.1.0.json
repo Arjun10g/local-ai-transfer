@@ -76,6 +76,7 @@
     "durable_start": "required_append_and_readback_exact_immediately_before_create_callback_via_absent_adapter",
     "terminal": "required_append_and_readback_exact_after_full_job_reap_before_acknowledgement_via_absent_adapter",
     "post_start_uncertainty": "dispatched_unknown_manual_no_replay",
+    "transition_linearization": "shared_supervisor_mutation_fence_claim_before_bounded_adapter_io",
     "lost_ack_replay": false,
     "next_operation": "only_after_exact_terminal_record_and_fresh_capability"
   },
@@ -87,6 +88,8 @@
     "primary_created_suspended": true,
     "resume_after_registry_ownership": true,
     "single_active_transaction": true,
+    "shutdown_linearization": "shared_fence_then_atomic_stop_then_cancel_signal",
+    "irreversible_mutation_linearization": "shared_fence_recheck_then_create_or_resume",
     "success_requires_job_active_processes_zero": true,
     "failure_requires_root_job_terminate_and_bounded_zero_active_proof": true,
     "unsettled_cleanup_policy": "supervisor_fail_stop_then_startup_unknown_manual_recovery",

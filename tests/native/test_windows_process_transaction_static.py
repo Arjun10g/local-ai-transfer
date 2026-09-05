@@ -181,6 +181,35 @@ def model_active_checkpoint(shutting_down: bool,
     return not shutting_down and not cancellation_signalled
 
 
+class MutationFenceModel:
+    """Linearization oracle for shutdown versus mutation/finalization."""
+
+    def __init__(self):
+        self.shutting_down = False
+        self.mutations = 0
+        self.successes = 0
+
+    def shutdown_wins(self, event_signal_succeeds: bool = True) -> None:
+        # The atomic publication and signal attempt share the shutdown fence.
+        self.shutting_down = True
+        _ = event_signal_succeeds
+
+    def mutation_wins(self) -> bool:
+        if self.shutting_down:
+            return False
+        self.mutations += 1
+        return True
+
+    def terminal_wins(self) -> bool:
+        if self.shutting_down:
+            return False
+        self.successes += 1
+        return True
+
+    def consume_completed_read(self) -> bool:
+        return not self.shutting_down
+
+
 class WindowsProcessTransactionStaticTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -281,10 +310,13 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
         self.assertNotIn("CREATE_BREAKAWAY_FROM_JOB", self.tx)
 
     def test_durable_start_is_immediately_before_creation_callback(self):
-        dispatch = self.cpp[self.cpp.index("JournalOutcome dispatch_owned"):
-                            self.cpp.index("#include \"process_transaction.inc\"")]
-        self.assertLess(dispatch.index("append_and_readback_exact"),
-                        dispatch.index("operation(capability)"))
+        owned = self.cpp[self.cpp.index("JournalOutcome dispatch_owned"):
+                         self.cpp.index("bool recover_owned")]
+        implementation = self.cpp[self.cpp.index("JournalOutcome dispatch_impl"):
+                                  self.cpp.index("public:\n  JournalState query")]
+        self.assertIn("persist(adapter, record, context)", owned)
+        self.assertLess(implementation.index("persist(start)"),
+                        implementation.index("operation(capability)"))
         callback = self.tx[self.tx.index("DispatchStatus create_monitor_reap_after_durable_start"):
                            self.tx.index("[[maybe_unused]] LaunchReceipt")]
         self.assertLess(callback.index("checkpoint("), callback.index("CreateProcessAsUserW"))
@@ -444,6 +476,101 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
         # A failed event signal cannot erase the already-published atomic stop.
         self.assertFalse(model_active_checkpoint(
             shutting_down=True, cancellation_signalled=False))
+
+    def test_mutation_fence_orders_shutdown_create_resume_and_journal(self):
+        authority = self.tx[self.tx.index("struct ProcessLaunchAuthority"):
+                            self.tx.index("ProcessLaunchAuthority&")]
+        shutdown = self.cpp[self.cpp.index("bool stop_supervisor"):
+                            self.cpp.index("JournalOutcome durable_journal_authorize")]
+        create = self.tx[self.tx.index("BOOL launched = FALSE"):
+                         self.tx.index("if (!launched)")]
+        resume = self.tx[self.tx.index("bool monitor_registered_child"):
+                         self.tx.index("bool saw_exit")]
+        persist = self.tx[self.tx.index("bool persist_launch_record"):
+                          self.tx.index("bool make_pipe_pair")]
+        self.assertIn("std::mutex mutation_fence", authority)
+        self.assertIn("std::lock_guard fence(launch.mutation_fence)", shutdown)
+        self.assertLess(shutdown.index("mutation_fence"),
+                        shutdown.index("shutting_down.store(true"))
+        self.assertLess(shutdown.index("shutting_down.store(true"),
+                        shutdown.index("SetEvent(state.cancellation.get())"))
+        self.assertIn("std::lock_guard fence(context->authority->mutation_fence)",
+                      create)
+        self.assertIn("std::lock_guard fence(context->authority->mutation_fence)",
+                      resume)
+        self.assertIn("std::lock_guard fence(context->authority->mutation_fence)",
+                      persist)
+        self.assertIn("journal_transition_claimed_sequence = record.sequence",
+                      persist)
+        self.assertLess(persist.index("mutation_fence"),
+                        persist.index("adapter.append_and_readback_exact"))
+        wrapper = self.tx[self.tx.index("const JournalOutcome journal"):]
+        self.assertIn("finish_claimed_terminal", wrapper)
+        self.assertIn(
+            "prepared.journal_transition_claimed_sequence != journal.sequence",
+            wrapper,
+        )
+        for bounded_section in (create, resume):
+            self.assertNotIn("Sleep(", bounded_section)
+            self.assertNotIn("WaitForMultipleObjects", bounded_section)
+
+    def test_interleaving_model_never_mutates_or_succeeds_after_shutdown_wins(self):
+        for boundary in (
+            "before_create", "before_final", "during_sync_read",
+            "set_event_failure",
+        ):
+            with self.subTest(boundary=boundary):
+                model = MutationFenceModel()
+                if boundary == "before_create":
+                    model.shutdown_wins()
+                    self.assertFalse(model.mutation_wins())
+                elif boundary == "before_final":
+                    self.assertTrue(model.mutation_wins())
+                    model.shutdown_wins()
+                    self.assertFalse(model.terminal_wins())
+                elif boundary == "during_sync_read":
+                    model.shutdown_wins()
+                    self.assertFalse(model.consume_completed_read())
+                else:
+                    model.shutdown_wins(event_signal_succeeds=False)
+                    self.assertFalse(model.mutation_wins())
+                self.assertEqual(model.successes, 0)
+
+        create_first = MutationFenceModel()
+        self.assertTrue(create_first.mutation_wins())
+        create_first.shutdown_wins()
+        self.assertEqual(create_first.mutations, 1)
+        final_first = MutationFenceModel()
+        self.assertTrue(final_first.terminal_wins())
+        final_first.shutdown_wins()
+        self.assertEqual(final_first.successes, 1)
+
+    def test_sync_and_awaited_reads_recheck_stop_before_consuming_bytes(self):
+        read = self.tx[self.tx.index("bool overlapped_read"):
+                       self.tx.index("bool hash_retained_executable")]
+        usable = self.tx[self.tx.index("bool read_result_usable"):
+                         self.tx.index("bool append_bytes")]
+        self.assertIn("std::lock_guard fence(authority.mutation_fence)", usable)
+        self.assertIn("authority.shutting_down.load", usable)
+        self.assertIn("WaitForSingleObject(cancellation, 0) == WAIT_TIMEOUT", usable)
+        self.assertGreaterEqual(read.count("read_result_usable("), 3)
+        self.assertIn("transferred = 0", read)
+        drain = self.cpp[self.cpp.index("DWORD WINAPI drain_child_pipe"):
+                         self.cpp.index("bool settle_drain_worker")]
+        self.assertGreaterEqual(drain.count("drain_result_usable(*context)"), 2)
+        self.assertIn("SecureZeroMemory(context->bytes.data() + total, read)",
+                      drain)
+
+    def test_preparation_rechecks_stop_between_resource_acquisitions(self):
+        launch = self.tx[self.tx.index("PreparedLaunch prepared"):
+                         self.tx.index("const JournalOutcome journal")]
+        for token in (
+            "CreateFileW(", "hash_retained_executable(",
+            "create_restricted_low_token(", "make_pipe_pair(",
+            "make_stdin_pair(", "prepare_startup_attributes(",
+        ):
+            self.assertIn(token, launch)
+        self.assertGreaterEqual(launch.count("checkpoint(supervisor, authority"), 8)
 
     def test_worker_context_requires_join_before_release_or_fail_stops(self):
         owner = self.cpp[self.cpp.index("class DrainContextOwner"):
