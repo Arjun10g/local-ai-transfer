@@ -1,6 +1,7 @@
 import { makeToolResult } from '../agent/tool-envelope.mjs';
 import { ProviderToolError, exactObject, boundedArray, boundedBoolean, boundedInteger, boundedString, checkAborted, digest, failureResult, jsonResponse, normalizeText, own, providerError, result, safeArray } from './provider-common.mjs';
 import { MicrosoftDeviceCodeCredential, MicrosoftGraphHttpsTransport, GRAPH_ORIGIN } from './microsoft-graph-auth.mjs';
+import { attachProviderAttestation } from '../agent/provider-attestation.mjs';
 
 const API = '/v1.0';
 const FOLDERS = new Set(['inbox', 'sentitems', 'drafts', 'archive']);
@@ -138,14 +139,23 @@ const journalBinding = call => {
   return Object.freeze({ operation_id: binding.operation_id, operation_digest: binding.operation_digest, arguments_digest: binding.arguments_digest, preview_digest: binding.preview_digest });
 };
 const operationMarker = binding => binding ? `${binding.operation_id}:${binding.operation_digest}` : null;
-const evidence = ({ binding, response, resource, reconciliation = null }) => ({ operation_digest: binding?.operation_digest ?? null, arguments_digest: binding?.arguments_digest ?? null, preview_digest: binding?.preview_digest ?? null, response_digest: digest({ status: response?.status ?? null, resource_id: typeof resource?.id === 'string' ? resource.id : null }), resource_digest: resource ? digest(resource) : null, reconciliation });
-const verifiedPayload = ({ call, binding, response, resource, reconciliation = null, completed = true }) => ({ provider: 'microsoft_graph', state: completed ? 'completed' : 'reconciling', provider_completion: completed ? 'verified' : 'unverified', completion: completed ? 'provider_verified' : 'manual_required', http_status: response?.status ?? null, resource_id: typeof resource?.id === 'string' ? resource.id.slice(0, 512) : null, accepted: true, completed, timestamp: new Date().toISOString(), evidence: evidence({ binding, response, resource, reconciliation }) });
-const reconcilingPayload = ({ binding, response = null, reconciliation, resource = null }) => ({ provider: 'microsoft_graph', state: 'reconciling', provider_completion: 'unverified', completion: 'manual_required', accepted: true, completed: false, code: 'provider_action_reconciling', http_status: response?.status ?? null, resource_id: typeof resource?.id === 'string' ? resource.id.slice(0, 512) : null, evidence: evidence({ binding, response, resource, reconciliation }) });
+const verifiedPayload = ({ response, resource, reconciliation = null, completed = true }) => ({ provider: 'microsoft_graph', state: completed ? 'completed' : 'reconciling', provider_completion: completed ? 'verified' : 'unverified', completion: completed ? 'provider_verified' : 'manual_required', http_status: response?.status ?? null, resource_id: typeof resource?.id === 'string' ? resource.id.slice(0, 512) : null, accepted: true, completed, reconciliation, timestamp: new Date().toISOString() });
+const reconcilingPayload = ({ response = null, reconciliation, resource = null }) => ({ provider: 'microsoft_graph', state: 'reconciling', provider_completion: 'unverified', completion: 'manual_required', accepted: true, completed: false, code: 'provider_action_reconciling', http_status: response?.status ?? null, resource_id: typeof resource?.id === 'string' ? resource.id.slice(0, 512) : null, reconciliation });
+const verifiedResult = ({ call, binding, response, resource, reconciliation }) => {
+  const output = result(call, 'ok', verifiedPayload({ response, resource, reconciliation }));
+  if (binding) attachProviderAttestation(output, { provider: 'microsoft_graph', call_id: call.id, tool_name: call.name, operation_id: binding.operation_id, operation_digest: binding.operation_digest, arguments_digest: binding.arguments_digest, preview_digest: binding.preview_digest, proof: reconciliation });
+  return output;
+};
 const validResource = (value, expectedId = null) => value && typeof value === 'object' && !Array.isArray(value) && typeof value.id === 'string' && value.id.length >= 1 && value.id.length <= 512 && (!expectedId || value.id === expectedId);
 const messageState = (body, expectedId) => body && typeof body === 'object' && !Array.isArray(body) && body.id === expectedId && typeof body.isRead === 'boolean' ? { id: body.id, is_read: body.isRead } : null;
 const teamsResource = (body, chatId, content) => validResource(body) && (!body.chatId || body.chatId === chatId) && body.body && typeof body.body === 'object' && body.body.content === content ? { id: body.id, chat_id: chatId } : null;
 const isNotFound = error => error?.httpStatus === 404;
 const putBounded = (map, key, value, max) => { if (map.size >= max && !map.has(key)) map.delete(map.keys().next().value); map.set(key, value); };
+const proofCollection = (body, max = MAX_RECONCILIATION_ITEMS) => {
+  if (!body || typeof body !== 'object' || Array.isArray(body) || !Array.isArray(body.value)) return { values: null, truncated: false };
+  const truncated = body.value.length > max || Object.hasOwn(body, '@odata.nextLink');
+  return { values: body.value.slice(0, max), truncated };
+};
 const validGraphPath = path => typeof path === 'string' && path.length <= 2048 && /^\/v1\.0\/(?:me(?:\/mailFolders\/[^/]+\/messages|\/messages(?:\/[^/]+(?:\/send)?)?|\/chats)?|chats\/[^/]+\/messages)$/u.test(path) && !path.includes('..') && !/[\u0000-\u001f\u007f]/u.test(path);
 const validGraphMethodPath = (method, path) => {
   if (!['GET', 'POST', 'PATCH'].includes(method) || !validGraphPath(path)) return false;
@@ -209,8 +219,8 @@ export class MicrosoftGraphProvider {
     let response; try {
       const request = { origin: this.origin, method, path, query: query ?? {}, headers: { ...headers, authorization: `Bearer ${bearer}`, accept: 'application/json' }, body, signal: deadline.signal };
       if (onDispatch !== undefined && typeof onDispatch !== 'function') throw new ProviderToolError('provider_invalid_request');
-      checkAborted(signal); onDispatch?.();
-      const pending = typeof this.transport === 'function' ? this.transport(request) : this.transport.request(request); let rejectTimeout; const timeout = new Promise((_, reject) => { rejectTimeout = reject; }); const cancelled = new Promise((_, reject) => { rejectAbort = reject; }); timer = setTimeout(() => { deadline.abort(); rejectTimeout(Object.assign(new Error('provider timeout'), { code: 'provider_timeout' })); }, this.requestTimeoutMs); response = await Promise.race([pending, timeout, cancelled]);
+      checkAborted(signal);
+      const pending = typeof this.transport === 'function' ? this.transport({ ...request, onDispatch }) : this.transport.request({ ...request, onDispatch }); let rejectTimeout; const timeout = new Promise((_, reject) => { rejectTimeout = reject; }); const cancelled = new Promise((_, reject) => { rejectAbort = reject; }); timer = setTimeout(() => { deadline.abort(); rejectTimeout(Object.assign(new Error('provider timeout'), { code: 'provider_timeout' })); }, this.requestTimeoutMs); response = await Promise.race([pending, timeout, cancelled]);
     } catch (error) {
       if (signal?.aborted) throw new ProviderToolError('provider_cancelled');
       if (deadline.signal.aborted) throw new ProviderToolError('provider_timeout');
@@ -243,18 +253,21 @@ export class MicrosoftGraphProvider {
     const state = messageState(response.body, messageId); if (!state) throw new ProviderToolError('provider_invalid_response'); return state;
   }
   async listDraftsForMarker(marker, expectedDigest, signal) {
-    if (!marker) return [];
+    if (!marker) return { values: null, truncated: false };
     const response = await this.request({ method: 'GET', path: `${API}/me/mailFolders/drafts/messages`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$top': MAX_RECONCILIATION_ITEMS, '$select': 'id,subject,body,toRecipients,ccRecipients,internetMessageHeaders,changeKey' }, signal });
-    const values = safeArray(response.body?.value, MAX_RECONCILIATION_ITEMS); return values.filter(value => Array.isArray(value?.internetMessageHeaders) && value.internetMessageHeaders.some(header => header && typeof header.name === 'string' && header.name.toLowerCase() === LAE_OPERATION_HEADER && header.value === marker)).map(value => projectionDraft(value)).filter(value => value && draftContentDigest(value) === expectedDigest);
+    const collection = proofCollection(response.body); if (!collection.values || collection.truncated) return { values: collection.values, truncated: collection.truncated };
+    return { values: collection.values.filter(value => Array.isArray(value?.internetMessageHeaders) && value.internetMessageHeaders.some(header => header && typeof header.name === 'string' && header.name.toLowerCase() === LAE_OPERATION_HEADER && header.value === marker)).map(value => projectionDraft(value)).filter(value => value && draftContentDigest(value) === expectedDigest), truncated: false };
   }
   async listSentForDigest(expectedDigest, existingIds, snapshotAt, sentMarker, signal) {
     const response = await this.request({ method: 'GET', path: `${API}/me/mailFolders/sentitems/messages`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$top': MAX_RECONCILIATION_ITEMS, '$orderby': 'sentDateTime desc', '$select': 'id,subject,body,toRecipients,ccRecipients,changeKey,sentDateTime,internetMessageHeaders' }, signal });
-    const values = safeArray(response.body?.value, MAX_RECONCILIATION_ITEMS); const upper = this.now() + 60000;
-    return values.map(value => { const item = projectionDraft(value); return item ? { ...item, sent_at_ms: typeof value?.sentDateTime === 'string' ? Date.parse(value.sentDateTime) : NaN } : null; }).filter(item => item && typeof sentMarker === 'string' && item.operation_marker === sentMarker && !existingIds?.has(item.id) && draftContentDigest(item) === expectedDigest && Number.isFinite(snapshotAt) && Number.isFinite(item.sent_at_ms) && item.sent_at_ms >= snapshotAt - 1000 && item.sent_at_ms <= upper);
+    const collection = proofCollection(response.body); if (!collection.values || collection.truncated) return { values: collection.values, truncated: collection.truncated };
+    const upper = this.now() + 60000;
+    return { values: collection.values.map(value => { const item = projectionDraft(value); return item ? { ...item, sent_at_ms: typeof value?.sentDateTime === 'string' ? Date.parse(value.sentDateTime) : NaN } : null; }).filter(item => item && typeof sentMarker === 'string' && item.operation_marker === sentMarker && !existingIds?.has(item.id) && draftContentDigest(item) === expectedDigest && Number.isFinite(snapshotAt) && Number.isFinite(item.sent_at_ms) && item.sent_at_ms >= snapshotAt - 1000 && item.sent_at_ms <= upper), truncated: false };
   }
   async listChatMessagesForProof(chatId, signal) {
     const response = await this.request({ method: 'GET', path: `${API}/chats/${encodeURIComponent(chatId)}/messages`, query: { '$top': MAX_RECONCILIATION_ITEMS }, signal });
-    return safeArray(response.body?.value, MAX_RECONCILIATION_ITEMS).filter(value => validResource(value) && value.body && typeof value.body === 'object' && typeof value.body.content === 'string').map(value => ({ id: value.id, content: value.body.content, content_type: value.body.contentType === 'text' ? 'text' : null, created: typeof value.createdDateTime === 'string' ? value.createdDateTime : null, created_ms: typeof value.createdDateTime === 'string' ? Date.parse(value.createdDateTime) : NaN, sender_id: typeof value.from?.user?.id === 'string' ? value.from.user.id.slice(0, 512) : null }));
+    const collection = proofCollection(response.body); if (!collection.values || collection.truncated) return { values: collection.values, truncated: collection.truncated };
+    return { values: collection.values.filter(value => validResource(value) && value.body && typeof value.body === 'object' && typeof value.body.content === 'string').map(value => ({ id: value.id, content: value.body.content, content_type: value.body.contentType === 'text' ? 'text' : null, created: typeof value.createdDateTime === 'string' ? value.createdDateTime : null, created_ms: typeof value.createdDateTime === 'string' ? Date.parse(value.createdDateTime) : NaN, sender_id: typeof value.from?.user?.id === 'string' ? value.from.user.id.slice(0, 512) : null })), truncated: false };
   }
   teamsProofMatches(items, args, saved) {
     if (!saved.prewrite_verified || !saved.post_attempted || !saved.reconciliation_allowed || typeof saved.team_sender_id !== 'string' || !Number.isFinite(saved.team_prewrite_at)) return [];
@@ -262,19 +275,20 @@ export class MicrosoftGraphProvider {
     return items.filter(item => item.content_type === 'text' && item.content === args.body && item.sender_id === saved.team_sender_id && Number.isFinite(item.created_ms) && item.created_ms >= saved.team_prewrite_at - 1000 && item.created_ms <= upper);
   }
   async reconcileCreateDraft(call, args, binding, response = null, signal) {
-    const matches = await this.listDraftsForMarker(operationMarker(binding), requestedDraftContentDigest(args), signal);
-    if (matches.length === 1) return verifiedPayload({ binding, response, resource: { id: matches[0].id }, reconciliation: 'unique_exact_draft' });
-    return reconcilingPayload({ binding, response, reconciliation: matches.length > 1 ? 'multiple_exact_drafts' : 'draft_not_found' });
+    const collection = await this.listDraftsForMarker(operationMarker(binding), requestedDraftContentDigest(args), signal); const matches = collection.values ?? [];
+    if (!collection.values || collection.truncated) return result(call, 'ok', reconcilingPayload({ response, reconciliation: collection.truncated ? 'draft_collection_truncated' : 'draft_collection_unavailable' }));
+    if (matches.length === 1) return verifiedResult({ call, binding, response, resource: { id: matches[0].id }, reconciliation: 'unique_exact_draft' });
+    return result(call, 'ok', reconcilingPayload({ response, reconciliation: matches.length > 1 ? 'multiple_exact_drafts' : 'draft_not_found' }));
   }
   async reconcileSendDraft(call, args, binding, response, saved, signal) {
-    if (!saved.prewrite_verified || !saved.post_attempted || !saved.reconciliation_allowed) return reconcilingPayload({ binding, response, reconciliation: 'send_reconciliation_not_authorized' });
+    if (!saved.prewrite_verified || !saved.post_attempted || !saved.reconciliation_allowed) return result(call, 'ok', reconcilingPayload({ response, reconciliation: 'send_reconciliation_not_authorized' }));
     let draftPresent = true;
     try { await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(args.draft_id)}`, query: { '$select': 'id' }, signal }); }
-    catch (error) { if (isNotFound(error)) draftPresent = false; else return reconcilingPayload({ binding, response, reconciliation: 'draft_state_unavailable' }); }
-    if (draftPresent) return reconcilingPayload({ binding, response, reconciliation: 'draft_still_present' });
-    const sent = await this.listSentForDigest(saved.draftBinding, saved.preexistingSentIds, saved.sent_snapshot_at, saved.sent_marker, signal);
-    if (sent.length === 1) return verifiedPayload({ binding, response, resource: { id: sent[0].id }, reconciliation: 'unique_sent_item' });
-    return reconcilingPayload({ binding, response, reconciliation: sent.length > 1 ? 'multiple_matching_sent_items' : 'sent_item_not_found' });
+    catch (error) { if (isNotFound(error)) draftPresent = false; else return result(call, 'ok', reconcilingPayload({ response, reconciliation: 'draft_state_unavailable' })); }
+    if (draftPresent) return result(call, 'ok', reconcilingPayload({ response, reconciliation: 'draft_still_present' }));
+    const collection = await this.listSentForDigest(saved.draftBinding, saved.preexistingSentIds, saved.sent_snapshot_at, saved.sent_marker, signal); if (!collection.values || collection.truncated) return result(call, 'ok', reconcilingPayload({ response, reconciliation: collection.truncated ? 'sent_collection_truncated' : 'sent_collection_unavailable' })); const sent = collection.values;
+    if (sent.length === 1) return verifiedResult({ call, binding, response, resource: { id: sent[0].id }, reconciliation: 'unique_sent_item' });
+    return result(call, 'ok', reconcilingPayload({ response, reconciliation: sent.length > 1 ? 'multiple_matching_sent_items' : 'sent_item_not_found' }));
   }
   async preview(call) {
     const args = this.validate(call.name, call.arguments); const proposalRevision = this.remember(call, args);
@@ -331,46 +345,48 @@ export class MicrosoftGraphProvider {
         if (marker) body.internetMessageHeaders = [{ name: LAE_OPERATION_HEADER, value: marker }];
         response = await this.request({ method: 'POST', path: `${API}/me/messages`, body, signal: operation.signal, onDispatch: () => { saved.post_attempted = true; } });
         const created = response.status === 201 && validResource(response.body);
-        if (created) return result(call, 'ok', verifiedPayload({ call, binding, response, resource: { id: response.body.id }, reconciliation: 'created_resource' }));
-        return result(call, 'ok', await this.reconcileCreateDraft(call, args, binding, response, operation.signal));
+        if (created && saved.post_attempted) return verifiedResult({ call, binding, response, resource: { id: response.body.id }, reconciliation: 'created_resource' });
+        if (created && !saved.post_attempted) return result(call, 'ok', reconcilingPayload({ response, resource: { id: response.body.id }, reconciliation: 'dispatch_unconfirmed' }));
+        return await this.reconcileCreateDraft(call, args, binding, response, operation.signal);
       }
       if (call.name === 'mail.send_draft') {
         saved.prewrite_verified = false; saved.post_attempted = false; saved.reconciliation_allowed = false;
         const currentResponse = await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(args.draft_id)}`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$select': 'id,subject,body,toRecipients,ccRecipients,internetMessageHeaders,changeKey' }, signal: operation.signal }); const current = projectionDraft(currentResponse.body); if (!current || !saved.draftIdentity?.etag || !saved.draftIdentity?.change_key || !current.etag || !current.change_key || current.id !== args.draft_id || draftContentDigest(current) !== saved.draftBinding || current.operation_marker !== saved.sent_marker || current.etag !== saved.draftIdentity.etag || current.change_key !== saved.draftIdentity.change_key) throw new ProviderToolError('provider_permission_insufficient', 'draft identity changed after preview');
-        const sentBefore = await this.request({ method: 'GET', path: `${API}/me/mailFolders/sentitems/messages`, query: { '$top': MAX_RECONCILIATION_ITEMS, '$orderby': 'sentDateTime desc', '$select': 'id,sentDateTime' }, signal: operation.signal }); saved.preexistingSentIds = new Set(safeArray(sentBefore.body?.value, MAX_RECONCILIATION_ITEMS).filter(item => typeof item?.id === 'string').map(item => item.id)); saved.sent_snapshot_at = this.now(); saved.prewrite_verified = true; saved.reconciliation_allowed = true;
+        const sentBefore = await this.request({ method: 'GET', path: `${API}/me/mailFolders/sentitems/messages`, query: { '$top': MAX_RECONCILIATION_ITEMS, '$orderby': 'sentDateTime desc', '$select': 'id,sentDateTime' }, signal: operation.signal }); const sentCollection = proofCollection(sentBefore.body); if (!sentCollection.values || sentCollection.truncated) throw new ProviderToolError('provider_invalid_response', sentCollection.truncated ? 'sent proof collection is incomplete' : 'sent proof collection unavailable'); saved.preexistingSentIds = new Set(sentCollection.values.filter(item => typeof item?.id === 'string').map(item => item.id)); saved.sent_snapshot_at = this.now(); saved.prewrite_verified = true; saved.reconciliation_allowed = true;
         const sendHeaders = { 'If-Match': saved.draftIdentity.etag }; response = await this.request({ method: 'POST', path: `${API}/me/messages/${encodeURIComponent(args.draft_id)}/send`, headers: sendHeaders, signal: operation.signal, onDispatch: () => { saved.post_attempted = true; } });
-        return result(call, 'ok', await this.reconcileSendDraft(call, args, binding, response, saved, operation.signal));
+        return await this.reconcileSendDraft(call, args, binding, response, saved, operation.signal);
       }
       if (call.name === 'mail.mark_read') {
         const before = await this.readMessageState(args.message_id, operation.signal);
-        if (before.is_read === args.is_read) return result(call, 'ok', verifiedPayload({ call, binding, response: null, resource: { id: args.message_id, is_read: before.is_read }, reconciliation: 'pre_read_already_desired' }));
-        response = await this.request({ method: 'PATCH', path: `${API}/me/messages/${encodeURIComponent(args.message_id)}`, body: { isRead: args.is_read }, signal: operation.signal });
-        const after = await this.readMessageState(args.message_id, operation.signal); if (after.is_read !== args.is_read) return result(call, 'ok', reconcilingPayload({ binding, response, reconciliation: 'desired_state_not_observed' }));
-        return result(call, 'ok', verifiedPayload({ call, binding, response, resource: { id: after.id, is_read: after.is_read }, reconciliation: 'post_write_get_verified' }));
+        if (before.is_read === args.is_read) return verifiedResult({ call, binding, response: null, resource: { id: args.message_id, is_read: before.is_read }, reconciliation: 'pre_read_already_desired' });
+        saved.post_attempted = false; response = await this.request({ method: 'PATCH', path: `${API}/me/messages/${encodeURIComponent(args.message_id)}`, body: { isRead: args.is_read }, signal: operation.signal, onDispatch: () => { saved.post_attempted = true; } });
+        const after = await this.readMessageState(args.message_id, operation.signal); if (after.is_read !== args.is_read) return result(call, 'ok', reconcilingPayload({ response, reconciliation: 'desired_state_not_observed' }));
+        if (!saved.post_attempted) return result(call, 'ok', reconcilingPayload({ response, resource: { id: after.id }, reconciliation: 'dispatch_unconfirmed' })); return verifiedResult({ call, binding, response, resource: { id: after.id, is_read: after.is_read }, reconciliation: 'post_write_get_verified' });
       }
       if (call.name === 'teams.send_message') {
         saved.prewrite_verified = false; saved.post_attempted = false; saved.reconciliation_allowed = false; saved.team_sender_id = null; saved.team_prewrite_at = this.now();
-        const before = await this.listChatMessagesForProof(args.chat_id, operation.signal); saved.preexistingTeamIds = new Set(before.map(item => item.id)); saved.prewrite_verified = true; saved.reconciliation_allowed = true;
+        const before = await this.listChatMessagesForProof(args.chat_id, operation.signal); if (!before.values || before.truncated) throw new ProviderToolError('provider_invalid_response', before.truncated ? 'chat proof collection is incomplete' : 'chat proof collection unavailable'); saved.preexistingTeamIds = new Set(before.values.map(item => item.id)); saved.prewrite_verified = true; saved.reconciliation_allowed = true;
         response = await this.request({ method: 'POST', path: `${API}/chats/${encodeURIComponent(args.chat_id)}/messages`, body: { body: { contentType: 'text', content: args.body } }, signal: operation.signal, onDispatch: () => { saved.post_attempted = true; } });
         const resource = response.status === 201 ? teamsResource(response.body, args.chat_id, args.body) : null;
-        if (resource) return result(call, 'ok', verifiedPayload({ call, binding, response, resource, reconciliation: 'created_resource' }));
-        const after = await this.listChatMessagesForProof(args.chat_id, operation.signal); const matches = this.teamsProofMatches(after, args, saved).filter(item => !saved.preexistingTeamIds.has(item.id));
-        if (matches.length === 1) return result(call, 'ok', verifiedPayload({ call, binding, response, resource: { id: matches[0].id }, reconciliation: 'unique_chat_message' }));
-        return result(call, 'ok', reconcilingPayload({ binding, response, reconciliation: matches.length > 1 ? 'multiple_matching_chat_messages' : 'chat_message_not_found' }));
+        if (resource && saved.post_attempted) return verifiedResult({ call, binding, response, resource, reconciliation: 'created_resource' });
+        if (resource && !saved.post_attempted) return result(call, 'ok', reconcilingPayload({ response, resource, reconciliation: 'dispatch_unconfirmed' }));
+        const afterCollection = await this.listChatMessagesForProof(args.chat_id, operation.signal); if (!afterCollection.values || afterCollection.truncated) return result(call, 'ok', reconcilingPayload({ response, reconciliation: afterCollection.truncated ? 'chat_collection_truncated' : 'chat_collection_unavailable' })); const matches = this.teamsProofMatches(afterCollection.values, args, saved).filter(item => !saved.preexistingTeamIds.has(item.id));
+        if (matches.length === 1) return verifiedResult({ call, binding, response, resource: { id: matches[0].id }, reconciliation: 'unique_chat_message' });
+        return result(call, 'ok', reconcilingPayload({ response, reconciliation: matches.length > 1 ? 'multiple_matching_chat_messages' : 'chat_message_not_found' }));
       }
       throw new ProviderToolError('provider_invalid_response');
     } catch (error) {
       if (call.name === 'mail.create_draft' && ['provider_timeout', 'provider_failed'].includes(error?.code) && !operation.signal.aborted && saved.post_attempted) {
-        try { return result(call, 'ok', await this.reconcileCreateDraft(call, args, binding, null, operation.signal)); } catch {}
+        try { return await this.reconcileCreateDraft(call, args, binding, null, operation.signal); } catch {}
       }
       if (call.name === 'mail.send_draft' && ['provider_timeout', 'provider_failed'].includes(error?.code) && !operation.signal.aborted && saved.draftBinding && saved.prewrite_verified && saved.post_attempted && saved.reconciliation_allowed) {
-        try { return result(call, 'ok', await this.reconcileSendDraft(call, args, binding, null, saved, operation.signal)); } catch {}
+        try { return await this.reconcileSendDraft(call, args, binding, null, saved, operation.signal); } catch {}
       }
       if (call.name === 'mail.mark_read' && ['provider_timeout', 'provider_failed'].includes(error?.code) && !operation.signal.aborted) {
-        try { const after = await this.readMessageState(args.message_id, operation.signal); if (after.is_read === args.is_read) return result(call, 'ok', verifiedPayload({ call, binding, response: null, resource: { id: after.id, is_read: after.is_read }, reconciliation: 'timeout_get_verified' })); return result(call, 'ok', reconcilingPayload({ binding, reconciliation: 'timeout_state_unknown' })); } catch {}
+        try { const after = await this.readMessageState(args.message_id, operation.signal); if (after.is_read === args.is_read) return verifiedResult({ call, binding, response: null, resource: { id: after.id, is_read: after.is_read }, reconciliation: 'timeout_get_verified' }); return result(call, 'ok', reconcilingPayload({ reconciliation: 'timeout_state_unknown' })); } catch {}
       }
       if (call.name === 'teams.send_message' && ['provider_timeout', 'provider_failed'].includes(error?.code) && !operation.signal.aborted && saved.prewrite_verified && saved.post_attempted && saved.reconciliation_allowed) {
-        try { const after = await this.listChatMessagesForProof(args.chat_id, operation.signal); const matches = this.teamsProofMatches(after, args, saved).filter(item => !saved.preexistingTeamIds?.has(item.id)); if (matches.length === 1) return result(call, 'ok', verifiedPayload({ call, binding, response: null, resource: { id: matches[0].id }, reconciliation: 'timeout_unique_chat_message' })); return result(call, 'ok', reconcilingPayload({ binding, reconciliation: matches.length > 1 ? 'timeout_multiple_chat_messages' : 'timeout_chat_message_not_found' })); } catch {}
+        try { const afterCollection = await this.listChatMessagesForProof(args.chat_id, operation.signal); if (!afterCollection.values || afterCollection.truncated) return result(call, 'ok', reconcilingPayload({ reconciliation: afterCollection.truncated ? 'timeout_chat_collection_truncated' : 'timeout_chat_collection_unavailable' })); const matches = this.teamsProofMatches(afterCollection.values, args, saved).filter(item => !saved.preexistingTeamIds?.has(item.id)); if (matches.length === 1) return verifiedResult({ call, binding, response: null, resource: { id: matches[0].id }, reconciliation: 'timeout_unique_chat_message' }); return result(call, 'ok', reconcilingPayload({ reconciliation: matches.length > 1 ? 'timeout_multiple_chat_messages' : 'timeout_chat_message_not_found' })); } catch {}
       }
       return failureResult(call, error);
     } finally { operation.close(); }

@@ -34,7 +34,8 @@ export class MicrosoftGraphHttpsTransport {
     if (typeof sleep !== 'function') throw new TypeError('HTTPS sleep implementation is required');
     this.fetchImpl = fetchImpl; this.requestTimeoutMs = requestTimeoutMs; this.sleep = sleep;
   }
-  async request({ origin, method, path, query = {}, headers = {}, body, signal }) {
+  async request({ origin, method, path, query = {}, headers = {}, body, signal, onDispatch }) {
+    if (onDispatch !== undefined && typeof onDispatch !== 'function') throw new ProviderToolError('provider_invalid_request');
     if (![GRAPH_ORIGIN, LOGIN_ORIGIN].includes(origin) || typeof method !== 'string' || !/^(GET|POST|PATCH)$/u.test(method) || typeof path !== 'string' || path.length < 1 || path.length > 2048 || path.includes('//') || path.includes('..') || path.includes('?') || path.includes('#') || /[\u0000-\u001f\u007f]/u.test(path)) throw new ProviderToolError('provider_destination_rejected');
     if (origin === GRAPH_ORIGIN && !GRAPH_PATH.test(path)) throw new ProviderToolError('provider_destination_rejected');
     if (origin === LOGIN_ORIGIN && !/^\/[A-Za-z0-9][A-Za-z0-9.-]{0,127}\/oauth2\/v2\.0\/(?:devicecode|token)$/u.test(path)) throw new ProviderToolError('provider_destination_rejected');
@@ -52,7 +53,14 @@ export class MicrosoftGraphHttpsTransport {
     while (true) {
       checkAborted(signal); const timeout = AbortSignal.timeout(this.requestTimeoutMs); const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
       let response;
-      try { response = await this.fetchImpl(url, { method, headers: requestHeaders, body: requestBody, redirect: 'error', signal: combined }); }
+      try {
+        const pending = this.fetchImpl(url, { method, headers: requestHeaders, body: requestBody, redirect: 'error', signal: combined });
+        // A transport callback means the request was handed to fetch.  It is
+        // deliberately after invocation: synchronous validation/network setup
+        // failures must never authorize reconciliation.
+        onDispatch?.();
+        response = await pending;
+      }
       catch (error) { if (signal?.aborted) throw new ProviderToolError('provider_cancelled'); if (error?.name === 'TimeoutError' || error?.name === 'AbortError') throw new ProviderToolError('provider_timeout'); throw new ProviderToolError('provider_offline'); }
       if (!response || !Number.isInteger(response.status) || response.status < 100 || response.status > 599) throw new ProviderToolError('provider_invalid_response');
       const rawLength = response.headers?.get?.('content-length'); if (rawLength !== undefined && rawLength !== null && (!/^\d+$/u.test(String(rawLength)) || Number(rawLength) > MAX_AUTH_BODY_BYTES)) throw new ProviderToolError('provider_response_too_large');
