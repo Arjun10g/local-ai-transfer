@@ -14,6 +14,7 @@ retains a historical task without making it current authority;
 | SOL-003 | S0 | `main` | IN_PROGRESS | SOL-001 | S4 | `coordination/POLICY_STATUS.md` |
 | SOL-005 | S0 | `main` | IN_PROGRESS | SOL-003 | S2, S4 | `coordination/STATUS.md` |
 | GOV-TRUTH-001 | S3 | `main` (merged from `luna/governance-truth-final`) | MERGED_SOURCE_PENDING_GATE | `main@3746421`, SOL-003 | S0, S4 | corrected source `ff900b7`, merge `2491f45`; docs-only authoritative governance refresh; no gate or readiness change |
+| GOV-TRUTH-002 | Luna docs | `luna/current-truth-refresh-post-native` | CLAIMED | `main@2ec9c44`, SOL-003 | S0, S4 | docs-only reconciliation of audited inert native-source merges and rejected/unmerged candidates; no source, configuration, availability, or gate change |
 | RUN-001 | S1 | `luna/runtime` | CLAIMED | SOL-002 | S0, S3, S4 | pending |
 | RUN-002 | S1 | `luna/runtime` | CLAIMED | RUN-001 | S0, S3, S4 | pending |
 | MODEL-001 | S2 | `luna/model-performance` | CLAIMED | SOL-002 | S0, S1, S4 | pending |
