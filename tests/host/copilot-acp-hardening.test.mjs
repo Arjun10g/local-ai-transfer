@@ -41,6 +41,14 @@ test('executable identity replacement between preview and dispatch fails before 
   assert.equal(JSON.parse(result.content[0].text).code, 'copilot_policy_denied'); assert.equal(spawned, 0);
 });
 
+test('cwd identity is rechecked after version validation before ACP dispatch', async () => {
+  let cwdChecks = 0; let spawned = 0;
+  const identity = (canonicalPath, ino) => ({ canonicalPath, dev: 1, ino, size: 1, mtimeMs: 1, nlink: 1, uid: 1, mode: 0o700, brokerIssued: false, workspace_id: null });
+  const provider = new CopilotCliProvider({ testOnly: true, protocol: 'acp', enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], cwd: '/approved/workspace', versionCheck: async () => true, readContext: async () => ({ text: '', files: [] }), executableIdentity: async value => identity(value, 1), cwdIdentity: async value => identity(value, ++cwdChecks === 3 ? 2 : 1), spawn: () => { spawned += 1; throw new Error('must not spawn'); } });
+  const request = call(); await provider.preview(request); const output = await provider.execute({ ...request, authorization: { kind: 'user_confirmation' } });
+  assert.equal(JSON.parse(output.content[0].text).code, 'copilot_policy_denied'); assert.equal(spawned, 0); assert.equal(cwdChecks, 3);
+});
+
 test('ACP frames reject duplicate/unknown/deep/oversized data and unsafe correlations', () => {
   assert.deepEqual(parseCopilotAcpFrame('{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}').result, { protocolVersion: 1 });
   for (const frame of [
@@ -69,7 +77,17 @@ test('ACP command and permission payloads are strict bounded objects', () => {
     { ...permission, params: { options: [{ optionId: 'x', name: 'x', kind: 'x', extra: true }] } },
     { ...permission, params: { options: [{ optionId: 'x', name: 'x' }] } },
     { ...permission, params: { options: [{ optionId: 'x', name: 'x', kind: 'execute' }] } },
+    { ...permission, params: { ...permission.params, toolCall: { toolCallId: '', title: 'x' } } },
+    { ...permission, params: { ...permission.params, toolCall: { toolCallId: 'tc', title: 'x', kind: 'unknown' } } },
   ]) assert.throws(() => parseCopilotAcpFrame(JSON.stringify(invalid)));
+});
+
+test('ACP initialize rejects unknown optional object fields', async () => {
+  const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null; child.signalCode = null;
+  child.stdin = { write(line) { const request = JSON.parse(line); if (request.method === 'initialize') queueMicrotask(() => child.stdout.emit('data', Buffer.from(`${JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { protocolVersion: 1, agentInfo: { name: 'agent', version: '1', injected: true } } })}\n`))); return true; }, end() {} }; child.kill = () => { child.exitCode = 1; child.emit('close', 1); };
+  const provider = new CopilotCliProvider({ testOnly: true, protocol: 'acp', enabled: true, executable: '/approved/copilot', allowlist: ['/approved/copilot'], cwd: '/approved/workspace', versionCheck: async () => true, readContext: async () => ({ text: '', files: [] }), spawn: () => child });
+  const output = await provider.runAcp({ id: 'call_init_shape', name: 'coding.copilot_ask', arguments: { workspace_id: 'private' } }, 'hello');
+  assert.equal(JSON.parse(output.content[0].text).code, 'provider_failed');
 });
 
 test('ACP runtime rejects permission requests outside the active session phase', async () => {

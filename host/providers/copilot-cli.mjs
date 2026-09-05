@@ -13,6 +13,7 @@ const MAX_CWD_BYTES = 1024;
 const VERSION = /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u;
 const WORKSPACE_ID = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/u;
 const ACP_PERMISSION_KINDS = new Set(['allow_once', 'allow_always', 'reject_once', 'reject_always']);
+const ACP_TOOL_CALL_KINDS = new Set(['read', 'edit', 'delete', 'move', 'search', 'execute', 'think', 'fetch', 'switch_mode', 'other']);
 const PATH = (value, name = 'context_path') => boundedString(value, name, { min: 1, max: 1024, identifier: true }).replaceAll('\\', '/');
 const logicalWorkspacePath = workspaceId => `/lae/workspaces/${workspaceId}`;
 const validate = input => { const args = exactObject(input, ['prompt', 'workspace_id', 'context_paths'], ['prompt', 'workspace_id', 'context_paths']); boundedString(args.prompt, 'prompt', { min: 1, max: 8192 }); boundedString(args.workspace_id, 'workspace_id', { min: 1, max: 64, identifier: true }); if (!WORKSPACE_ID.test(args.workspace_id)) throw new ProviderToolError('invalid_tool_arguments', 'workspace_id must be an opaque lowercase identifier'); boundedArray(args.context_paths, 'context_paths', { max: 8 }); const contextPaths = args.context_paths.map((value, index) => PATH(value, `context_paths[${index}]`)); if (contextPaths.some(value => value.startsWith('/') || /^[A-Za-z]:\//u.test(value) || value.split('/').some(part => !part || part === '.' || part === '..'))) throw new ProviderToolError('invalid_tool_arguments', 'context paths must be relative and contained'); return { ...structuredClone(args), context_paths: contextPaths }; };
@@ -45,6 +46,24 @@ function validatePermissionOption(option) {
   if (option.description !== undefined) boundedFrameString(option.description);
 }
 
+function validateInitializeResult(result) {
+  exactKeys(result, ['protocolVersion'], ['agentCapabilities', 'authMethods', 'agentInfo']);
+  if (result.agentCapabilities !== undefined) {
+    const capabilities = exactKeys(result.agentCapabilities, [], ['loadSession', 'promptCapabilities', 'mcpCapabilities', 'sessionCapabilities']);
+    if (capabilities.loadSession !== undefined && typeof capabilities.loadSession !== 'boolean') throw new ProviderToolError('provider_failed');
+    for (const key of ['promptCapabilities', 'mcpCapabilities', 'sessionCapabilities']) {
+      if (capabilities[key] !== undefined) { const nested = exactKeys(capabilities[key], [], ['image', 'audio', 'embeddedContext', 'http', 'sse', 'list', 'resume']); if (Object.values(nested).some(value => typeof value !== 'boolean')) throw new ProviderToolError('provider_failed'); }
+    }
+  }
+  if (result.authMethods !== undefined) {
+    if (!Array.isArray(result.authMethods) || result.authMethods.length > 8) throw new ProviderToolError('provider_failed');
+    result.authMethods.forEach(method => { exactKeys(method, ['id', 'name'], ['description', 'type']); boundedFrameString(method.id, 128); boundedFrameString(method.name, 256); for (const key of ['description', 'type']) if (method[key] !== undefined) boundedFrameString(method[key], 256); });
+  }
+  if (result.agentInfo !== undefined) {
+    const info = exactKeys(result.agentInfo, ['name', 'version'], ['title', 'description']); boundedFrameString(info.name, 256); boundedFrameString(info.version, 128); for (const key of ['title', 'description']) if (info[key] !== undefined) boundedFrameString(info[key], 512);
+  }
+}
+
 function validateFrameShape(message) {
   if (!message || message.jsonrpc !== '2.0') throw new ProviderToolError('provider_failed');
   if (typeof message.method === 'string') {
@@ -70,7 +89,7 @@ function validateFrameShape(message) {
       // accepted shape narrow so a server cannot smuggle arbitrary authority.
       const params = exactKeys(message.params, ['sessionId', 'toolCall', 'options']);
       if (typeof params.sessionId !== 'string' || params.sessionId.length < 1 || params.sessionId.length > 128 || /[\u0000-\u001f\u007f]/u.test(params.sessionId)) throw new ProviderToolError('provider_failed');
-      const toolCall = exactKeys(params.toolCall, ['toolCallId', 'title'], ['description', 'kind']); for (const key of ['toolCallId', 'title', 'description', 'kind']) if (toolCall[key] !== undefined && (typeof toolCall[key] !== 'string' || toolCall[key].length > 2048 || /[\u0000-\u001f\u007f]/u.test(toolCall[key]))) throw new ProviderToolError('provider_failed');
+      const toolCall = exactKeys(params.toolCall, ['toolCallId', 'title'], ['description', 'kind']); boundedFrameString(toolCall.toolCallId, 256); boundedFrameString(toolCall.title, 512); for (const key of ['description', 'kind']) if (toolCall[key] !== undefined) boundedFrameString(toolCall[key], 2048); if (toolCall.kind !== undefined && !ACP_TOOL_CALL_KINDS.has(toolCall.kind)) throw new ProviderToolError('provider_failed');
       if (!Array.isArray(params.options) || params.options.length > 16 || params.options.length < 1) throw new ProviderToolError('provider_failed'); params.options.forEach(validatePermissionOption);
     } else throw new ProviderToolError('provider_failed');
     return message;
@@ -172,26 +191,27 @@ function waitForClose(child, timeoutMs) {
 }
 
 export async function killCopilotProcessTree(child, { platform = process.platform, spawn = nodeSpawn, graceMs = 1000 } = {}) {
-  if (!child || !Number.isInteger(child.pid) || child.pid <= 0 || (child.exitCode !== null && child.exitCode !== undefined) || (child.signalCode !== null && child.signalCode !== undefined)) return;
+  if (!child || !Number.isInteger(child.pid) || child.pid <= 0 || (child.exitCode !== null && child.exitCode !== undefined) || (child.signalCode !== null && child.signalCode !== undefined)) return child?.treeReaped === true;
   if (platform === 'win32') {
-    let killer;
-    try { killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore' }); } catch { try { child.kill(); } catch {} }
-    if (killer && !await waitForClose(killer, Math.min(5000, Math.max(100, graceMs)))) throw new ProviderToolError('provider_cleanup_unknown');
+    let killer; try { killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore' }); } catch { throw new ProviderToolError('provider_cleanup_unknown'); }
+    if (!killer || !await waitForClose(killer, Math.min(5000, Math.max(100, graceMs)))) throw new ProviderToolError('provider_cleanup_unknown');
     if (!await waitForClose(child, Math.min(5000, Math.max(100, graceMs)))) throw new ProviderToolError('provider_cleanup_unknown');
-    return;
+    return child.treeReaped === true;
   }
-  try { process.kill(-child.pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch {} }
+  try { process.kill(-child.pid, 'SIGTERM'); } catch { throw new ProviderToolError('provider_cleanup_unknown'); }
   await waitForClose(child, Math.min(5000, Math.max(100, graceMs)));
   // A detached leader can exit while a descendant keeps the process group
   // alive, so always issue the bounded final group kill after the grace wait.
-  try { process.kill(-child.pid, 'SIGKILL'); } catch { if (child.exitCode === null && child.signalCode === null) { try { child.kill('SIGKILL'); } catch {} } }
+  try { process.kill(-child.pid, 'SIGKILL'); } catch { throw new ProviderToolError('provider_cleanup_unknown'); }
   if (!await waitForClose(child, Math.min(5000, Math.max(100, graceMs)))) throw new ProviderToolError('provider_cleanup_unknown');
+  return child.treeReaped === true;
 }
 
 async function boundedCleanup(provider, child, wasClosed = () => false) {
   let timer;
+  let treeProof;
   try {
-    await Promise.race([
+    treeProof = await Promise.race([
       Promise.resolve().then(() => provider.killProcess(child)),
       new Promise((_, reject) => {
         timer = setTimeout(() => reject(new ProviderToolError('provider_cleanup_unknown')), 7000);
@@ -199,7 +219,7 @@ async function boundedCleanup(provider, child, wasClosed = () => false) {
       }),
     ]);
   } finally { clearTimeout(timer); }
-  if (!provider.testOnly && !wasClosed() && child.exitCode === null && child.exitCode === undefined && child.signalCode === null && child.signalCode === undefined) throw new ProviderToolError('provider_cleanup_unknown');
+  if (!provider.testOnly && (treeProof !== true || !wasClosed() && child.exitCode === null && child.exitCode === undefined && child.signalCode === null && child.signalCode === undefined)) throw new ProviderToolError('provider_cleanup_unknown');
 }
 
 export function createCopilotVersionCheck({ expectedVersion, spawn = spawnProcess, environment = {}, timeoutMs = 5000, platform = process.platform, requireCwd = false } = {}) {
@@ -249,7 +269,7 @@ export class CopilotCliProvider {
   validate(input) { return validate(input); }
   async preview(call) { const args = validate(call.arguments); const context = await this.context(args); const contextBytes = Buffer.byteLength(context.text, 'utf8'); const promptBytes = Buffer.byteLength(args.prompt, 'utf8'); const separatorBytes = context.text ? Buffer.byteLength('\n\nSelected context:\n', 'utf8') : 0; const bytes = promptBytes + separatorBytes + contextBytes; if (bytes > 65536) throw new ProviderToolError('invalid_tool_arguments', 'prompt and selected context exceed egress bound'); let executableIdentity = null; let reviewedCwdIdentity = null; try { executableIdentity = await this.executableIdentity(this.executable); } catch { if (this.testOnly) executableIdentity = { canonicalPath: this.executable }; } try { reviewedCwdIdentity = await this.cwdIdentity(this.cwd); } catch { if (this.testOnly) reviewedCwdIdentity = { canonicalPath: this.cwd }; } const proposal = { digest: digest(args), name: call.name, workspace_id: args.workspace_id, context_digest: digest({ text: context.text, files: context.files }), context_bytes: contextBytes, egress_bytes: bytes, executable_identity: executableIdentity, cwd_identity: reviewedCwdIdentity }; putBounded(this.proposals, call.id, proposal, 128); return { provider: 'github_copilot', destination: 'GitHub Copilot cloud', action: 'prompt_only', workspace_id: args.workspace_id, context_paths: args.context_paths, context_files: context.files, egress_bytes: bytes, data_categories: ['prompt', ...(args.context_paths.length ? ['selected_workspace_files'] : [])], disclosure: 'Selected prompt/context is sent to GitHub Copilot; output is untrusted.' }; }
   async execute(call) {
-    let args; try { args = validate(call.arguments); const saved = this.proposals.get(call.id); if (!saved || saved.name !== call.name || saved.digest !== digest(args) || !saved.executable_identity || !saved.cwd_identity) throw new ProviderToolError('copilot_policy_denied'); if (!call.authorization || typeof call.authorization !== 'object' || Array.isArray(call.authorization) || call.authorization.kind !== 'user_confirmation' || Object.keys(call.authorization).length !== 1) throw new ProviderToolError('provider_permission_insufficient'); if (!this.enabled) throw new ProviderToolError('copilot_cli_unavailable'); if (!this.executable || !this.versionCheck || !this.allowlist.has(this.executable)) throw new ProviderToolError('copilot_policy_denied'); const binding = call.internal?.journal_binding; if (!this.testOnly) validateBinding(binding); const probeBefore = await this.executableIdentity(this.executable); if (!sameIdentity(probeBefore, saved.executable_identity) || !this.testOnly && (!workspaceIdentity(probeBefore, args.workspace_id))) throw new ProviderToolError('copilot_policy_denied'); const cwdBefore = await this.cwdIdentity(this.cwd, args.workspace_id); if (!sameIdentity(cwdBefore, saved.cwd_identity) || !this.testOnly && (!workspaceIdentity(cwdBefore, args.workspace_id))) throw new ProviderToolError('copilot_policy_denied'); if (!await this.versionCheck(probeBefore.canonicalPath, call.signal, this.cwd)) throw new ProviderToolError('copilot_policy_denied'); const probeAfter = await this.executableIdentity(this.executable); if (!sameIdentity(probeBefore, probeAfter) || !this.testOnly && (!workspaceIdentity(probeAfter, args.workspace_id))) throw new ProviderToolError('copilot_policy_denied'); const context = await this.context(args); const contextBytes = Buffer.byteLength(context.text, 'utf8'); if (digest({ text: context.text, files: context.files }) !== saved.context_digest || contextBytes !== saved.context_bytes) throw new ProviderToolError('copilot_policy_denied', 'selected context changed after preview'); const prompt = context.text ? `${args.prompt}\n\nSelected context:\n${context.text}` : args.prompt; if (Buffer.byteLength(prompt, 'utf8') !== saved.egress_bytes || Buffer.byteLength(prompt, 'utf8') > 65536) throw new ProviderToolError('copilot_policy_denied'); const attemptKey = `${binding?.operation_digest ?? `${call.id}:${digest(args)}`}`; if (this.attempts.has(attemptKey)) return this.attempts.get(attemptKey); putBounded(this.attempts, attemptKey, failureResult(call, new ProviderToolError('provider_request_already_attempted')), MAX_ATTEMPTS); let output; try { output = await this.run(call, args, prompt, probeAfter.canonicalPath, binding); } catch (error) { output = failureResult(call, error); } this.attempts.set(attemptKey, output); return output; } catch (error) { if (error?.code === 'invalid_tool_arguments') throw error; return failureResult(call, error); }
+    let args; try { args = validate(call.arguments); const saved = this.proposals.get(call.id); if (!saved || saved.name !== call.name || saved.digest !== digest(args) || !saved.executable_identity || !saved.cwd_identity) throw new ProviderToolError('copilot_policy_denied'); if (!call.authorization || typeof call.authorization !== 'object' || Array.isArray(call.authorization) || call.authorization.kind !== 'user_confirmation' || Object.keys(call.authorization).length !== 1) throw new ProviderToolError('provider_permission_insufficient'); if (!this.enabled) throw new ProviderToolError('copilot_cli_unavailable'); if (!this.executable || !this.versionCheck || !this.allowlist.has(this.executable)) throw new ProviderToolError('copilot_policy_denied'); const binding = call.internal?.journal_binding; if (!this.testOnly) validateBinding(binding); const probeBefore = await this.executableIdentity(this.executable); if (!sameIdentity(probeBefore, saved.executable_identity) || !this.testOnly && (!workspaceIdentity(probeBefore, args.workspace_id))) throw new ProviderToolError('copilot_policy_denied'); const cwdBefore = await this.cwdIdentity(this.cwd, args.workspace_id); if (!sameIdentity(cwdBefore, saved.cwd_identity) || !this.testOnly && (!workspaceIdentity(cwdBefore, args.workspace_id))) throw new ProviderToolError('copilot_policy_denied'); if (!await this.versionCheck(probeBefore.canonicalPath, call.signal, this.cwd)) throw new ProviderToolError('copilot_policy_denied'); const cwdAfterVersion = await this.cwdIdentity(this.cwd, args.workspace_id); if (!sameIdentity(cwdBefore, cwdAfterVersion) || !this.testOnly && (!workspaceIdentity(cwdAfterVersion, args.workspace_id))) throw new ProviderToolError('copilot_policy_denied'); const probeAfter = await this.executableIdentity(this.executable); if (!sameIdentity(probeBefore, probeAfter) || !this.testOnly && (!workspaceIdentity(probeAfter, args.workspace_id))) throw new ProviderToolError('copilot_policy_denied'); const context = await this.context(args); const contextBytes = Buffer.byteLength(context.text, 'utf8'); if (digest({ text: context.text, files: context.files }) !== saved.context_digest || contextBytes !== saved.context_bytes) throw new ProviderToolError('copilot_policy_denied', 'selected context changed after preview'); const prompt = context.text ? `${args.prompt}\n\nSelected context:\n${context.text}` : args.prompt; if (Buffer.byteLength(prompt, 'utf8') !== saved.egress_bytes || Buffer.byteLength(prompt, 'utf8') > 65536) throw new ProviderToolError('copilot_policy_denied'); const cwdAtDispatch = await this.cwdIdentity(this.cwd, args.workspace_id); if (!sameIdentity(cwdAfterVersion, cwdAtDispatch) || !this.testOnly && (!workspaceIdentity(cwdAtDispatch, args.workspace_id))) throw new ProviderToolError('copilot_policy_denied'); const executableAtDispatch = await this.executableIdentity(this.executable); if (!sameIdentity(probeAfter, executableAtDispatch) || !this.testOnly && (!workspaceIdentity(executableAtDispatch, args.workspace_id))) throw new ProviderToolError('copilot_policy_denied'); const attemptKey = `${binding?.operation_digest ?? `${call.id}:${digest(args)}`}`; if (this.attempts.has(attemptKey)) return this.attempts.get(attemptKey); putBounded(this.attempts, attemptKey, failureResult(call, new ProviderToolError('provider_request_already_attempted')), MAX_ATTEMPTS); let output; try { output = await this.run(call, args, prompt, executableAtDispatch.canonicalPath, binding); } catch (error) { output = failureResult(call, error); } this.attempts.set(attemptKey, output); return output; } catch (error) { if (error?.code === 'invalid_tool_arguments') throw error; return failureResult(call, error); }
   }
   async context(args) {
     if (!args.context_paths.length) return { text: '', files: [] };
@@ -300,7 +320,7 @@ async function hardenedRunAcp(call, prompt, executable = this.executable, bindin
     const item = pending.get(message.id); if (!item) { void stop('provider_failed'); return; } pending.delete(message.id);
     if (message.error) { item.reject(new ProviderToolError('provider_failed')); return; }
     try {
-      if (item.method === 'initialize') { exactKeys(message.result, ['protocolVersion'], ['agentCapabilities', 'authMethods', 'agentInfo']); if (message.result.protocolVersion !== 1 || phase !== 'boot') throw new ProviderToolError('provider_failed'); phase = 'initialized'; }
+      if (item.method === 'initialize') { validateInitializeResult(message.result); if (message.result.protocolVersion !== 1 || phase !== 'boot') throw new ProviderToolError('provider_failed'); phase = 'initialized'; }
       else if (item.method === 'session/new') { exactKeys(message.result, ['sessionId']); if (phase !== 'initialized' || typeof message.result.sessionId !== 'string' || message.result.sessionId.length < 1 || message.result.sessionId.length > 128 || /[\u0000-\u001f\u007f]/u.test(message.result.sessionId)) throw new ProviderToolError('provider_failed'); sessionId = message.result.sessionId; phase = 'session_open'; }
       else if (item.method === 'session/prompt') { exactKeys(message.result, ['stopReason']); if (message.result.stopReason !== 'end_turn' || phase !== 'prompting') throw new ProviderToolError('provider_failed'); promptDone = true; phase = 'complete'; }
       else throw new ProviderToolError('provider_failed');
