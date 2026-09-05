@@ -231,6 +231,11 @@ BoundedIoStatus bounded_sync_io(HANDLE file, SyncIoKind kind,
   }
   worker.join();
   if (!state->ok) return BoundedIoStatus::kFailed;
+  // A successful blocking call and the waiter's last probe are distinct
+  // events. Do not accept bytes if cancellation or the absolute deadline
+  // became observable as the call completed.
+  if (control.cancellation_requested()) return BoundedIoStatus::kCancelled;
+  if (control.deadline_expired()) return BoundedIoStatus::kTimeout;
   if (kind == SyncIoKind::kRead)
     std::copy_n(state->bytes.data(), count, bytes);
   return BoundedIoStatus::kOk;
@@ -803,8 +808,14 @@ StoreStatus FixedContainerStore::reload(StorageIoControl io) {
       return bounded_status;
     }
     for (std::uint32_t slot = 0; slot < kSlotCount; ++slot) {
+      if (io.stop_requested())
+        return io.cancellation_requested() ? StoreStatus::kCancelled
+                                           : StoreStatus::kIoTimeout;
       std::array<Bank, kBanksPerSlot> banks{};
       for (std::uint32_t bank = 0; bank < kBanksPerSlot; ++bank) {
+        if (io.stop_requested())
+          return io.cancellation_requested() ? StoreStatus::kCancelled
+                                             : StoreStatus::kIoTimeout;
         banks[bank].index = bank;
         const std::size_t bank_start =
             (static_cast<std::size_t>(slot) * kBanksPerSlot + bank) * kBankBytes;
@@ -822,6 +833,9 @@ StoreStatus FixedContainerStore::reload(StorageIoControl io) {
                            banks[bank].record)) return StoreStatus::kCorruptBank;
           banks[bank].has_record = true;
         }
+        if (io.stop_requested())
+          return io.cancellation_requested() ? StoreStatus::kCancelled
+                                             : StoreStatus::kIoTimeout;
       }
       Bank* authority = nullptr;
       std::vector<Bank*> committed;
@@ -871,9 +885,17 @@ StoreStatus FixedContainerStore::reload(StorageIoControl io) {
         if (terminal(authority->record.events.back().state)) ++terminal_count;
         else ++active;
       }
+      if (io.stop_requested())
+        return io.cancellation_requested() ? StoreStatus::kCancelled
+                                           : StoreStatus::kIoTimeout;
     }
     if (active > kMaxActiveRecords || terminal_count > kMaxTerminalRecords)
       return StoreStatus::kRecordLimitExceeded;
+    // Final cooperative boundary for the entire 1024 x 2 decode, hash, and
+    // authority scan. No recovered snapshot becomes observable before this.
+    if (io.stop_requested())
+      return io.cancellation_requested() ? StoreStatus::kCancelled
+                                         : StoreStatus::kIoTimeout;
     records_ = std::move(next);
     occupied_ = occupied;
     staged_bank_ = staged_bank;
@@ -897,11 +919,20 @@ StoreStatus FixedContainerStore::load_and_recover(
   if (status != StoreStatus::kOk) return status;
   std::vector<std::string> recover;
   for (const auto& [operation, record] : records_) {
+    if (io.stop_requested())
+      return io.cancellation_requested() ? StoreStatus::kCancelled
+                                         : StoreStatus::kIoTimeout;
     const auto& state = record.events.back().state;
     if (state == "prepared" || state == "authorized" || state == "dispatching" ||
         state == "acknowledged" || state == "reconciling") recover.push_back(operation);
   }
+  if (io.stop_requested())
+    return io.cancellation_requested() ? StoreStatus::kCancelled
+                                       : StoreStatus::kIoTimeout;
   for (const auto& operation : recover) {
+    if (io.stop_requested())
+      return io.cancellation_requested() ? StoreStatus::kCancelled
+                                         : StoreStatus::kIoTimeout;
     const JournalEvent previous = records_.at(operation).events.back();
     const bool pre_dispatch = previous.state == "prepared" || previous.state == "authorized";
     const auto event = make_event(operation, &previous, "startup_recovery",
@@ -911,8 +942,14 @@ StoreStatus FixedContainerStore::load_and_recover(
     bool committed = false;
     status = append(operation, event, io, committed);
     if (status != StoreStatus::kOk || !committed) return status;
+    if (io.stop_requested())
+      return io.cancellation_requested() ? StoreStatus::kCancelled
+                                         : StoreStatus::kIoTimeout;
     ++recovery_count;
   }
+  if (io.stop_requested())
+    return io.cancellation_requested() ? StoreStatus::kCancelled
+                                       : StoreStatus::kIoTimeout;
   recovery_count_ = recovery_count;
   return StoreStatus::kOk;
 }

@@ -18,6 +18,9 @@ import {
 import {
   ACTION_JOURNAL_HELPER_PRODUCTION_AVAILABLE,
   ActionJournalHelperReference,
+  classifyBoundedStorageCompletion,
+  classifyCancelledPipeSettlement,
+  modelParsedBootstrapSecretLifetime,
   validatePersistedAuthority,
 } from '../reference/action-journal-helper-model.mjs';
 
@@ -165,6 +168,65 @@ test('startup scan has an exact deadline and cancellation probe before recovery 
     onStorageIo() { controller.abort(); },
   }), error => error.code === 'io_cancel_failed');
   assert.equal(cancelled.store, null);
+});
+
+test('successful storage completion is rejected at deadline or after cancellation', () => {
+  assert.equal(classifyBoundedStorageCompletion({
+    success: true, cancelled: false, nowMs: NOW + 9, deadlineAtMs: NOW + 10,
+  }), 'ok');
+  assert.equal(classifyBoundedStorageCompletion({
+    success: true, cancelled: false, nowMs: NOW + 10, deadlineAtMs: NOW + 10,
+  }), 'io_timeout');
+  assert.equal(classifyBoundedStorageCompletion({
+    success: true, cancelled: true, nowMs: NOW + 9, deadlineAtMs: NOW + 10,
+  }), 'cancelled');
+});
+
+test('startup probes the whole bank scan and final boundary for deadline and supervisor death', async () => {
+  for (const mode of ['deadline', 'supervisor']) {
+    let now = NOW;
+    const controller = new AbortController();
+    const helper = new ActionJournalHelperReference({
+      device: await formattedDevice(), key: KEY, nonce: NONCE,
+      expectedClient: CLIENT, expectedIssuer: ISSUER, now: () => now,
+    });
+    await assert.rejects(helper.start({
+      issuer: ISSUER,
+      deadlineAtMs: NOW + 10,
+      signal: controller.signal,
+      onStorageIo(phase, scanIndex) {
+        if (phase === 'during_startup_scan' && scanIndex === 2047) {
+          if (mode === 'deadline') now = NOW + 10;
+          else controller.abort();
+        }
+      },
+    }), error => error.code === (mode === 'deadline' ? 'io_timeout' : 'io_cancel_failed'));
+    assert.equal(helper.store, null);
+  }
+});
+
+test('parsed bootstrap secret copies are wiped on invalid and successful paths', () => {
+  for (const valid of [false, true]) {
+    const state = modelParsedBootstrapSecretLifetime({ valid });
+    assert.equal(state.accepted, valid);
+    assert.deepEqual(state.parsedKey, new Uint8Array(32));
+    assert.deepEqual(state.parsedNonce, new Uint8Array(16));
+    assert.equal(state.outputKey.some(Boolean), valid);
+    assert.equal(state.outputNonce.some(Boolean), valid);
+  }
+});
+
+test('cancellation settlement classifies raced completion by actual settled bytes', () => {
+  assert.equal(classifyCancelledPipeSettlement({
+    settled: true, cancelStarted: false, cancelError: 'not_found',
+    completionSucceeded: true, completionBytes: 12, completionError: null,
+    timedOut: true,
+  }), 'io_cancel_failed');
+  assert.equal(classifyCancelledPipeSettlement({
+    settled: true, cancelStarted: true, cancelError: null,
+    completionSucceeded: false, completionBytes: 0,
+    completionError: 'operation_aborted', timedOut: true,
+  }), 'io_timeout');
 });
 
 test('startup recovery rechecks its shared deadline before each durable append', async () => {

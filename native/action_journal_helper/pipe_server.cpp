@@ -325,6 +325,10 @@ bool read_bootstrap(HANDLE input, BootstrapRecord& output) {
       static_cast<std::uint64_t>(storage_chars + image_chars) * sizeof(wchar_t);
   if (text_bytes != total - kBootstrapFixedBytes) return false;
   BootstrapRecord parsed;
+  // BootstrapRecord's implicit move copies fixed arrays. This scope wipes the
+  // local HMAC key and nonce on every invalid return and after a successful
+  // move into the caller-owned, separately guarded record.
+  BootstrapScope parsed_scope(parsed);
   parsed.expected_client_pid = read_u32(bytes.data() + 24);
   parsed.expected_client_session_id = read_u32(bytes.data() + 28);
   parsed.expected_client_creation_time = read_u64(bytes.data() + 32);
@@ -476,7 +480,7 @@ IoResult wait_overlapped(HANDLE pipe, HANDLE client_process, OVERLAPPED& operati
   const DWORD completion_error = completed ? ERROR_SUCCESS : GetLastError();
   if (settled != WAIT_OBJECT_0 ||
       (!cancelled && cancel_error != ERROR_NOT_FOUND) ||
-      (completed && transferred != 0) ||
+      (completed && ignored != 0) ||
       (!completed && completion_error != ERROR_OPERATION_ABORTED &&
        completion_error != ERROR_BROKEN_PIPE &&
        completion_error != ERROR_PIPE_NOT_CONNECTED)) return IoResult::kCancelFailed;
@@ -667,6 +671,11 @@ HelperStatus run_foreground_helper_from_inherited_stdin() noexcept {
     PipeSecurity security;
     if (!private_pipe_security(user.sid, security))
       return HelperStatus::kPipeSecurityFailed;
+    // Recheck the shared startup authority at the final pipe-publication
+    // boundary; recovery success must not outlive its supervisor or deadline.
+    if (startup_io.stop_requested())
+      return startup_io.cancellation_requested()
+          ? HelperStatus::kRecoveryFailed : HelperStatus::kIoTimeout;
     const std::wstring pipe_name = kPipePrefix +
         std::to_wstring(GetCurrentProcessId());
     UniqueHandle pipe(CreateNamedPipeW(

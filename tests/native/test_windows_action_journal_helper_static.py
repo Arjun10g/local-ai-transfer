@@ -278,6 +278,61 @@ class WindowsActionJournalHelperStaticTests(unittest.TestCase):
         self.assertNotRegex(reload_body, r"ReadFile\([^;]+nullptr\)")
         self.assertNotIn("INFINITE", self.store)
 
+    def test_successful_storage_completion_rechecks_cancel_and_exact_deadline(self):
+        bounded = self.store[
+            self.store.index("BoundedIoStatus bounded_sync_io"):
+            self.store.index("BoundedIoStatus read_exact")
+        ]
+        success = bounded.index("if (!state->ok)")
+        cancel = bounded.index("if (control.cancellation_requested())", success)
+        deadline = bounded.index("if (control.deadline_expired())", cancel)
+        accept = bounded.index("return BoundedIoStatus::kOk", deadline)
+        self.assertLess(success, cancel)
+        self.assertLess(cancel, deadline)
+        self.assertLess(deadline, accept)
+        self.assertIn("GetTickCount64() >= hard_deadline_tick_ms", self.headers)
+
+    def test_full_recovery_scan_has_cooperative_and_final_stop_boundaries(self):
+        reload_body = self.store[
+            self.store.index("FixedContainerStore::reload"):
+            self.store.index("FixedContainerStore::load_and_recover")
+        ]
+        self.assertGreaterEqual(reload_body.count("io.stop_requested()"), 5)
+        final = reload_body.index("Final cooperative boundary")
+        publish = reload_body.index("records_ = std::move(next)")
+        self.assertLess(final, publish)
+        recovery = self.store[
+            self.store.index("FixedContainerStore::load_and_recover"):
+            self.store.index("FixedContainerStore::append")
+        ]
+        self.assertGreaterEqual(recovery.count("io.stop_requested()"), 5)
+        self.assertLess(
+            recovery.rindex("io.stop_requested()"),
+            recovery.index("recovery_count_ = recovery_count"),
+        )
+
+    def test_local_parsed_bootstrap_secrets_are_scope_wiped_on_all_returns(self):
+        bootstrap = self.pipe[
+            self.pipe.index("bool read_bootstrap"):
+            self.pipe.index("std::uint64_t file_time_value")
+        ]
+        parsed = bootstrap.index("BootstrapRecord parsed")
+        scope = bootstrap.index("BootstrapScope parsed_scope(parsed)", parsed)
+        copy_key = bootstrap.index("parsed.hmac_key.begin()", scope)
+        move = bootstrap.index("output = std::move(parsed)", copy_key)
+        self.assertLess(parsed, scope)
+        self.assertLess(scope, copy_key)
+        self.assertLess(copy_key, move)
+
+    def test_pipe_cancel_settlement_uses_actual_completion_bytes(self):
+        wait = self.pipe[
+            self.pipe.index("IoResult wait_overlapped"):
+            self.pipe.index("IoResult exact_io")
+        ]
+        self.assertIn("DWORD ignored = 0", wait)
+        self.assertIn("completed && ignored != 0", wait)
+        self.assertNotIn("completed && transferred != 0", wait)
+
     def test_recovery_has_one_explicit_deadline_and_cancel_probe_before_pipe(self):
         for token in (
             "StartupCancellationContext", "startup_cancelled",
@@ -289,6 +344,8 @@ class WindowsActionJournalHelperStaticTests(unittest.TestCase):
             self.pipe.index("store.load_and_recover(startup_io, recovery_count)"),
             self.pipe.index("CreateNamedPipeW"),
         )
+        final_probe = self.pipe.index("if (startup_io.stop_requested())")
+        self.assertLess(final_probe, self.pipe.index("CreateNamedPipeW"))
 
     def test_exact_deadline_and_persisted_authority_enums_fail_closed(self):
         self.assertIn("if (deadline <= now_ms)", self.protocol)

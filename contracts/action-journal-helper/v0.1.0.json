@@ -57,7 +57,7 @@
       "expected_client_image_path"
     ],
     "secret_fields": ["hmac_key", "session_nonce"],
-    "secret_policy": "exactly 32 key bytes and 16 nonce bytes; read once, locked where supported, zeroed after session; never argv, environment, disk, pipe name, receipt, or error",
+    "secret_policy": "exactly 32 key bytes and 16 nonce bytes; read once, locked where supported; every local parsed copy is scope-wiped on invalid return and after transfer, and the retained session copy is zeroed after session; never argv, environment, disk, pipe name, receipt, or error",
     "issuer_authority": {
       "current_slice": "refused before bootstrap read because no authenticated supervisor image trust anchor is configured",
       "os_binding": "retain the inherited anonymous-pipe read handle; GetNamedPipeServerProcessId must identify one live retained same-user same-session issuer process",
@@ -70,9 +70,9 @@
   "storage": {
     "lease": "open_existing through the merged Win32 boundary before named-pipe creation and retain the complete lease for helper lifetime",
     "single_authority": "all startup scan, recovery, append, summary, and detail operations use only the retained file handle",
-    "startup": "before pipe creation, a shared 15000 ms monotonic deadline and retained-supervisor liveness cancellation probe cover the complete strict 1024-slot/two-bank scan and every recovery append",
+    "startup": "before pipe creation, a shared 15000 ms monotonic deadline and retained-supervisor liveness cancellation probe run cooperatively through the complete strict 1024-slot/two-bank decode/hash/authority scan, at its final publication boundary, and around every recovery append",
     "recovery": "prepared and authorized append startup_recovery/cancelled; dispatching, acknowledged, and reconciling append startup_recovery/unknown_manual; terminal and unknown remain unchanged",
-    "io": "synchronous retained-handle ReadFile, WriteFile, and FlushFileBuffers execute on a dedicated targeted thread; CancelSynchronousIo plus a 2000 ms settlement grace is checked, and unproved cancellation heap-retains its duplicate handle/buffer while poisoning and terminating the helper",
+    "io": "synchronous retained-handle ReadFile, WriteFile, and FlushFileBuffers execute on a dedicated targeted thread; CancelSynchronousIo plus a 2000 ms settlement grace is checked; after successful completion cancellation and now>=hard deadline are rechecked before bytes are accepted; unproved cancellation heap-retains its duplicate handle/buffer while poisoning and terminating the helper",
     "persisted_authority": "authorization_kind and resolution are decoded only from the exact finite protocol enums; unknown, empty-string, or wrong-typed values make the bank corrupt",
     "commit": [
       "validate exact protocol event and transition plus capacity before write",

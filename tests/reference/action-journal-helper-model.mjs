@@ -85,6 +85,43 @@ export function validatePersistedAuthority(event) {
   return (event.authorization_kind === null || AUTHORIZATION_KINDS.has(event.authorization_kind))
     && (event.resolution === null || RESOLUTIONS.has(event.resolution));
 }
+
+// Platform-neutral decision models for the native wait boundaries. They use
+// the completion-time observations, never the state from before the wait.
+export function classifyBoundedStorageCompletion({ success, cancelled, nowMs, deadlineAtMs }) {
+  if (success !== true) return 'io_failed';
+  if (cancelled === true) return 'cancelled';
+  if (!Number.isSafeInteger(nowMs) || !Number.isSafeInteger(deadlineAtMs)
+      || nowMs >= deadlineAtMs) return 'io_timeout';
+  return 'ok';
+}
+
+export function classifyCancelledPipeSettlement({
+  settled, cancelStarted, cancelError, completionSucceeded, completionBytes,
+  completionError, timedOut,
+}) {
+  const cancelSettled = cancelStarted === true || cancelError === 'not_found';
+  const completionSettled = completionSucceeded === true
+    ? completionBytes === 0
+    : ['operation_aborted', 'broken_pipe', 'pipe_not_connected'].includes(completionError);
+  if (settled !== true || !cancelSettled || !completionSettled)
+    return 'io_cancel_failed';
+  return timedOut === true ? 'io_timeout' : 'transport_closed';
+}
+
+export function modelParsedBootstrapSecretLifetime({ valid }) {
+  const parsedKey = new Uint8Array(32).fill(0xa5);
+  const parsedNonce = new Uint8Array(16).fill(0x5a);
+  const outputKey = new Uint8Array(32);
+  const outputNonce = new Uint8Array(16);
+  if (valid === true) {
+    outputKey.set(parsedKey);
+    outputNonce.set(parsedNonce);
+  }
+  parsedKey.fill(0);
+  parsedNonce.fill(0);
+  return { accepted: valid === true, parsedKey, parsedNonce, outputKey, outputNonce };
+}
 function keyBytes(value) {
   if (!(value instanceof Uint8Array) || value.byteLength !== 32) fail('bootstrap_invalid');
   return Buffer.from(value);
@@ -156,40 +193,52 @@ export class ActionJournalHelperReference {
     if (this.closed || this.store !== null) fail('bootstrap_invalid');
     const observedIssuer = exactIssuer(issuer);
     if (!sameIssuer(observedIssuer, this.expectedIssuer)) fail('bootstrap_issuer_untrusted');
-    const probe = async phase => {
+    const probe = async (phase, scanIndex = null) => {
       if (signal?.aborted) fail('io_cancel_failed');
       if (!Number.isSafeInteger(deadlineAtMs) || this.now() >= deadlineAtMs) fail('io_timeout');
-      if (onStorageIo) await onStorageIo(phase);
+      if (onStorageIo) await onStorageIo(phase, scanIndex);
       if (signal?.aborted) fail('io_cancel_failed');
       if (this.now() >= deadlineAtMs) fail('io_timeout');
     };
     await probe('before_startup_scan');
-    this.store = ActionJournalContainerReference.open(this.device);
-    const initial = this.store.summary();
-    for (const summary of initial.records) {
-      await probe('during_startup_scan');
-      const detail = this.store.detail(summary.operation_id);
-      if (!detail.events.every(validatePersistedAuthority)) fail('container_corrupt_bank');
-      const previous = detail.events.at(-1);
-      const recovery = startupRecovery(previous.state);
-      if (recovery.state === previous.state) continue;
-      const event = eventFor(
-        summary.operation_id,
-        previous,
-        'startup_recovery',
-        {},
-        recovery.state,
-        previous.authorization_kind,
-        recovery.resolution,
-      );
-      this.commitInProgress = true;
-      try {
-        await probe('before_startup_recovery_append');
-        await this.store.append(summary.operation_id, event, { onBoundary });
-        await probe('after_startup_recovery_append');
+    if (onStorageIo || signal) {
+      for (let bank = 0; bank < 1024 * 2; bank++)
+        await probe('during_startup_scan', bank);
+    }
+    const opened = ActionJournalContainerReference.open(this.device);
+    await probe('after_startup_scan');
+    this.store = opened;
+    try {
+      const initial = this.store.summary();
+      for (const summary of initial.records) {
+        await probe('during_startup_recovery');
+        const detail = this.store.detail(summary.operation_id);
+        if (!detail.events.every(validatePersistedAuthority)) fail('container_corrupt_bank');
+        const previous = detail.events.at(-1);
+        const recovery = startupRecovery(previous.state);
+        if (recovery.state === previous.state) continue;
+        const event = eventFor(
+          summary.operation_id,
+          previous,
+          'startup_recovery',
+          {},
+          recovery.state,
+          previous.authorization_kind,
+          recovery.resolution,
+        );
+        this.commitInProgress = true;
+        try {
+          await probe('before_startup_recovery_append');
+          await this.store.append(summary.operation_id, event, { onBoundary });
+          await probe('after_startup_recovery_append');
+        }
+        finally { this.commitInProgress = false; }
+        this.recoveryCount++;
       }
-      finally { this.commitInProgress = false; }
-      this.recoveryCount++;
+      await probe('after_startup_recovery');
+    } catch (error) {
+      this.store = null;
+      throw error;
     }
     return Object.freeze({ production_enabled: false, recovery_count: this.recoveryCount, status: 'unavailable' });
   }
