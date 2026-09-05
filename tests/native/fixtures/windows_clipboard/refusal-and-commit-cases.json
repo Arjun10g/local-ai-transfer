@@ -1,0 +1,336 @@
+{
+  "cases": [
+    {
+      "expected_status": "platform_unavailable",
+      "expected_trace": [],
+      "name": "all_production_gates_false",
+      "state": {"capability": false, "gates": false, "operation": "write"}
+    },
+    {
+      "expected_status": "capability_refused",
+      "expected_trace": ["validate_capability"],
+      "name": "malformed_capability_before_os",
+      "state": {"capability": false, "gates": true, "operation": "write"}
+    },
+    {
+      "expected_status": "capability_refused",
+      "expected_trace": ["validate_capability"],
+      "name": "forged_or_tampered_capability_mac",
+      "state": {"gates": true, "mac": false, "operation": "write"}
+    },
+    {
+      "expected_status": "capability_refused",
+      "expected_trace": ["validate_capability"],
+      "name": "valid_mac_replayed_after_bound_field_tamper",
+      "state": {"gates": true, "mac": false, "operation": "read"}
+    },
+    {
+      "expected_status": "session_refused",
+      "expected_trace": ["validate_capability", "verify_interactive_identity"],
+      "name": "noninteractive_session",
+      "state": {"gates": true, "operation": "read", "session": false}
+    },
+    {
+      "expected_status": "cancelled",
+      "expected_trace": ["validate_capability", "verify_interactive_identity", "check_cancel_deadline"],
+      "name": "cancel_before_open",
+      "state": {"cancelled": true, "gates": true, "operation": "read"}
+    },
+    {
+      "expected_status": "deadline_exceeded",
+      "expected_trace": ["validate_capability", "verify_interactive_identity", "check_cancel_deadline", "open_clipboard_bounded"],
+      "name": "bounded_open_deadline",
+      "state": {"gates": true, "open": false, "operation": "read"}
+    },
+    {
+      "expected_status": "session_refused",
+      "expected_trace": ["validate_capability", "verify_interactive_identity", "check_cancel_deadline", "open_clipboard_bounded", "revalidate_identity_after_open"],
+      "name": "input_desktop_switched_after_open",
+      "state": {"gates": true, "operation": "read", "post_open_identity": false}
+    },
+    {
+      "expected_status": "capability_refused",
+      "expected_trace": ["validate_capability", "verify_interactive_identity", "check_cancel_deadline", "prepare_global_memory", "open_clipboard_bounded", "compare_confirmed_sequence"],
+      "name": "clipboard_changed_after_confirmation",
+      "state": {"gates": true, "operation": "write", "sequence": false}
+    },
+    {
+      "expected_status": "already_dispatched",
+      "expected_trace": ["validate_capability", "verify_interactive_identity", "check_cancel_deadline", "prepare_global_memory", "open_clipboard_bounded", "compare_confirmed_sequence", "durable_dispatch"],
+      "name": "replayed_write_never_mutates",
+      "state": {"dispatch": "already", "gates": true, "operation": "write"}
+    },
+    {
+      "expected_status": "journal_unavailable",
+      "expected_trace": ["validate_capability", "verify_interactive_identity", "check_cancel_deadline", "prepare_global_memory", "open_clipboard_bounded", "compare_confirmed_sequence", "durable_dispatch"],
+      "name": "dispatch_failure_never_mutates",
+      "state": {"dispatch": "unavailable", "gates": true, "operation": "write"}
+    },
+    {
+      "expected_status": "session_refused",
+      "expected_trace": ["validate_capability", "verify_interactive_identity", "check_cancel_deadline", "prepare_global_memory", "open_clipboard_bounded", "compare_confirmed_sequence", "durable_dispatch", "revalidate_identity_before_mutation", "durable_failed_before_mutation"],
+      "name": "desktop_object_replaced_before_empty",
+      "state": {"gates": true, "operation": "write", "pre_mutation_identity": false}
+    },
+    {
+      "expected_status": "clipboard_busy",
+      "expected_trace": ["validate_capability", "verify_interactive_identity", "check_cancel_deadline", "prepare_global_memory", "open_clipboard_bounded", "compare_confirmed_sequence", "durable_dispatch", "empty_all_confirmed_formats", "durable_mutation_attempt_failed"],
+      "name": "empty_failure_is_durably_definitive",
+      "state": {"empty": false, "gates": true, "operation": "write"}
+    },
+    {
+      "expected_status": "mutation_unknown",
+      "expected_trace": ["validate_capability", "verify_interactive_identity", "check_cancel_deadline", "prepare_global_memory", "open_clipboard_bounded", "compare_confirmed_sequence", "durable_dispatch", "empty_all_confirmed_formats", "durable_mutation_attempt_failed", "revalidate_identity_after_journal_outcome"],
+      "name": "desktop_switch_during_failed_empty_outcome_persistence",
+      "state": {"empty": false, "gates": true, "operation": "write", "post_journal_identity": false}
+    },
+    {
+      "expected_status": "mutation_unknown",
+      "expected_trace": ["validate_capability", "verify_interactive_identity", "check_cancel_deadline", "prepare_global_memory", "open_clipboard_bounded", "compare_confirmed_sequence", "durable_dispatch", "empty_all_confirmed_formats", "set_unicode_text", "durable_failed_after_mutation"],
+      "name": "set_failure_after_clear_is_never_replayed",
+      "state": {"gates": true, "operation": "write", "set": false}
+    },
+    {
+      "expected_status": "mutation_unknown",
+      "expected_trace": ["validate_capability", "verify_interactive_identity", "check_cancel_deadline", "prepare_global_memory", "open_clipboard_bounded", "compare_confirmed_sequence", "durable_dispatch", "empty_all_confirmed_formats", "set_unicode_text", "revalidate_identity_before_close", "durable_unknown_outcome"],
+      "name": "desktop_object_replaced_before_final_close",
+      "state": {"final_identity": false, "gates": true, "operation": "write"}
+    },
+    {
+      "expected_status": "mutation_unknown",
+      "expected_trace": ["validate_capability", "verify_interactive_identity", "check_cancel_deadline", "prepare_global_memory", "open_clipboard_bounded", "compare_confirmed_sequence", "durable_dispatch", "empty_all_confirmed_formats", "set_unicode_text", "close_and_correlate_sequence", "durable_unknown_outcome"],
+      "name": "sequence_ambiguity_after_set",
+      "state": {"gates": true, "operation": "write", "sequence_after": false}
+    },
+    {
+      "expected_status": "mutation_unknown",
+      "expected_trace": ["validate_capability", "verify_interactive_identity", "check_cancel_deadline", "prepare_global_memory", "open_clipboard_bounded", "compare_confirmed_sequence", "durable_dispatch", "empty_all_confirmed_formats", "set_unicode_text", "close_and_correlate_sequence", "durable_applied_outcome"],
+      "name": "outcome_persistence_failure",
+      "state": {"gates": true, "operation": "write", "outcome_saved": false}
+    },
+    {
+      "expected_status": "ok",
+      "expected_trace": ["validate_capability", "verify_interactive_identity", "check_cancel_deadline", "prepare_global_memory", "open_clipboard_bounded", "compare_confirmed_sequence", "durable_dispatch", "empty_all_confirmed_formats", "set_unicode_text", "close_and_correlate_sequence", "durable_applied_outcome", "publish_redacted_receipt"],
+      "name": "exact_write_commit",
+      "state": {"gates": true, "operation": "write"}
+    },
+    {
+      "expected_status": "ok",
+      "expected_trace": ["validate_capability", "verify_interactive_identity", "journal_lookup_applied"],
+      "name": "lost_ack_uses_durable_applied_record",
+      "state": {"gates": true, "journal_state": "applied", "operation": "query"}
+    },
+    {
+      "expected_status": "mutation_unknown",
+      "expected_trace": ["validate_capability", "verify_interactive_identity", "journal_lookup_applied", "revalidate_identity_after_journal_lookup"],
+      "name": "desktop_switch_during_journal_lookup",
+      "state": {"gates": true, "journal_state": "applied", "operation": "query", "post_journal_identity": false}
+    },
+    {
+      "expected_status": "postcondition_present_manual",
+      "expected_trace": ["validate_capability", "verify_interactive_identity", "journal_lookup_dispatched", "read_current_postcondition", "manual_no_replay"],
+      "name": "dispatched_only_matching_content_remains_manual",
+      "state": {"content_matches": true, "gates": true, "journal_state": "dispatched", "operation": "query"}
+    },
+    {
+      "expected_status": "postcondition_absent_manual",
+      "expected_trace": ["validate_capability", "verify_interactive_identity", "journal_lookup_dispatched", "read_current_postcondition", "manual_no_replay"],
+      "name": "dispatched_only_missing_content_remains_manual",
+      "state": {"content_matches": false, "gates": true, "journal_state": "dispatched", "operation": "query"}
+    },
+    {
+      "expected_status": "mutation_unknown",
+      "expected_trace": ["validate_capability", "verify_interactive_identity", "check_cancel_deadline", "prepare_global_memory", "open_clipboard_bounded", "compare_confirmed_sequence", "durable_dispatch", "empty_all_confirmed_formats", "set_unicode_text", "close_and_correlate_sequence", "durable_applied_outcome", "revalidate_identity_after_journal_outcome"],
+      "name": "desktop_switch_after_applied_outcome_persistence",
+      "state": {"gates": true, "operation": "write", "post_journal_identity": false}
+    }
+  ],
+  "fixture_only": true,
+  "mutation_attempt_cases": [
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "durable_start_only_not_dispatched",
+      "state": {"journal_state": "not_dispatched"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "journal_lookup_failure_after_operation_id",
+      "state": {"lookup_result": "failure"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "journal_lookup_unavailable_after_operation_id",
+      "state": {"lookup_result": "unavailable"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "crash_after_dispatch_before_marker",
+      "state": {"journal_state": "dispatched"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "crash_inside_empty_after_marker",
+      "state": {"journal_state": "mutation_prepared"}
+    },
+    {
+      "expected_mutation_attempt_state": "attempted",
+      "name": "empty_returned_failure",
+      "state": {"journal_state": "mutation_attempt_failed"}
+    },
+    {
+      "expected_mutation_attempt_state": "attempted",
+      "name": "applied_terminal",
+      "state": {"journal_state": "applied"}
+    },
+    {
+      "expected_mutation_attempt_state": "attempted",
+      "name": "unknown_after_mutation_terminal",
+      "state": {"journal_state": "unknown_after_mutation"}
+    },
+    {
+      "expected_mutation_attempt_state": "not_attempted",
+      "name": "failed_before_mutation_terminal",
+      "state": {"journal_state": "failed_before_mutation"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "corrupt_failed_before_record",
+      "state": {"corrupt": true, "journal_state": "failed_before_mutation"}
+    }
+  ],
+  "post_dispatch_return_cases": [
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "dispatch_ack_then_identity_lost",
+      "state": {"dispatch": "dispatched", "identity_after_dispatch": false}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "already_dispatched",
+      "state": {"dispatch": "already", "identity_after_dispatch": true}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "unavailable_may_be_lost_ack",
+      "state": {"dispatch": "unavailable", "identity_after_dispatch": true}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "refused_may_be_lost_ack",
+      "state": {"dispatch": "refused", "identity_after_dispatch": true}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "invalid_dispatch_enum",
+      "state": {"dispatch": "invalid", "identity_after_dispatch": true}
+    },
+    {
+      "expected_mutation_attempt_state": "not_attempted",
+      "name": "unavailable_with_exact_durable_negative",
+      "state": {"dispatch": "unavailable", "exact_failed_before": true, "identity_after_dispatch": true}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "mutation_prepare_persistence_failure",
+      "state": {"dispatch": "dispatched", "identity_after_dispatch": true, "stage": "prepared_persist_failed"}
+    },
+    {
+      "expected_mutation_attempt_state": "not_attempted",
+      "name": "exact_failed_before_after_dispatch",
+      "state": {"dispatch": "dispatched", "exact_failed_before": true, "identity_after_dispatch": true, "stage": "failed_before"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "crash_after_mutation_prepared",
+      "state": {"dispatch": "dispatched", "identity_after_dispatch": true, "stage": "prepared_crash"}
+    },
+    {
+      "expected_mutation_attempt_state": "attempted",
+      "name": "emptyclipboard_returned_failure",
+      "state": {"dispatch": "dispatched", "identity_after_dispatch": true, "stage": "empty_returned"}
+    },
+    {
+      "expected_mutation_attempt_state": "attempted",
+      "name": "applied_terminal",
+      "state": {"dispatch": "dispatched", "identity_after_dispatch": true, "stage": "applied"}
+    }
+  ],
+  "query_dependency_cases": [
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "activation_unavailable_before_pointer_access",
+      "state": {"activation": false}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "missing_capability",
+      "state": {"capability": "missing"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "missing_context_for_write_capability",
+      "state": {"capability": "write", "context": false}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "missing_journal_for_write_capability",
+      "state": {"capability": "write", "journal": false}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "capability_authentication_failure",
+      "state": {"authenticated": false, "capability": "write"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "deadline_before_lookup",
+      "state": {"capability": "write", "deadline": false}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "lookup_failure",
+      "state": {"capability": "write", "lookup_result": "failure"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "corrupt_lookup",
+      "state": {"capability": "write", "corrupt": true, "journal_state": "failed_before_mutation"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "not_dispatched_is_not_terminal_negative",
+      "state": {"capability": "write", "journal_state": "not_dispatched"}
+    },
+    {
+      "expected_mutation_attempt_state": "not_attempted",
+      "name": "exact_durable_failed_before",
+      "state": {"capability": "write", "journal_state": "failed_before_mutation"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "durable_dispatch_only",
+      "state": {"capability": "write", "journal_state": "dispatched"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "durable_mutation_prepared",
+      "state": {"capability": "write", "journal_state": "mutation_prepared"}
+    },
+    {
+      "expected_mutation_attempt_state": "attempted",
+      "name": "durable_mutation_attempt_failed",
+      "state": {"capability": "write", "journal_state": "mutation_attempt_failed"}
+    },
+    {
+      "expected_mutation_attempt_state": "attempted",
+      "name": "durable_applied",
+      "state": {"capability": "write", "journal_state": "applied"}
+    },
+    {
+      "expected_mutation_attempt_state": "attempted",
+      "name": "durable_unknown_after_mutation",
+      "state": {"capability": "write", "journal_state": "unknown_after_mutation"}
+    }
+  ],
+  "schema": "lae.windows-clipboard-static-cases.v1"
+}

@@ -1,0 +1,154 @@
+{
+  "$id": "lae://contracts/windows-clipboard/0.1.0",
+  "activation": {
+    "authenticated_capability_issuer_available": false,
+    "cancellable_clipboard_io_available": false,
+    "cmake_target_present": false,
+    "durable_journal_available": false,
+    "host_import_present": false,
+    "package_entry_present": false,
+    "production_available": false,
+    "supervisor_identity_available": false,
+    "target_acceptance_passed": false
+  },
+  "capability": {
+    "authority": "opaque_future_broker_issuer_only",
+    "bound_fields": [
+      "authority_nonce",
+      "confirmation_digest",
+      "confirmed_sequence_number",
+      "content_digest",
+      "expires_monotonic_ms",
+      "interactive_session_id",
+      "issued_monotonic_ms",
+      "operation",
+      "operation_id",
+      "replace_all_formats_confirmed",
+      "request_digest",
+      "session_id"
+    ],
+    "caller_constructible": false,
+    "issuer_key_exposed": false,
+    "mac_algorithm": "HMAC-SHA-256",
+    "mac_frame_encoding": "domain_then_exact_bound_fields_binary_le_lengths_and_integers",
+    "maximum_lifetime_ms": 5000,
+    "runtime_override": false,
+    "verification": "trusted_nonconstructible_authority_recomputes_then_constant_time_compares"
+  },
+  "confirmation": {
+    "read_tier": "T1",
+    "write_preview_must_disclose": "replacement clears every existing clipboard format, not only text",
+    "write_requires_exact_sequence": true,
+    "write_requires_replace_all_formats": true,
+    "write_tier": "T2"
+  },
+  "interface": {
+    "implementation": "direct_win32_no_subprocess",
+    "operations": [
+      "clipboard.read",
+      "clipboard.write"
+    ],
+    "reconciliation_query": "clipboard.write.status",
+    "transport": "none"
+  },
+  "journal_order": [
+    "validate_exact_capability_confirmation_and_content",
+    "prepare_and_lock_then_unlock_owned_global_memory",
+    "open_clipboard_and_validate_exact_confirmed_sequence",
+    "durably_dispatch_exact_operation",
+    "enter_noncancellable_commit",
+    "durably_record_mutation_prepared_before_first_emptyclipboard",
+    "revalidate_retained_desktop_identity_immediately_before_mutation",
+    "empty_all_confirmed_formats",
+    "set_cf_unicodetext_and_transfer_ownership",
+    "revalidate_retained_desktop_identity_before_and_after_close",
+    "close_clipboard_and_correlate_sequence",
+    "durably_record_typed_outcome",
+    "publish_redacted_receipt"
+  ],
+  "limits": {
+    "deadline_ms": 5000,
+    "identifier_bytes": 128,
+    "open_retry_initial_ms": 5,
+    "open_retry_maximum_ms": 80,
+    "utf16_allocation_bytes": 131074,
+    "utf8_text_bytes": 65536
+  },
+  "os_surface": {
+    "clipboard_format": "CF_UNICODETEXT_only",
+    "desktop": "active_console_WinSta0_Default_only",
+    "desktop_identity": "retained_station_and_desktop_handles_plus_bounded_security_descriptor_fingerprints_and_UOI_IO",
+    "network": false,
+    "process_creation": false,
+    "shell": false
+  },
+  "receipt": {
+    "allowed_fields": [
+      "content_logged",
+      "journal_dispatch_durable",
+      "journal_mutation_prepared_durable",
+      "journal_outcome_durable",
+      "mutation_attempt_state",
+      "operation",
+      "sensitive",
+      "sequence_after",
+      "sequence_before",
+      "status",
+      "utf8_bytes"
+    ],
+    "clipboard_content_allowed": false,
+    "content_digests_allowed": false,
+    "mutation_attempt_state_semantics": {
+      "attempted": "live_EmptyClipboard_returned_or_durable_terminal_requires_invocation",
+      "may_have_been_attempted": "durable_dispatch_or_mutation_prepared_without_terminal_evidence",
+      "not_attempted": "exact_durable_failed_before_mutation_only"
+    },
+    "mutation_attempt_state_table": {
+      "corrupt_or_unknown_lookup": "may_have_been_attempted",
+      "durable_applied": "attempted",
+      "durable_dispatch_only": "may_have_been_attempted",
+      "durable_failed_before_mutation": "not_attempted",
+      "durable_mutation_attempt_failed": "attempted",
+      "durable_mutation_prepared": "may_have_been_attempted",
+      "durable_start_not_dispatched": "may_have_been_attempted",
+      "durable_unknown_after_mutation": "attempted",
+      "lookup_failure_or_unavailable": "may_have_been_attempted"
+    },
+    "mutation_attempt_state_values": [
+      "attempted",
+      "may_have_been_attempted",
+      "not_attempted"
+    ],
+    "raw_win32_errors_allowed": false
+  },
+  "reconciliation": {
+    "applied_requires": "durable exact operation-bound applied outcome",
+    "dispatched_only_exact_postcondition": "manual_resolution_no_replay",
+    "failed_before_negative_requires": "successful_exact_readback_of_durable_failed_before_mutation_state",
+    "lookup_failure_attempt_state": "may_have_been_attempted",
+    "mutation_prepared_exact_postcondition": "manual_resolution_no_replay",
+    "repeats_write": false,
+    "sequence_and_content_are_compared": true
+  },
+  "schema_version": "lae.windows-clipboard-boundary.v0.1.0",
+  "status": "SOURCE_ONLY_NOT_READY",
+  "status_codes": [
+    "already_dispatched",
+    "cancelled",
+    "capability_refused",
+    "clipboard_busy",
+    "deadline_exceeded",
+    "format_unavailable",
+    "internal_failure",
+    "invalid_request",
+    "invalid_text",
+    "journal_unavailable",
+    "mutation_unknown",
+    "ok",
+    "output_limit",
+    "platform_unavailable",
+    "postcondition_absent_manual",
+    "postcondition_present_manual",
+    "session_refused"
+  ]
+}
