@@ -16,7 +16,9 @@
     "durable_journal_authority": false,
     "nested_job_policy_proven": false,
     "broker_issued_identity_proven": false,
-    "retained_executing_section_identity_proven": false
+    "retained_executing_section_identity_proven": false,
+    "retained_working_directory_identity_proven": false,
+    "supervisor_owned_process_transaction_accepted": false
   },
   "transport": {
     "kind": "loopback_metadata_only",

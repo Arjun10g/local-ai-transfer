@@ -12,11 +12,16 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <map>
 #include <mutex>
 #include <limits>
+#include <memory>
+#include <new>
 #include <set>
+#include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 // This translation unit is intentionally absent from native/CMakeLists.txt.
@@ -27,6 +32,7 @@ namespace {
 
 constexpr DWORD kWaitSliceMs = 250;
 constexpr DWORD kMaxWaitMs = 120000;
+constexpr std::uint64_t kMaxCleanupHorizonMs = 2ull * kMaxWaitMs;
 // One direct root Job is the only supported containment model.  The registry
 // and the Job capacity intentionally share one limit.
 constexpr std::size_t kMaxChildren = 8;
@@ -34,6 +40,8 @@ constexpr std::size_t kMaxFrameBytes = 65536;
 constexpr std::size_t kCapabilityBytes = 32;
 constexpr std::size_t kMaxDigestBytes = 32;
 constexpr std::size_t kMaxJournalRecords = 64;
+constexpr std::size_t kMaxCapturedBytesPerStream = 64 * 1024;
+constexpr DWORD kWorkerSettlementMs = 2000;
 // Each operation needs one durable start plus one durable terminal/unknown
 // record. Reserve both sequence numbers before invoking provider code.
 constexpr std::uint64_t kRequiredJournalSequences = 2;
@@ -212,11 +220,89 @@ class UniqueHandle final {
   HANDLE value_ = INVALID_HANDLE_VALUE;
 };
 
+struct DrainContext final {
+  HANDLE source = INVALID_HANDLE_VALUE;
+  HANDLE cancellation = nullptr;
+  std::mutex* mutation_fence = nullptr;
+  const std::atomic<bool>* shutting_down = nullptr;
+  const std::atomic<bool>* poisoned = nullptr;
+  std::uint64_t deadline_at_ms = 0;
+  std::array<std::byte, kMaxCapturedBytesPerStream> bytes{};
+  DWORD limit = 0;
+  std::atomic<DWORD> captured{0};
+  std::atomic<DWORD> error{ERROR_IO_PENDING};
+  std::atomic<bool> overflow{false};
+
+  ~DrainContext() { SecureZeroMemory(bytes.data(), bytes.size()); }
+};
+
+bool drain_result_usable_locked(const DrainContext& context) noexcept {
+  return context.mutation_fence && context.shutting_down && context.poisoned &&
+      !context.shutting_down->load(std::memory_order_acquire) &&
+      !context.poisoned->load(std::memory_order_acquire) &&
+      GetTickCount64() < context.deadline_at_ms &&
+      (!context.cancellation ||
+       WaitForSingleObject(context.cancellation, 0) == WAIT_TIMEOUT);
+}
+
+// CreateThread receives a raw context pointer. This owner therefore refuses
+// normal destruction while that pointer could still be in use. The context is
+// freed only before a worker starts or after its thread was joined and proven
+// stopped.
+class DrainContextOwner final {
+ public:
+  DrainContextOwner() = default;
+  ~DrainContextOwner() {
+    if (context_) std::terminate();
+  }
+  DrainContextOwner(const DrainContextOwner&) = delete;
+  DrainContextOwner& operator=(const DrainContextOwner&) = delete;
+  DrainContextOwner(DrainContextOwner&& other) noexcept
+      : context_(std::exchange(other.context_, nullptr)) {}
+  DrainContextOwner& operator=(DrainContextOwner&& other) noexcept {
+    if (context_) std::terminate();
+    context_ = std::exchange(other.context_, nullptr);
+    return *this;
+  }
+
+  bool allocate() noexcept {
+    if (context_) return false;
+    context_ = new (std::nothrow) DrainContext();
+    return context_ != nullptr;
+  }
+  explicit operator bool() const noexcept { return context_ != nullptr; }
+  DrainContext* get() const noexcept { return context_; }
+  DrainContext* operator->() const noexcept { return context_; }
+
+  void discard_before_worker_start() noexcept {
+    DrainContext* context = std::exchange(context_, nullptr);
+    delete context;
+  }
+  void release_after_join() noexcept {
+    DrainContext* context = std::exchange(context_, nullptr);
+    delete context;
+  }
+
+ private:
+  DrainContext* context_ = nullptr;
+};
+
 struct Child final {
   UniqueHandle process;
+  UniqueHandle primary_thread;
+  UniqueHandle stdout_read;
+  UniqueHandle stderr_read;
+  UniqueHandle stdout_worker;
+  UniqueHandle stderr_worker;
+  DrainContextOwner stdout_context;
+  DrainContextOwner stderr_context;
   FixedIdentity executable{};
   std::uint64_t stable_id = 0;
   bool membership_verified = false;
+  bool resumed = false;
+  bool output_overflow = false;
+  std::uint32_t stdout_bytes = 0;
+  std::uint32_t stderr_bytes = 0;
   Child() = default;
   Child(const Child&) = delete;
   Child& operator=(const Child&) = delete;
@@ -833,18 +919,23 @@ bool root_job_policy_proven(HANDLE root_job) noexcept {
       !kNestedJobPolicyProven;
 }
 
-bool wait_reaped(HANDLE process, DWORD deadline_ms,
-                 HANDLE cancellation = nullptr) noexcept {
-  if (!process || deadline_ms > kMaxWaitMs) return false;
-  const ULONGLONG deadline = GetTickCount64() + deadline_ms;
-  while (GetTickCount64() < deadline) {
+bool cleanup_deadline_valid(std::uint64_t deadline_at_ms) noexcept {
+  const std::uint64_t now = GetTickCount64();
+  return deadline_at_ms > now &&
+      deadline_at_ms - now <= kMaxCleanupHorizonMs;
+}
+
+bool wait_reaped_until(HANDLE process, std::uint64_t deadline_at_ms,
+                       HANDLE cancellation = nullptr) noexcept {
+  if (!process || !cleanup_deadline_valid(deadline_at_ms)) return false;
+  while (GetTickCount64() < deadline_at_ms) {
     const ULONGLONG now = GetTickCount64();
-    const DWORD remaining = static_cast<DWORD>(deadline - now);
+    const DWORD remaining = static_cast<DWORD>(deadline_at_ms - now);
     const DWORD wait_ms = (remaining < kWaitSliceMs) ? remaining : kWaitSliceMs;
     HANDLE handles[2] = {process, cancellation};
     const DWORD count = cancellation ? 2u : 1u;
     const DWORD result = WaitForMultipleObjects(count, handles, FALSE, wait_ms);
-    if (result == WAIT_OBJECT_0) return true;
+    if (result == WAIT_OBJECT_0) return GetTickCount64() < deadline_at_ms;
     if (cancellation && result == WAIT_OBJECT_0 + 1) return false;
     if (result != WAIT_TIMEOUT) return false;
   }
@@ -860,12 +951,192 @@ bool job_empty(HANDLE job) noexcept {
   return info.ActiveProcesses == 0;
 }
 
+bool wait_job_empty_until(HANDLE root_job,
+                          std::uint64_t deadline_at_ms) noexcept {
+  if (!root_job || !cleanup_deadline_valid(deadline_at_ms)) return false;
+  do {
+    const std::uint64_t now = GetTickCount64();
+    if (now >= deadline_at_ms) return false;
+    if (job_empty(root_job)) return GetTickCount64() < deadline_at_ms;
+    Sleep(static_cast<DWORD>(std::min<std::uint64_t>(kWaitSliceMs,
+                                                     deadline_at_ms - now)));
+  } while (true);
+}
+
+DWORD WINAPI drain_child_pipe(void* opaque) noexcept {
+  auto* context = static_cast<DrainContext*>(opaque);
+  if (!context || !context->source || context->source == INVALID_HANDLE_VALUE ||
+      !context->mutation_fence || !context->shutting_down ||
+      !context->poisoned)
+    return ERROR_INVALID_HANDLE;
+  DWORD total = 0;
+  for (;;) {
+    if (context->limit == 0 || context->limit > context->bytes.size()) {
+      context->error.store(ERROR_INVALID_DATA, std::memory_order_release);
+      return ERROR_INVALID_DATA;
+    }
+    if (total == context->limit) {
+      // Probe one byte without appending it. Exact-limit output followed by
+      // EOF is valid; only an actual additional byte is overflow.
+      std::byte probe{};
+      DWORD read = 0;
+      if (!ReadFile(context->source, &probe, 1, &read, nullptr)) {
+        const DWORD error = GetLastError();
+        SecureZeroMemory(&probe, sizeof(probe));
+        std::lock_guard fence(*context->mutation_fence);
+        if (!drain_result_usable_locked(*context)) {
+          context->error.store(ERROR_OPERATION_ABORTED,
+                               std::memory_order_release);
+          return ERROR_OPERATION_ABORTED;
+        }
+        if (error == ERROR_BROKEN_PIPE || error == ERROR_HANDLE_EOF) {
+          context->captured.store(total, std::memory_order_release);
+          context->error.store(ERROR_SUCCESS, std::memory_order_release);
+          return ERROR_SUCCESS;
+        }
+        context->error.store(error, std::memory_order_release);
+        return error;
+      }
+      {
+        std::lock_guard fence(*context->mutation_fence);
+        if (!drain_result_usable_locked(*context)) {
+          SecureZeroMemory(&probe, sizeof(probe));
+          context->error.store(ERROR_OPERATION_ABORTED,
+                               std::memory_order_release);
+          return ERROR_OPERATION_ABORTED;
+        }
+        SecureZeroMemory(&probe, sizeof(probe));
+        if (read == 0) {
+          context->captured.store(total, std::memory_order_release);
+          context->error.store(ERROR_SUCCESS, std::memory_order_release);
+          return ERROR_SUCCESS;
+        }
+        context->overflow.store(true, std::memory_order_release);
+        context->error.store(ERROR_BUFFER_OVERFLOW, std::memory_order_release);
+      }
+      return ERROR_BUFFER_OVERFLOW;
+    }
+    DWORD read = 0;
+    const DWORD room = context->limit - total;
+    if (!ReadFile(context->source, context->bytes.data() + total, room,
+                  &read, nullptr)) {
+      const DWORD error = GetLastError();
+      std::lock_guard fence(*context->mutation_fence);
+      if (!drain_result_usable_locked(*context)) {
+        context->error.store(ERROR_OPERATION_ABORTED,
+                             std::memory_order_release);
+        return ERROR_OPERATION_ABORTED;
+      }
+      if (error == ERROR_BROKEN_PIPE || error == ERROR_HANDLE_EOF) {
+        context->captured.store(total, std::memory_order_release);
+        context->error.store(ERROR_SUCCESS, std::memory_order_release);
+        return ERROR_SUCCESS;
+      }
+      context->captured.store(total, std::memory_order_release);
+      context->error.store(error, std::memory_order_release);
+      return error;
+    }
+    {
+      std::lock_guard fence(*context->mutation_fence);
+      if (!drain_result_usable_locked(*context)) {
+        SecureZeroMemory(context->bytes.data() + total, read);
+        context->error.store(ERROR_OPERATION_ABORTED,
+                             std::memory_order_release);
+        return ERROR_OPERATION_ABORTED;
+      }
+      if (read == 0) {
+        context->captured.store(total, std::memory_order_release);
+        context->error.store(ERROR_SUCCESS, std::memory_order_release);
+        return ERROR_SUCCESS;
+      }
+      total += read;
+      context->captured.store(total, std::memory_order_release);
+    }
+  }
+}
+
+bool settle_drain_worker(UniqueHandle& worker, DrainContext* context,
+                         std::uint64_t deadline_at_ms) noexcept {
+  const std::uint64_t started = GetTickCount64();
+  if (!context || !worker || started >= deadline_at_ms) return false;
+  DWORD maximum_ms = static_cast<DWORD>(std::min<std::uint64_t>(
+      kWorkerSettlementMs, deadline_at_ms - started));
+  DWORD wait = WaitForSingleObject(worker.get(), 0);
+  if (wait == WAIT_TIMEOUT) {
+    // Cancel the exact worker thread that owns the synchronous ReadFile. Its
+    // heap context remains registry-owned until the thread is proven stopped.
+    if (!CancelSynchronousIo(worker.get()) && GetLastError() != ERROR_NOT_FOUND)
+      return false;
+    const std::uint64_t now = GetTickCount64();
+    if (now >= deadline_at_ms) return false;
+    maximum_ms = static_cast<DWORD>(std::min<std::uint64_t>(
+        maximum_ms, deadline_at_ms - now));
+    wait = WaitForSingleObject(worker.get(), maximum_ms);
+  }
+  if (wait != WAIT_OBJECT_0) return false;
+  if (GetTickCount64() >= deadline_at_ms) return false;
+  DWORD code = ERROR_GEN_FAILURE;
+  if (!GetExitCodeThread(worker.get(), &code) || code == STILL_ACTIVE)
+    return false;
+  if (GetTickCount64() >= deadline_at_ms) return false;
+  return code == ERROR_SUCCESS || code == ERROR_OPERATION_ABORTED ||
+      code == ERROR_BROKEN_PIPE || code == ERROR_HANDLE_EOF ||
+      code == ERROR_BUFFER_OVERFLOW || code == ERROR_INVALID_DATA;
+}
+
+bool settle_child_drains(Child& child,
+                         std::uint64_t deadline_at_ms) noexcept {
+  if (!child.stdout_worker && !child.stderr_worker &&
+      !child.stdout_context && !child.stderr_context) return true;
+  if (!child.stdout_worker || !child.stderr_worker ||
+      !child.stdout_context || !child.stderr_context) return false;
+  const bool stdout_settled = settle_drain_worker(
+      child.stdout_worker, child.stdout_context.get(), deadline_at_ms);
+  const bool stderr_settled = settle_drain_worker(
+      child.stderr_worker, child.stderr_context.get(), deadline_at_ms);
+  if (!stdout_settled || !stderr_settled) return false;
+  if (!child.stdout_context->mutation_fence ||
+      child.stdout_context->mutation_fence !=
+          child.stderr_context->mutation_fence) return false;
+  {
+    std::lock_guard fence(*child.stdout_context->mutation_fence);
+    const bool capture_usable =
+        drain_result_usable_locked(*child.stdout_context) &&
+        drain_result_usable_locked(*child.stderr_context);
+    child.stdout_bytes = capture_usable
+        ? child.stdout_context->captured.load(std::memory_order_acquire) : 0;
+    child.stderr_bytes = capture_usable
+        ? child.stderr_context->captured.load(std::memory_order_acquire) : 0;
+    child.output_overflow = capture_usable &&
+        (child.stdout_context->overflow.load(std::memory_order_acquire) ||
+         child.stderr_context->overflow.load(std::memory_order_acquire));
+    // Joined-worker handle/context release is cleanup: it remains mandatory
+    // after shutdown, but is serialized with all other cleanup mutations.
+    child.stdout_worker.reset();
+    child.stderr_worker.reset();
+    child.stdout_read.reset();
+    child.stderr_read.reset();
+    child.stdout_context.release_after_join();
+    child.stderr_context.release_after_join();
+  }
+  return true;
+}
+
 class ChildRegistry final {
  public:
-  bool insert(Child child, HANDLE root_job) noexcept {
+  using RegisteredOperation = bool (*)(Child&, HANDLE, void*) noexcept;
+  struct RegisteredOutcome final {
+    std::uint32_t stdout_bytes = 0;
+    std::uint32_t stderr_bytes = 0;
+    bool output_overflow = false;
+  };
+
+  bool insert(Child& child, HANDLE root_job) noexcept {
     std::lock_guard lock(mutex_);
     if (children_.size() >= kMaxChildren || child.stable_id == 0 ||
-        !child.process || !root_job ||
+        !child.process || !child.primary_thread || !child.stdout_read ||
+        !child.stderr_read || !child.stdout_context || !child.stderr_context ||
+        !root_job ||
         children_.find(child.stable_id) != children_.end())
       return false;
     // Never trust a caller-provided boolean: membership is queried against
@@ -873,12 +1144,46 @@ class ChildRegistry final {
     if (!verify_membership(child.process.get(), root_job)) return false;
     child.membership_verified = true;
     try {
-      auto [ignored, inserted] = children_.emplace(child.stable_id, std::move(child));
-      (void)ignored;
-      return inserted;
+      // Allocate and publish an empty slot before transferring any retained
+      // handle. If allocation fails, the caller still owns the complete
+      // suspended child and can terminate the root Job. Move assignment is
+      // noexcept, so a successful slot reservation cannot strand ownership
+      // between the caller and registry.
+      auto [slot, inserted] = children_.try_emplace(child.stable_id);
+      if (!inserted) return false;
+      slot->second = std::move(child);
+      return true;
     } catch (...) {
       return false;
     }
+  }
+
+  bool operate_and_unregister(std::uint64_t stable_id, HANDLE root_job,
+                              RegisteredOperation operation,
+                              void* context,
+                              std::uint64_t settlement_deadline_at_ms,
+                              std::mutex& cleanup_fence,
+                              RegisteredOutcome& outcome) noexcept {
+    std::lock_guard lock(mutex_);
+    const auto found = children_.find(stable_id);
+    if (found == children_.end() || !root_job || !operation ||
+        !verify_membership(found->second.process.get(), root_job)) return false;
+    Child& child = found->second;
+    if (!operation(child, root_job, context) ||
+        WaitForSingleObject(child.process.get(), 0) != WAIT_OBJECT_0 ||
+        !job_empty(root_job) ||
+        !settle_child_drains(child, settlement_deadline_at_ms)) return false;
+    outcome.stdout_bytes = child.stdout_bytes;
+    outcome.stderr_bytes = child.stderr_bytes;
+    outcome.output_overflow = child.output_overflow;
+    {
+      // Registry detachment is a cleanup mutation. It is serialized with
+      // shutdown/forward mutations but is intentionally permitted after a
+      // shutdown request once all waits and ownership proofs have completed.
+      std::lock_guard fence(cleanup_fence);
+      children_.erase(found);
+    }
+    return true;
   }
 
   static bool verify_membership(HANDLE process, HANDLE root_job) noexcept {
@@ -887,69 +1192,106 @@ class ChildRegistry final {
     return IsProcessInJob(process, root_job, &in_job) != FALSE && in_job != FALSE;
   }
 
-  bool unregister(std::uint64_t stable_id, HANDLE root_job) noexcept {
+  bool terminate_root_once(HANDLE root_job,
+                           std::mutex& cleanup_fence) noexcept {
+    std::lock_guard lock(mutex_);
+    return terminate_root_once_locked(root_job, cleanup_fence);
+  }
+
+  bool unregister(std::uint64_t stable_id, HANDLE root_job,
+                  std::mutex& cleanup_fence) noexcept {
     std::lock_guard lock(mutex_);
     const auto found = children_.find(stable_id);
     if (found == children_.end() ||
         WaitForSingleObject(found->second.process.get(), 0) != WAIT_OBJECT_0 ||
         !verify_membership(found->second.process.get(), root_job)) return false;
-    children_.erase(found);
+    {
+      std::lock_guard fence(cleanup_fence);
+      children_.erase(found);
+    }
     return true;
   }
 
   bool terminate_and_reap(std::uint64_t stable_id, HANDLE root_job,
-                          DWORD deadline_ms, HANDLE cancellation = nullptr) noexcept {
+                          std::uint64_t cleanup_deadline_at_ms,
+                          std::mutex& cleanup_fence,
+                          HANDLE cancellation = nullptr) noexcept {
     std::lock_guard lock(mutex_);
-    if (deadline_ms > kMaxWaitMs || !root_job) return false;
+    if (!root_job || !cleanup_deadline_valid(cleanup_deadline_at_ms)) return false;
     (void)cancellation;
     const auto found = children_.find(stable_id);
     if (found == children_.end()) return false;
     Child& child = found->second;
     // Once the root is terminated, cancellation cannot shorten mandatory
     // whole-tree reap. The hard deadline remains the only bound.
-    if (!TerminateJobObject(root_job, 1) ||
-        !wait_reaped(child.process.get(), deadline_ms, nullptr) ||
-        !job_empty(root_job)) return false;
-    children_.erase(found);
+    if (!terminate_root_once_locked(root_job, cleanup_fence)) return false;
+    if (!wait_reaped_until(child.process.get(), cleanup_deadline_at_ms, nullptr) ||
+        !wait_job_empty_until(root_job, cleanup_deadline_at_ms) ||
+        !settle_child_drains(child, cleanup_deadline_at_ms)) return false;
+    {
+      std::lock_guard fence(cleanup_fence);
+      children_.erase(found);
+    }
     return true;
   }
 
-  bool terminate_and_reap_all(HANDLE root_job, DWORD deadline_ms,
+  bool terminate_and_reap_all(HANDLE root_job,
+                              std::uint64_t cleanup_deadline_at_ms,
+                              std::mutex& cleanup_fence,
                               HANDLE cancellation = nullptr) noexcept {
     std::lock_guard lock(mutex_);
-    if (deadline_ms > kMaxWaitMs || !root_job) return false;
+    if (!root_job || !cleanup_deadline_valid(cleanup_deadline_at_ms)) return false;
     (void)cancellation;
-    const ULONGLONG end = GetTickCount64() + deadline_ms;
-    // Issue exactly one root termination. Repeating it per child can race the
-    // accounting query and falsely reject a tree that is still draining.
-    bool ok = TerminateJobObject(root_job, 1) != FALSE;
+    // Issue exactly one root termination. A retry continues proof/reaping
+    // without issuing a second root mutation.
+    bool ok = terminate_root_once_locked(root_job, cleanup_fence);
     for (auto& [ignored, child] : children_) {
       (void)ignored;
       const ULONGLONG now = GetTickCount64();
-      const DWORD remaining = now >= end
-                                  ? 0
-                                  : static_cast<DWORD>(end - now);
       // Cancellation is intentionally ignored during mandatory reap; returning
       // early here would leave a kill-on-close root live.
-      if (remaining == 0 || !wait_reaped(child.process.get(), remaining, nullptr))
+      if (now >= cleanup_deadline_at_ms ||
+          !wait_reaped_until(child.process.get(), cleanup_deadline_at_ms, nullptr))
         ok = false;
+      if (!settle_child_drains(child, cleanup_deadline_at_ms)) ok = false;
     }
-    if (!job_empty(root_job)) ok = false;
+    if (!wait_job_empty_until(root_job, cleanup_deadline_at_ms))
+      ok = false;
     return ok;
   }
 
-  void close_all() noexcept {
+  void close_all(std::mutex& cleanup_fence) noexcept {
     std::lock_guard lock(mutex_);
+    std::lock_guard fence(cleanup_fence);
     for (auto& [ignored, child] : children_) {
       (void)ignored;
+      if (child.stdout_worker || child.stderr_worker || child.stdout_context ||
+          child.stderr_context) {
+        // Destroying a live worker's heap context would be a UAF. A process
+        // fail-stop is safer than inventing a fresh cleanup deadline here.
+        std::terminate();
+      }
       child.process.reset();
     }
     children_.clear();
   }
 
  private:
+  bool terminate_root_once_locked(HANDLE root_job,
+                                  std::mutex& cleanup_fence) noexcept {
+    if (!root_job) return false;
+    if (root_termination_issued_) return true;
+    // Cleanup mutations remain mandatory after shutdown, but share the same
+    // short fence as forward mutations. Long waits never hold this fence.
+    std::lock_guard fence(cleanup_fence);
+    if (!TerminateJobObject(root_job, 1)) return false;
+    root_termination_issued_ = true;
+    return true;
+  }
+
   std::mutex mutex_;
   std::map<std::uint64_t, Child> children_;
+  bool root_termination_issued_ = false;
 };
 
 struct SupervisorState final {
@@ -981,6 +1323,12 @@ enum class DispatchStatus : std::uint8_t {
   kPersistenceFailure,
 };
 
+enum class DurableLoadResult : std::uint8_t {
+  kEmpty,
+  kRecord,
+  kRefused,
+};
+
 struct JournalOutcome final {
   DispatchStatus status = DispatchStatus::kPreDispatchFailure;
   JournalState durable_state = JournalState::kUnknown;
@@ -1006,13 +1354,77 @@ using JournalPersist = bool (*)(const JournalRecord&) noexcept;
 // supervisor's authority boundary.
 using JournalLoad = bool (*)(JournalRecord&) noexcept;
 using DispatchOperation = DispatchStatus (*)(const IssuedCapability&) noexcept;
+using OwnedDispatchOperation = DispatchStatus (*)(
+    const IssuedCapability&, void*) noexcept;
+
+// This is a module-private contract, not a hook accepted from a request. The
+// supervisor will own the one implementation that talks to the authenticated
+// native journal helper. No implementation is installed in this inert slice.
+class DurableJournalAdapter {
+ public:
+  virtual ~DurableJournalAdapter() = default;
+  virtual bool authority_ready() const noexcept = 0;
+  virtual bool append_and_readback_exact(
+      const JournalRecord& record) noexcept = 0;
+  virtual DurableLoadResult load_latest_exact(
+      JournalRecord& record) noexcept = 0;
+};
+
+using OwnedJournalPersist = bool (*)(DurableJournalAdapter&,
+                                     const JournalRecord&, void*) noexcept;
 
 class JournalAuthority final {
  public:
   JournalOutcome dispatch(const IssuedCapability& capability, JournalPersist persist,
                           DispatchOperation operation) noexcept {
+    if (!persist || !operation) return {};
+    return dispatch_impl(
+        capability,
+        [persist](const JournalRecord& record) noexcept {
+          return persist(record);
+        },
+        [operation](const IssuedCapability& issued) noexcept {
+          return operation(issued);
+        });
+  }
+
+  JournalOutcome dispatch_owned(const IssuedCapability& capability,
+                                DurableJournalAdapter& adapter,
+                                OwnedJournalPersist persist,
+                                OwnedDispatchOperation operation,
+                                void* context) noexcept {
+    if (!adapter.authority_ready() || !persist || !operation) return {};
+    return dispatch_impl(
+        capability,
+        [&adapter, persist, context](const JournalRecord& record) noexcept {
+          return persist(adapter, record, context);
+        },
+        [operation, context](const IssuedCapability& issued) noexcept {
+          return operation(issued, context);
+        });
+  }
+
+  bool recover_owned(DurableJournalAdapter& adapter) noexcept {
+    if (!trust_gates_open() || !adapter.authority_ready()) return false;
+    JournalRecord latest{};
+    const DurableLoadResult loaded = adapter.load_latest_exact(latest);
+    if (loaded == DurableLoadResult::kEmpty) {
+      return sequence_ == 0 && state_ == JournalState::kIdle;
+    }
+    if (loaded != DurableLoadResult::kRecord) {
+      state_ = JournalState::kUnknown;
+      return false;
+    }
+    return recover_record(latest);
+  }
+
+ private:
+  template <typename Persist, typename Operation>
+  JournalOutcome dispatch_impl(const IssuedCapability& capability,
+                               Persist persist,
+                               Operation operation) noexcept {
     JournalOutcome outcome{};
-    if (!trust_gates_open() || !persist || !operation || state_ != JournalState::kIdle ||
+    if (!trust_gates_open() || state_ != JournalState::kIdle ||
         capability.operation_id == 0 || !valid_scope(capability.operation_scope))
       return outcome;
     // Sequence exhaustion must be decided before the operation callback. At
@@ -1086,6 +1498,7 @@ class JournalAuthority final {
     return JournalOutcome{operation_status, state_, completed.sequence};
   }
 
+ public:
   JournalState query() const noexcept { return state_; }
 
   // A terminal record closes one operation.  The private adapter may then
@@ -1105,7 +1518,16 @@ class JournalAuthority final {
   bool recover(JournalLoad load) noexcept {
     if (!trust_gates_open() || !load) return false;
     JournalRecord latest{};
-    if (!load(latest) || latest.sequence == 0 || latest.operation_id == 0 ||
+    if (!load(latest)) {
+      state_ = JournalState::kUnknown;
+      return false;
+    }
+    return recover_record(latest);
+  }
+
+ private:
+  bool recover_record(const JournalRecord& latest) noexcept {
+    if (latest.sequence == 0 || latest.operation_id == 0 ||
         !valid_scope(latest.scope) || !nonzero_digest(latest.operation_digest) ||
         !nonzero_digest(latest.argument_digest) ||
         !nonzero_digest(latest.preview_digest) ||
@@ -1121,6 +1543,8 @@ class JournalAuthority final {
     return true;
   }
 
+ public:
+
   bool recovery_required() const noexcept {
     return state_ == JournalState::kUnknown;
   }
@@ -1129,7 +1553,9 @@ class JournalAuthority final {
     return state_ == JournalState::kTerminalDurable;
   }
 
+
  private:
+
   bool can_reserve_sequences(std::uint64_t count) const noexcept {
     return count != 0 && sequence_ <=
         std::numeric_limits<std::uint64_t>::max() - count;
@@ -1158,19 +1584,39 @@ class JournalAuthority final {
   std::uint64_t sequence_ = 0;
 };
 
+bool consume_capability(
+    SupervisorState& state, const IssuedCapability& capability,
+    std::uint64_t now_ms, std::uint64_t session_id, std::uint32_t scope,
+    std::uint64_t operation_id,
+    const std::array<std::byte, kMaxDigestBytes>& operation_digest,
+    const std::array<std::byte, kMaxDigestBytes>& argument_digest,
+    const std::array<std::byte, kMaxDigestBytes>& preview_digest) noexcept;
+
+#include "process_transaction.inc"
+
 bool initialize_supervisor(SupervisorState& state,
                            BootstrapProof& bootstrap) noexcept {
-  if (!trust_gates_open() || !adopt_bootstrap(bootstrap, state.bootstrap_handles))
+  if (!trust_gates_open() || state.root_job || state.cancellation ||
+      state.bootstrap_handles.read || state.bootstrap_handles.write ||
+      !adopt_bootstrap(bootstrap, state.bootstrap_handles))
     return false;
+  state.cancellation.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+  if (!state.cancellation) {
+    state.bootstrap_handles.read.reset();
+    state.bootstrap_handles.write.reset();
+    return false;
+  }
   state.root_job.reset(create_root_job());
   if (!state.root_job || !root_job_policy_proven(state.root_job.get())) {
     state.root_job.reset();
+    state.cancellation.reset();
     state.bootstrap_handles.read.reset();
     state.bootstrap_handles.write.reset();
     return false;
   }
   if (!state.issuer.initialize_epoch()) {
     state.root_job.reset();
+    state.cancellation.reset();
     state.bootstrap_handles.read.reset();
     state.bootstrap_handles.write.reset();
     return false;
@@ -1191,17 +1637,48 @@ bool executable_identity_bound(const FixedIdentity& expected,
 }
 
 bool stop_supervisor(SupervisorState& state, DWORD deadline_ms) noexcept {
-  if (!trust_gates_open() || deadline_ms > kMaxWaitMs) return false;
-  bool ok = state.children.terminate_and_reap_all(state.root_job.get(), deadline_ms,
-                                                   state.cancellation.get());
-  if (state.root_job) {
-    // Closing a kill-on-close root is mandatory even when bounded reap reports
-    // an ambiguity. It is cleanup, never success evidence; the caller still
-    // receives failure when any child could not be proven reaped.
-    state.root_job.reset();
+  if (!trust_gates_open() || deadline_ms == 0 || deadline_ms > kMaxWaitMs ||
+      !state.cancellation || !state.root_job) return false;
+  const std::uint64_t now = GetTickCount64();
+  if (now > std::numeric_limits<std::uint64_t>::max() - deadline_ms)
+    return false;
+  const std::uint64_t cleanup_deadline_at_ms = now + deadline_ms;
+  ProcessLaunchAuthority& launch = process_launch_authority();
+  {
+    // This is the shutdown linearization point shared with process creation,
+    // resume, and journal-transition claims. Publish before signalling, so a
+    // failed SetEvent still stops every later fenced mutation/checkpoint.
+    std::lock_guard fence(launch.mutation_fence);
+    launch.shutting_down.store(true, std::memory_order_release);
+    if (!SetEvent(state.cancellation.get())) return false;
   }
-  state.children.close_all();
-  return ok;
+  // Signal before waiting for the transaction or registry lock so a monitor
+  // holding the registry lock can leave its wait and retain/settle ownership.
+  std::unique_lock<std::mutex> transaction_lock(launch.mutex, std::defer_lock);
+  while (!transaction_lock.try_lock()) {
+    const std::uint64_t observed = GetTickCount64();
+    if (observed >= cleanup_deadline_at_ms) return false;
+    Sleep(static_cast<DWORD>(std::min<std::uint64_t>(
+        kWaitSliceMs, cleanup_deadline_at_ms - observed)));
+  }
+  if (!state.children.terminate_and_reap_all(
+          state.root_job.get(), cleanup_deadline_at_ms,
+          launch.mutation_fence,
+          state.cancellation.get()) || !job_empty(state.root_job.get())) {
+    // Retain the signaled event, root Job, registry, and all worker contexts.
+    // A later explicit shutdown attempt may continue cleanup; no settlement is
+    // claimed and kill-on-close still protects supervisor death.
+    return false;
+  }
+  state.children.close_all(launch.mutation_fence);
+  {
+    std::lock_guard fence(launch.mutation_fence);
+    state.root_job.reset();
+    state.cancellation.reset();
+    state.bootstrap_handles.read.reset();
+    state.bootstrap_handles.write.reset();
+  }
+  return true;
 }
 
 JournalOutcome durable_journal_authorize(

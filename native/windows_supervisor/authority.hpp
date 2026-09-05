@@ -27,11 +27,21 @@ inline constexpr bool kBrokerIssuedIdentityProven = false;
 // retain and revalidate an executing image section handle, bootstrap is
 // unavailable; a pathname re-open is never treated as equivalent proof.
 inline constexpr bool kRetainedExecutingSectionIdentityProven = false;
+// The Windows creation API accepts a cwd pathname, not a retained directory
+// handle. An independently reviewed stable-root/path-resolution invariant is
+// therefore also required before this latent transaction can be enabled.
+inline constexpr bool kRetainedWorkingDirectoryIdentityProven = false;
+// The source-only process transaction below is not an activation switch. It
+// remains false until its exact Windows SDK build and target race suite pass.
+inline constexpr bool kSupervisorOwnedProcessTransactionAccepted = false;
 inline constexpr bool kProductionAvailable =
     kReleaseManifestPinned && kSelfAuthenticodePinned &&
     kPackageIdentityPinned && kCancellableIoProven &&
     kDurableJournalAuthority &&
-    kBrokerIssuedIdentityProven && kRetainedExecutingSectionIdentityProven;
+    kBrokerIssuedIdentityProven && kRetainedExecutingSectionIdentityProven &&
+    kRetainedWorkingDirectoryIdentityProven;
+inline constexpr bool kProcessLaunchAvailable =
+    kProductionAvailable && kSupervisorOwnedProcessTransactionAccepted;
 
 enum class Status : std::uint8_t {
   kUnavailable,

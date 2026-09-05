@@ -1,0 +1,171 @@
+{
+  "schema": "lae.windows-process-transaction.contract.v0.1.0",
+  "status": "SOURCE_ONLY_NOT_READY",
+  "availability": {
+    "production": false,
+    "target": false,
+    "public_api": false,
+    "durable_adapter_installed": false,
+    "cmake_registered": false,
+    "host_registered": false,
+    "tool_registry_registered": false,
+    "launcher_registered": false,
+    "package_registered": false
+  },
+  "authority": {
+    "owner": "native/windows_supervisor/authority.cpp anonymous translation-unit namespace",
+    "transaction_source": "native/windows_supervisor/process_transaction.inc",
+    "caller_handles_accepted": false,
+    "caller_journal_hooks_accepted": false,
+    "caller_issuer_accepted": false,
+    "caller_job_accepted": false,
+    "concurrent_launches": 1,
+    "replay_policy": "consume_private_capability_nonce_once_before_durable_start"
+  },
+  "capability_binding": [
+    "capability_id",
+    "capability_nonce",
+    "capability_mac",
+    "capability_expiry_monotonic_ms",
+    "session_id",
+    "scope",
+    "root_job_generation",
+    "request_id",
+    "operation_id",
+    "launch_class",
+    "executable_identity",
+    "executable_sha256",
+    "restricted_token_profile_sha256",
+    "argument_vector_sha256",
+    "working_directory",
+    "limits_sha256",
+    "fixed_environment_sha256"
+  ],
+  "launch": {
+    "classes": [
+      "allowlisted_process",
+      "approved_application",
+      "approved_browser",
+      "approved_copilot"
+    ],
+    "executable": "exact_absolute_drive_path_and_retained_deny_write_delete_file_identity",
+    "argv": "fixed_vector_windows_quoted_no_shell_no_path_search",
+    "environment": ["SystemRoot"],
+    "token": "supervisor_created_disable_max_privilege_low_integrity_primary_token",
+    "create_api": "CreateProcessAsUserW",
+    "create_flags": [
+      "CREATE_SUSPENDED",
+      "CREATE_NO_WINDOW",
+      "CREATE_UNICODE_ENVIRONMENT",
+      "EXTENDED_STARTUPINFO_PRESENT"
+    ],
+    "creation_attributes": [
+      "PROC_THREAD_ATTRIBUTE_HANDLE_LIST",
+      "PROC_THREAD_ATTRIBUTE_JOB_LIST"
+    ],
+    "shell": false,
+    "path_search": false,
+    "breakaway": false,
+    "nested_job": false
+  },
+  "journal": {
+    "authority": "existing_module_private_JournalAuthority",
+    "adapter": "module_private_DurableJournalAdapter",
+    "adapter_implementation_present": false,
+    "startup_recovery_required": true,
+    "durable_start": "required_append_and_readback_exact_immediately_before_create_callback_via_absent_adapter",
+    "terminal": "required_append_and_readback_exact_after_full_job_reap_before_acknowledgement_via_absent_adapter",
+    "post_start_uncertainty": "dispatched_unknown_manual_no_replay",
+    "transition_linearization": "shared_supervisor_mutation_fence_claim_before_bounded_adapter_io",
+    "lost_ack_replay": false,
+    "next_operation": "only_after_exact_terminal_record_and_fresh_capability"
+  },
+  "containment": {
+    "evidence": "uncompiled_static_source_design_only",
+    "root_job_owned_by": "supervisor",
+    "kill_on_close": true,
+    "child_in_root_job_at_creation": "requested_by_PROC_THREAD_ATTRIBUTE_JOB_LIST_not_target_proven",
+    "primary_created_suspended": true,
+    "resume_after_registry_ownership": true,
+    "single_active_transaction": true,
+    "shutdown_linearization": "shared_fence_then_atomic_stop_then_cancel_signal",
+    "irreversible_mutation_linearization": "shared_fence_recheck_then_create_or_resume",
+    "read_consumption_linearization": "hash_update_hash_finish_and_pipe_capture_updates_inside_shared_fence",
+    "terminal_claim_linearization": "exact_sequence_poison_shutdown_cancel_and_inclusive_deadline_rechecked_inside_shared_fence",
+    "forward_mutation_after_shutdown": false,
+    "cleanup_after_shutdown": "mandatory_serialized_idempotent_root_termination_and_registry_detach",
+    "cleanup_waits_hold_mutation_fence": false,
+    "success_requires_job_active_processes_zero": true,
+    "failure_requires_root_job_terminate_and_bounded_zero_active_proof": true,
+    "unsettled_cleanup_policy": "supervisor_fail_stop_then_startup_unknown_manual_recovery",
+    "parent_death": "retained_root_job_kill_on_close"
+  },
+  "limits": {
+    "max_arguments": 16,
+    "max_argument_utf16_code_units": 2048,
+    "max_command_utf16_code_units": 16384,
+    "max_path_utf16_code_units": 1024,
+    "max_runtime_ms": 120000,
+    "max_cleanup_reserve_ms": 120000,
+    "max_transaction_horizon_ms": 240000,
+    "max_stdout_bytes": 65536,
+    "max_stderr_bytes": 65536,
+    "max_aggregate_output_bytes": 131072,
+    "max_executable_bytes": 67108864,
+    "worker_settlement_ms": 2000
+  },
+  "receipt": {
+    "statuses": [
+      "unavailable",
+      "invalid_request",
+      "capability_refused",
+      "journal_unavailable",
+      "pre_dispatch_failure",
+      "dispatched_unknown",
+      "cancelled",
+      "deadline",
+      "output_limit",
+      "exit_failure",
+      "terminal_failure",
+      "ok"
+    ],
+    "fields": [
+      "status",
+      "stdout_bytes",
+      "stderr_bytes",
+      "exit_code",
+      "journal_bound",
+      "job_reaped",
+      "mutation_attempted"
+    ],
+    "forbidden": [
+      "stdout",
+      "stderr",
+      "executable_path",
+      "working_directory",
+      "argv",
+      "environment",
+      "pid",
+      "handle",
+      "file_id",
+      "token",
+      "sid",
+      "capability_id",
+      "capability_nonce",
+      "capability_mac",
+      "digest"
+    ]
+  },
+  "unresolved_activation_blockers": [
+    "immutable production and process-transaction trust gates are false",
+    "no authenticated durable ActionJournal adapter is installed",
+    "a future durable adapter must own its lifetime and prove cooperative cancellation and settlement within the transaction deadline",
+    "no module-private startup recovery and adapter installation path is wired",
+    "CreateProcessAsUserW consumes an executable pathname rather than the retained file handle; executing-section identity proof remains false",
+    "CreateProcessAsUserW consumes a working-directory pathname rather than a retained directory handle; stable cwd identity proof remains false",
+    "DLL and plugin dependency closure is not proven",
+    "Windows SDK compile and static analysis are unproven",
+    "creation-time Job-list semantics and whole-tree failure races are not target-tested",
+    "restricted-token usability and exact policy are not target-accepted"
+  ]
+}
