@@ -3,7 +3,7 @@ import { makeEvent } from './assistant-events.mjs';
 import { makeToolResult, parseToolCall, validateToolResult, EnvelopeError } from './tool-envelope.mjs';
 import { createActionBinding } from './action-journal.mjs';
 import { readGraphAttestation, transferGraphAttestation } from '../providers/microsoft-graph.mjs';
-import { readBrowserAttestation, transferBrowserAttestation } from '../providers/browser-actions.mjs';
+import { projectBrowserResult, readBrowserAttestation, transferBrowserAttestation } from '../providers/browser-actions.mjs';
 import { timeNowDefinition, timeNowTool } from '../tools/time-now.mjs';
 
 export const STATES = Object.freeze(['IDLE', 'BUILDING_PROMPT', 'INFERENCING', 'TOOL_PROPOSED', 'WAITING_CONFIRMATION', 'TOOL_RUNNING', 'CONTINUING_MODEL', 'COMPLETED', 'CANCELLED', 'FAILED']);
@@ -20,13 +20,16 @@ const EFFECT_TIERS = Object.freeze({
   process_execution: ['T3'], cloud_inference: ['T3'], send_mail: ['T3'], send_teams: ['T3'], browser_input: ['T3'], browser_activation: ['T3']
 });
 const RECONCILIATION_REQUIRED_EFFECTS = new Set(['create_draft', 'send_mail', 'modify_mail', 'send_teams', 'browser_navigation', 'browser_input', 'browser_activation']);
+const BROWSER_TOOL_NAMES = new Set(['browser.session_start', 'browser.inspect_links', 'browser.inspect_page', 'browser.follow_link', 'browser.fill_field', 'browser.activate_control', 'browser.session_close']);
+const BROWSER_PROOFS = new Set(['session_started', 'navigation_verified', 'input_verified', 'activation_verified']);
 const PRIVATE_JOURNAL_KEYS = new Set(['operation_id', 'operation_digest', 'arguments_digest', 'preview_digest', 'response_digest', 'resource_digest']);
-const providerAttestationMatches = (result, expectedBinding, call, tool) => {
-  const attestation = tool?.providerAttestation?.read?.(result) ?? (tool?.name?.startsWith('browser.') ? readBrowserAttestation(result) : readGraphAttestation(result));
+const providerAttestationMatches = (result, expectedBinding, call) => {
+  const browser = BROWSER_TOOL_NAMES.has(call?.name);
+  const attestation = browser ? readBrowserAttestation(result) : readGraphAttestation(result);
   let payload = null; try { payload = JSON.parse(result?.content?.[0]?.text ?? ''); } catch {}
-  const expectedProvider = tool?.providerAttestation?.provider ?? 'microsoft_graph';
-  const safeProofs = tool?.providerAttestation?.proofs ?? SAFE_RECONCILIATIONS;
-  return result?.status === 'ok' && payload && typeof payload === 'object' && payload.reconciliation === attestation?.proof && attestation?.provider === expectedProvider && attestation.call_id === call.id && attestation.tool_name === call.name && attestation.operation_id === expectedBinding.id && attestation.operation_digest === expectedBinding.operationDigest && attestation.arguments_digest === expectedBinding.argumentsDigest && attestation.preview_digest === expectedBinding.previewDigest && safeProofs.has(attestation.proof);
+  const safeProofs = browser ? BROWSER_PROOFS : SAFE_RECONCILIATIONS;
+  const providerPayloadValid = browser || payload?.provider_completion === 'verified' && payload?.state === 'completed' && payload?.completed === true;
+  return result?.status === 'ok' && payload && typeof payload === 'object' && providerPayloadValid && payload.reconciliation === attestation?.proof && attestation?.provider === (browser ? 'browser_actions' : 'microsoft_graph') && attestation.call_id === call.id && attestation.tool_name === call.name && attestation.operation_id === expectedBinding.id && attestation.operation_digest === expectedBinding.operationDigest && attestation.arguments_digest === expectedBinding.argumentsDigest && attestation.preview_digest === expectedBinding.previewDigest && safeProofs.has(attestation.proof);
 };
 function stripPrivateJournalMetadata(value) {
   if (Array.isArray(value)) return value.map(stripPrivateJournalMetadata);
@@ -258,14 +261,14 @@ export class ConversationController {
         const hostResult = result;
         try { result = validateToolResult(result); } catch { throw Object.assign(new Error('invalid_tool_result'), { code: 'invalid_tool_result' }); }
         if (result.id !== call.id || result.name !== call.name) throw Object.assign(new Error('tool_result_mismatch'), { code: 'tool_result_mismatch' });
-        transferGraphAttestation(hostResult, result); tool.providerAttestation?.transfer?.(hostResult, result);
+        transferGraphAttestation(hostResult, result); if (BROWSER_TOOL_NAMES.has(call.name)) transferBrowserAttestation(hostResult, result);
         let strictModelResult = false; let controllerVerified = false; let modelBinding = null;
         if (activeJournalOperation) {
           strictModelResult = activeJournalOperation.reconcile === true;
           modelBinding = activeJournalOperation;
           if (result.status === 'ok') {
             await this.actionJournal.acknowledge(activeJournalOperation.id);
-            if (activeJournalOperation.reconcile && !providerAttestationMatches(result, activeJournalOperation, call, tool)) {
+            if (activeJournalOperation.reconcile && !providerAttestationMatches(result, activeJournalOperation, call)) {
               await this.actionJournal.beginReconciliation(activeJournalOperation.id);
               const responseDigest = digestEvidence({ status: result.status, content: result.content.map(item => ({ type: item.type, text_digest: digestEvidence(item.text) })) });
               result = makeToolResult({ id: call.id, name: call.name, status: 'failed', text: JSON.stringify({ code: 'action_completion_unverified', operation_id: activeJournalOperation.id, state: 'reconciling', completion: 'controller_acknowledged', provider_completion: 'unverified', evidence: { operation_digest: activeJournalOperation.operationDigest, preview_digest: activeJournalOperation.previewDigest, resource_digest: null, response_digest: responseDigest, arguments_digest: activeJournalOperation.argumentsDigest } }) });
@@ -277,7 +280,7 @@ export class ConversationController {
           else await this.actionJournal.markUnknown(activeJournalOperation.id);
           activeJournalOperation = null;
         }
-        const modelResult = tool.providerAttestation?.project ? tool.providerAttestation.project(result, { controllerVerified, reconciliationRequired: strictModelResult }) : strictModelResult ? modelVisibleReconciliationResult(result, controllerVerified, modelBinding) : modelVisibleToolResult(result);
+        const modelResult = BROWSER_TOOL_NAMES.has(call.name) ? projectBrowserResult(result, { controllerVerified, reconciliationRequired: strictModelResult }) : strictModelResult ? modelVisibleReconciliationResult(result, controllerVerified, modelBinding) : modelVisibleToolResult(result);
         emit('tool.completed', { result: modelResult });
         this._appendHistory(session, { role: 'assistant', content: callText });
         this._appendHistory(session, { role: 'tool', name: call.name, tool_call_id: call.id, content: modelResult.content[0]?.text ?? '' });

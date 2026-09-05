@@ -103,7 +103,7 @@ function safeBrowserPayload(payload) {
   return output;
 }
 
-function projectBrowserResult(resultValue, { controllerVerified = false, reconciliationRequired = false } = {}) {
+export function projectBrowserResult(resultValue, { controllerVerified = false, reconciliationRequired = false } = {}) {
   let payload; try { payload = JSON.parse(resultValue?.content?.[0]?.text ?? ''); } catch { payload = null; }
   const safe = safeBrowserPayload(payload);
   if (reconciliationRequired && controllerVerified !== true) return makeToolResult({ id: resultValue?.id, name: resultValue?.name, status: 'failed', text: JSON.stringify({ ...safe, code: 'action_completion_unverified', state: 'reconciling', completion: 'controller_acknowledged', provider_completion: 'unverified' }), durationMs: resultValue?.metadata?.duration_ms ?? 0 });
@@ -246,6 +246,6 @@ export class BrowserActionProvider {
   async shutdown() { await Promise.all([...this.sessions.values()].map(session => this.closeStored(session))); this.sessions.clear(); }
 }
 
-export function createBrowserActionTools(options = {}) { const provider = options instanceof BrowserActionProvider ? options : new BrowserActionProvider(options); return Object.fromEntries(Object.entries(definitions).filter(([name]) => (provider.experimentalMutations || provider.safeActions) || !['browser.fill_field', 'browser.activate_control'].includes(name)).map(([name, definition]) => { const tool = { ...definition, confirmationRequired: () => definition.requires_confirmation, authorize: call => provider.authorize({ ...call, name }), preview: call => provider.preview({ ...call, name }), execute: call => provider.execute({ ...call, name }) }; Object.defineProperty(tool, 'providerAttestation', { enumerable: false, value: { provider: 'browser_actions', proofs: BROWSER_PROOFS, read: readBrowserAttestation, transfer: transferBrowserAttestation, project: projectBrowserResult } }); return [name, tool]; })); }
+export function createBrowserActionTools(options = {}) { const provider = options instanceof BrowserActionProvider ? options : new BrowserActionProvider(options); return Object.fromEntries(Object.entries(definitions).filter(([name]) => (provider.experimentalMutations || provider.safeActions) || !['browser.fill_field', 'browser.activate_control'].includes(name)).map(([name, definition]) => { const tool = { ...definition, confirmationRequired: () => definition.requires_confirmation, authorize: call => provider.authorize({ ...call, name }), preview: call => provider.preview({ ...call, name }), execute: call => provider.execute({ ...call, name }) }; return [name, tool]; })); }
 
 export { browserSchemas, definitions as browserActionDefinitions, publicAddress, publicUrl, hostIsPrivate };
