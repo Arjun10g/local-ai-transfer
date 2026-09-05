@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { makeEvent } from './assistant-events.mjs';
 import { makeToolResult, parseToolCall, validateToolResult, EnvelopeError } from './tool-envelope.mjs';
 import { createActionBinding } from './action-journal.mjs';
+import { readGraphAttestation, transferGraphAttestation } from '../providers/microsoft-graph.mjs';
 import { timeNowDefinition, timeNowTool } from '../tools/time-now.mjs';
 
 export const STATES = Object.freeze(['IDLE', 'BUILDING_PROMPT', 'INFERENCING', 'TOOL_PROPOSED', 'WAITING_CONFIRMATION', 'TOOL_RUNNING', 'CONTINUING_MODEL', 'COMPLETED', 'CANCELLED', 'FAILED']);
@@ -18,6 +19,35 @@ const EFFECT_TIERS = Object.freeze({
   process_execution: ['T3'], cloud_inference: ['T3'], send_mail: ['T3'], send_teams: ['T3'], browser_input: ['T3'], browser_activation: ['T3']
 });
 const RECONCILIATION_REQUIRED_EFFECTS = new Set(['create_draft', 'send_mail', 'modify_mail', 'send_teams', 'browser_navigation', 'browser_input', 'browser_activation']);
+const PRIVATE_JOURNAL_KEYS = new Set(['operation_id', 'operation_digest', 'arguments_digest', 'preview_digest', 'response_digest', 'resource_digest']);
+const providerAttestationMatches = (result, expectedBinding, call) => {
+  const attestation = readGraphAttestation(result);
+  let payload = null; try { payload = JSON.parse(result?.content?.[0]?.text ?? ''); } catch {}
+  return result?.status === 'ok' && payload && typeof payload === 'object' && payload.provider_completion === 'verified' && payload.state === 'completed' && payload.completed === true && payload.reconciliation === attestation?.proof && attestation?.provider === 'microsoft_graph' && attestation.call_id === call.id && attestation.tool_name === call.name && attestation.operation_id === expectedBinding.id && attestation.operation_digest === expectedBinding.operationDigest && attestation.arguments_digest === expectedBinding.argumentsDigest && attestation.preview_digest === expectedBinding.previewDigest && SAFE_RECONCILIATIONS.has(attestation.proof);
+};
+function stripPrivateJournalMetadata(value) {
+  if (Array.isArray(value)) return value.map(stripPrivateJournalMetadata);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !PRIVATE_JOURNAL_KEYS.has(key)).map(([key, item]) => [key, stripPrivateJournalMetadata(item)]));
+}
+function modelVisibleToolResult(result) {
+  if (!result?.content || !Array.isArray(result.content)) return result;
+  return { ...result, content: result.content.map(item => {
+    if (item?.type !== 'text' || typeof item.text !== 'string') return item;
+    try { return { ...item, text: JSON.stringify(stripPrivateJournalMetadata(JSON.parse(item.text))) }; } catch { return item; }
+  }) };
+}
+const SAFE_RECONCILIATIONS = new Set(['created_resource', 'unique_exact_draft', 'unique_sent_item', 'post_write_get_verified', 'timeout_get_verified', 'pre_read_already_desired']);
+function modelVisibleReconciliationResult(result, controllerVerified, binding) {
+  let payload;
+  try { payload = JSON.parse(result?.content?.[0]?.text ?? ''); } catch { payload = null; }
+  if (controllerVerified !== true || !payload || typeof payload !== 'object' || Array.isArray(payload)) return makeToolResult({ id: result.id, name: result.name, status: 'failed', text: JSON.stringify({ code: 'action_completion_unverified', state: 'reconciling', completion: 'controller_acknowledged', provider_completion: 'unverified' }), durationMs: result.metadata?.duration_ms ?? 0 });
+  const httpStatus = payload.http_status === null || (Number.isInteger(payload.http_status) && payload.http_status >= 200 && payload.http_status <= 599) ? payload.http_status : null;
+  const privateValues = Object.values(binding ?? {}).filter(value => typeof value === 'string' && value.length > 0);
+  const resourceId = typeof payload.resource_id === 'string' && payload.resource_id.length <= 512 && !/[\u0000-\u001f\u007f]/u.test(payload.resource_id) && !privateValues.some(value => payload.resource_id.toLocaleLowerCase('en-US').includes(value.toLocaleLowerCase('en-US'))) ? payload.resource_id : null;
+  const reconciliation = SAFE_RECONCILIATIONS.has(payload.reconciliation) ? payload.reconciliation : null;
+  return makeToolResult({ id: result.id, name: result.name, status: 'ok', text: JSON.stringify({ state: 'completed', provider_completion: 'verified', completion: 'provider_verified', accepted: true, completed: true, http_status: httpStatus, resource_id: resourceId, reconciliation }), durationMs: result.metadata?.duration_ms ?? 0 });
+}
 function digestEvidence(value) { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
 
 // The model sees only the OpenAI-compatible function schema. Execution and
@@ -219,25 +249,35 @@ export class ConversationController {
           // `policy` is host-internal bookkeeping, not a model/provider
           // authorization object. Only pass concrete user/grant proof across
           // the provider boundary.
-          result = await invokeWithTimeout(tool, tool.execute, { ...call, ...(authorization.kind === 'policy' ? {} : { authorization }) }, controller.signal);
+          const internal = activeJournalOperation?.reconcile ? { journal_binding: { operation_id: activeJournalOperation.id, operation_digest: activeJournalOperation.operationDigest, arguments_digest: activeJournalOperation.argumentsDigest, preview_digest: activeJournalOperation.previewDigest } } : undefined;
+          result = await invokeWithTimeout(tool, tool.execute, { ...call, ...(authorization.kind === 'policy' ? {} : { authorization }), ...(internal ? { internal } : {}) }, controller.signal);
         }
+        const hostResult = result;
         try { result = validateToolResult(result); } catch { throw Object.assign(new Error('invalid_tool_result'), { code: 'invalid_tool_result' }); }
         if (result.id !== call.id || result.name !== call.name) throw Object.assign(new Error('tool_result_mismatch'), { code: 'tool_result_mismatch' });
+        transferGraphAttestation(hostResult, result);
+        let strictModelResult = false; let controllerVerified = false; let modelBinding = null;
         if (activeJournalOperation) {
+          strictModelResult = activeJournalOperation.reconcile === true;
+          modelBinding = activeJournalOperation;
           if (result.status === 'ok') {
             await this.actionJournal.acknowledge(activeJournalOperation.id);
-            if (activeJournalOperation.reconcile) {
+            if (activeJournalOperation.reconcile && !providerAttestationMatches(result, activeJournalOperation, call)) {
               await this.actionJournal.beginReconciliation(activeJournalOperation.id);
               const responseDigest = digestEvidence({ status: result.status, content: result.content.map(item => ({ type: item.type, text_digest: digestEvidence(item.text) })) });
               result = makeToolResult({ id: call.id, name: call.name, status: 'failed', text: JSON.stringify({ code: 'action_completion_unverified', operation_id: activeJournalOperation.id, state: 'reconciling', completion: 'controller_acknowledged', provider_completion: 'unverified', evidence: { operation_digest: activeJournalOperation.operationDigest, preview_digest: activeJournalOperation.previewDigest, resource_digest: null, response_digest: responseDigest, arguments_digest: activeJournalOperation.argumentsDigest } }) });
-            } else await this.actionJournal.complete(activeJournalOperation.id);
+            } else {
+              await this.actionJournal.complete(activeJournalOperation.id);
+              controllerVerified = activeJournalOperation.reconcile === true;
+            }
           }
           else await this.actionJournal.markUnknown(activeJournalOperation.id);
           activeJournalOperation = null;
         }
-        emit('tool.completed', { result });
+        const modelResult = strictModelResult ? modelVisibleReconciliationResult(result, controllerVerified, modelBinding) : modelVisibleToolResult(result);
+        emit('tool.completed', { result: modelResult });
         this._appendHistory(session, { role: 'assistant', content: callText });
-        this._appendHistory(session, { role: 'tool', name: call.name, tool_call_id: call.id, content: result.content[0]?.text ?? '' });
+        this._appendHistory(session, { role: 'tool', name: call.name, tool_call_id: call.id, content: modelResult.content[0]?.text ?? '' });
         session.state = 'CONTINUING_MODEL'; text = '';
       }
     } catch (caught) {
