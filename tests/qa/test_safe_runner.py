@@ -1,5 +1,6 @@
 import ast
 import importlib.util
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -74,6 +75,57 @@ ok 1 - safe
         self.assertEqual(runner.parse_tap_report(valid)["tests"], 1)
         with self.assertRaises(runner.ReporterError):
             runner.parse_tap_report(valid.replace("1..1", "1..2"))
+
+    def test_node_inventory_covers_model_tests_and_rejects_linked_discovery(self):
+        self.assertIn("tests/model/production_tool_fixture_parity.test.mjs", runner.discover_node_tests(ROOT))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "tests/host").mkdir(parents=True)
+            try:
+                (root / "tests/host/linked.test.mjs").symlink_to(ROOT / "tests/host/action-journal.test.mjs")
+            except (NotImplementedError, OSError):
+                self.skipTest("symlinks unavailable")
+            with self.assertRaises(runner.DiscoveryError):
+                runner.discover_node_tests(root)
+
+    def test_tap_skip_and_unknown_status_cannot_pass(self):
+        contradictory = """TAP version 13
+ok 1 - skipped # SKIP not run
+1..1
+# tests 1
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+"""
+        with self.assertRaises(runner.ReporterError):
+            runner.parse_tap_report(contradictory)
+        self.assertEqual(runner.summarize_records([])["status"], "BLOCKED")
+        self.assertFalse(runner.summarize_records([{"test": "x", "status": "BROKEN"}])["release_passed"])
+        self.assertEqual(runner.summarize_records([{"test": "x", "status": "UNKNOWN"}])["status"], "BLOCKED")
+
+    def test_output_writer_is_atomic_and_rejects_aliases_and_casefolded_operator_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "summary.json"
+            runner.write_output_atomically(target, "first\n")
+            self.assertEqual(target.read_text(encoding="utf-8"), "first\n")
+            alias = root / "alias.json"
+            os.link(target, alias)
+            with self.assertRaisesRegex(ValueError, "unlinked regular"):
+                runner.write_output_atomically(alias, "must-not-truncate\n")
+            link = root / "link.json"
+            try:
+                link.symlink_to(target)
+            except (NotImplementedError, OSError):
+                pass
+            else:
+                with self.assertRaisesRegex(ValueError, "link or reparse"):
+                    runner.validate_output_path(link)
+            with self.assertRaisesRegex(ValueError, "protected operator evidence"):
+                runner.validate_output_path(root / "Experiments" / "RUNTIME" / "INCIDENTS.JSONL")
 
 
 if __name__ == "__main__":

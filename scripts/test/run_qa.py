@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import stat
 import sys
 from typing import Any
 
@@ -25,9 +26,13 @@ from qa.clean_machine.package import scan_tree
 from qa.harness.evidence import DEFAULT_ENV_ALLOWLIST, audit_environment
 
 
-NODE_TEST_PATTERNS = ("tests/host/*.test.mjs", "tests/security/*.test.mjs")
 PYTHON_TEST_ROOTS = ("tests/qa", "tests/release", "tests/security", "tests/performance", "tests/model", "tests/native")
 _SUMMARY_KEYS = ("tests", "suites", "pass", "fail", "cancelled", "skipped", "todo")
+MAX_DISCOVERY_ENTRIES = 4096
+MAX_DISCOVERY_FILES = 1024
+MAX_DISCOVERY_BYTES = 16 * 1024 * 1024
+MAX_DISCOVERY_DEPTH = 8
+MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 
 # Every current test file is classified. New tests must be assigned a class
 # here before they can enter evidence; unknown files fail closed.
@@ -66,16 +71,74 @@ class ReporterError(ValueError):
     """The built-in Node reporter did not produce a complete TAP result."""
 
 
-def discover_node_tests(root: Path) -> list[str]:
-    """Return all discovered Node tests for compatibility/reporting only."""
+class DiscoveryError(ValueError):
+    """Test discovery was incomplete or exceeded a safe bound."""
 
-    paths = [path for pattern in NODE_TEST_PATTERNS for path in sorted(root.glob(pattern))]
-    return [path.relative_to(root).as_posix() for path in paths]
+
+def _discover_test_files(root: Path, predicate) -> list[Path]:
+    base = (root / "tests").absolute()
+    if not base.is_dir():
+        raise DiscoveryError("tests root is missing")
+    pending: list[tuple[Path, int]] = [(base, 0)]
+    files: list[Path] = []
+    entries_seen = 0
+    bytes_seen = 0
+    identities: set[tuple[int, int]] = set()
+    while pending:
+        directory, depth = pending.pop()
+        try:
+            directory_stat = directory.stat(follow_symlinks=False)
+        except OSError as error:
+            raise DiscoveryError("test directory cannot be inspected") from error
+        if stat.S_ISLNK(directory_stat.st_mode) or (os.name == "nt" and bool(getattr(directory_stat, "st_file_attributes", 0) & 0x400)):
+            raise DiscoveryError("test directory is a link or reparse point")
+        identity = (int(directory_stat.st_dev), int(directory_stat.st_ino))
+        if identity in identities:
+            raise DiscoveryError("test directory identity repeats")
+        identities.add(identity)
+        try:
+            with os.scandir(directory) as iterator:
+                children = sorted(iterator, key=lambda item: item.name)
+        except OSError as error:
+            raise DiscoveryError("test directory cannot be enumerated") from error
+        for child in children:
+            entries_seen += 1
+            if entries_seen > MAX_DISCOVERY_ENTRIES:
+                raise DiscoveryError("test discovery entry bound exceeded")
+            try:
+                info = child.stat(follow_symlinks=False)
+            except OSError as error:
+                raise DiscoveryError("test entry cannot be inspected") from error
+            if stat.S_ISLNK(info.st_mode) or (os.name == "nt" and bool(getattr(info, "st_file_attributes", 0) & 0x400)):
+                raise DiscoveryError("test discovery encountered a link or reparse point")
+            child_path = Path(child.path)
+            if stat.S_ISDIR(info.st_mode):
+                if depth + 1 > MAX_DISCOVERY_DEPTH:
+                    raise DiscoveryError("test discovery depth bound exceeded")
+                pending.append((child_path, depth + 1))
+            elif stat.S_ISREG(info.st_mode):
+                bytes_seen += max(0, int(info.st_size))
+                if bytes_seen > MAX_DISCOVERY_BYTES:
+                    raise DiscoveryError("test discovery byte bound exceeded")
+                if predicate(child_path):
+                    files.append(child_path)
+                    if len(files) > MAX_DISCOVERY_FILES:
+                        raise DiscoveryError("test discovery file bound exceeded")
+    return sorted(files)
+
+
+def discover_node_tests(root: Path) -> list[str]:
+    """Return every bounded ``tests/**/*.test.mjs`` path."""
+
+    base = Path(root).absolute()
+    paths = _discover_test_files(base, lambda path: path.name.endswith(".test.mjs"))
+    return [path.relative_to(base).as_posix() for path in paths]
 
 
 def discover_python_test_modules(root: Path) -> list[str]:
-    paths = sorted((root / "tests").glob("**/test_*.py"))
-    return [".".join(path.relative_to(root).with_suffix("").parts) for path in paths]
+    base = Path(root).absolute()
+    paths = _discover_test_files(base, lambda path: path.name.startswith("test_") and path.suffix == ".py")
+    return [".".join(path.relative_to(base).with_suffix("").parts) for path in paths]
 
 
 def python_unittest_command(root: Path) -> list[str]:
@@ -84,18 +147,24 @@ def python_unittest_command(root: Path) -> list[str]:
 
 def discovered_test_paths(root: Path) -> set[str]:
     paths = set(discover_node_tests(root))
-    paths.update(path.relative_to(root).as_posix() for path in root.glob("tests/**/test_*.py"))
+    paths.update(module.replace(".", "/") + ".py" for module in discover_python_test_modules(root))
     return paths
 
 
 def inventory_check(root: Path) -> dict[str, Any]:
-    discovered = discovered_test_paths(root)
+    try:
+        discovered = discovered_test_paths(root)
+        discovery_error = None
+    except DiscoveryError as error:
+        discovered = set()
+        discovery_error = str(error)
     known = set(TEST_INVENTORY)
     return {
         "discovered": sorted(discovered),
         "unknown": sorted(discovered - known),
         "missing": sorted(known - discovered),
         "classes": {path: TEST_INVENTORY[path] for path in sorted(discovered & known)},
+        "discovery_error": discovery_error,
     }
 
 
@@ -114,12 +183,14 @@ def parse_tap_report(output: str) -> dict[str, int]:
         raise ReporterError("TAP plan missing or duplicated")
     test_lines = []
     for line in lines:
-        match = re.match(r"^(ok|not ok) (\d+) - (.+)$", line)
+        match = re.fullmatch(r"(ok|not ok) (\d+) - (.*?)(?:\s+#\s+(SKIP|TODO)(?:\s+.*)?)?", line)
         if match:
-            test_lines.append((int(match.group(2)), match.group(1)))
+            test_lines.append((int(match.group(2)), match.group(1), match.group(3), match.group(4)))
+        elif re.match(r"^(?:ok|not ok) \d+ - ", line):
+            raise ReporterError("unknown TAP directive")
     if not test_lines:
         raise ReporterError("zero-count Node suite")
-    if [number for number, _status in test_lines] != list(range(1, len(test_lines) + 1)):
+    if [number for number, _status, _name, _directive in test_lines] != list(range(1, len(test_lines) + 1)):
         raise ReporterError("non-sequential TAP test numbering")
     planned = int(plans[0].group(1))
     if planned != len(test_lines):
@@ -132,8 +203,14 @@ def parse_tap_report(output: str) -> dict[str, int]:
         summary[key] = values[0]
     if summary["tests"] != planned or sum(summary[key] for key in ("pass", "fail", "cancelled", "skipped", "todo")) != summary["tests"]:
         raise ReporterError("TAP summary is internally inconsistent")
-    if summary["fail"] != sum(status == "not ok" for _number, status in test_lines):
-        raise ReporterError("TAP fail count does not match test records")
+    calculated = {
+        "pass": sum(status == "ok" and directive is None for _number, status, _name, directive in test_lines),
+        "fail": sum(status == "not ok" and directive not in {"SKIP", "TODO"} for _number, status, _name, directive in test_lines),
+        "skipped": sum(directive == "SKIP" for _number, _status, _name, directive in test_lines),
+        "todo": sum(directive == "TODO" for _number, _status, _name, directive in test_lines),
+    }
+    if any(summary[key] != value for key, value in calculated.items()):
+        raise ReporterError("TAP summary does not match test records")
     return summary
 
 
@@ -142,6 +219,10 @@ def skipped(test: str, reason: str, *, mandatory: bool = True) -> dict[str, obje
 
 
 def summarize_records(records: list[dict[str, Any]]) -> dict[str, object]:
+    allowed = {"PASS", "FAIL", "SKIP", "BROKEN"}
+    invalid = [str(record.get("test", "unnamed")) for record in records if record.get("status") not in allowed]
+    if not records or invalid or any(record.get("status") == "BROKEN" for record in records):
+        return {"status": "BLOCKED", "passed": False, "fixture_checks_passed": False, "release_passed": False, "mandatory_unproven": invalid}
     fixture_checks_passed = not any(record.get("status") == "FAIL" for record in records)
     mandatory_unproven = [str(record.get("test", "unnamed")) for record in records if record.get("mandatory") is True and record.get("status") == "SKIP"]
     release_passed = fixture_checks_passed and not mandatory_unproven
@@ -154,7 +235,9 @@ def evaluate_records(records: list[dict[str, object]], *, release: bool) -> tupl
     for record in records:
         label = str(record.get("test", "unknown"))
         status = record.get("status")
-        if status == "FAIL":
+        if status not in {"PASS", "FAIL", "SKIP", "BROKEN"}:
+            blockers.append(f"{label}: unknown status ({status})")
+        elif status in {"FAIL", "BROKEN"}:
             blockers.append(f"{label}: failed")
         if release and record.get("mandatory", True) and status != "PASS":
             blockers.append(f"{label}: unverified mandatory suite ({status})")
@@ -176,8 +259,10 @@ def safe_plan(root: Path, *, release: bool = False, skip_native: bool = False) -
         records.append({"status": "FAIL", "test": "QA-INVENTORY", "mandatory": True, "reason": "inventory_entry_missing"})
     if inventory["unknown"]:
         records.append({"status": "FAIL", "test": "QA-INVENTORY", "mandatory": True, "reason": "unknown_test_inventory_entry"})
+    if inventory.get("discovery_error"):
+        records.append({"status": "FAIL", "test": "QA-INVENTORY", "mandatory": True, "reason": "test_discovery_failed", "detail": inventory["discovery_error"]})
 
-    package = scan_tree(root / "release" / "windows", require_runtime=release)
+    package = scan_tree(root / "release" / "windows", require_runtime=release, metadata_only=True)
     records.append({"status": package["status"], "test": "REL-001-skeleton-scan", "mandatory": True, "findings": package.get("findings", [])})
     records.append(skipped("QA-003-native-cmake", "safe_mode_never_runs_cmake; skip-native-is-inherent" if skip_native else "safe_mode_never_runs_cmake"))
     records.extend(skipped(name, reason) for name, reason in (
@@ -191,10 +276,164 @@ def safe_plan(root: Path, *, release: bool = False, skip_native: bool = False) -
     return {"inventory": inventory, "results": records, "passed": False, "release_passed": False, "status": "BLOCKED", "release_blockers": blockers, "mode": "release" if release else "safe"}
 
 
-def validate_output_path(path: Path) -> None:
-    resolved = path.resolve()
-    if resolved.name in PROTECTED_OUTPUT_NAMES or ("experiments" in resolved.parts and "runtime" in resolved.parts):
+def _reparse(info: os.stat_result) -> bool:
+    return stat.S_ISLNK(info.st_mode) or (os.name == "nt" and bool(getattr(info, "st_file_attributes", 0) & 0x400))
+
+
+def _absolute_output_path(path: Path) -> Path:
+    value = Path(os.path.abspath(os.fspath(path)))
+    folded = [part.casefold() for part in value.parts]
+    protected = {name.casefold() for name in PROTECTED_OUTPUT_NAMES}
+    if any(part in protected for part in folded) or any(folded[index:index + 2] == ["experiments", "runtime"] for index in range(len(folded) - 1)):
         raise ValueError("output path overlaps protected operator evidence")
+    current = Path(value.anchor)
+    for part in value.parts[1:]:
+        current /= part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise ValueError("output path cannot be inspected") from error
+        # macOS exposes /var (and on some versions /tmp) as stable system
+        # aliases. They are not caller-controlled output ancestors; retain
+        # the stricter rejection for every other supplied link/reparse path.
+        trusted_system_alias = platform.system() == "Darwin" and current in {Path("/var"), Path("/tmp")}
+        if _reparse(info) and not trusted_system_alias:
+            raise ValueError("output path contains a link or reparse point")
+        if current != value and not stat.S_ISDIR(info.st_mode) and not trusted_system_alias:
+            raise ValueError("output parent is not a directory")
+    try:
+        info = value.lstat()
+    except FileNotFoundError:
+        return value
+    if not stat.S_ISREG(info.st_mode) or int(info.st_nlink) != 1:
+        raise ValueError("output target must be an unlinked regular file")
+    return value
+
+
+def validate_output_path(path: Path) -> Path:
+    """Validate a lexical output path without resolving links or aliases."""
+
+    return _absolute_output_path(path)
+
+
+def _ensure_output_parent(path: Path) -> None:
+    missing: list[Path] = []
+    current = path.parent
+    while True:
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            missing.append(current)
+            if current.parent == current:
+                raise ValueError("output parent does not exist")
+            current = current.parent
+            continue
+        trusted_system_alias = platform.system() == "Darwin" and current in {Path("/var"), Path("/tmp")}
+        if (_reparse(info) and not trusted_system_alias) or not stat.S_ISDIR(info.st_mode):
+            raise ValueError("output parent is unsafe")
+        break
+    for directory in reversed(missing):
+        directory.mkdir()
+        info = directory.lstat()
+        if _reparse(info) or not stat.S_ISDIR(info.st_mode):
+            raise ValueError("output parent changed during creation")
+
+
+def write_output_atomically(path: Path, text: str) -> None:
+    target = validate_output_path(path)
+    data = text.encode("utf-8")
+    if len(data) > MAX_OUTPUT_BYTES:
+        raise ValueError("output exceeds byte bound")
+    _ensure_output_parent(target)
+    target = validate_output_path(target)
+    parent = target.parent
+    parent_before = parent.stat(follow_symlinks=False)
+    old_info = None
+    try:
+        old_info = target.lstat()
+    except FileNotFoundError:
+        pass
+    temporary_name = f".{target.name}.tmp-{os.getpid()}-{os.urandom(8).hex()}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    use_dir_fd = os.name != "nt" and hasattr(os, "supports_dir_fd") and os.open in os.supports_dir_fd
+    parent_fd = None
+    temporary = parent / temporary_name
+    if use_dir_fd:
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        parent_fd = os.open(parent, directory_flags)
+        opened_parent = os.fstat(parent_fd)
+        if (opened_parent.st_ino, opened_parent.st_dev) != (parent_before.st_ino, parent_before.st_dev):
+            os.close(parent_fd)
+            raise ValueError("output parent changed during write")
+    descriptor = None
+    try:
+        descriptor = os.open(temporary_name if use_dir_fd else temporary, flags, 0o600, dir_fd=parent_fd) if use_dir_fd else os.open(temporary, flags, 0o600)
+        written = 0
+        while written < len(data):
+            count = os.write(descriptor, data[written:])
+            if count <= 0:
+                raise ValueError("output write made no progress")
+            written += count
+        os.fsync(descriptor)
+        final_temp = os.fstat(descriptor)
+        if not stat.S_ISREG(final_temp.st_mode) or final_temp.st_nlink != 1:
+            raise ValueError("temporary output identity changed")
+    except BaseException:
+        try:
+            if use_dir_fd:
+                os.unlink(temporary_name, dir_fd=parent_fd)
+            else:
+                os.unlink(temporary)
+        except OSError:
+            pass
+        if parent_fd is not None:
+            os.close(parent_fd)
+        raise
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    try:
+        temp_info = os.stat(temporary_name, dir_fd=parent_fd, follow_symlinks=False) if use_dir_fd else temporary.lstat()
+        if not stat.S_ISREG(temp_info.st_mode) or int(temp_info.st_nlink) != 1:
+            raise ValueError("temporary output identity changed")
+        current_parent = os.fstat(parent_fd) if use_dir_fd else parent.stat(follow_symlinks=False)
+        if (current_parent.st_ino, current_parent.st_dev) != (parent_before.st_ino, parent_before.st_dev):
+            raise ValueError("output parent changed during write")
+        try:
+            current = os.stat(target.name, dir_fd=parent_fd, follow_symlinks=False) if use_dir_fd else target.lstat()
+        except FileNotFoundError:
+            current = None
+        if (old_info is None) != (current is None) or old_info is not None and (old_info.st_dev, old_info.st_ino) != (current.st_dev, current.st_ino):
+            raise ValueError("output target changed during write")
+        if use_dir_fd:
+            os.replace(temporary_name, target.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        else:
+            os.replace(temporary, target)
+        descriptor = None
+        try:
+            descriptor = os.dup(parent_fd) if use_dir_fd else os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            os.fsync(descriptor)
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+    finally:
+        try:
+            if use_dir_fd:
+                os.unlink(temporary_name, dir_fd=parent_fd)
+            else:
+                os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # The output is already fail-closed if cleanup cannot remove the
+            # private temporary name; never follow or truncate that path.
+            pass
+        if parent_fd is not None:
+            os.close(parent_fd)
 
 
 def main() -> int:
@@ -205,8 +444,7 @@ def main() -> int:
     parser.add_argument("--release", action="store_true", help="apply strict release policy; evidence remains BLOCKED without target proof")
     args = parser.parse_args()
     root = Path(args.root).resolve()
-    output = Path(args.output)
-    validate_output_path(output)
+    output = validate_output_path(Path(args.output))
     plan = safe_plan(root, release=args.release, skip_native=args.skip_native)
     summary = {
         "schema_version": "qa-run.safe.v1",
@@ -216,8 +454,7 @@ def main() -> int:
         **plan,
         "limitations": ["No test subprocess, CMake/native fixture, model, browser, network, provider, or lifecycle execution occurs in safe mode."],
     }
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_output_atomically(output, json.dumps(summary, indent=2, sort_keys=True) + "\n")
     print(json.dumps({"output": str(output), "mode": summary["mode"], "status": summary["status"], "release_blockers": summary["release_blockers"]}, sort_keys=True))
     return 1
 
