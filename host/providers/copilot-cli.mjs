@@ -287,7 +287,7 @@ export class CopilotCliProvider {
       child.stdout?.on('data', chunk => { const before = Buffer.byteLength(output, 'utf8'); output = collect(output, chunk, outputDecoder); if (Buffer.byteLength(output, 'utf8') >= this.maxOutput && Buffer.byteLength(chunk) + before > this.maxOutput && !outputOverflow) { outputOverflow = true; stopAndFinish('provider_response_too_large'); } }); child.stderr?.on('data', () => {}); child.once('error', error => stopAndFinish(error.code === 'ENOENT' ? 'copilot_cli_unavailable' : 'provider_failed')); child.once('close', code => { if (forcedCode) return; output = collect(output, Buffer.alloc(0), outputDecoder, true); const exitClass = code === 0 ? 'ok' : code === null ? 'cancelled' : 'failed'; const outputResult = result(call, code === 0 ? 'ok' : 'failed', { provider: 'github_copilot', state: 'ready', stdout: output, exit_class: exitClass, truncated, duration_ms: Date.now() - started, cli_version: this.version, egress_bytes: Buffer.byteLength(prompt, 'utf8'), idempotency: 'new' }); finish(issueCopilotAttestation(outputResult, { call, binding })); }); call.signal?.addEventListener('abort', abort, { once: true }); child.stdin?.once?.('error', () => stopAndFinish('provider_failed')); child.stdin?.end(prompt, 'utf8');
     });
   }
- 
+
   safeEnvironment() { return minimalEnvironment(this.environment); }
 }
 
