@@ -166,6 +166,81 @@ test('commits alternate exact COW banks and bind canonical protocol event digest
   assert.equal(markerOffset(0, 0) - bankOffset(0, 0), 15360);
 });
 
+test('sequential operations occupy distinct stable slots and reopen identically', async () => {
+  const device = await formatted();
+  const journal = ActionJournalContainerReference.open(device);
+  await journal.append(operation(1), prepared());
+  await journal.append(operation(2), prepared(OTHER_RECEIPT));
+  const before = journal.summary();
+  assert.deepEqual(before.records.map(record => [record.operation_id, record.slot_index]), [
+    [operation(1), 0],
+    [operation(2), 1],
+  ]);
+  const reopened = ActionJournalContainerReference.open(device);
+  assert.deepEqual(reopened.summary(), before);
+  assert.deepEqual(reopened.detail(operation(1)).events, [prepared()]);
+  assert.deepEqual(reopened.detail(operation(2)).events, [prepared(OTHER_RECEIPT)]);
+});
+
+test('existing operation reuses its slot without overwriting another operation', async () => {
+  const device = await formatted();
+  const journal = ActionJournalContainerReference.open(device);
+  await journal.append(operation(1), prepared());
+  await journal.append(operation(2), prepared(OTHER_RECEIPT));
+  const secondBefore = journal.detail(operation(2));
+  await journal.append(operation(1), authorized());
+  assert.deepEqual(journal.detail(operation(1)).events, [prepared(), authorized()]);
+  assert.deepEqual(journal.detail(operation(2)), secondBefore);
+  await rejectionCode(journal.append(operation(1), prepared()), 'container_invalid_event');
+  assert.deepEqual(ActionJournalContainerReference.open(device).detail(operation(2)), secondBefore);
+});
+
+test('a crash between new operations preserves allocation and committed summary authority', async () => {
+  const device = await formatted();
+  const journal = ActionJournalContainerReference.open(device);
+  await journal.append(operation(1), prepared());
+  device.crash();
+  await journal.append(operation(2), prepared(OTHER_RECEIPT));
+  assert.deepEqual(journal.summary().records.map(record => [record.operation_id, record.slot_index]), [
+    [operation(1), 0],
+    [operation(2), 1],
+  ]);
+
+  const lostAck = ActionJournalContainerReference.open(await formatted());
+  await assert.rejects(lostAck.append(operation(3), prepared(), {
+    onBoundary(phase) { if (phase === 'after_commit_flush') throw new Error('lost acknowledgement'); },
+  }), /lost acknowledgement/);
+  assert.deepEqual(lostAck.summary().records.map(record => [record.operation_id, record.slot_index]), [
+    [operation(3), 0],
+  ]);
+});
+
+test('sequential allocation reaches the exact active cap without reusing a committed slot', async () => {
+  const device = await formatted();
+  for (let slotIndex = 0; slotIndex < 255; slotIndex++) {
+    seedBankForTest(device, {
+      containerId: CONTAINER_ID,
+      slotIndex,
+      bankIndex: 0,
+      generation: 0n,
+      operationId: operation(slotIndex + 1),
+      events: [prepared()],
+    });
+  }
+  const journal = ActionJournalContainerReference.open(device);
+  await journal.append(operation(256), prepared());
+  assert.deepEqual(journal.summary().records.at(-1), {
+    operation_id: operation(256),
+    slot_index: 255,
+    bank_index: 0,
+    generation: '0',
+    event_count: 1,
+    state: 'prepared',
+  });
+  await rejectionCode(journal.append(operation(257), prepared()), 'container_active_limit');
+  assert.deepEqual(ActionJournalContainerReference.open(device).summary(), journal.summary());
+});
+
 test('every write, flush, and readback boundary recovers only old or committed authority', async () => {
   const source = await baseline();
   const committedBoundaries = new Set(['after_commit_flush', 'after_commit_readback']);

@@ -683,7 +683,17 @@ export class ActionJournalContainerReference {
     this.terminalCount = terminalCount;
   }
 
+  _reloadCommittedAuthority() {
+    const authoritative = ActionJournalContainerReference.open(this.device);
+    if (!this.containerId.equals(authoritative.containerId)) fail('container_conflicting_authority');
+    this.slots = authoritative.slots;
+    this.records = authoritative.records;
+    this.activeCount = authoritative.activeCount;
+    this.terminalCount = authoritative.terminalCount;
+  }
+
   summary() {
+    this._reloadCommittedAuthority();
     return Object.freeze({
       active: this.activeCount,
       terminal: this.terminalCount,
@@ -701,6 +711,7 @@ export class ActionJournalContainerReference {
 
   detail(operationId) {
     checkedOperationId(operationId);
+    this._reloadCommittedAuthority();
     const record = this.records.get(operationId);
     if (!record) fail('container_not_found');
     return Object.freeze({
@@ -713,6 +724,10 @@ export class ActionJournalContainerReference {
   async append(operationId, event, { onBoundary } = {}) {
     validateBoundaryCallback(onBoundary);
     checkedOperationId(operationId);
+    // The durable banks, not a prior in-memory allocation snapshot, select the
+    // operation's slot. This also recovers a commit whose acknowledgement was
+    // lost before a later append in the same open reference instance.
+    this._reloadCommittedAuthority();
     const current = this.records.get(operationId) ?? null;
     const events = current === null ? [event] : [...current.events, event];
     const encoded = validateHistory(events);
@@ -826,10 +841,10 @@ export class ActionJournalContainerReference {
     });
     await boundary(onBoundary, 'after_commit_readback', context);
 
-    const record = Object.freeze({ slotIndex, bankIndex, marker, ...verified });
-    this.records.set(operationId, record);
-    this.activeCount = projectedActive;
-    this.terminalCount = projectedTerminal;
+    // Re-decode the committed container instead of manufacturing authority
+    // from intended writes. Summary/detail therefore expose only bytes that
+    // survived the final flush and exact readback.
+    this._reloadCommittedAuthority();
     return this.detail(operationId);
   }
 }
