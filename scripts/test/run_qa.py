@@ -46,6 +46,7 @@ TEST_INVENTORY = {
     "tests/host/action-journal-helper-model.test.mjs": "host_fixture",
     "tests/host/action-journal-protocol.test.mjs": "host_fixture",
     "tests/host/action-journal.test.mjs": "host_fixture",
+    "tests/host/native-action-journal-client.test.mjs": "host_fixture",
     "tests/host/copilot-acp-hardening.test.mjs": "provider_fixture",
     "tests/host/external-tools.test.mjs": "provider_fixture",
     "tests/host/graph-read-tools.test.mjs": "provider_fixture",
