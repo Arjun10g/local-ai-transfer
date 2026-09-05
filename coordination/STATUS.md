@@ -45,7 +45,11 @@
   package paths, and explicitly `NO` for production and target execution.
 - Process implementation candidate `6167ef6` remains rejected and unmerged.
   The later merged process transaction remains unreachable: its adapter is
-  `nullptr`/unrecovered and it has no public launch API, CMake, or package path.
+  `nullptr`/unrecovered, with no public launch/package/activation or product/
+  runtime CMake linkage. Its only CMake presence is the default-off,
+  unconfigured/unbuilt static target `lae_compilecheck_windows_supervisor`,
+  which compiles `authority.cpp` with `process_transaction.inc` marked
+  `HEADER_FILE_ONLY`; `SAFE_TO_COMPILE` remains unknown/`NO`.
   Rejected supervisor predecessor `81cfd79` and clipboard predecessor
   `0ba98d5` are historical and were superseded by the inert merged source above;
   neither predecessor nor either merged source confers an executable capability.
