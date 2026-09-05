@@ -53,6 +53,64 @@ const definitions = Object.freeze({
   'browser.session_close': { name: 'browser.session_close', version: '0.1.0', description: descriptions['browser.session_close'], risk_tier: 'T0', side_effect: 'browser_close', network: false, data_egress: 'none', requires_confirmation: false, timeout_ms: 5000, output_limit: 4096, parameters: browserSchemas['browser.session_close'], input_schema: browserSchemas['browser.session_close'] }
 });
 
+const BROWSER_PROOFS = new Set(['session_started', 'navigation_verified', 'input_verified', 'activation_verified']);
+const BROWSER_SESSION_ID = /^browser_[a-f0-9]{32}$/u;
+const BROWSER_REVISION = /^[a-f0-9]{64}$/u;
+const browserAttestations = new WeakMap();
+
+function browserJournalBinding(call) {
+  const binding = call?.internal?.journal_binding;
+  if (binding === undefined) return null;
+  if (!binding || typeof binding !== 'object' || Array.isArray(binding) || Object.keys(binding).sort().join(',') !== 'arguments_digest,operation_digest,operation_id,preview_digest' || !/^act_[a-f0-9]{32}$/u.test(binding.operation_id) || !/^[a-f0-9]{64}$/u.test(binding.arguments_digest) || !/^[a-f0-9]{64}$/u.test(binding.operation_digest) || !/^[a-f0-9]{64}$/u.test(binding.preview_digest)) throw new ProviderToolError('provider_invalid_request', 'invalid internal journal binding');
+  return Object.freeze({ operation_id: binding.operation_id, operation_digest: binding.operation_digest, arguments_digest: binding.arguments_digest, preview_digest: binding.preview_digest });
+}
+
+function issueBrowserAttestation(resultValue, { call, binding, proof }) {
+  if (!binding || resultValue?.status !== 'ok' || !BROWSER_PROOFS.has(proof)) return resultValue;
+  let output = resultValue;
+  try {
+    const payload = JSON.parse(resultValue.content?.[0]?.text ?? '');
+    if (payload && typeof payload === 'object' && payload.reconciliation !== proof) output = result(call, 'ok', { ...payload, reconciliation: proof });
+  } catch { return resultValue; }
+  browserAttestations.set(output, Object.freeze({ provider: 'browser_actions', call_id: call.id, tool_name: call.name, operation_id: binding.operation_id, operation_digest: binding.operation_digest, arguments_digest: binding.arguments_digest, preview_digest: binding.preview_digest, proof }));
+  return output;
+}
+
+export const readBrowserAttestation = value => value && typeof value === 'object' ? browserAttestations.get(value) ?? null : null;
+export const transferBrowserAttestation = (source, target) => { const attestation = readBrowserAttestation(source); if (attestation && target && typeof target === 'object') browserAttestations.set(target, attestation); return target; };
+
+function safeBrowserUrl(value) {
+  if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > MAX_URL) return null;
+  try { const url = new URL(value); if (url.protocol !== 'https:' || url.username || url.password || url.hostname === '') return null; return { href: url.href, origin: url.origin }; } catch { return null; }
+}
+function safeBrowserId(value) { return typeof value === 'string' && BROWSER_SESSION_ID.test(value) ? value : null; }
+function safeBrowserRevision(value) { return typeof value === 'string' && BROWSER_REVISION.test(value) ? value : null; }
+function safeBrowserPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return {};
+  const output = { provider: 'browser_actions' };
+  if (payload.state === 'ready' || payload.state === 'closed' || payload.state === 'reconciling') output.state = payload.state;
+  for (const key of ['title', 'text']) if (typeof payload[key] === 'string') output[key] = payload[key].slice(0, key === 'text' ? MAX_PAGE_TEXT : MAX_PAGE_TITLE);
+  for (const key of ['truncated', 'text_truncated', 'controls_truncated', 'closed']) if (typeof payload[key] === 'boolean') output[key] = payload[key];
+  const sessionId = safeBrowserId(payload.browser_session_id); if (sessionId) output.browser_session_id = sessionId;
+  const pageRevision = safeBrowserRevision(payload.page_revision); if (pageRevision) output.page_revision = pageRevision;
+  const url = safeBrowserUrl(payload.url); if (url) { output.url = url.href; output.origin = url.origin; }
+  const destination = safeBrowserUrl(payload.destination); if (destination) { output.destination = destination.href; output.destination_origin = destination.origin; }
+  const egress = safeBrowserUrl(payload.egress_destination); if (egress) output.egress_destination = egress.href;
+  if (typeof payload.followed_link_id === 'string' && /^link_[a-f0-9]{24}$/u.test(payload.followed_link_id)) output.followed_link_id = payload.followed_link_id;
+  if (typeof payload.control_id === 'string' && /^control_[a-f0-9]{24}$/u.test(payload.control_id)) output.control_id = payload.control_id;
+  if (Array.isArray(payload.links)) output.links = payload.links.slice(0, MAX_LINKS).flatMap(link => { const href = safeBrowserUrl(link?.url); return href && typeof link?.id === 'string' && /^link_[a-f0-9]{24}$/u.test(link.id) ? [{ id: link.id, url: href.href, origin: href.origin, label: boundedText(link.label, MAX_LABEL) }] : []; });
+  if (Array.isArray(payload.controls)) output.controls = payload.controls.slice(0, MAX_CONTROLS).flatMap(control => { if (!control || typeof control !== 'object' || typeof control.id !== 'string' || !/^control_[a-f0-9]{24}$/u.test(control.id)) return []; const item = { id: control.id, kind: control.kind === 'field' || control.kind === 'control' ? control.kind : 'control', tag: boundedText(control.tag, 32), type: boundedText(control.type, 32), label: boundedText(control.label, MAX_LABEL), disabled: control.disabled === true, readonly: control.readonly === true }; const form = safeBrowserUrl(control.form_action); const href = safeBrowserUrl(control.href); if (form) { item.form_action = form.href; item.form_origin = form.origin; } if (href) { item.href = href.href; item.href_origin = href.origin; } return [item]; });
+  return output;
+}
+
+function projectBrowserResult(resultValue, { controllerVerified = false, reconciliationRequired = false } = {}) {
+  let payload; try { payload = JSON.parse(resultValue?.content?.[0]?.text ?? ''); } catch { payload = null; }
+  const safe = safeBrowserPayload(payload);
+  if (reconciliationRequired && controllerVerified !== true) return makeToolResult({ id: resultValue?.id, name: resultValue?.name, status: 'failed', text: JSON.stringify({ ...safe, code: 'action_completion_unverified', state: 'reconciling', completion: 'controller_acknowledged', provider_completion: 'unverified' }), durationMs: resultValue?.metadata?.duration_ms ?? 0 });
+  if (reconciliationRequired) return makeToolResult({ id: resultValue.id, name: resultValue.name, status: 'ok', text: JSON.stringify({ ...safe, state: 'completed', completion: 'provider_verified', provider_completion: 'verified', accepted: true, completed: true, reconciliation: payload?.reconciliation ?? null }), durationMs: resultValue.metadata?.duration_ms ?? 0 });
+  return makeToolResult({ id: resultValue?.id, name: resultValue?.name, status: resultValue?.status === 'ok' ? 'ok' : 'failed', text: JSON.stringify(safe), durationMs: resultValue?.metadata?.duration_ms ?? 0 });
+}
+
 function validate(name, input) {
   const args = exactObject(input, Object.keys(browserSchemas[name] ?? {}).length ? Object.keys(browserSchemas[name].properties) : [], browserSchemas[name]?.required ?? []);
   if (name === 'browser.session_start') boundedString(args.url, 'url', { min: 1, max: MAX_URL });
@@ -158,12 +216,13 @@ export class BrowserActionProvider {
   async execute(call) { try { const args = validate(call.name, call.arguments); return await this._execute(call, args); } catch (error) { if (error?.code === 'invalid_tool_arguments') throw error; return failureResult(call, error); } }
   async _execute(call, args) {
     checkAborted(call.signal); if ((call.name === 'browser.fill_field' || call.name === 'browser.activate_control') && !this.experimentalMutations && !this.safeActions) return failureResult(call, new ProviderToolError('provider_unconfigured')); if (this.state() === 'disabled') return failureResult(call, new ProviderToolError('provider_disabled')); if (this.state() === 'unconfigured') return failureResult(call, new ProviderToolError('provider_unconfigured'));
+    if (['browser.session_start', 'browser.follow_link', 'browser.fill_field', 'browser.activate_control'].includes(call.name)) browserJournalBinding(call);
     if (call.name === 'browser.session_close') return this.closeSession(call, args);
     if (call.name === 'browser.inspect_links') return this.inspectLinks(call, args);
     if (call.name === 'browser.inspect_page') return this.inspectPage(call, args);
-    if (call.name === 'browser.session_start') { if (call.authorization?.kind !== 'user_confirmation') return failureResult(call, new ProviderToolError('provider_permission_insufficient')); this.consumeProposal(call, args); return this.startSession(call, args); }
-    if (call.name === 'browser.follow_link') { if (call.authorization?.kind !== 'user_confirmation') return failureResult(call, new ProviderToolError('provider_permission_insufficient')); this.consumeProposal(call, args); return this.followLink(call, args); }
-    if (call.name === 'browser.fill_field' || call.name === 'browser.activate_control') { if (call.authorization?.kind !== 'user_confirmation') return failureResult(call, new ProviderToolError('provider_permission_insufficient')); const session = this.sessions.get(args.browser_session_id); const control = session?.controls?.get(args.control_id); const destination = control && await this.actionDestination(control.form_action || control.href || session.url, session, call.signal); this.consumeProposal(call, args, { session_id: session?.id, page_revision: session?.revision, control_digest: control?.digest, origin: session ? new URL(session.url).origin : null, destination: destination?.href }); return call.name === 'browser.fill_field' ? this.fillField(call, args) : this.activateControl(call, args); }
+    if (call.name === 'browser.session_start') { if (call.authorization?.kind !== 'user_confirmation') return failureResult(call, new ProviderToolError('provider_permission_insufficient')); this.consumeProposal(call, args); const output = await this.startSession(call, args); return issueBrowserAttestation(output, { call, binding: browserJournalBinding(call), proof: 'session_started' }); }
+    if (call.name === 'browser.follow_link') { if (call.authorization?.kind !== 'user_confirmation') return failureResult(call, new ProviderToolError('provider_permission_insufficient')); this.consumeProposal(call, args); const output = await this.followLink(call, args); return issueBrowserAttestation(output, { call, binding: browserJournalBinding(call), proof: 'navigation_verified' }); }
+    if (call.name === 'browser.fill_field' || call.name === 'browser.activate_control') { if (call.authorization?.kind !== 'user_confirmation') return failureResult(call, new ProviderToolError('provider_permission_insufficient')); const session = this.sessions.get(args.browser_session_id); const control = session?.controls?.get(args.control_id); const destination = control && await this.actionDestination(control.form_action || control.href || session.url, session, call.signal); this.consumeProposal(call, args, { session_id: session?.id, page_revision: session?.revision, control_digest: control?.digest, origin: session ? new URL(session.url).origin : null, destination: destination?.href }); const output = call.name === 'browser.fill_field' ? await this.fillField(call, args) : await this.activateControl(call, args); return issueBrowserAttestation(output, { call, binding: browserJournalBinding(call), proof: call.name === 'browser.fill_field' ? 'input_verified' : 'activation_verified' }); }
     throw new ProviderToolError('invalid_tool_arguments');
   }
   async startSession(call, args) {
@@ -187,6 +246,6 @@ export class BrowserActionProvider {
   async shutdown() { await Promise.all([...this.sessions.values()].map(session => this.closeStored(session))); this.sessions.clear(); }
 }
 
-export function createBrowserActionTools(options = {}) { const provider = options instanceof BrowserActionProvider ? options : new BrowserActionProvider(options); return Object.fromEntries(Object.entries(definitions).filter(([name]) => (provider.experimentalMutations || provider.safeActions) || !['browser.fill_field', 'browser.activate_control'].includes(name)).map(([name, definition]) => [name, { ...definition, confirmationRequired: () => definition.requires_confirmation, authorize: call => provider.authorize({ ...call, name }), preview: call => provider.preview({ ...call, name }), execute: call => provider.execute({ ...call, name }) }])); }
+export function createBrowserActionTools(options = {}) { const provider = options instanceof BrowserActionProvider ? options : new BrowserActionProvider(options); return Object.fromEntries(Object.entries(definitions).filter(([name]) => (provider.experimentalMutations || provider.safeActions) || !['browser.fill_field', 'browser.activate_control'].includes(name)).map(([name, definition]) => { const tool = { ...definition, confirmationRequired: () => definition.requires_confirmation, authorize: call => provider.authorize({ ...call, name }), preview: call => provider.preview({ ...call, name }), execute: call => provider.execute({ ...call, name }) }; Object.defineProperty(tool, 'providerAttestation', { enumerable: false, value: { provider: 'browser_actions', proofs: BROWSER_PROOFS, read: readBrowserAttestation, transfer: transferBrowserAttestation, project: projectBrowserResult } }); return [name, tool]; })); }
 
 export { browserSchemas, definitions as browserActionDefinitions, publicAddress, publicUrl, hostIsPrivate };
