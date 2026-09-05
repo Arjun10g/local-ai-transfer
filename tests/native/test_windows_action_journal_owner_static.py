@@ -8,6 +8,7 @@ and contract text.
 from __future__ import annotations
 
 import json
+from itertools import product
 from pathlib import Path
 import re
 import unittest
@@ -79,6 +80,28 @@ def latched_monitor_model(*, monitor_signaled: bool, original_closed: bool,
     """Original handle teardown cannot erase a monitor's latched signal."""
     del original_closed, fresh_probe
     return monitor_signaled
+
+
+ADMISSION_CLOSING = 1 << 63
+ADMISSION_COUNT_MASK = (1 << 32) - 1
+
+
+def admission_model(word: int, event: str, maximum: int = 4096):
+    """CAS-word oracle: closing and borrower count linearize together."""
+    count = word & ADMISSION_COUNT_MASK
+    if word & ~(ADMISSION_CLOSING | ADMISSION_COUNT_MASK):
+        return word, False
+    if event == "acquire":
+        if word & ADMISSION_CLOSING or count >= maximum:
+            return word, False
+        return word + 1, True
+    if event == "close":
+        return word | ADMISSION_CLOSING, True
+    if event == "release":
+        if count == 0:
+            return word, False
+        return (word & ~ADMISSION_COUNT_MASK) | (count - 1), True
+    raise ValueError(event)
 
 
 class WindowsActionJournalOwnerStaticTests(unittest.TestCase):
@@ -170,7 +193,7 @@ class WindowsActionJournalOwnerStaticTests(unittest.TestCase):
         for token in (
             "std::mutex", "std::lock_guard<std::mutex>",
             "const auto status = store_.apply(request, io, result)",
-            "poison_for(status)", "if (shutdown_requested_.load",
+            "poison_for(status)", "if (admission_closing()",
             "std::lock_guard<std::mutex> lock(mutex_)",
         ):
             self.assertIn(token, self.owner + self.store)
@@ -183,15 +206,19 @@ class WindowsActionJournalOwnerStaticTests(unittest.TestCase):
 
     def test_shutdown_closes_admission_waits_store_and_getters_fail_closed(self):
         self.assertIn("bool begin_shutdown() noexcept", self.owner)
-        self.assertIn("shutdown_requested_.store(true", self.store)
+        self.assertIn("admission_.compare_exchange_weak", self.store)
+        self.assertIn("kAdmissionClosing", self.owner)
+        self.assertIn("kMaxActiveBorrows = 4096", self.owner)
+        self.assertNotIn("shutdown_requested_", self.owner + self.store)
+        self.assertNotIn("active_borrows_", self.owner + self.store)
         shutdown = self.store[
             self.store.index("bool JournalAuthorityOwner::begin_shutdown"):
             self.store.index("bool JournalAuthorityOwner::ready")
         ]
-        self.assertLess(
-            shutdown.index("shutdown_requested_.store(true"),
-            shutdown.index("std::lock_guard<std::mutex>"),
-        )
+        self.assertIn("admission_.compare_exchange_weak", shutdown)
+        self.assertIn("wait_for_borrowers()", shutdown)
+        self.assertIn("WaitOnAddress", self.store)
+        self.assertIn("ERROR_TIMEOUT", self.store)
         self.assertIn("shutting_down_ = true", shutdown)
         self.assertIn("return false;", self.store[self.store.index("bool JournalAuthorityOwner::ready"):])
         self.assertIn("poisoned_.load", self.store[self.store.index("bool JournalAuthorityOwner::poisoned"):])
@@ -203,8 +230,59 @@ class WindowsActionJournalOwnerStaticTests(unittest.TestCase):
         ]
         self.assertLess(apply.index("ActiveBorrow borrow(*this)"),
                         apply.index("std::unique_lock<std::mutex> lock"))
-        self.assertIn("while (active_borrows_.load", self.store)
+        self.assertIn("try_acquire_borrow", self.owner + self.store)
+        self.assertIn("release_borrow", self.owner + self.store)
         self.assertIn("poisoned_.store(true", apply[apply.rindex("catch (...)"):])
+
+    def test_single_admission_word_has_linearized_close_and_bounded_overflow(self):
+        word, admitted = admission_model(0, "acquire")
+        self.assertTrue(admitted)
+        word, closed = admission_model(word, "close")
+        self.assertTrue(closed)
+        word_after, admitted_after = admission_model(word, "acquire")
+        self.assertFalse(admitted_after)
+        self.assertEqual(word_after, word)
+        word, released = admission_model(word, "release")
+        self.assertTrue(released)
+        self.assertEqual(word & ADMISSION_COUNT_MASK, 0)
+        self.assertEqual(word & ADMISSION_CLOSING, ADMISSION_CLOSING)
+        near_max = 4095
+        word, admitted = admission_model(near_max, "acquire")
+        self.assertTrue(admitted)
+        self.assertEqual(word & ADMISSION_COUNT_MASK, 4096)
+        word_after, admitted_after = admission_model(word, "acquire")
+        self.assertFalse(admitted_after)
+        self.assertEqual(word_after, word)
+        corrupt = 1 << 40
+        self.assertFalse(admission_model(corrupt, "acquire")[1])
+        self.assertFalse(admission_model(0, "release")[1])
+
+    def test_admission_interleavings_preserve_count_and_close_invariant(self):
+        # Exhaustively enumerate the bounded event traces.  This is a model of
+        # the CAS linearization, not a claim that source text is a runtime
+        # concurrency test.
+        for events in product(("acquire", "close", "release"), repeat=6):
+            word = 0
+            expected_count = 0
+            closed = False
+            for event in events:
+                before = word
+                word, accepted = admission_model(word, event)
+                if event == "acquire":
+                    if accepted:
+                        expected_count += 1
+                    if closed:
+                        self.assertFalse(accepted)
+                        self.assertEqual(word, before)
+                elif event == "close":
+                    closed = True
+                    self.assertTrue(word & ADMISSION_CLOSING)
+                elif event == "release":
+                    if accepted:
+                        expected_count -= 1
+                self.assertEqual(word & ADMISSION_COUNT_MASK, expected_count)
+                self.assertGreaterEqual(expected_count, 0)
+                self.assertLessEqual(expected_count, 4096)
 
     def test_shutdown_and_exception_interleavings_latch_fail_closed(self):
         outcome, active, shutdown, poisoned = owner_interleaving_model(

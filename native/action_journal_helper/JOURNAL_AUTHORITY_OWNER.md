@@ -13,7 +13,8 @@ pipe reads/writes remain outside that lock. The owner and store are destroyed
 after the protocol/session and pipe have settled, so the retained lease remains
 valid for every store operation.
 
-Shutdown first publishes an atomic admission stop, then takes the owner mutex;
+Shutdown first CAS-publishes a closing bit in the single admission word, then
+takes the owner mutex;
 this waits for the one active store application and prevents a new one. The
 owner destructor repeats that close-admission operation before destroying the
 borrowed store and lease. Lock failures return finite fail-closed statuses;
@@ -24,11 +25,16 @@ probe before it reaches storage. The post-application decision reads that
 latched probe rather than reopening the original pipe, so the owner lock never
 invokes a pipe API and an original-handle close cannot erase cancellation.
 
-Each application registers an active borrow before waiting for the owner mutex;
-shutdown atomically closes admission and waits for that counter to reach zero
-before taking the mutex. Fatal statuses and lock failures atomically poison
-admission, and all later applications/getters fail closed. If the destructor
-cannot prove shutdown, it terminates rather than destroying a live store/lease.
+Each application increments the same admission word with CAS before waiting for
+the owner mutex. Its lower 32 bits are a bounded count (maximum 4096); the
+closing bit and count therefore linearize together, so shutdown cannot observe
+a false zero or admit a late caller. Shutdown waits for that count to reach
+zero before taking the mutex. Fatal statuses and lock failures latch the
+sticky poison state, and all later applications/getters fail closed. If the
+destructor cannot prove shutdown, including an unexpected WaitOnAddress
+failure, it terminates rather than destroying a live store/lease. WaitOnAddress
+is the Windows 8+ aligned 64-bit-address wait primitive: timeouts retry, other
+errors are unproven.
 
 Corrupt, conflicting, unknown, poisoned, cancelled, or deadline-expired
 startup state returns a finite status and publishes no pipe. Severe storage or

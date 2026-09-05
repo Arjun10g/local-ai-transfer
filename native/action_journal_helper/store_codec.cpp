@@ -1339,6 +1339,10 @@ std::unique_ptr<JournalAuthorityOwner> JournalAuthorityOwner::open(
       // Recovery is a store call too: serialize it under the same owner lock
       // used after publication, while keeping all pipe/session I/O outside.
       ActiveBorrow borrow(*owner);
+      if (!borrow.acquired()) {
+        status = AuthorityStatus::kInternal;
+        return nullptr;
+      }
       const std::lock_guard<std::mutex> lock(owner->mutex_);
       const auto recovery = owner->store_.load_and_recover(
           io, owner->recovery_count_);
@@ -1368,19 +1372,19 @@ std::unique_ptr<JournalAuthorityOwner> JournalAuthorityOwner::open(
 StoreStatus JournalAuthorityOwner::apply(const DecodedRequest& request,
                                          StorageIoControl io,
                                          EncodedResult& result) noexcept {
-  if (shutdown_requested_.load(std::memory_order_acquire) ||
-      poisoned_.load(std::memory_order_acquire))
+  if (admission_closing() || poisoned_.load(std::memory_order_acquire))
     return StoreStatus::kInternal;
-  // Register before any owner-mutex wait. Shutdown closes admission first and
-  // waits this counter to reach zero before taking ownership of teardown.
+  // The CAS admission increment is the linearization point and occurs before
+  // any owner-mutex wait. Shutdown uses the same word and therefore cannot
+  // race a late increment after it has begun waiting for zero.
   ActiveBorrow borrow(*this);
+  if (!borrow.acquired()) return StoreStatus::kInternal;
   std::unique_lock<std::mutex> lock;
   try {
-    if (shutdown_requested_.load(std::memory_order_acquire) ||
-        poisoned_.load(std::memory_order_acquire))
+    if (admission_closing() || poisoned_.load(std::memory_order_acquire))
       return StoreStatus::kInternal;
     lock = std::unique_lock<std::mutex>(mutex_);
-    if (shutdown_requested_.load(std::memory_order_acquire) ||
+    if (admission_closing() ||
         shutting_down_ || !recovered_ ||
         poisoned_.load(std::memory_order_acquire))
       return StoreStatus::kInternal;
@@ -1393,7 +1397,7 @@ StoreStatus JournalAuthorityOwner::apply(const DecodedRequest& request,
       }
       // Shutdown may publish its admission bit while store I/O is in flight;
       // never return a successful result after that linearization point.
-      if (shutdown_requested_.load(std::memory_order_acquire))
+      if (admission_closing())
         return StoreStatus::kInternal;
       return status;
     } catch (const std::bad_alloc&) {
@@ -1414,10 +1418,72 @@ StoreStatus JournalAuthorityOwner::apply(const DecodedRequest& request,
   }
 }
 
+bool JournalAuthorityOwner::try_acquire_borrow() noexcept {
+  std::uint64_t observed = admission_.load(std::memory_order_acquire);
+  for (;;) {
+    if ((observed & kAdmissionClosing) != 0) return false;
+    const auto count = observed & kAdmissionCountMask;
+    if ((observed & ~(kAdmissionClosing | kAdmissionCountMask)) != 0 ||
+        count >= kMaxActiveBorrows)
+      return false;
+    const auto desired = observed + UINT64_C(1);
+    if (admission_.compare_exchange_weak(
+            observed, desired, std::memory_order_acq_rel,
+            std::memory_order_acquire))
+      return true;
+  }
+}
+
+bool JournalAuthorityOwner::release_borrow() noexcept {
+  std::uint64_t observed = admission_.load(std::memory_order_acquire);
+  for (;;) {
+    const auto count = observed & kAdmissionCountMask;
+    if (count == 0 ||
+        (observed & ~(kAdmissionClosing | kAdmissionCountMask)) != 0)
+      return false;
+    const auto desired = (observed & ~kAdmissionCountMask) | (count - 1);
+    if (admission_.compare_exchange_weak(
+            observed, desired, std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+      if (count == 1)
+        WakeByAddressAll(reinterpret_cast<PVOID>(&admission_));
+      return true;
+    }
+  }
+}
+
+bool JournalAuthorityOwner::admission_closing() const noexcept {
+  return (admission_.load(std::memory_order_acquire) & kAdmissionClosing) != 0;
+}
+
+bool JournalAuthorityOwner::wait_for_borrowers() noexcept {
+  for (;;) {
+    const auto observed = admission_.load(std::memory_order_acquire);
+    if ((observed & kAdmissionCountMask) == 0) return true;
+    if ((observed & ~(kAdmissionClosing | kAdmissionCountMask)) != 0)
+      return false;
+    std::uint64_t expected = observed;
+    if (WaitOnAddress(reinterpret_cast<volatile VOID*>(&admission_), &expected,
+                      sizeof(expected), 1000))
+      continue;
+    const DWORD error = GetLastError();
+    if (error != ERROR_TIMEOUT) return false;
+  }
+}
+
 bool JournalAuthorityOwner::begin_shutdown() noexcept {
-  shutdown_requested_.store(true, std::memory_order_release);
-  while (active_borrows_.load(std::memory_order_acquire) != 0)
-    std::this_thread::yield();
+  std::uint64_t observed = admission_.load(std::memory_order_acquire);
+  for (;;) {
+    if ((observed & ~(kAdmissionClosing | kAdmissionCountMask)) != 0)
+      return false;
+    if ((observed & kAdmissionClosing) != 0) break;
+    const auto desired = observed | kAdmissionClosing;
+    if (admission_.compare_exchange_weak(
+            observed, desired, std::memory_order_acq_rel,
+            std::memory_order_acquire))
+      break;
+  }
+  if (!wait_for_borrowers()) return false;
   try {
     const std::lock_guard<std::mutex> lock(mutex_);
     shutting_down_ = true;
@@ -1430,12 +1496,12 @@ bool JournalAuthorityOwner::begin_shutdown() noexcept {
 }
 
 bool JournalAuthorityOwner::ready() const {
-  if (shutdown_requested_.load(std::memory_order_acquire) ||
+  if (admission_closing() ||
       poisoned_.load(std::memory_order_acquire))
     return false;
   try {
     const std::lock_guard<std::mutex> lock(mutex_);
-    return !shutdown_requested_.load(std::memory_order_acquire) &&
+    return !admission_closing() &&
         !shutting_down_ && recovered_ &&
         !poisoned_.load(std::memory_order_acquire);
   } catch (...) {
@@ -1444,17 +1510,17 @@ bool JournalAuthorityOwner::ready() const {
 }
 
 bool JournalAuthorityOwner::poisoned() const {
-  return shutdown_requested_.load(std::memory_order_acquire) ||
+  return admission_closing() ||
       poisoned_.load(std::memory_order_acquire);
 }
 
 std::uint32_t JournalAuthorityOwner::recovery_count() const {
-  if (shutdown_requested_.load(std::memory_order_acquire) ||
+  if (admission_closing() ||
       poisoned_.load(std::memory_order_acquire))
     return UINT32_MAX;
   try {
     const std::lock_guard<std::mutex> lock(mutex_);
-    if (shutdown_requested_.load(std::memory_order_acquire) ||
+    if (admission_closing() ||
         shutting_down_ || poisoned_.load(std::memory_order_acquire))
       return UINT32_MAX;
     return recovery_count_;

@@ -23,7 +23,7 @@
     "recovered record/slot state",
     "poison state",
     "recovery count",
-    "shutdown admission and one active store borrow counter",
+    "one CAS-managed admission word with a closing bit and bounded active-borrow count (maximum 4096)",
     "one-writer mutex"
   ],
   "borrowed_boundary": {
@@ -53,7 +53,7 @@
   "lifecycle": {
     "startup": "recover the complete fixed container before CreateNamedPipeW",
     "shutdown": "close admission, wait the mutex-held store application, settle protocol/session and pipe, then owner destruction closes lease",
-    "shutdown_failure": "atomic admission remains closed; no reuse or new store call; destructor fail-stops if shutdown cannot be proven",
+    "shutdown_failure": "CAS admission remains closed; no reuse or new store call; WaitOnAddress failures other than timeout are unproven and destructor fail-stops",
     "unknown_or_corrupt_state": "no owner and no published pipe",
     "second_store_or_lease": "forbidden"
   },

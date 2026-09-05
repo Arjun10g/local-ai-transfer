@@ -63,8 +63,9 @@ class JournalAuthorityOwner final {
                     StorageIoControl io,
                     EncodedResult& result) noexcept;
   // Closes admission and waits for the current owner-locked application to
-  // settle.  The atomic admission bit is published before taking the mutex,
-  // so a concurrent caller cannot enter while shutdown is waiting.
+  // settle.  Closing and the bounded borrower count are one CAS-managed word:
+  // no caller can be admitted after shutdown's linearization point, and
+  // shutdown cannot observe a false zero count.
   bool begin_shutdown() noexcept;
   bool ready() const;
   bool poisoned() const;
@@ -73,17 +74,17 @@ class JournalAuthorityOwner final {
  private:
   class ActiveBorrow final {
    public:
-    explicit ActiveBorrow(JournalAuthorityOwner& owner) noexcept : owner_(owner) {
-      owner_.active_borrows_.fetch_add(1, std::memory_order_acq_rel);
-    }
-    ~ActiveBorrow() noexcept {
-      owner_.active_borrows_.fetch_sub(1, std::memory_order_acq_rel);
-    }
+    explicit ActiveBorrow(JournalAuthorityOwner& owner) noexcept
+        : owner_(owner), acquired_(owner.try_acquire_borrow()) {}
+    ~ActiveBorrow() noexcept { if (acquired_ && !owner_.release_borrow())
+      owner_.poisoned_.store(true, std::memory_order_release); }
     ActiveBorrow(const ActiveBorrow&) = delete;
     ActiveBorrow& operator=(const ActiveBorrow&) = delete;
+    bool acquired() const noexcept { return acquired_; }
 
    private:
     JournalAuthorityOwner& owner_;
+    bool acquired_ = false;
   };
 
   JournalAuthorityOwner(action_journal_storage::JournalStorageLease&& lease,
@@ -93,14 +94,30 @@ class JournalAuthorityOwner final {
       action_journal_storage::StorageStatus status) noexcept;
   static AuthorityStatus map_recovery_status(StoreStatus status) noexcept;
   void poison_for(StoreStatus status) noexcept;
+  bool try_acquire_borrow() noexcept;
+  bool release_borrow() noexcept;
+  bool admission_closing() const noexcept;
+  bool wait_for_borrowers() noexcept;
+
+  // Bit 63 closes admission.  The lower 32 bits are the borrower count;
+  // bits 32..62 are reserved and must stay zero.  A single aligned word is
+  // the linearization primitive for both admission and shutdown.  The
+  // Windows wait API is available on Windows 8+ and is used only on this
+  // exact address; unexpected wait failure is an unproved shutdown.
+  static constexpr std::uint64_t kAdmissionClosing = UINT64_C(1) << 63;
+  static constexpr std::uint64_t kAdmissionCountMask = UINT64_C(0xffffffff);
+  static constexpr std::uint32_t kMaxActiveBorrows = 4096;
+  static_assert(sizeof(std::atomic<std::uint64_t>) == sizeof(std::uint64_t),
+                "admission word must be waitable as one 64-bit value");
+  static_assert(alignof(std::atomic<std::uint64_t>) >= alignof(std::uint64_t),
+                "admission word must be naturally aligned for WaitOnAddress");
 
   // Declaration order is part of the ownership invariant: the lease outlives
   // the store that borrows its retained file handle.
   action_journal_storage::JournalStorageLease lease_;
   FixedContainerStore store_;
   mutable std::mutex mutex_;
-  std::atomic<std::uint32_t> active_borrows_{0};
-  std::atomic_bool shutdown_requested_{false};
+  alignas(8) std::atomic<std::uint64_t> admission_{0};
   bool shutting_down_ = false;
   std::uint32_t recovery_count_ = 0;
   bool recovered_ = false;
