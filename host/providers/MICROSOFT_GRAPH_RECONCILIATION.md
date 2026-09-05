@@ -21,6 +21,11 @@ when the requested state is already present, and always verifies with a fresh
 GET after a PATCH. A timeout is never retried blindly; a GET can prove the
 desired state, otherwise the operation remains reconciling.
 
+Proof timestamps are accepted only as strict, calendar-valid Microsoft Graph
+UTC values with a terminal `Z` and 1–12 fractional digits. Non-UTC offsets,
+impossible dates, and over-precision remain unproven and fail closed before a
+Sent Items baseline or Teams timeout proof is used.
+
 `mail.send_draft` binds the complete bounded normalized draft content,
 recipients, subject, and non-empty returned ETag/change key at preview. It does
 not claim completion from Graph's `202 Accepted`. Completion requires the draft

@@ -12,7 +12,12 @@ const MAX_TOKEN_BYTES = 4096;
 const MAX_PROPOSALS = 128;
 const MAX_WRITE_RECORDS = 256;
 const MAX_RECONCILIATION_ITEMS = 50;
-const GRAPH_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,12}))?(Z|[+-]\d{2}:\d{2})$/u;
+// Graph message/chat creation and sent timestamps are documented as UTC.
+// Keep the proof parser narrower than generic RFC3339: accepting a local
+// offset would make independently produced timestamps comparable after a
+// conversion the provider did not attest to. Fractional seconds remain
+// bounded to the OData-compatible 1–12 digits.
+const GRAPH_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,12}))?Z$/u;
 const OPERATION_ID = /^act_[a-f0-9]{32}$/u;
 const DIGEST = /^[a-f0-9]{64}$/u;
 const LAE_OPERATION_HEADER = 'x-lae-operation';
@@ -105,11 +110,10 @@ const graphDateTimeMs = value => {
   const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0); const monthDays = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]; if (day < 1 || day > monthDays[month - 1]) return NaN;
   const fraction = match[7] ?? ''; const millis = fraction ? Number(fraction.slice(0, 3).padEnd(3, '0')) : 0; const subMilliseconds = fraction.length > 3 ? Number(`0.${fraction.slice(3, 12)}`) : 0; const wall = new Date(0); wall.setUTCFullYear(year, month - 1, day); wall.setUTCHours(hour, minute, second, millis);
   if (wall.getUTCFullYear() !== year || wall.getUTCMonth() !== month - 1 || wall.getUTCDate() !== day || wall.getUTCHours() !== hour || wall.getUTCMinutes() !== minute || wall.getUTCSeconds() !== second || wall.getUTCMilliseconds() !== millis) return NaN;
-  let offsetMinutes = 0; const zone = match[8]; if (zone !== 'Z') { const sign = zone[0] === '+' ? 1 : -1; const offsetHour = Number(zone.slice(1, 3)); const offsetMinute = Number(zone.slice(4, 6)); if (offsetHour > 14 || offsetMinute > 59 || offsetHour === 14 && offsetMinute !== 0 || zone === '-00:00') return NaN; offsetMinutes = sign * (offsetHour * 60 + offsetMinute); }
   // JavaScript dates have millisecond resolution. Preserve the first nine
   // fractional digits as a bounded sub-millisecond value and deterministically
   // floor any remaining OData precision rather than invoking permissive parsing.
-  const timestamp = wall.getTime() + subMilliseconds - offsetMinutes * 60000; return Number.isFinite(timestamp) ? timestamp : NaN;
+  const timestamp = wall.getTime() + subMilliseconds; return Number.isFinite(timestamp) ? timestamp : NaN;
 };
 const projectionMessage = (value, maxPreview = 1024) => {
   if (!value || typeof value !== 'object' || typeof value.id !== 'string') return null;
