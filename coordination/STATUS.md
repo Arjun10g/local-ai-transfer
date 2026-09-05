@@ -46,9 +46,14 @@
 - The bounded action-journal wire protocol is source-merged at `3746421`, but
   it is inert: no native helper, durable store, transport, trust anchor,
   packaging, activation, or production availability was added.
-- Browser candidate `5dc2ad2` is rejected; repair
-  `fc317fce023f9364e7f19b69a700124d1936f8ca` remains unmerged and unreviewed.
-  No live browser readiness is claimed.
+- Browser reconciliation source `fc317fce023f9364e7f19b69a700124d1936f8ca`
+  is merged by `976aeff` after independent source/mock review. The rejected
+  predecessor `5dc2ad2` remains historical. No live browser, Windows process,
+  approved-executable, or target evidence exists, so live readiness is not
+  claimed.
+- Native journal container candidate `dd85ca0`, Graph-read completeness, and
+  current Copilot hardening remain unmerged/in progress. They provide no
+  production or live capability on `main`.
 - The strongest recorded general remote tool evaluation is 27/34, below its
   gate. The later production-profile result is 13/32 and failed that profile;
   these are distinct results and neither establishes model/tool readiness.
