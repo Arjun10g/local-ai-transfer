@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { makeEvent } from './assistant-events.mjs';
 import { makeToolResult, parseToolCall, validateToolResult, EnvelopeError } from './tool-envelope.mjs';
 import { createActionBinding } from './action-journal.mjs';
@@ -11,6 +11,7 @@ const sessionIdPattern = /^[A-Za-z0-9_-]{8,96}$/;
 const DURABLE_ACTION_EFFECTS = new Set(['create', 'replace', 'write_sensitive', 'launch', 'external_navigation', 'process_execution', 'cloud_inference', 'create_draft', 'send_mail', 'modify_mail', 'send_teams', 'browser_navigation', 'browser_input', 'browser_activation']);
 const NON_ACTION_EFFECTS = new Set(['none', 'read_sensitive', 'read_mail', 'read_teams', 'browser_read', 'browser_close']);
 const RECONCILIATION_REQUIRED_EFFECTS = new Set(['create_draft', 'send_mail', 'modify_mail', 'send_teams', 'browser_navigation', 'browser_input', 'browser_activation']);
+function digestEvidence(value) { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
 
 // The model sees only the OpenAI-compatible function schema. Execution and
 // confirmation policy remain host-owned and never cross the native boundary.
@@ -182,7 +183,7 @@ export class ConversationController {
           if (!this.actionJournal) throw Object.assign(new Error('durable action journal is not configured'), { code: 'action_journal_unavailable' });
           const binding = createActionBinding({ requestId, callId: call.id, toolName: call.name, arguments: call.arguments, preview });
           const receipt = await this.actionJournal.prepare({ requestId, callId: call.id, toolName: call.name, riskTier: tool.risk_tier, sideEffect: tool.side_effect, argumentsDigest: binding.argumentsDigest, previewDigest: binding.previewDigest, operationDigest: binding.operationDigest });
-          activeJournalOperation = { id: receipt.operation_id, dispatched: false, reconcile: RECONCILIATION_REQUIRED_EFFECTS.has(tool.side_effect) };
+          activeJournalOperation = { id: receipt.operation_id, dispatched: false, reconcile: RECONCILIATION_REQUIRED_EFFECTS.has(tool.side_effect), operationDigest: binding.operationDigest, argumentsDigest: binding.argumentsDigest, previewDigest: binding.previewDigest };
         }
         const requiresConfirmation = !previewAccessDenied && (typeof tool.confirmationRequired === 'function' ? await tool.confirmationRequired(call, { preview }) : Boolean(tool.requires_confirmation));
         if (requiresConfirmation) {
@@ -215,7 +216,8 @@ export class ConversationController {
             await this.actionJournal.acknowledge(activeJournalOperation.id);
             if (activeJournalOperation.reconcile) {
               await this.actionJournal.beginReconciliation(activeJournalOperation.id);
-              result = makeToolResult({ id: call.id, name: call.name, status: 'failed', text: JSON.stringify({ code: 'action_completion_unverified', operation_id: activeJournalOperation.id, state: 'reconciling' }) });
+              const responseDigest = digestEvidence({ status: result.status, content: result.content.map(item => ({ type: item.type, text_digest: digestEvidence(item.text) })) });
+              result = makeToolResult({ id: call.id, name: call.name, status: 'failed', text: JSON.stringify({ code: 'action_completion_unverified', operation_id: activeJournalOperation.id, state: 'reconciling', completion: 'controller_acknowledged', provider_completion: 'unverified', evidence: { operation_digest: activeJournalOperation.operationDigest, precondition_digest: activeJournalOperation.previewDigest, resource_digest: null, response_digest: responseDigest, arguments_digest: activeJournalOperation.argumentsDigest } }) });
             } else await this.actionJournal.complete(activeJournalOperation.id);
           }
           else await this.actionJournal.markUnknown(activeJournalOperation.id);

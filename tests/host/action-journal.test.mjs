@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFile, chmod, lstat, mkdtemp, readFile, realpath, symlink } from 'node:fs/promises';
+import { appendFile, chmod, lstat, link as hardlink, mkdtemp, readFile, realpath, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ActionJournal, ACTION_JOURNAL_LIMITS, createActionBinding } from '../../host/agent/action-journal.mjs';
@@ -22,7 +22,7 @@ async function directory(t) {
 
 function deterministicOptions(path, extra = {}) {
   let id = 0; let tick = 0;
-  return { directory: path, idFactory: () => `act_${(++id).toString(16).padStart(32, '0')}`, now: () => new Date(Date.UTC(2026, 0, 1, 0, 0, tick++)).toISOString(), ...extra };
+  return { directory: path, testOnly: true, idFactory: () => `act_${(++id).toString(16).padStart(32, '0')}`, now: () => new Date(Date.UTC(2026, 0, 1, 0, 0, tick++)).toISOString(), ...extra };
 }
 
 function input(overrides = {}) {
@@ -76,18 +76,18 @@ test('journal persists a bounded hash chain with private permissions and digest-
   for (const secret of [SECRET, REQUEST_ID, CALL_ID, 'note.txt']) assert.equal(raw.includes(secret), false, secret);
   for (const line of raw.trimEnd().split('\n')) assert.ok(Buffer.byteLength(line, 'utf8') <= ACTION_JOURNAL_LIMITS.max_event_bytes);
   if (process.platform !== 'win32') { assert.equal((await lstat(path)).mode & 0o777, 0o700); assert.equal((await lstat(filename)).mode & 0o777, 0o600); }
-  const reopened = await ActionJournal.open({ directory: path }); assert.deepEqual(reopened.health(), { state: 'ready', error: null }); assert.equal((await reopened.detail(receipt.operation_id)).receipt_hash, detail.receipt_hash);
+  const reopened = await ActionJournal.open({ directory: path, testOnly: true }); assert.deepEqual(reopened.health(), { state: 'ready', error: null }); assert.equal((await reopened.detail(receipt.operation_id)).receipt_hash, detail.receipt_hash);
 });
 
 test('Windows and untrusted directory paths fail closed without creating or chmodding targets', async t => {
   const parent = await directory(t); const absent = join(parent, 'not-created');
   const windows = await ActionJournal.open({ directory: 'C:\\private\\journal', platform: 'win32' });
   assert.deepEqual(windows.health(), { state: 'blocked', error: 'action_journal_platform_unavailable' });
-  const absentJournal = await ActionJournal.open({ directory: absent }); assert.equal(absentJournal.health().state, 'blocked');
+  const absentJournal = await ActionJournal.open({ directory: absent }); assert.deepEqual(absentJournal.health(), { state: 'blocked', error: 'action_journal_handle_relative_unavailable' });
   await assert.rejects(lstat(absent), { code: 'ENOENT' });
   const target = join(parent, 'target'); await import('node:fs/promises').then(fs => fs.mkdir(target, { mode: 0o755 }));
   const link = join(parent, 'link'); await symlink(target, link);
-  const linked = await ActionJournal.open({ directory: link }); assert.deepEqual(linked.health(), { state: 'blocked', error: 'action_journal_permissions_invalid' });
+  const linked = await ActionJournal.open({ directory: link, testOnly: true }); assert.deepEqual(linked.health(), { state: 'blocked', error: 'action_journal_permissions_invalid' });
   assert.equal((await lstat(target)).mode & 0o777, 0o755, 'opening a symlink does not chmod its target');
 });
 
@@ -96,7 +96,7 @@ test('startup never manufactures completion and recovery preserves ambiguity', a
   const acknowledged = await prepared(journal); await journal.authorize(acknowledged.operation_id, 'user_confirmation'); await journal.dispatch(acknowledged.operation_id); await journal.acknowledge(acknowledged.operation_id);
   const second = await prepared(journal, { requestId: 'request_action02', callId: 'call_action0002', arguments: { path: 'second.txt', content: SECRET }, preview: { path: 'second.txt' } }); await journal.authorize(second.operation_id, 'user_confirmation'); await journal.dispatch(second.operation_id); await journal.beginReconciliation(second.operation_id);
   const third = await prepared(journal, { requestId: 'request_action03', callId: 'call_action0003', arguments: { path: 'third.txt', content: SECRET }, preview: { path: 'third.txt' } }); await journal.authorize(third.operation_id, 'user_confirmation'); await journal.dispatch(third.operation_id);
-  const reopened = await ActionJournal.open({ directory: path });
+  const reopened = await ActionJournal.open({ directory: path, testOnly: true });
   assert.equal((await reopened.detail(acknowledged.operation_id)).state, 'acknowledged');
   assert.equal((await reopened.detail(second.operation_id)).state, 'reconciling');
   assert.equal((await reopened.detail(third.operation_id)).state, 'unknown_manual');
@@ -110,7 +110,7 @@ test('malformed, truncated, and hash-tampered journals block subsequent actions'
       else if (damage === 'truncated') { const raw = await readFile(filename, 'utf8'); await import('node:fs/promises').then(fs => fs.writeFile(filename, raw.slice(0, -2), { mode: 0o600 })); }
       else if (damage === 'hash') { const raw = await readFile(filename, 'utf8'); await import('node:fs/promises').then(fs => fs.writeFile(filename, raw.replace(/"hash":"[a-f0-9]{64}"/, `"hash":"${'f'.repeat(64)}"`), { mode: 0o600 })); }
       else await appendFile(filename, `${'x'.repeat(ACTION_JOURNAL_LIMITS.max_event_bytes + 1)}\n`);
-      const reopened = await ActionJournal.open({ directory: path }); assert.equal(reopened.health().state, 'blocked'); await assert.rejects(prepared(reopened), error => error.code === reopened.health().error);
+      const reopened = await ActionJournal.open({ directory: path, testOnly: true }); assert.equal(reopened.health().state, 'blocked'); await assert.rejects(prepared(reopened), error => error.code === reopened.health().error);
     });
   }
 });
@@ -121,6 +121,22 @@ test('record symlink substitution is rejected before target mutation', async t =
   await assert.rejects(journal.authorize(receipt.operation_id, 'user_confirmation'), error => ['action_journal_write_failed', 'action_journal_corrupt'].includes(error.code)); assert.equal(await readFile(target, 'utf8'), 'unchanged'); assert.equal(journal.health().state, 'blocked');
 });
 
+test('record hardlinks and same-size live replacement fail closed before append', async t => {
+  const path = await directory(t); const journal = await ActionJournal.open(deterministicOptions(path)); const receipt = await prepared(journal); const filename = join(path, `${receipt.operation_id}.jsonl`);
+  const hardlinkPath = join(path, '..', 'action-journal-hardlink-probe.jsonl'); t.after(() => unlink(hardlinkPath).catch(() => {})); await hardlink(filename, hardlinkPath);
+  const reopened = await ActionJournal.open({ directory: path, testOnly: true }); assert.deepEqual(reopened.health(), { state: 'blocked', error: 'action_journal_corrupt' });
+
+  const secondPath = await directory(t); let replaced = false;
+  const second = await ActionJournal.open(deterministicOptions(secondPath, { fault: async ({ phase, state }) => {
+    if (!replaced && phase === 'before_append' && state === 'authorized') {
+      replaced = true; const target = join(secondPath, `${secondReceipt.operation_id}.jsonl`); const raw = await readFile(target); await unlink(target); await writeFile(target, raw, { mode: 0o600 });
+    }
+  } }));
+  const secondReceipt = await prepared(second);
+  await assert.rejects(second.authorize(secondReceipt.operation_id, 'user_confirmation'), error => ['action_journal_write_failed', 'action_journal_corrupt'].includes(error.code));
+  assert.equal(second.health().state, 'blocked');
+});
+
 test('dispatch must be fsynced before execution and any post-dispatch failure becomes unknown', async t => {
   for (const phase of ['before_append', 'after_append_before_sync', 'after_fsync']) {
     await t.test(`dispatch fault ${phase}`, async t => {
@@ -128,7 +144,7 @@ test('dispatch must be fsynced before execution and any post-dispatch failure be
       const journal = await ActionJournal.open(deterministicOptions(path, { fault: ({ phase: actual, state }) => { if (state === 'dispatching' && actual === phase) throw new Error('injected_crash'); } }));
       const turn = await runMutation({ journal, execute: async call => { executions++; return makeToolResult({ id: call.id, name: call.name }); } });
       assert.equal(executions, 0); assert.equal(turn.result.error, 'action_journal_write_failed');
-      const reopened = await ActionJournal.open({ directory: path }); const summary = await reopened.summary();
+      const reopened = await ActionJournal.open({ directory: path, testOnly: true }); const summary = await reopened.summary();
       assert.ok(summary.records.every(record => ['cancelled', 'unknown_manual'].includes(record.state))); assert.equal((await readFile(join(path, (await import('node:fs/promises').then(fs => fs.readdir(path))).find(name => name.endsWith('.jsonl'))), 'utf8')).includes(SECRET), false);
     });
   }
@@ -174,7 +190,7 @@ test('provider acknowledgements stay visibly unverified and duplicate active act
   };
   const controller = new ConversationController({ actionJournal: journal, confirmationTimeoutMs: 1000, toolRegistry: { [tool.name]: tool }, engine: { async *generate({ messages }) { if (!messages.some(message => message.role === 'tool')) { yield { kind: 'tool_call_chunk', text: JSON.stringify({ id: `call_draft000${++callNumber}`, name: tool.name, arguments: { subject: 'same action' } }) }; return; } yield { kind: 'text_delta', text: 'pending' }; } } });
   const events = []; const first = controller.runTurn({ sessionId: 'session_draft001', requestId: 'request_draft001', message: 'draft', onEvent: event => { events.push(event); if (event.event === 'tool.confirmation_required') queueMicrotask(() => controller.confirm(event.data.confirmation_id, true, { requestId: event.request_id, callId: event.data.call.id })); } });
-  assert.equal((await first).state, 'COMPLETED'); const completed = events.find(event => event.event === 'tool.completed'); assert.equal(completed.data.result.status, 'failed'); assert.equal(JSON.parse(completed.data.result.content[0].text).code, 'action_completion_unverified'); assert.equal((await journal.summary()).records[0].state, 'reconciling');
+  assert.equal((await first).state, 'COMPLETED'); const completed = events.find(event => event.event === 'tool.completed'); assert.equal(completed.data.result.status, 'failed'); const unverified = JSON.parse(completed.data.result.content[0].text); assert.equal(unverified.code, 'action_completion_unverified'); assert.equal(unverified.completion, 'controller_acknowledged'); assert.equal(unverified.provider_completion, 'unverified'); assert.equal(unverified.evidence.resource_digest, null); for (const key of ['operation_digest', 'precondition_digest', 'arguments_digest', 'response_digest']) assert.match(unverified.evidence[key], /^[a-f0-9]{64}$/u); assert.equal(JSON.stringify(unverified).includes('same action'), false); assert.equal((await journal.summary()).records[0].state, 'reconciling');
   controller.resetSession('session_draft001'); const second = controller.runTurn({ sessionId: 'session_draft001', requestId: 'request_draft002', message: 'draft again', onEvent: event => { if (event.event === 'tool.confirmation_required') queueMicrotask(() => controller.confirm(event.data.confirmation_id, true, { requestId: event.request_id, callId: event.data.call.id })); } });
   assert.equal((await second).error, 'action_journal_duplicate_active'); assert.equal(previewRevision, 2, 'nondeterministic preview revisions cannot bypass argument-bound duplicate refusal'); assert.equal(executions, 1);
 });
@@ -204,6 +220,7 @@ test('operator endpoints are authenticated, bounded, assertion-only, and never r
   let providerExecutions = 0;
   const host = new HostServer({ controller: { cancelActive() { return false; } }, actionJournal: journal, providerShutdown: async () => { providerExecutions++; } });
   const address = await host.listen(0); t.after(() => host.close()); const headers = { authorization: `Bearer ${address.token}` };
+  const readyStatus = await (await fetch(`${address.url}/api/status`, { headers })).json(); assert.deepEqual(readyStatus.action_journal, { state: 'ready', error: null, durable_action_dispatch: true });
   assert.equal((await fetch(`${address.url}/api/action-journal`)).status, 401);
   const summaryResponse = await fetch(`${address.url}/api/action-journal?limit=1`, { headers }); assert.equal(summaryResponse.status, 200); const summary = await summaryResponse.json(); assert.equal(summary.records[0].state, 'unknown_manual'); assert.equal(JSON.stringify(summary).includes(SECRET), false);
   assert.equal((await fetch(`${address.url}/api/action-journal?limit=1&limit=2`, { headers })).status, 400);
@@ -212,5 +229,6 @@ test('operator endpoints are authenticated, bounded, assertion-only, and never r
   assert.equal((await fetch(`${address.url}/api/action-journal/act_${'f'.repeat(32)}`, { headers })).status, 404);
   assert.equal((await fetch(`${address.url}/api/action-journal/${receipt.operation_id}/resolve`, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: '{"resolution":"maybe"}' })).status, 400);
   const resolveResponse = await fetch(`${address.url}/api/action-journal/${receipt.operation_id}/resolve`, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ resolution: 'completed' }) }); assert.equal(resolveResponse.status, 200); assert.equal((await resolveResponse.json()).receipt.state, 'completed'); assert.equal(providerExecutions, 0, 'resolution only appends the operator assertion and does not contact or replay a provider');
-  const unavailableHost = new HostServer({ controller: { cancelActive() { return false; } } }); const unavailableAddress = await unavailableHost.listen(0); t.after(() => unavailableHost.close()); assert.equal((await fetch(`${unavailableAddress.url}/api/action-journal`, { headers: { authorization: `Bearer ${unavailableAddress.token}` } })).status, 409);
+  const unavailableHost = new HostServer({ controller: { cancelActive() { return false; } } }); const unavailableAddress = await unavailableHost.listen(0); t.after(() => unavailableHost.close()); const unavailableStatus = await (await fetch(`${unavailableAddress.url}/api/status`, { headers: { authorization: `Bearer ${unavailableAddress.token}` } })).json(); assert.deepEqual(unavailableStatus.action_journal, { state: 'unavailable', error: 'action_journal_unavailable', durable_action_dispatch: false }); assert.equal((await fetch(`${unavailableAddress.url}/api/action-journal`, { headers: { authorization: `Bearer ${unavailableAddress.token}` } })).status, 409);
+  const blockedHost = new HostServer({ controller: { cancelActive() { return false; } }, actionJournal: { health: () => ({ state: 'blocked', error: 'action_journal_handle_relative_unavailable' }) } }); const blockedAddress = await blockedHost.listen(0); t.after(() => blockedHost.close()); const blockedStatus = await (await fetch(`${blockedAddress.url}/api/status`, { headers: { authorization: `Bearer ${blockedAddress.token}` } })).json(); assert.deepEqual(blockedStatus.action_journal, { state: 'blocked', error: 'action_journal_handle_relative_unavailable', durable_action_dispatch: false });
 });

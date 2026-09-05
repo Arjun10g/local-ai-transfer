@@ -22,7 +22,7 @@ const call = (name, arguments_, id = `call_${name.replaceAll('.', '_')}`) => ({ 
 const value = result => JSON.parse(result.content[0].text);
 const revision = 'a'.repeat(64);
 const configuredWorkspace = () => ({ id: 'project', path: '/approved/workspace', read: true, write: true });
-async function journal(t) { const path = await realpath(await mkdtemp(join(tmpdir(), 'lae-external-journal-'))); await chmod(path, 0o700); t.after(() => rm(path, { recursive: true, force: true })); return ActionJournal.open({ directory: path }); }
+async function journal(t) { const path = await realpath(await mkdtemp(join(tmpdir(), 'lae-external-journal-'))); await chmod(path, 0o700); t.after(() => rm(path, { recursive: true, force: true })); return ActionJournal.open({ directory: path, testOnly: true }); }
 
 test('external contract publishes complete strict schemas for every tool', async () => {
   const contract = JSON.parse(await readFile(new URL('../../contracts/external-tools/v0.1.0.json', import.meta.url), 'utf8'));

@@ -144,7 +144,7 @@ test('mocked HostServer drives validated read and confirmed mutation through mod
     async shutdown() {}
   };
   const rawJournalPath = await mkdtemp(join(tmpdir(), 'lae-vertical-journal-')); const journalPath = await realpath(rawJournalPath); await chmod(journalPath, 0o700); t.after(() => rm(journalPath, { recursive: true, force: true }));
-  const actionJournal = await ActionJournal.open({ directory: journalPath });
+  const actionJournal = await ActionJournal.open({ directory: journalPath, testOnly: true });
   const controller = new ConversationController({ engine, actionJournal, confirmationTimeoutMs: 1000, toolRegistry: { [readTool.name]: readTool, [draftTool.name]: draftTool } });
   const host = new HostServer({ controller, engine, actionJournal }); const address = await host.listen(0); t.after(() => host.close());
   const sessionResponse = await fetch(`${address.url}/api/sessions`, { method: 'POST', headers: { ...auth(address.token), 'content-type': 'application/json' }, body: '{}' });

@@ -59,6 +59,7 @@ export function createActionBinding({ requestId, callId, toolName, arguments: ar
 function exactKeys(value) { return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === EVENT_KEYS.length && EVENT_KEYS.every(key => Object.hasOwn(value, key)); }
 function isoTimestamp(value) { return typeof value === 'string' && value.length >= 20 && value.length <= 32 && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value; }
 function regularFile(value) { return Boolean(value && (typeof value.isFile === 'function' ? value.isFile() : value.isFile === true)); }
+function singleLink(value) { return Number.isInteger(value?.nlink) && value.nlink === 1; }
 function directory(value) { return Boolean(value && (typeof value.isDirectory === 'function' ? value.isDirectory() : value.isDirectory === true)); }
 function symlink(value) { return Boolean(value && (typeof value.isSymbolicLink === 'function' ? value.isSymbolicLink() : value.isSymbolicLink === true)); }
 function sameIdentity(left, right) { return left && right && left.dev === right.dev && left.ino === right.ino; }
@@ -99,19 +100,19 @@ async function readBoundedFile(path) {
   const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const before = await handle.stat();
-    if (!regularFile(before) || before.size < 1 || before.size > MAX_FILE_BYTES) throw new ActionJournalError('action_journal_corrupt');
+    if (!regularFile(before) || !singleLink(before) || before.size < 1 || before.size > MAX_FILE_BYTES) throw new ActionJournalError('action_journal_corrupt');
     const buffer = Buffer.alloc(before.size + 1); let offset = 0;
     while (offset < buffer.length) { const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset); if (!bytesRead) break; offset += bytesRead; }
     const after = await handle.stat();
-    if (!sameIdentity(before, after) || after.size !== before.size || offset !== before.size) throw new ActionJournalError('action_journal_corrupt');
+    if (!sameIdentity(before, after) || !singleLink(after) || after.size !== before.size || offset !== before.size) throw new ActionJournalError('action_journal_corrupt');
     return { text: buffer.subarray(0, offset).toString('utf8'), identity: after, size: after.size };
   } finally { await handle.close(); }
 }
 
 export class ActionJournal {
-  constructor({ directory: journalDirectory, platform = process.platform, now = () => new Date().toISOString(), idFactory = () => `act_${randomBytes(16).toString('hex')}`, fault, maxActive = ACTION_JOURNAL_LIMITS.max_active, maxRecords = ACTION_JOURNAL_LIMITS.max_records, maxTerminalRecords = ACTION_JOURNAL_LIMITS.max_terminal_records } = {}) {
+  constructor({ directory: journalDirectory, platform = process.platform, testOnly = false, now = () => new Date().toISOString(), idFactory = () => `act_${randomBytes(16).toString('hex')}`, fault, maxActive = ACTION_JOURNAL_LIMITS.max_active, maxRecords = ACTION_JOURNAL_LIMITS.max_records, maxTerminalRecords = ACTION_JOURNAL_LIMITS.max_terminal_records } = {}) {
     if (!Number.isInteger(maxActive) || maxActive < 1 || maxActive > ACTION_JOURNAL_LIMITS.max_active || !Number.isInteger(maxRecords) || maxRecords < maxActive || maxRecords > ACTION_JOURNAL_LIMITS.max_records || !Number.isInteger(maxTerminalRecords) || maxTerminalRecords < 0 || maxTerminalRecords > maxRecords - maxActive) throw new TypeError('invalid action journal limits');
-    this.platform = platform; this.directory = validateDirectoryPath(journalDirectory, platform); this.now = now; this.idFactory = idFactory; this.fault = fault; this.maxActive = maxActive; this.maxRecords = maxRecords; this.maxTerminalRecords = maxTerminalRecords;
+    this.platform = platform; this.testOnly = testOnly === true; this.directory = validateDirectoryPath(journalDirectory, platform); this.now = now; this.idFactory = idFactory; this.fault = fault; this.maxActive = maxActive; this.maxRecords = maxRecords; this.maxTerminalRecords = maxTerminalRecords;
     this.records = new Map(); this.directoryIdentity = null; this.healthState = 'uninitialized'; this.failureCode = 'action_journal_unavailable'; this.tail = Promise.resolve();
   }
   static async open(options) { const journal = new ActionJournal(options); await journal.initialize(); return journal; }
@@ -122,6 +123,10 @@ export class ActionJournal {
   async initialize() {
     if (this.healthState !== 'uninitialized') return this;
     if (this.platform === 'win32') { this._block('action_journal_platform_unavailable'); return this; }
+    // Node's promises API has no openat/renameat/unlinkat equivalent.  The
+    // pathname seam below cannot survive an ancestor swap, so it is test-only
+    // and must never authorize a production action.
+    if (!this.testOnly) { this._block('action_journal_handle_relative_unavailable'); return this; }
     try {
       const resolvedDirectory = await realpath(this.directory); if (resolvedDirectory !== this.directory) throw new ActionJournalError('action_journal_permissions_invalid');
       const info = await lstat(this.directory); if (symlink(info) || !directory(info) || !ownedByCurrentUser(info, this.platform) || (info.mode & 0o777) !== 0o700) throw new ActionJournalError('action_journal_permissions_invalid');
@@ -130,7 +135,7 @@ export class ActionJournal {
       if (entries.length > this.maxRecords) throw new ActionJournalError('action_journal_limit_exceeded');
       for (const entry of entries) {
         if (!entry.isFile() || !/^act_[a-f0-9]{32}\.jsonl$/u.test(entry.name)) throw new ActionJournalError('action_journal_corrupt');
-        const loaded = await readBoundedFile(join(this.directory, entry.name)); if (!ownedByCurrentUser(loaded.identity, this.platform) || this.platform !== 'win32' && (loaded.identity.mode & 0o777) !== 0o600) throw new ActionJournalError('action_journal_permissions_invalid'); const lines = loaded.text.split('\n');
+        const loaded = await readBoundedFile(join(this.directory, entry.name)); if (!ownedByCurrentUser(loaded.identity, this.platform) || !singleLink(loaded.identity) || this.platform !== 'win32' && (loaded.identity.mode & 0o777) !== 0o600) throw new ActionJournalError('action_journal_permissions_invalid'); const lines = loaded.text.split('\n');
         if (lines.at(-1) !== '') throw new ActionJournalError('action_journal_corrupt'); lines.pop();
         if (!lines.length || lines.length > ACTION_JOURNAL_LIMITS.max_events_per_operation) throw new ActionJournalError('action_journal_corrupt');
         let previous; const events = lines.map(line => {
@@ -188,10 +193,10 @@ export class ActionJournal {
       await this.fault?.({ phase: 'before_append', operation_id: operationId, state });
       const flags = constants.O_WRONLY | constants.O_APPEND | (constants.O_NOFOLLOW ?? 0) | (creating ? constants.O_CREAT | constants.O_EXCL : 0);
       handle = await open(path, flags, 0o600); const before = await handle.stat();
-      if (!regularFile(before) || !ownedByCurrentUser(before, this.platform) || !creating && (!sameIdentity(before, record.identity) || before.size !== record.size) || creating && before.size !== 0 || this.platform !== 'win32' && (before.mode & 0o777) !== 0o600) throw new ActionJournalError('action_journal_corrupt');
+      if (!regularFile(before) || !singleLink(before) || !ownedByCurrentUser(before, this.platform) || !creating && (!sameIdentity(before, record.identity) || before.size !== record.size) || creating && before.size !== 0 || this.platform !== 'win32' && (before.mode & 0o777) !== 0o600) throw new ActionJournalError('action_journal_corrupt');
       let offset = 0; while (offset < bytes.length) { const written = await handle.write(bytes, offset, bytes.length - offset, null); if (!written.bytesWritten) throw new ActionJournalError('action_journal_write_failed'); offset += written.bytesWritten; }
       await this.fault?.({ phase: 'after_append_before_sync', operation_id: operationId, state }); await handle.sync();
-      const after = await handle.stat(); if (!sameIdentity(before, after) || after.size !== before.size + bytes.length) throw new ActionJournalError('action_journal_corrupt');
+      const after = await handle.stat(); if (!sameIdentity(before, after) || !singleLink(after) || after.size !== before.size + bytes.length) throw new ActionJournalError('action_journal_corrupt');
       await handle.close(); handle = null;
       if (creating) { const directoryHandle = await open(this.directory, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)); try { const directoryInfo = await directoryHandle.stat(); if (!directory(directoryInfo) || !sameIdentity(directoryInfo, this.directoryIdentity)) throw new ActionJournalError('action_journal_corrupt'); await directoryHandle.sync(); } finally { await directoryHandle.close(); } }
       await this._verifyDirectoryLocked();
@@ -206,7 +211,7 @@ export class ActionJournal {
     const terminal = [...this.records.values()].filter(record => TERMINAL.has(record.state)).sort((a, b) => a.events.at(-1).timestamp_utc.localeCompare(b.events.at(-1).timestamp_utc) || a.operation_id.localeCompare(b.operation_id));
     while (terminal.length > this.maxTerminalRecords || this.records.size + reserve > this.maxRecords) {
       const record = terminal.shift(); if (!record) throw new ActionJournalError('action_journal_limit_exceeded'); const path = join(this.directory, `${record.operation_id}.jsonl`);
-      try { const info = await lstat(path); if (symlink(info) || !regularFile(info) || !sameIdentity(info, record.identity) || info.size !== record.size) throw new ActionJournalError('action_journal_corrupt'); await unlink(path); const directoryHandle = await open(this.directory, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)); try { const directoryInfo = await directoryHandle.stat(); if (!directory(directoryInfo) || !sameIdentity(directoryInfo, this.directoryIdentity)) throw new ActionJournalError('action_journal_corrupt'); await directoryHandle.sync(); } finally { await directoryHandle.close(); } await this._verifyDirectoryLocked(); this.records.delete(record.operation_id); }
+      try { const info = await lstat(path); if (symlink(info) || !regularFile(info) || !singleLink(info) || !sameIdentity(info, record.identity) || info.size !== record.size) throw new ActionJournalError('action_journal_corrupt'); await unlink(path); const directoryHandle = await open(this.directory, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)); try { const directoryInfo = await directoryHandle.stat(); if (!directory(directoryInfo) || !sameIdentity(directoryInfo, this.directoryIdentity)) throw new ActionJournalError('action_journal_corrupt'); await directoryHandle.sync(); } finally { await directoryHandle.close(); } await this._verifyDirectoryLocked(); this.records.delete(record.operation_id); }
       catch (error) { const code = error instanceof ActionJournalError ? error.code : 'action_journal_write_failed'; this._block(code); throw new ActionJournalError(code); }
     }
   }

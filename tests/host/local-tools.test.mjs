@@ -79,5 +79,5 @@ test('filesystem operations fail closed when Windows handle safety is unavailabl
 });
 
 test('confirmation UI discloses browser destination and carries both binding fields', async () => {
-  const source = await readFile(new URL('../../ui/app.js', import.meta.url), 'utf8'); assert.match(source, /External destination \(network egress\)/); assert.match(source, /previews\.set\(ev\.data\.call\.id,destination\)/); assert.match(source, /request_id:ev\.request_id,call_id:call\.id/);
+  const source = await readFile(new URL('../../ui/app.js', import.meta.url), 'utf8'); assert.match(source, /External destination \(network egress\)/); assert.match(source, /previews\.set\(ev\.data\.call\.id,destination\)/); assert.match(source, /request_id:ev\.request_id,call_id:call\.id/); assert.match(source, /tool\.completed/); assert.match(source, /action_completion_unverified/); assert.match(source, /operation_id/); assert.match(source, /textContent/); assert.doesNotMatch(source, /innerHTML/);
 });
