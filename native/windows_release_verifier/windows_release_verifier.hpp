@@ -1,8 +1,8 @@
 #pragma once
 
-// Inert, source-only Windows release-tree identity verifier. This header and
-// its implementation are intentionally absent from CMake, host imports,
-// package manifests, launchers, and registries.
+// Inert, source-only Windows release-tree identity verifier. It is absent from
+// the default/product CMake graph, host imports, package manifests, launchers,
+// and registries. An OFF-by-default compile-check target is not activation.
 #ifndef _WIN32
 #error "The Windows release-tree verifier is Windows-only"
 #endif

@@ -1,7 +1,8 @@
 #pragma once
 
-// Source-only Windows storage boundary. This header is intentionally absent
-// from native/CMakeLists.txt and every production import/registration path.
+// Source-only Windows storage boundary. It is absent from the default/product
+// CMake graph and every production import/registration path. The optional
+// helper compile-check target does not register or activate storage.
 #ifndef _WIN32
 #error "The ActionJournal storage boundary is Windows-only"
 #endif

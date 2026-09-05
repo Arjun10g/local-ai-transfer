@@ -1,8 +1,10 @@
 # Inert Windows release-tree verifier source
 
 This directory contains an unlinked `_WIN32` design implementation for exact,
-read-only release-tree verification. It is deliberately absent from CMake,
-the host, package manifests, registries, and launchers.
+read-only release-tree verification. It is absent from the default/product
+CMake graph, the host, package manifests, registries, and launchers. An
+OFF-by-default static compile-check target may compile it only for approved
+remote Windows evidence and does not register or activate the verifier.
 
 The public entry returns `not_activated` before reading its request. The
 compiled-manifest identity, handle-bound Authenticode policy, and cancellable

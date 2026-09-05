@@ -1,7 +1,8 @@
 #pragma once
 
-// Inert Windows-only source. Intentionally absent from CMake, package
-// manifests, host imports, and production capability registries.
+// Inert Windows-only source. It is absent from the default/product CMake graph,
+// package manifests, host imports, and production capability registries. An
+// OFF-by-default compile-check target is not activation.
 #ifndef _WIN32
 #error "The Windows hardware attestor source is Windows-only"
 #endif

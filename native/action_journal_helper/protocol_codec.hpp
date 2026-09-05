@@ -1,7 +1,8 @@
 #pragma once
 
-// Source-only protocol codec. It is deliberately absent from CMake and every
-// production import/package path.
+// Source-only protocol codec. It is absent from the default/product CMake graph
+// and every production import/package path. Its optional compile-check target
+// does not make the protocol available.
 #ifndef _WIN32
 #error "The ActionJournal helper source is Windows-only"
 #endif
