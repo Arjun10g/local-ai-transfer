@@ -33,6 +33,7 @@ HOST_RUNTIME_FILES = frozenset({
     "host/tools/local/argument-validation.mjs",
     "host/tools/local/filesystem.mjs",
     "host/tools/local/index.mjs",
+    "host/tools/local/platform-safety.mjs",
     "host/tools/local/process-run.mjs",
     "host/tools/local/system-tools.mjs",
     "host/tools/local/workspace-policy.mjs",
@@ -173,6 +174,7 @@ def scan_tree(root: str | Path, *, require_runtime: bool = False) -> dict[str, o
     if require_runtime:
         return {
             "status": "FAIL",
+            "readiness": "NOT_READY",
             "files": [],
             "findings": ["secure-handle-relative-package-scan-unavailable"],
             "dependencies": "SKIP-package-scan-refused",

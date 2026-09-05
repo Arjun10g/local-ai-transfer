@@ -13,7 +13,7 @@ from qa.clean_machine.package import (
     scan_binary_dependencies,
     scan_tree,
 )
-from qa.clean_machine.package_runner import PACKAGE_BUILD_BLOCKER, build_package
+from qa.clean_machine.package_runner import PACKAGE_BUILD_BLOCKER, PACKAGE_READINESS, build_package
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -37,6 +37,8 @@ class PackageScannerTests(unittest.TestCase):
         self.assertEqual("REFUSED-NOT_READY", manifest["native_windows_launch"])
         self.assertTrue(FORBIDDEN_PACKAGE_PATHS.isdisjoint(PACKAGE_ALLOWLIST))
         self.assertTrue(FORBIDDEN_PACKAGE_PATHS.isdisjoint(HOST_RUNTIME_FILES))
+        self.assertIn("host/tools/local/platform-safety.mjs", HOST_RUNTIME_FILES)
+        self.assertIn("host/tools/local/platform-safety.mjs", PACKAGE_ALLOWLIST)
         self.assertNotIn("lae-host.mjs", manifest["files"])
 
         notices = (ROOT / "release/windows/THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
@@ -47,6 +49,7 @@ class PackageScannerTests(unittest.TestCase):
         with mock.patch.dict(scan_tree.__globals__, {"_tree_entries": mock.Mock(side_effect=AssertionError("enumerated"))}):
             result = scan_tree(ExplodingPath(), require_runtime=True)
         self.assertEqual("FAIL", result["status"])
+        self.assertEqual(PACKAGE_READINESS, result["readiness"])
         self.assertEqual("NONE", result["authorization"])
         self.assertEqual(["secure-handle-relative-package-scan-unavailable"], result["findings"])
 
@@ -56,6 +59,7 @@ class PackageScannerTests(unittest.TestCase):
         self.assertEqual(
             {
                 "status": "FAIL",
+                "readiness": PACKAGE_READINESS,
                 "stage": "safety-unavailable",
                 "findings": [PACKAGE_BUILD_BLOCKER],
                 "output_created": False,

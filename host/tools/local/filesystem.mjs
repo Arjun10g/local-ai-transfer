@@ -6,10 +6,10 @@ import { makeToolResult } from '../../agent/tool-envelope.mjs';
 import { WorkspaceError } from './workspace-policy.mjs';
 import { validateToolArguments } from './argument-validation.mjs';
 import { applyOperatorGrantPolicy } from '../../providers/operator-tool-policy.mjs';
+import { assertFilesystemPlatformSafe, filesystemSafetyError } from './platform-safety.mjs';
 
 const MAX_READ = 65536; const MAX_SEARCH_FILES = 200; const MAX_SEARCH_MATCHES = 500;
 const NOFOLLOW = fsConstants.O_NOFOLLOW;
-const PLATFORM_SAFETY_ERROR = 'filesystem tools require descriptor-safe path operations; Windows support is fail-closed until handle-relative reparse-safe primitives are available';
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const result = (call, status, text, truncated = false, durationMs = 0) => makeToolResult({ id: call.id, name: call.name, status, text, truncated, durationMs });
 const boundedInt = (value, fallback, min, max) => Number.isInteger(value) ? Math.min(max, Math.max(min, value)) : fallback;
@@ -29,7 +29,14 @@ async function boundedFile(policy, call, { maxBytes = MAX_READ } = {}) {
 }
 
 function assertPlatformSafe(platform) {
-  if (platform === 'win32' || typeof NOFOLLOW !== 'number') throw new WorkspaceError('platform_path_safety_unavailable', PLATFORM_SAFETY_ERROR);
+  assertFilesystemPlatformSafe(platform);
+  if (typeof NOFOLLOW !== 'number') throw filesystemSafetyError();
+}
+
+function refuseBeforePolicy(tool, platform) {
+  if (platform !== 'win32') return tool;
+  const refuse = async () => { assertFilesystemPlatformSafe(platform); };
+  return { ...tool, confirmationRequired: refuse, authorize: refuse, ...(tool.preview ? { preview: refuse } : {}), execute: refuse };
 }
 
 async function closeQuietly(handle) { await handle?.close().catch(() => {}); }
@@ -107,6 +114,9 @@ export function createFilesystemTools(policy, { platform = process.platform, gra
     const finalHandle = await openNoFollow(prepared.file.canonical, platform); let written; try { const finalStat = await finalHandle.stat(); if (finalStat.size > 2 * 1024 * 1024) throw new WorkspaceError('file_too_large', 'replacement exceeds the bounded operation size'); written = await readHandle(finalHandle, 2 * 1024 * 1024); } finally { await closeQuietly(finalHandle); } return result(call, 'ok', JSON.stringify({ applied: true, ...prepared.preview, final_sha256: sha256(written) }));
   };
   const tools = { 'fs.list': { ...filesystemDefinitions['fs.list'], execute: list }, 'fs.read_text': { ...filesystemDefinitions['fs.read_text'], execute: readText }, 'fs.search_text': { ...filesystemDefinitions['fs.search_text'], execute: searchText }, 'fs.write_new': { ...filesystemDefinitions['fs.write_new'], execute: writeNew }, 'fs.apply_patch': { ...filesystemDefinitions['fs.apply_patch'], preview: async call => (await patchPreview(call)).preview, execute: applyPatch } };
-  for (const name of ['fs.write_new', 'fs.apply_patch']) tools[name] = applyOperatorGrantPolicy(tools[name], { grantControl, capabilityForCall: call => `local.filesystem:${call.arguments.workspace_id}` });
+  for (const name of ['fs.write_new', 'fs.apply_patch']) {
+    const guarded = applyOperatorGrantPolicy(tools[name], { grantControl, capabilityForCall: call => `local.filesystem:${call.arguments.workspace_id}` });
+    tools[name] = refuseBeforePolicy(guarded, platform);
+  }
   return tools;
 }
