@@ -1,0 +1,23 @@
+{
+  "schema": "lae.windows-broker.manifest.v1",
+  "mode": "fixture",
+  "manifest_id": "fixture.windows-broker.1",
+  "runtime_directory_id": "broker_temp",
+  "executables": [
+    {"id": "git", "absolute_path": "C:\\Program Files\\Git\\cmd\\git.exe", "size_bytes": 1000000, "sha256": "1111111111111111111111111111111111111111111111111111111111111111", "volume_serial": 101, "file_id_128": "11111111111111111111111111111111"},
+    {"id": "edge", "absolute_path": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe", "size_bytes": 2000000, "sha256": "2222222222222222222222222222222222222222222222222222222222222222", "volume_serial": 101, "file_id_128": "22222222222222222222222222222222"},
+    {"id": "copilot", "absolute_path": "C:\\Approved\\GitHubCopilot\\copilot.exe", "size_bytes": 3000000, "sha256": "3333333333333333333333333333333333333333333333333333333333333333", "volume_serial": 101, "file_id_128": "33333333333333333333333333333333"}
+  ],
+  "directories": [
+    {"id": "broker_temp", "absolute_path": "C:\\Approved\\LocalAssistant\\runtime", "volume_serial": 101, "file_id_128": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    {"id": "workspace", "absolute_path": "C:\\Approved\\Workspace", "volume_serial": 101, "file_id_128": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+  ],
+  "actions": [
+    {"action_id": "process.git.status", "kind": "process", "executable_id": "git", "cwd_id": "workspace", "argv_template_id": "git.status.v1", "argv_template": [{"literal": "status"}, {"literal": "--short"}], "parameters": [], "timeout_ms": 10000, "stdout_limit_bytes": 65536, "stderr_limit_bytes": 65536, "max_processes": 4, "restricted_token_required": true, "visible": false, "environment_profile": "systemroot-broker-temp-v1"},
+    {"action_id": "application.edge.open", "kind": "application", "executable_id": "edge", "cwd_id": "workspace", "argv_template_id": "edge.open.v1", "argv_template": [{"literal": "--no-first-run"}], "parameters": [], "timeout_ms": 5000, "stdout_limit_bytes": 4096, "stderr_limit_bytes": 4096, "max_processes": 16, "restricted_token_required": true, "visible": true, "environment_profile": "systemroot-broker-temp-v1"},
+    {"action_id": "browser.edge.open_https", "kind": "browser", "executable_id": "edge", "cwd_id": "workspace", "argv_template_id": "edge.https.v1", "argv_template": [{"literal": "--no-first-run"}, {"parameter": "url"}], "parameters": [{"name": "url", "kind": "https_url", "placement": "argv", "max_bytes": 2048, "required": true}], "timeout_ms": 15000, "stdout_limit_bytes": 4096, "stderr_limit_bytes": 4096, "max_processes": 16, "restricted_token_required": true, "visible": true, "environment_profile": "systemroot-broker-temp-v1"},
+    {"action_id": "copilot.ask.stdin", "kind": "copilot", "executable_id": "copilot", "cwd_id": "workspace", "argv_template_id": "copilot.stdin.v1", "argv_template": [{"literal": "ask"}, {"literal": "--stdin"}], "parameters": [{"name": "prompt", "kind": "utf8", "placement": "stdin", "max_bytes": 8192, "required": true}], "timeout_ms": 30000, "stdout_limit_bytes": 65536, "stderr_limit_bytes": 16384, "max_processes": 4, "restricted_token_required": true, "visible": false, "environment_profile": "systemroot-broker-temp-v1"},
+    {"action_id": "clipboard.read_text", "kind": "clipboard_read", "parameters": [], "timeout_ms": 3000, "stdout_limit_bytes": 65536, "stderr_limit_bytes": 0, "max_processes": 1, "restricted_token_required": false, "visible": false, "environment_profile": "systemroot-broker-temp-v1"},
+    {"action_id": "clipboard.write_text", "kind": "clipboard_write", "parameters": [{"name": "text", "kind": "utf8", "placement": "clipboard", "max_bytes": 65536, "required": true}], "timeout_ms": 3000, "stdout_limit_bytes": 0, "stderr_limit_bytes": 0, "max_processes": 1, "restricted_token_required": false, "visible": false, "environment_profile": "systemroot-broker-temp-v1"}
+  ]
+}

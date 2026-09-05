@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "lae://contracts/windows-process-broker/response/1.0.0",
+  "title": "LAE Windows broker response v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "request_id", "status", "error_code", "result", "receipt"],
+  "properties": {
+    "schema": {"const": "lae.windows-broker.response.v1"},
+    "request_id": {"type": "string", "minLength": 16, "maxLength": 64, "pattern": "^[A-Za-z0-9_-]+$"},
+    "status": {"enum": ["accepted", "ok", "failed", "cancelled", "timeout"]},
+    "error_code": {"$ref": "#/$defs/errorCode"},
+    "result": {"type": "object", "maxProperties": 8},
+    "receipt": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/receipt"}]}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "errorCode": {
+      "enum": [
+        "ok", "invalid_frame", "invalid_json", "invalid_request",
+        "broker_not_activated", "manifest_untrusted", "manifest_invalid",
+        "action_denied", "arguments_rejected", "broker_busy",
+        "identity_mismatch", "cwd_mismatch", "environment_unavailable",
+        "restricted_token_unavailable", "pipe_setup_failed", "job_setup_failed",
+        "process_create_failed", "process_image_mismatch", "job_assignment_failed",
+        "resume_failed", "process_wait_failed", "child_exit_nonzero",
+        "output_limit", "deadline_expired", "cancelled", "job_reap_failed",
+        "clipboard_unavailable", "internal_failure"
+      ]
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action_id", "action_kind", "manifest_sha256", "executable_sha256",
+        "argv_template_id", "cwd_id", "status", "error_code", "duration_ms",
+        "stdout_bytes", "stderr_bytes", "stdin_bytes", "output_truncated",
+        "restricted_token", "job_assigned_before_resume"
+      ],
+      "properties": {
+        "action_id": {"type": "string", "minLength": 2, "maxLength": 96},
+        "action_kind": {"enum": ["process", "application", "browser", "copilot", "clipboard_read", "clipboard_write"]},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "executable_sha256": {"oneOf": [{"const": ""}, {"$ref": "#/$defs/sha256"}]},
+        "argv_template_id": {"type": "string", "maxLength": 64},
+        "cwd_id": {"type": "string", "maxLength": 64},
+        "status": {"enum": ["ok", "failed", "cancelled", "timeout"]},
+        "error_code": {"$ref": "#/$defs/errorCode"},
+        "duration_ms": {"type": "integer", "minimum": 0, "maximum": 135000},
+        "stdout_bytes": {"type": "integer", "minimum": 0},
+        "stderr_bytes": {"type": "integer", "minimum": 0},
+        "stdin_bytes": {"type": "integer", "minimum": 0},
+        "output_truncated": {"type": "boolean"},
+        "restricted_token": {"type": "boolean"},
+        "job_assigned_before_resume": {"type": "boolean"}
+      }
+    }
+  }
+}
