@@ -16,9 +16,11 @@ be passed to the production controller.
 Graph requests are constrained to the fixed HTTPS Graph origin and `/me` mail,
 `/me/chats`, `/chats/{id}/messages`, and
 `/teams/{id}/channels/{id}/messages` endpoint families. Outlook search uses a
-fixed `$search` template; Teams text filtering is explicitly limited to the
-current bounded Graph page. Mail and Teams body reads request selected fields
-only and sanitize HTML, entities, scripts, styles, UTF-8, and byte bounds.
+fixed `$search` template and is classified as T2 `search_query` egress with an
+exact-query preview and confirmation; Teams text filtering is explicitly local
+to the current bounded Graph page. Mail and Teams body reads request selected
+fields only and remove HTML, entities, complete or unclosed script/style
+content, post-transformation controls, unsafe UTF-8, and over-bound output.
 Strict projections reject unknown/malformed fields, duplicate item identities,
 invalid UTC dates, unsupported body types, attachments, and oversized pages.
 Results contain no headers, remote URLs, attachments, tokens, or transport

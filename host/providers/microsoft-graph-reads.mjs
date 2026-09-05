@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { makeToolResult } from '../agent/tool-envelope.mjs';
-import { ProviderToolError, boundedBoolean, boundedInteger, boundedString, digest, exactObject, normalizeText, own } from './provider-common.mjs';
+import { ProviderToolError, boundedBoolean, boundedInteger, boundedString, digest, exactObject, own } from './provider-common.mjs';
 
 const API = '/v1.0';
 const FOLDERS = new Set(['inbox', 'sentitems', 'drafts', 'archive']);
@@ -41,6 +41,9 @@ export const graphReadScopes = Object.freeze({
   'teams.read_channel_message': Object.freeze(['ChannelMessage.Read.All'])
 });
 
+const GRAPH_READ_EGRESS_TOOLS = new Set(['mail.search_messages']);
+export const isGraphReadEgressTool = name => GRAPH_READ_EGRESS_TOOLS.has(name);
+
 const INPUT_SCHEMAS = Object.freeze({
   'mail.list_messages': pageSchema({ folder: string(32, { enum: [...FOLDERS] }), unread_only: { type: 'boolean' }, limit: { type: 'integer', minimum: 1, maximum: 25 } }),
   'mail.search_messages': pageSchema({ query: string(128, { minLength: 1 }), folder: string(32, { enum: [...FOLDERS] }), limit: { type: 'integer', minimum: 1, maximum: 25 } }, ['query']),
@@ -73,7 +76,10 @@ const definition = name => Object.freeze({
   required_scopes: graphReadScopes[name]
 });
 
-export const graphReadDefinitions = Object.freeze(Object.fromEntries([...READ_TOOL_NAMES].map(name => [name, definition(name)])));
+export const graphReadDefinitions = Object.freeze(Object.fromEntries([...READ_TOOL_NAMES].map(name => {
+  const value = definition(name);
+  return [name, isGraphReadEgressTool(name) ? Object.freeze({ ...value, risk_tier: 'T2', side_effect: 'external_query', data_egress: 'search_query', requires_confirmation: true }) : value];
+})));
 export const isGraphReadTool = name => READ_TOOL_NAMES.has(name);
 
 function identifierArgument(value, field) {
@@ -150,9 +156,74 @@ function graphDate(value, optional = false) {
   return value;
 }
 
+function decodeEntities(value) {
+  const named = Object.freeze({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' });
+  let text = value;
+  for (let pass = 0; pass < 8; pass++) {
+    const decoded = text.replace(/&(?:amp|lt|gt|quot|apos|nbsp);|&#(?:x[0-9a-f]+|[0-9]+);/giu, entity => {
+      const name = /^&([a-z]+);$/iu.exec(entity)?.[1]?.toLowerCase();
+      if (name && Object.hasOwn(named, name)) return named[name];
+      const hex = /^&#x([0-9a-f]+);$/iu.exec(entity);
+      const decimal = /^&#([0-9]+);$/u.exec(entity);
+      const code = hex ? Number.parseInt(hex[1], 16) : decimal ? Number.parseInt(decimal[1], 10) : NaN;
+      return Number.isSafeInteger(code) && code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff) ? String.fromCodePoint(code) : ' ';
+    });
+    if (decoded === text) break;
+    text = decoded;
+  }
+  return text;
+}
+
+function stripMarkup(value) {
+  let output = ''; let offset = 0; let blocked = null;
+  while (offset < value.length) {
+    if (blocked !== null) {
+      const close = new RegExp(`<\\s*\\/\\s*${blocked}\\b[^>]*>`, 'iu');
+      const match = close.exec(value.slice(offset));
+      if (!match) break;
+      offset += match.index + match[0].length; blocked = null; output += ' '; continue;
+    }
+    if (value.startsWith('<!--', offset)) {
+      const end = value.indexOf('-->', offset + 4);
+      if (end < 0) break;
+      offset = end + 3; output += ' '; continue;
+    }
+    if (value[offset] !== '<') { output += value[offset++]; continue; }
+    const end = value.indexOf('>', offset + 1);
+    if (end < 0) break;
+    const tag = value.slice(offset + 1, end);
+    const closing = /^\s*\//u.test(tag);
+    const tagName = /^\s*\/?\s*([a-z][a-z0-9:-]*)/iu.exec(tag)?.[1]?.toLowerCase();
+    const nestedDangerous = /<\s*\/?\s*(script|style)\b/iu.exec(tag)?.[1]?.toLowerCase();
+    const dangerous = ['script', 'style'].includes(tagName) ? tagName : nestedDangerous ?? null;
+    offset = end + 1; output += ' ';
+    if (!closing && dangerous !== null) blocked = dangerous;
+  }
+  return output;
+}
+
+function normalizedSafeText(value) {
+  const withoutMarkup = stripMarkup(decodeEntities(value));
+  return withoutMarkup
+    .replace(/[\p{Cc}\p{Cf}]/gu, character => character === '\n' ? '\n' : ' ')
+    .replace(/[ \t\r\f]+/gu, ' ')
+    .replace(/\n{3,}/gu, '\n\n')
+    .trim();
+}
+
+function truncateUtf8(value, maxBytes) {
+  const bytes = Buffer.from(value, 'utf8');
+  if (bytes.length <= maxBytes) return { text: value, truncated: false };
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  for (let end = maxBytes; end >= Math.max(0, maxBytes - 3); end--) {
+    try { return { text: decoder.decode(bytes.subarray(0, end)), truncated: true }; } catch {}
+  }
+  throw new ProviderToolError('provider_invalid_response');
+}
+
 function safeText(value, maxBytes) {
   providerString(value, Math.min(maxBytes * 4, 65536));
-  return normalizeText(value, maxBytes);
+  return truncateUtf8(normalizedSafeText(value), maxBytes);
 }
 
 function address(value) {
@@ -270,6 +341,12 @@ export class MicrosoftGraphReadBoundary {
     this.pages.delete(args.page_cursor);
     return page;
   }
+  previewIdentity(name, args) {
+    if (!own(args, 'page_cursor')) return Object.freeze({ ...args });
+    const page = this.pages.get(args.page_cursor);
+    if (!page || page.name !== name || page.account !== this.accountFingerprint()) throw new ProviderToolError('provider_invalid_request', 'page cursor is unavailable');
+    return page.identity;
+  }
   async execute(call, args) {
     try { return await this._execute(call, args); }
     catch (error) { return readResult(call, 'failed', { provider: 'microsoft_graph', state: 'unavailable', code: failureCode(error) }); }
@@ -283,7 +360,9 @@ export class MicrosoftGraphReadBoundary {
     if (response.status !== 200) throw new ProviderToolError('provider_invalid_response');
     const projected = collection(response.body, spec.mapItem, spec.max);
     let items = projected.items;
+    if (identity.unread_only === true) items = items.filter(item => item.unread === true);
     if (identity.search_text) { const needle = identity.search_text.toLocaleLowerCase('en-US'); items = items.filter(item => item.text.toLocaleLowerCase('en-US').includes(needle)); }
+    items = items.slice(0, identity.limit);
     const nextPage = this.rememberPage(call.name, identity, path, query, projected.nextLink);
     return readResult(call, 'ok', { provider: 'microsoft_graph', state: 'ready', source_untrusted: true, kind: spec.kind, account_scope: 'signed_in_user', [spec.field]: items, item_count: items.length, next_page: nextPage, search_scope: identity.search_text ? 'current_graph_page' : null });
   }
@@ -293,8 +372,7 @@ export class MicrosoftGraphReadBoundary {
       const folder = call.name === 'mail.list_messages' ? args.folder ?? 'inbox' : args.folder ?? null; const limit = args.limit ?? 25;
       const identity = next ? null : { folder, unread_only: args.unread_only === true, query: args.query ?? null, limit };
       const path = call.name === 'mail.search_messages' && folder === null ? `${API}/me/messages` : `${API}/me/mailFolders/${encodeURIComponent(folder)}/messages`;
-      const query = { '$top': limit, '$select': 'id,receivedDateTime,from,subject,isRead,importance,bodyPreview' };
-      if (args.unread_only) query.$filter = 'isRead eq false';
+      const query = { '$top': 25, '$select': 'id,receivedDateTime,from,subject,isRead,importance,bodyPreview' };
       if (args.query) query.$search = `\"${args.query}\"`;
       return this.page(call, args, { identity, path, query, max: 25, mapItem: mailSummary, kind: call.name === 'mail.search_messages' ? 'mail_search_page' : 'mail_page', field: 'messages' });
     }
@@ -305,11 +383,11 @@ export class MicrosoftGraphReadBoundary {
       return readResult(call, 'ok', { provider: 'microsoft_graph', state: 'ready', source_untrusted: true, kind: 'mail_message', account_scope: 'signed_in_user', message }, message.text_truncated);
     }
     if (call.name === 'teams.list_chats') {
-      return this.page(call, args, { identity: next ? null : { limit: args.limit ?? 25 }, path: `${API}/me/chats`, query: { '$top': args.limit ?? 25, '$select': 'id,topic,chatType,lastUpdatedDateTime' }, max: 25, mapItem: chatSummary, kind: 'teams_chat_page', field: 'chats' });
+      return this.page(call, args, { identity: next ? null : { limit: args.limit ?? 25 }, path: `${API}/me/chats`, query: { '$top': 25, '$select': 'id,topic,chatType,lastUpdatedDateTime' }, max: 25, mapItem: chatSummary, kind: 'teams_chat_page', field: 'chats' });
     }
     if (call.name === 'teams.list_messages') {
       const identity = next ? null : { chat_id: args.chat_id, search_text: args.search_text ?? null, limit: args.limit ?? 50 };
-      return this.page(call, args, { identity, path: `${API}/chats/${encodeURIComponent(args.chat_id)}/messages`, query: { '$top': args.limit ?? 50, '$select': 'id,replyToId,createdDateTime,lastModifiedDateTime,importance,from,body' }, max: MAX_PAGE_ITEMS, mapItem: value => teamsMessage(value, null, MAX_ITEM_TEXT_BYTES), kind: 'teams_chat_message_page', field: 'messages' });
+      return this.page(call, args, { identity, path: `${API}/chats/${encodeURIComponent(args.chat_id)}/messages`, query: { '$top': 50, '$select': 'id,replyToId,createdDateTime,lastModifiedDateTime,importance,from,body' }, max: MAX_PAGE_ITEMS, mapItem: value => teamsMessage(value, null, MAX_ITEM_TEXT_BYTES), kind: 'teams_chat_message_page', field: 'messages' });
     }
     if (call.name === 'teams.read_message') {
       const response = await this.request({ method: 'GET', path: `${API}/chats/${encodeURIComponent(args.chat_id)}/messages/${encodeURIComponent(args.message_id)}`, query: { '$select': 'id,replyToId,createdDateTime,lastModifiedDateTime,importance,from,body' }, signal: call.signal });
@@ -319,11 +397,11 @@ export class MicrosoftGraphReadBoundary {
     }
     if (call.name === 'teams.list_channels') {
       const identity = next ? null : { team_id: args.team_id, limit: args.limit ?? 50 };
-      return this.page(call, args, { identity, path: `${API}/teams/${encodeURIComponent(args.team_id)}/channels`, query: { '$top': args.limit ?? 50, '$select': 'id,displayName,description,membershipType' }, max: MAX_PAGE_ITEMS, mapItem: channelSummary, kind: 'teams_channel_page', field: 'channels' });
+      return this.page(call, args, { identity, path: `${API}/teams/${encodeURIComponent(args.team_id)}/channels`, query: { '$top': 50, '$select': 'id,displayName,description,membershipType' }, max: MAX_PAGE_ITEMS, mapItem: channelSummary, kind: 'teams_channel_page', field: 'channels' });
     }
     if (call.name === 'teams.list_channel_messages') {
       const identity = next ? null : { team_id: args.team_id, channel_id: args.channel_id, search_text: args.search_text ?? null, limit: args.limit ?? 50 };
-      return this.page(call, args, { identity, path: `${API}/teams/${encodeURIComponent(args.team_id)}/channels/${encodeURIComponent(args.channel_id)}/messages`, query: { '$top': args.limit ?? 50, '$select': 'id,replyToId,createdDateTime,lastModifiedDateTime,importance,from,body' }, max: MAX_PAGE_ITEMS, mapItem: value => teamsMessage(value, null, MAX_ITEM_TEXT_BYTES), kind: 'teams_channel_message_page', field: 'messages' });
+      return this.page(call, args, { identity, path: `${API}/teams/${encodeURIComponent(args.team_id)}/channels/${encodeURIComponent(args.channel_id)}/messages`, query: { '$top': 50, '$select': 'id,replyToId,createdDateTime,lastModifiedDateTime,importance,from,body' }, max: MAX_PAGE_ITEMS, mapItem: value => teamsMessage(value, null, MAX_ITEM_TEXT_BYTES), kind: 'teams_channel_message_page', field: 'messages' });
     }
     if (call.name === 'teams.read_channel_message') {
       const response = await this.request({ method: 'GET', path: `${API}/teams/${encodeURIComponent(args.team_id)}/channels/${encodeURIComponent(args.channel_id)}/messages/${encodeURIComponent(args.message_id)}`, query: { '$select': 'id,replyToId,createdDateTime,lastModifiedDateTime,importance,from,body' }, signal: call.signal });

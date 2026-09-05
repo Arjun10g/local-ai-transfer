@@ -12,10 +12,11 @@ const opaque = prefix => `${prefix}_${randomUUID().replaceAll('-', '')}`;
 const CANCELLED_CONFIRMATION = Symbol('cancelled-confirmation');
 const sessionIdPattern = /^[A-Za-z0-9_-]{8,96}$/;
 const DURABLE_ACTION_EFFECTS = new Set(['create', 'replace', 'write_sensitive', 'launch', 'external_navigation', 'process_execution', 'cloud_inference', 'create_draft', 'send_mail', 'modify_mail', 'send_teams', 'browser_navigation', 'browser_input', 'browser_activation']);
-const NON_ACTION_EFFECTS = new Set(['none', 'read_sensitive', 'read_mail', 'read_teams', 'browser_read', 'browser_close']);
+const NON_ACTION_EFFECTS = new Set(['none', 'read_sensitive', 'read_mail', 'read_teams', 'external_query', 'browser_read', 'browser_close']);
 const EFFECT_TIERS = Object.freeze({
   none: ['T0'], browser_close: ['T0'],
   read_sensitive: ['T1'], read_mail: ['T1'], read_teams: ['T1'], browser_read: ['T1'],
+  external_query: ['T2'],
   launch: ['T1'], external_navigation: ['T1'], browser_navigation: ['T1', 'T2'],
   create: ['T2'], replace: ['T2'], write_sensitive: ['T2'], create_draft: ['T2'], modify_mail: ['T2'],
   process_execution: ['T3'], cloud_inference: ['T3'], send_mail: ['T3'], send_teams: ['T3'], browser_input: ['T3'], browser_activation: ['T3']

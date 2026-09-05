@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ConversationController } from '../../host/agent/controller.mjs';
+import { ConversationController, requiresDurableAction } from '../../host/agent/controller.mjs';
 import { makeToolResult } from '../../host/agent/tool-envelope.mjs';
 import { MicrosoftGraphProvider, MicrosoftGraphHttpsTransport, createMicrosoftGraphTools, graphDefinitions } from '../../host/providers/microsoft-graph.mjs';
 import { createExternalToolRegistry } from '../../host/providers/index.mjs';
@@ -22,8 +22,12 @@ test('Graph read catalog is complete, least-scoped, strict, and not configured b
   };
   for (const [name, scopes] of Object.entries(expected)) {
     assert.deepEqual(graphDefinitions[name].required_scopes, scopes);
-    assert.equal(graphDefinitions[name].risk_tier, 'T1');
-    assert.equal(graphDefinitions[name].requires_confirmation, false);
+    const outbound = name === 'mail.search_messages';
+    assert.equal(graphDefinitions[name].risk_tier, outbound ? 'T2' : 'T1');
+    assert.equal(graphDefinitions[name].side_effect, outbound ? 'external_query' : name.startsWith('mail.') ? 'read_mail' : 'read_teams');
+    assert.equal(graphDefinitions[name].data_egress, outbound ? 'search_query' : 'none');
+    assert.equal(graphDefinitions[name].requires_confirmation, outbound);
+    assert.equal(requiresDurableAction(graphDefinitions[name]), false);
     assert.equal(graphDefinitions[name].parameters.additionalProperties, false);
   }
   const registry = createExternalToolRegistry();
@@ -62,13 +66,56 @@ test('Outlook list, search, and detail use fixed /me paths and safe bounded proj
   } }));
   const listed = payload(await tools['mail.list_messages'].execute(call('mail.list_messages', { folder: 'archive', unread_only: true, limit: 1 })));
   assert.equal(listed.messages[0].preview, 'Preview & safe'); assert.equal(listed.source_untrusted, true); assert.equal(listed.next_page, null);
-  const searched = payload(await tools['mail.search_messages'].execute(call('mail.search_messages', { query: 'quarterly status', folder: 'sentitems', limit: 1 })));
+  const searchCall = call('mail.search_messages', { query: 'quarterly status', folder: 'sentitems', limit: 1 });
+  await tools['mail.search_messages'].preview(searchCall);
+  const searched = payload(await tools['mail.search_messages'].execute({ ...searchCall, authorization: { kind: 'user_confirmation' } }));
   assert.equal(searched.kind, 'mail_search_page');
   const detail = payload(await tools['mail.read_message'].execute(call('mail.read_message', { message_id: 'mail-1', max_bytes: 32 })));
   assert.equal(detail.message.text, 'Body & detail'); assert.equal(JSON.stringify(detail).includes('drop()'), false);
   assert.deepEqual(requests.map(item => item.path), ['/v1.0/me/mailFolders/archive/messages', '/v1.0/me/mailFolders/sentitems/messages', '/v1.0/me/messages/mail-1']);
-  assert.equal(requests[0].query.$filter, 'isRead eq false'); assert.equal(requests[1].query.$search, '"quarterly status"');
+  assert.equal(requests[0].query.$filter, undefined); assert.equal(requests[0].query.$top, 25); assert.equal(requests[1].query.$search, '"quarterly status"');
   assert.equal(requests[2].headers.Prefer, 'outlook.body-content-type="text"');
+});
+
+test('outbound Outlook search cannot bypass preview and confirmation under ask-before-writes', async () => {
+  let requests = 0;
+  const graph = new MicrosoftGraphProvider({ enabled: true, permissionProfile: 'ask_before_writes', credentialSource, accountFingerprint: 'acct-read', testOnly: true, transport: { request: async request => {
+    requests += 1;
+    if (requests !== 1) return { status: 200, body: collection([mail()]) };
+    const next = new URL(`https://graph.microsoft.com${request.path}`);
+    for (const [key, value] of Object.entries(request.query)) next.searchParams.set(key, String(value));
+    next.searchParams.set('$skiptoken', 'next-search-page');
+    return { status: 200, body: collection([mail()], next.href) };
+  } } });
+  const tool = createMicrosoftGraphTools(graph)['mail.search_messages'];
+  const request = call('mail.search_messages', { query: 'quarterly status', folder: 'sentitems', limit: 1 }, 'call_search_guard');
+  assert.equal(graph.confirmationRequired('mail.search_messages'), true);
+  assert.equal(payload(await tool.execute(request)).code, 'provider_permission_insufficient');
+  const preview = await tool.preview(request);
+  assert.deepEqual({ action: preview.action, destination: preview.destination, query: preview.query, data_categories: preview.data_categories }, { action: 'search_messages', destination: '/me/mailFolders/sentitems/messages', query: 'quarterly status', data_categories: ['search_query'] });
+  assert.equal(payload(await tool.execute(request)).code, 'provider_permission_insufficient');
+  assert.equal(payload(await tool.execute({ ...request, authorization: { kind: 'policy' } })).code, 'provider_permission_insufficient');
+  assert.equal(requests, 0);
+  const firstPage = payload(await tool.execute({ ...request, authorization: { kind: 'user_confirmation' } }));
+  assert.equal(firstPage.kind, 'mail_search_page'); assert.match(firstPage.next_page, /^gpg_[0-9a-f]{32}$/u);
+  assert.equal(requests, 1);
+
+  const nextRequest = call('mail.search_messages', { page_cursor: firstPage.next_page }, 'call_search_guard_page_2');
+  assert.equal(payload(await tool.execute(nextRequest)).code, 'provider_permission_insufficient');
+  const nextPreview = await tool.preview(nextRequest);
+  assert.equal(nextPreview.query, 'quarterly status'); assert.equal(nextPreview.destination, '/me/mailFolders/sentitems/messages');
+  assert.equal(payload(await tool.execute(nextRequest)).code, 'provider_permission_insufficient'); assert.equal(requests, 1);
+  assert.equal(payload(await tool.execute({ ...nextRequest, authorization: { kind: 'user_confirmation' } })).kind, 'mail_search_page');
+  assert.equal(requests, 2);
+
+  let deniedRequests = 0; let deniedController;
+  const deniedTools = createMicrosoftGraphTools(new MicrosoftGraphProvider({ enabled: true, permissionProfile: 'ask_before_writes', credentialSource, accountFingerprint: 'acct-read', testOnly: true, transport: { request: async () => { deniedRequests += 1; return { status: 200, body: collection([mail()]) }; } } }));
+  let turn = 0; const events = [];
+  const engine = { async *generate() { if (turn++ === 0) { yield { kind: 'tool_call_chunk', text: JSON.stringify(call('mail.search_messages', { query: 'private phrase' }, 'call_search_denied')) }; return; } yield { kind: 'text_delta', text: 'done' }; yield { kind: 'done' }; } };
+  deniedController = new ConversationController({ engine, toolRegistry: deniedTools });
+  const denied = await deniedController.runTurn({ sessionId: 'session_search_deny', requestId: 'request_search_deny', message: 'search', onEvent: event => { events.push(event); if (event.event === 'tool.confirmation_required') queueMicrotask(() => deniedController.confirm(event.data.confirmation_id, false, { requestId: event.request_id, callId: event.data.call.id })); } });
+  assert.equal(denied.state, 'COMPLETED'); assert.equal(deniedRequests, 0);
+  const confirmation = events.find(event => event.event === 'tool.confirmation_required'); assert.equal(confirmation.data.risk_tier, 'T2'); assert.equal(confirmation.data.preview.query, 'private phrase');
 });
 
 test('Teams chat and channel list/detail paths bind every identity and expose only safe text', async () => {
@@ -95,7 +142,7 @@ test('Teams bounded search is explicitly page-local and does not alter the fixed
   const tools = createMicrosoftGraphTools(provider({ request: async request => { observed = request; return { status: 200, body: collection([teamMessage('one', 'Alpha'), teamMessage('two', 'Beta alpha'), teamMessage('three', 'Gamma')]) }; } }));
   const output = payload(await tools['teams.list_messages'].execute(call('teams.list_messages', { chat_id: 'chat-1', search_text: 'alpha', limit: 3 })));
   assert.deepEqual(output.messages.map(item => item.id), ['one', 'two']); assert.equal(output.search_scope, 'current_graph_page');
-  assert.deepEqual(observed.query, { '$top': 3, '$select': 'id,replyToId,createdDateTime,lastModifiedDateTime,importance,from,body' });
+  assert.deepEqual(observed.query, { '$top': 50, '$select': 'id,replyToId,createdDateTime,lastModifiedDateTime,importance,from,body' });
 });
 
 test('opaque pagination accepts only exact Graph origin/path/static query and is one-use/account-bound', async () => {
@@ -151,6 +198,26 @@ test('strict projections reject unknown/attachment fields, duplicate IDs, malfor
   const huge = Array.from({ length: 51 }, (_, index) => mail(`mail-${index}`));
   const tools = createMicrosoftGraphTools(provider({ request: async () => ({ status: 200, body: collection(huge) }) }));
   assert.equal(payload(await tools['mail.list_messages'].execute(call('mail.list_messages', {}))).code, 'provider_invalid_response');
+});
+
+test('safe text removes encoded, nested, malformed, and unclosed active content before stripping introduced controls', async () => {
+  const bodies = [
+    ['before<script>alert(1)</script><style>secret{}</style>after', 'before after'],
+    ['before<script><style>nested</style>secret', 'before'],
+    ['before<scr<script>ipt>malformed</script>after', 'before after'],
+    ['before &lt;script&gt;encoded&lt;/script&gt; after', 'before after'],
+    ['before &amp;lt;style&amp;gt;double&amp;lt;/style&amp;gt; after', 'before after'],
+    ['before &#x3c;script&#x3e;numeric&#x3c;/script&#x3e; after', 'before after'],
+    ['before<style>unclosed', 'before'],
+    ['A&#27;B&#x1b;C&#x85;D&#0;E', 'A B C D E']
+  ];
+  for (const [content, expected] of bodies) {
+    const tools = createMicrosoftGraphTools(provider({ request: async () => ({ status: 200, body: mailDetail(content) }) }));
+    const result = payload(await tools['mail.read_message'].execute(call('mail.read_message', { message_id: 'mail-1' })));
+    assert.equal(result.message.text, expected, content);
+    assert.equal(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/u.test(result.message.text), false);
+    assert.equal(/script|style|alert|secret|nested|malformed|encoded|double|numeric|unclosed/iu.test(result.message.text), false);
+  }
 });
 
 test('Graph HTTPS fake-fetch rejects duplicate JSON, invalid UTF-8, wrong content type, and oversized bodies', async () => {

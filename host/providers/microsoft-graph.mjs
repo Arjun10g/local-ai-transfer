@@ -1,7 +1,7 @@
 import { makeToolResult } from '../agent/tool-envelope.mjs';
 import { ProviderToolError, exactObject, boundedArray, boundedBoolean, boundedString, checkAborted, digest, failureResult, jsonResponse, normalizeText, own, providerError, result } from './provider-common.mjs';
 import { MicrosoftDeviceCodeCredential, MicrosoftGraphHttpsTransport, GRAPH_ORIGIN } from './microsoft-graph-auth.mjs';
-import { graphReadDefinitions, graphReadScopes, isGraphReadTool, MicrosoftGraphReadBoundary, validateGraphReadArguments } from './microsoft-graph-reads.mjs';
+import { graphReadDefinitions, graphReadScopes, isGraphReadEgressTool, isGraphReadTool, MicrosoftGraphReadBoundary, validateGraphReadArguments } from './microsoft-graph-reads.mjs';
 
 const API = '/v1.0';
 const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/u;
@@ -212,8 +212,8 @@ export class MicrosoftGraphProvider {
   confirmationRequired(name) {
     const important = name === 'teams.send_message' || name === 'mail.send_draft';
     if (this.permissionProfile === 'always_ask') return true;
-    if (this.permissionProfile === 'ask_before_writes') return this.isWrite(name);
-    if (this.permissionProfile === 'review_important_actions') return important;
+    if (this.permissionProfile === 'ask_before_writes') return this.isWrite(name) || isGraphReadEgressTool(name);
+    if (this.permissionProfile === 'review_important_actions') return important || isGraphReadEgressTool(name);
     if (this.permissionProfile === 'full_access') return important || !this.grantValid(this.capability(name));
     return true;
   }
@@ -318,6 +318,10 @@ export class MicrosoftGraphProvider {
   }
   async preview(call) {
     const args = this.validate(call.name, call.arguments); const proposalRevision = this.remember(call, args);
+    if (isGraphReadEgressTool(call.name)) {
+      const identity = this.readBoundary.previewIdentity(call.name, args);
+      return { provider: 'microsoft_graph', action: 'search_messages', destination: identity.folder ? `/me/mailFolders/${identity.folder}/messages` : '/me/messages', query: identity.query, proposal_revision: proposalRevision, data_categories: ['search_query'], permission_profile: this.permissionProfile };
+    }
     if (call.name === 'mail.create_draft') {
       const bodyPreview = previewText(args.body, 512); return { provider: 'microsoft_graph', action: 'create_draft', destination: '/me', recipients: [...args.to, ...(args.cc ?? [])], subject: args.subject, body_preview: bodyPreview.text, body_truncated: bodyPreview.truncated, proposal_revision: proposalRevision, data_categories: ['recipient', 'subject', 'message_body'], permission_profile: this.permissionProfile };
     }
@@ -337,7 +341,17 @@ export class MicrosoftGraphProvider {
     let args; try { args = this.validate(call.name, call.arguments); const value = await this._execute(call, args); return value; } catch (error) { if (error?.code === 'invalid_tool_arguments') throw error; return failureResult(call, error); }
   }
   async _execute(call, args) {
-    if (isGraphReadTool(call.name)) return this.readBoundary.execute(call, args);
+    if (isGraphReadTool(call.name)) {
+      if (isGraphReadEgressTool(call.name)) {
+        const saved = this.assertProposal(call, args); const authorization = call.authorization;
+        if (authorization !== undefined && (!authorization || typeof authorization !== 'object' || Array.isArray(authorization) || !['user_confirmation', 'operator_grant'].includes(authorization.kind) || authorization.kind === 'user_confirmation' && Object.keys(authorization).length !== 1 || authorization.kind === 'operator_grant' && (Object.keys(authorization).length !== 2 || typeof authorization.generation !== 'string' || !/^[a-f0-9]{32}$/u.test(authorization.generation)))) throw new ProviderToolError('provider_permission_insufficient');
+        if (authorization?.kind === 'operator_grant') {
+          const capability = this.capability(call.name); const grant = this.grantStore?.get(capability);
+          if (!grant || grant.profile !== 'full_access' || grant.generation !== saved.grantGeneration || grant.generation !== authorization.generation || !this.grantValid(capability)) throw new ProviderToolError('provider_permission_revoked');
+        } else if (authorization?.kind !== 'user_confirmation' && this.confirmationRequired(call.name)) throw new ProviderToolError('provider_permission_insufficient');
+      }
+      return this.readBoundary.execute(call, args);
+    }
     checkAborted(call.signal);
     const saved = this.assertProposal(call, args);
     const binding = journalBinding(call);
