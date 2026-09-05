@@ -4,10 +4,12 @@
 #include "win32_identity.hpp"
 
 #include <atomic>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_set>
 
 namespace lae::windows_broker {
 
@@ -28,11 +30,11 @@ class Broker final {
     std::atomic<bool> cancelled{false};
     std::atomic<bool> completed{false};
     UniqueHandle start_event;
-    UniqueHandle done_event;
     std::thread worker;
   };
 
   bool write(HANDLE output, const Response& response) noexcept;
+  bool remember_request_id(const std::string& request_id);
   void reap_completed();
   void cancel_and_reap();
   Response hello(const Request& request) const;
@@ -40,9 +42,12 @@ class Broker final {
   bool start(const Request& request, HANDLE output);
 
   ManifestLease manifest_;
-  std::mutex output_mutex_;
+  std::timed_mutex output_mutex_;
   std::mutex active_mutex_;
+  std::mutex replay_mutex_;
   std::unique_ptr<ActiveRequest> active_;
+  std::deque<std::string> recent_request_ids_;
+  std::unordered_set<std::string> recent_request_id_set_;
 };
 
 }  // namespace lae::windows_broker

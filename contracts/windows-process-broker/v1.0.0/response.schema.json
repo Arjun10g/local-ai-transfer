@@ -18,14 +18,13 @@
     "errorCode": {
       "enum": [
         "ok", "invalid_frame", "invalid_json", "invalid_request",
+        "protocol_io_timeout", "protocol_io_failed", "request_id_replayed",
         "broker_not_activated", "manifest_untrusted", "manifest_invalid",
         "action_denied", "arguments_rejected", "broker_busy",
-        "identity_mismatch", "cwd_mismatch", "environment_unavailable",
-        "restricted_token_unavailable", "pipe_setup_failed", "job_setup_failed",
-        "process_create_failed", "process_image_mismatch", "job_assignment_failed",
-        "resume_failed", "process_wait_failed", "child_exit_nonzero",
-        "output_limit", "deadline_expired", "cancelled", "job_reap_failed",
-        "clipboard_unavailable", "internal_failure"
+        "launch_containment_unproven", "launch_confinement_unproven",
+        "identity_mismatch", "cwd_mismatch", "output_limit",
+        "deadline_expired", "cancelled", "clipboard_unavailable",
+        "clipboard_invalid_text", "internal_failure"
       ]
     },
     "receipt": {
@@ -35,7 +34,7 @@
         "action_id", "action_kind", "manifest_sha256", "executable_sha256",
         "argv_template_id", "cwd_id", "status", "error_code", "duration_ms",
         "stdout_bytes", "stderr_bytes", "stdin_bytes", "output_truncated",
-        "restricted_token", "job_assigned_before_resume"
+        "process_created"
       ],
       "properties": {
         "action_id": {"type": "string", "minLength": 2, "maxLength": 96},
@@ -51,8 +50,7 @@
         "stderr_bytes": {"type": "integer", "minimum": 0},
         "stdin_bytes": {"type": "integer", "minimum": 0},
         "output_truncated": {"type": "boolean"},
-        "restricted_token": {"type": "boolean"},
-        "job_assigned_before_resume": {"type": "boolean"}
+        "process_created": {"const": false}
       }
     }
   }

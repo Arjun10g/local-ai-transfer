@@ -1,35 +1,52 @@
-# Windows process broker contract v1.0.0 (inactive skeleton)
+# Windows process broker contract v1.0.0 (inactive)
 
-This contract describes a future inherited-pipe boundary between the Node host
-and one native Windows broker. It does not activate a product capability. The
-broker source is absent from the native build graph and package allowlist, its
-compiled manifest trust anchor is empty by default, and all existing Windows
-tool-advertisement exclusions remain authoritative.
+Status: **NOT_READY**. This contract and its static fixtures describe a future
+inherited-pipe boundary. They do not activate a capability. There is no
+process-creation implementation, build target, package entry, host integration,
+launcher integration, registry entry, non-empty trust anchor, or Windows
+runtime evidence.
 
-Each message is encoded as a four-byte unsigned big-endian length followed by
-exactly that many UTF-8 JSON bytes. Request frames are limited to 65,536 bytes;
-response frames to 1,048,576 bytes. Duplicate JSON keys and trailing JSON data
-are invalid even though JSON Schema cannot express those lexical constraints.
-The broker reads inherited stdin and writes inherited stdout. TCP, shell text,
-and a generic command endpoint are not part of this protocol.
+Messages use a four-byte unsigned big-endian length followed by one UTF-8 JSON
+object. Request frames are at most 65,536 bytes and response frames at most
+1,048,576 bytes. Duplicate keys, trailing data, unknown keys, invalid types,
+control characters in arguments, excessive nesting, partial-frame stalls, and
+out-of-range lengths or deadlines fail closed. Reads, response writes, I/O
+cancellation, and worker joins have explicit bounds in the inactive source.
 
-An `invoke` request selects a manifest-pinned logical `action_id`. The request
-cannot select an executable, manifest, argv array, cwd, environment, output
-path, or shell. Its `arguments` keys must exactly match that action's typed
-parameter declarations. Literal argv pieces and parameter placement are fixed
-by the authenticated manifest. A parameter may be placed into one argv element,
-bounded stdin, or the clipboard, never interpolated into a shell string.
+An invocation selects a manifest-pinned logical `action_id`. It cannot select a
+manifest, executable, raw argv, cwd, environment, output path, or shell. Product
+policy is stricter than JSON Schema alone and is enforced by the C++ parser:
 
-The immediate response to a valid invocation has status `accepted`. A later
-response with the same request ID contains the terminal result. One action may
-run at a time. A `cancel` frame targets that exact request ID and causes full Job
-termination and bounded reaping. Parent EOF has the same cancellation effect.
+- every launch action binds an immutable executable identity/class, cwd,
+  action-policy ID, confinement profile, and action-specific argv template;
+- interpreters, shells, generic script hosts, and common LOLBins are denied;
+- every parameter is required, typed, bounded, used in its declared placement,
+  and free of NUL/newline/control characters in manifest literals and finite
+  values; canonical numeric values are range checked;
+- process argv parameters require finite `allowed_values`;
+- application argv is entirely fixed by the manifest;
+- browser input is one bounded `https` URL;
+- Copilot prompt content is bounded stdin only; and
+- clipboard actions use manifest limits no larger than 64 KiB/five seconds.
 
-Receipts intentionally exclude paths, argv values, environment, stdout/stderr,
-clipboard text, Copilot prompts, URLs, and other content. Process output is
-returned separately as bounded base64 only to the authenticated parent channel.
+The fixture manifest is `mode: fixture` and carries the explicit
+`unproven-disabled` confinement marker. Product parsing rejects that marker and
+the fixture mode. Even a valid product document could not start this source
+because the compiled trust anchor is empty and the supervisor-containment and
+launch-confinement activation constants are false.
 
-The checked-in manifest is `mode: fixture`. The product parser rejects it.
-Product mode requires a separate reviewed manifest whose exact SHA-256 is
-compiled into a remotely built and signed broker and whose executable and
-directory identities are captured on the accepted Windows target.
+The broker proposal rejects recently reused IDs with a bounded 1,024-entry
+in-memory cache. This is not restart-safe replay protection. A durable host
+action journal is mandatory before activation, including duplicate-action
+blocking and unknown-after-dispatch recovery. The protocol's `accepted` status
+must never be interpreted as completion.
+
+Receipts omit paths, argv/argument values, environment, output content,
+clipboard text, Copilot prompts, URLs, secrets, and token material. In this
+inactive revision `process_created` is always `false`; receipts do not claim Job
+assignment, confinement, reaping, navigation, or provider acknowledgement.
+
+The Python tests are static contract checks only. They do not prove C++17
+compilation, Windows behavior, process containment, security-token properties,
+clipboard behavior, or runtime readiness. A later activation change requires
+remote Windows build/test evidence and a new security review.

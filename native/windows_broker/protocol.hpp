@@ -1,6 +1,12 @@
 #pragma once
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #else
 #error "The Windows process broker is Windows-only and is not a portable fallback"
@@ -25,6 +31,9 @@ inline constexpr std::size_t kMaxArguments = 16;
 inline constexpr std::size_t kMaxArgumentStringBytes = 64 * 1024;
 inline constexpr std::uint32_t kMinDeadlineMs = 100;
 inline constexpr std::uint32_t kMaxDeadlineMs = 120 * 1000;
+inline constexpr std::uint32_t kFrameAssemblyDeadlineMs = 5000;
+inline constexpr std::uint32_t kResponseWriteDeadlineMs = 5000;
+inline constexpr std::uint32_t kIoCancellationGraceMs = 1000;
 
 enum class RequestKind { kHello, kInvoke, kCancel };
 enum class FrameStatus { kOk, kEndOfStream, kRejected, kIoFailure };
@@ -52,8 +61,7 @@ struct Receipt {
   std::uint64_t stderr_bytes = 0;
   std::uint64_t stdin_bytes = 0;
   bool output_truncated = false;
-  bool restricted_token = false;
-  bool job_assigned_before_resume = false;
+  bool process_created = false;
 };
 
 struct Response {
@@ -73,8 +81,9 @@ bool parse_request(std::string_view input, Request& request,
 
 nlohmann::json response_json(const Response& response);
 
-// The stream framing layer never allocates from an untrusted length. A clean EOF
-// before any prefix byte is distinct from a partial prefix/body.
+// The stream framing layer never allocates from an untrusted length. Every
+// frame, including its first byte, has one assembly deadline; a clean EOF before
+// any prefix byte is distinct from a partial prefix/body.
 FrameStatus read_request_frame(HANDLE input, std::string& json,
                                std::string& error_code) noexcept;
 bool write_response_frame(HANDLE output, const Response& response) noexcept;

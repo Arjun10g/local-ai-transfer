@@ -28,11 +28,19 @@ enum class ActionKind {
   kClipboardWrite,
 };
 
+enum class ExecutableClass {
+  kProcessTool,
+  kApplication,
+  kBrowser,
+  kCopilot,
+};
+
 enum class ParameterKind { kUtf8, kHttpsUrl, kUnsignedDecimal, kWorkspaceRelative };
 enum class ParameterPlacement { kArgv, kStdin, kClipboard };
 
 struct FileIdentitySpec {
   std::string id;
+  ExecutableClass executable_class = ExecutableClass::kProcessTool;
   std::wstring absolute_path;
   std::uint64_t size_bytes = 0;
   std::string sha256;
@@ -67,13 +75,14 @@ struct ActionSpec {
   std::string executable_id;
   std::string cwd_id;
   std::string argv_template_id;
+  std::string action_policy_id;
+  std::string confinement_profile;
   std::vector<ArgumentPart> argv_template;
   std::vector<ParameterSpec> parameters;
   std::uint32_t timeout_ms = 0;
   std::uint32_t stdout_limit_bytes = 0;
   std::uint32_t stderr_limit_bytes = 0;
   std::uint32_t max_processes = 1;
-  bool restricted_token_required = true;
   bool visible = false;
 };
 

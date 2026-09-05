@@ -16,6 +16,7 @@ namespace lae::windows_broker {
 namespace {
 
 constexpr std::size_t kMaxPathCharacters = 32767;
+constexpr ULONGLONG kManifestReadDeadlineMs = 5000;
 constexpr DWORD kFileLeaseShare = FILE_SHARE_READ;  // Denies WRITE and DELETE.
 constexpr DWORD kDirectoryLeaseShare = FILE_SHARE_READ | FILE_SHARE_WRITE;
 
@@ -311,7 +312,7 @@ bool load_compiled_manifest(ManifestLease& lease,
                             std::string& error_code) noexcept {
   error_code = "broker_not_activated";
   try {
-    if (!release_trust_anchor_configured()) return false;
+    if (!release_activation_prerequisites_configured()) return false;
     const std::wstring path = manifest_path();
     if (path.empty()) {
       error_code = "manifest_untrusted";
@@ -330,7 +331,8 @@ bool load_compiled_manifest(ManifestLease& lease,
     }
     std::string digest;
     std::string content;
-    if (!sha256_handle(document.object.get(), kMaxManifestBytes, digest, &content) ||
+    if (!sha256_handle(document.object.get(), kMaxManifestBytes, digest, &content,
+                       nullptr, GetTickCount64() + kManifestReadDeadlineMs) ||
         digest != kCompiledManifestSha256) {
       error_code = "manifest_untrusted";
       return false;

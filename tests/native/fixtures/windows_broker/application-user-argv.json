@@ -1,0 +1,1 @@
+{"action_id":"application.notes.open","parameters":[{"name":"file","kind":"workspace_relative","placement":"argv","max_bytes":256,"required":true,"allowed_values":["note.txt"]}],"argv_template":[{"parameter":"file"}]}

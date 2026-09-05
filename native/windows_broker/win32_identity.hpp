@@ -1,6 +1,12 @@
 #pragma once
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #else
 #error "The Windows identity lease is Windows-only"
@@ -52,7 +58,8 @@ struct ManifestLease {
 };
 
 // Every returned handle remains open to preserve the pathname/identity
-// invariant. Closing a lease before CreateProcess and child reaping is unsafe.
+// invariant. This inactive source never creates a process; any later launcher
+// must hold every lease through supervisor-contained creation and full reaping.
 bool acquire_executable_lease(const FileIdentitySpec& expected,
                               IdentityLease& lease,
                               std::string& error_code,
@@ -62,9 +69,10 @@ bool acquire_directory_lease(const DirectoryIdentitySpec& expected,
                              IdentityLease& lease,
                              std::string& error_code) noexcept;
 
-// Locates a fixed manifest next to the running broker, authenticates its exact
-// bytes against the compiled digest, strictly parses it, and pins its own and
-// runtime-directory identities for the full broker lifetime.
+// Fails before manifest access while any activation prerequisite is false. A
+// future reviewed activation would locate the fixed adjacent manifest,
+// authenticate exact bytes against the compiled digest, strictly parse it, and
+// pin its document/runtime-directory identities for the broker lifetime.
 bool load_compiled_manifest(ManifestLease& lease,
                             std::string& error_code) noexcept;
 

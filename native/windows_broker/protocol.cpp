@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
+#include <initializer_list>
 #include <limits>
 #include <set>
 #include <utility>
@@ -10,36 +12,137 @@
 namespace lae::windows_broker {
 namespace {
 
-bool read_exact(HANDLE input, void* destination, DWORD bytes, bool& clean_eof) {
-  clean_eof = false;
-  auto* cursor = static_cast<unsigned char*>(destination);
-  DWORD consumed = 0;
-  while (consumed < bytes) {
-    DWORD count = 0;
-    if (!ReadFile(input, cursor + consumed, bytes - consumed, &count, nullptr)) {
-      return false;
-    }
-    if (count == 0) {
-      clean_eof = consumed == 0;
-      return false;
-    }
-    consumed += count;
+enum class ExactReadStatus { kOk, kCleanEof, kPartialEof, kTimeout, kIoFailure };
+
+struct ReadContext {
+  HANDLE input = INVALID_HANDLE_VALUE;
+  unsigned char* destination = nullptr;
+  DWORD bytes = 0;
+  DWORD count = 0;
+  DWORD error = ERROR_SUCCESS;
+  bool success = false;
+};
+
+DWORD WINAPI read_worker(void* opaque) {
+  auto& context = *static_cast<ReadContext*>(opaque);
+  if (!ReadFile(context.input, context.destination, context.bytes,
+                &context.count, nullptr)) {
+    context.error = GetLastError();
+    return 1;
   }
-  return true;
+  context.success = true;
+  return 0;
 }
 
-bool write_exact(HANDLE output, const void* source, DWORD bytes) {
-  const auto* cursor = static_cast<const unsigned char*>(source);
-  DWORD consumed = 0;
-  while (consumed < bytes) {
-    DWORD count = 0;
-    if (!WriteFile(output, cursor + consumed, bytes - consumed, &count, nullptr) ||
-        count == 0) {
-      return false;
+[[noreturn]] void fail_stop_on_stuck_io() {
+  // Continuing would either strand a thread that references caller-owned
+  // memory or leave the authenticated parent unable to observe terminal state.
+  TerminateProcess(GetCurrentProcess(), 72);
+  std::abort();
+}
+
+ExactReadStatus read_some_bounded(HANDLE input, unsigned char* destination,
+                                  DWORD bytes, DWORD timeout_ms,
+                                  DWORD& count) {
+  ReadContext context{input, destination, bytes, 0, ERROR_SUCCESS, false};
+  HANDLE raw_thread = CreateThread(nullptr, 0, read_worker, &context, 0, nullptr);
+  if (!raw_thread) return ExactReadStatus::kIoFailure;
+  const DWORD first_wait = WaitForSingleObject(raw_thread, timeout_ms);
+  if (first_wait != WAIT_OBJECT_0) {
+    SetLastError(ERROR_SUCCESS);
+    const BOOL cancelled = CancelSynchronousIo(raw_thread);
+    const DWORD cancellation_error = cancelled ? ERROR_SUCCESS : GetLastError();
+    const DWORD cancellation_wait =
+        WaitForSingleObject(raw_thread, kIoCancellationGraceMs);
+    if (cancellation_wait != WAIT_OBJECT_0) {
+      CloseHandle(raw_thread);
+      fail_stop_on_stuck_io();
     }
+    CloseHandle(raw_thread);
+    if (!cancelled && cancellation_error != ERROR_NOT_FOUND)
+      return ExactReadStatus::kIoFailure;
+    return ExactReadStatus::kTimeout;
+  }
+  CloseHandle(raw_thread);
+  count = context.count;
+  if (context.success) return ExactReadStatus::kOk;
+  if (context.error == ERROR_BROKEN_PIPE || context.error == ERROR_HANDLE_EOF)
+    return ExactReadStatus::kCleanEof;
+  return ExactReadStatus::kIoFailure;
+}
+
+ExactReadStatus read_exact(HANDLE input, void* destination, DWORD bytes,
+                           ULONGLONG& assembly_deadline) {
+  if (GetFileType(input) != FILE_TYPE_PIPE) return ExactReadStatus::kIoFailure;
+  auto* cursor = static_cast<unsigned char*>(destination);
+  DWORD consumed = 0;
+  if (assembly_deadline == 0)
+    assembly_deadline = GetTickCount64() + kFrameAssemblyDeadlineMs;
+  while (consumed < bytes) {
+    const ULONGLONG now = GetTickCount64();
+    if (now >= assembly_deadline) return ExactReadStatus::kTimeout;
+    DWORD count = 0;
+    const auto remaining = static_cast<DWORD>(
+        std::min<ULONGLONG>(assembly_deadline - now,
+                            std::numeric_limits<DWORD>::max()));
+    const ExactReadStatus status = read_some_bounded(
+        input, cursor + consumed, bytes - consumed, remaining, count);
+    if (status == ExactReadStatus::kTimeout) return status;
+    if (status == ExactReadStatus::kCleanEof)
+      return consumed == 0 ? ExactReadStatus::kCleanEof
+                           : ExactReadStatus::kPartialEof;
+    if (status != ExactReadStatus::kOk) return status;
+    if (count == 0) return ExactReadStatus::kPartialEof;
     consumed += count;
   }
-  return true;
+  return ExactReadStatus::kOk;
+}
+
+struct WriteContext {
+  HANDLE output = INVALID_HANDLE_VALUE;
+  const unsigned char* source = nullptr;
+  DWORD bytes = 0;
+  bool success = false;
+};
+
+DWORD WINAPI write_worker(void* opaque) {
+  auto& context = *static_cast<WriteContext*>(opaque);
+  DWORD consumed = 0;
+  while (consumed < context.bytes) {
+    DWORD count = 0;
+    if (!WriteFile(context.output, context.source + consumed,
+                   context.bytes - consumed, &count, nullptr) || count == 0)
+      return 1;
+    consumed += count;
+  }
+  context.success = true;
+  return 0;
+}
+
+bool write_exact_bounded(HANDLE output, const void* source, DWORD bytes) {
+  if (GetFileType(output) != FILE_TYPE_PIPE) return false;
+  WriteContext context{output, static_cast<const unsigned char*>(source), bytes,
+                       false};
+  HANDLE raw_thread = CreateThread(nullptr, 0, write_worker, &context, 0, nullptr);
+  if (!raw_thread) return false;
+  const DWORD first_wait =
+      WaitForSingleObject(raw_thread, kResponseWriteDeadlineMs);
+  if (first_wait != WAIT_OBJECT_0) {
+    SetLastError(ERROR_SUCCESS);
+    const BOOL cancelled = CancelSynchronousIo(raw_thread);
+    const DWORD cancellation_error = cancelled ? ERROR_SUCCESS : GetLastError();
+    const DWORD cancellation_wait =
+        WaitForSingleObject(raw_thread, kIoCancellationGraceMs);
+    if (cancellation_wait != WAIT_OBJECT_0) {
+      CloseHandle(raw_thread);
+      fail_stop_on_stuck_io();
+    }
+    CloseHandle(raw_thread);
+    if (!cancelled && cancellation_error != ERROR_NOT_FOUND) return false;
+    return false;
+  }
+  CloseHandle(raw_thread);
+  return context.success;
 }
 
 bool identifier(std::string_view value, std::size_t minimum,
@@ -72,18 +175,13 @@ bool exact_keys(const nlohmann::json& value,
 
 bool bounded_argument_value(const nlohmann::json& value, std::size_t depth) {
   if (depth > 2) return false;
-  if (value.is_boolean()) return true;
   if (value.is_number_unsigned()) return value.get<std::uint64_t>() <= 0x7fffffff;
   if (value.is_string()) {
     const auto& text = value.get_ref<const std::string&>();
-    return text.size() <= kMaxArgumentStringBytes;
-  }
-  if (value.is_array()) {
-    if (value.size() > 16) return false;
-    return std::all_of(value.begin(), value.end(), [depth](const auto& element) {
-      return element.is_string() &&
-             element.get_ref<const std::string&>().size() <= 4096 && depth < 2;
-    });
+    return !text.empty() && text.size() <= kMaxArgumentStringBytes &&
+           std::none_of(text.begin(), text.end(), [](unsigned char c) {
+             return c < 0x20 || c == 0x7f;
+           });
   }
   return false;
 }
@@ -105,8 +203,7 @@ nlohmann::json receipt_json(const Receipt& receipt) {
       {"stderr_bytes", receipt.stderr_bytes},
       {"stdin_bytes", receipt.stdin_bytes},
       {"output_truncated", receipt.output_truncated},
-      {"restricted_token", receipt.restricted_token},
-      {"job_assigned_before_resume", receipt.job_assigned_before_resume},
+      {"process_created", receipt.process_created},
   };
 }
 
@@ -245,12 +342,20 @@ FrameStatus read_request_frame(HANDLE input, std::string& json,
   error_code.clear();
   json.clear();
   std::array<unsigned char, 4> prefix{};
-  bool clean_eof = false;
-  if (!read_exact(input, prefix.data(), static_cast<DWORD>(prefix.size()),
-                  clean_eof)) {
-    if (clean_eof) return FrameStatus::kEndOfStream;
-    error_code = "invalid_frame";
-    return FrameStatus::kRejected;
+  ULONGLONG assembly_deadline = 0;
+  const ExactReadStatus prefix_status = read_exact(
+      input, prefix.data(), static_cast<DWORD>(prefix.size()), assembly_deadline);
+  if (prefix_status != ExactReadStatus::kOk) {
+    if (prefix_status == ExactReadStatus::kCleanEof)
+      return FrameStatus::kEndOfStream;
+    error_code = prefix_status == ExactReadStatus::kTimeout
+                     ? "protocol_io_timeout"
+                     : prefix_status == ExactReadStatus::kIoFailure
+                           ? "protocol_io_failed"
+                           : "invalid_frame";
+    return prefix_status == ExactReadStatus::kPartialEof
+               ? FrameStatus::kRejected
+               : FrameStatus::kIoFailure;
   }
   const std::uint32_t length = (static_cast<std::uint32_t>(prefix[0]) << 24) |
                                (static_cast<std::uint32_t>(prefix[1]) << 16) |
@@ -261,10 +366,19 @@ FrameStatus read_request_frame(HANDLE input, std::string& json,
     return FrameStatus::kRejected;
   }
   json.resize(length);
-  if (!read_exact(input, json.data(), length, clean_eof)) {
+  const ExactReadStatus body_status =
+      read_exact(input, json.data(), length, assembly_deadline);
+  if (body_status != ExactReadStatus::kOk) {
     json.clear();
-    error_code = "invalid_frame";
-    return FrameStatus::kRejected;
+    error_code = body_status == ExactReadStatus::kTimeout
+                     ? "protocol_io_timeout"
+                     : body_status == ExactReadStatus::kIoFailure
+                           ? "protocol_io_failed"
+                           : "invalid_frame";
+    return body_status == ExactReadStatus::kPartialEof ||
+                   body_status == ExactReadStatus::kCleanEof
+               ? FrameStatus::kRejected
+               : FrameStatus::kIoFailure;
   }
   return FrameStatus::kOk;
 }
@@ -275,14 +389,14 @@ bool write_response_frame(HANDLE output, const Response& response) noexcept {
     if (body.empty() || body.size() > kMaxResponseFrameBytes ||
         body.size() > std::numeric_limits<std::uint32_t>::max()) return false;
     const auto length = static_cast<std::uint32_t>(body.size());
-    const std::array<unsigned char, 4> prefix = {
-        static_cast<unsigned char>((length >> 24) & 0xff),
-        static_cast<unsigned char>((length >> 16) & 0xff),
-        static_cast<unsigned char>((length >> 8) & 0xff),
-        static_cast<unsigned char>(length & 0xff),
-    };
-    return write_exact(output, prefix.data(), static_cast<DWORD>(prefix.size())) &&
-           write_exact(output, body.data(), length);
+    std::vector<unsigned char> frame(4 + body.size());
+    frame[0] = static_cast<unsigned char>((length >> 24) & 0xff);
+    frame[1] = static_cast<unsigned char>((length >> 16) & 0xff);
+    frame[2] = static_cast<unsigned char>((length >> 8) & 0xff);
+    frame[3] = static_cast<unsigned char>(length & 0xff);
+    std::copy(body.begin(), body.end(), frame.begin() + 4);
+    return write_exact_bounded(output, frame.data(),
+                               static_cast<DWORD>(frame.size()));
   } catch (...) {
     return false;
   }

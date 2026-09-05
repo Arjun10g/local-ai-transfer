@@ -24,10 +24,8 @@
     },
     "argument": {
       "oneOf": [
-        {"type": "string", "maxLength": 65536},
-        {"type": "integer", "minimum": 0, "maximum": 2147483647},
-        {"type": "boolean"},
-        {"type": "array", "maxItems": 16, "items": {"type": "string", "maxLength": 4096}}
+        {"type": "string", "minLength": 1, "maxLength": 65536, "not": {"pattern": "[\\u0000-\\u001f\\u007f]"}},
+        {"type": "integer", "minimum": 0, "maximum": 2147483647}
       ]
     },
     "hello": {

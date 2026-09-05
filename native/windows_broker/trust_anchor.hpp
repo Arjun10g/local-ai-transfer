@@ -15,6 +15,14 @@ namespace lae::windows_broker {
 inline constexpr std::string_view kCompiledManifestSha256 =
     LAE_WINDOWS_BROKER_MANIFEST_SHA256_HEX;
 
+// These source constants deliberately have no build-system override. A later
+// reviewed source change may set them only after a supervisor-created
+// containment primitive and a real least-privilege token/AppContainer profile
+// have Windows runtime evidence. A manifest hash alone must never activate
+// CreateProcess.
+inline constexpr bool kSupervisorContainmentProven = false;
+inline constexpr bool kLaunchConfinementProven = false;
+
 constexpr bool is_lower_hex(char value) {
   return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
 }
@@ -27,6 +35,11 @@ constexpr bool release_trust_anchor_configured() {
     nonzero = nonzero || value != '0';
   }
   return nonzero;
+}
+
+constexpr bool release_activation_prerequisites_configured() {
+  return release_trust_anchor_configured() && kSupervisorContainmentProven &&
+         kLaunchConfinementProven;
 }
 
 }  // namespace lae::windows_broker

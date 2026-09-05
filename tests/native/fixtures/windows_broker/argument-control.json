@@ -1,0 +1,1 @@
+{"schema":"lae.windows-broker.request.v1","request_id":"request_control_001","kind":"invoke","action_id":"clipboard.write_text","deadline_ms":1000,"arguments":{"text":"safe\nunsafe"}}

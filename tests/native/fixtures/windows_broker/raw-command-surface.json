@@ -1,1 +1,1 @@
-{"schema":"lae.windows-broker.request.v1","request_id":"request_fixture_0002","kind":"invoke","action_id":"process.git.status","deadline_ms":10000,"arguments":{},"executable":"C:\\Windows\\System32\\cmd.exe","argv":["/c","whoami"],"cwd":"C:\\","environment":{"HF_TOKEN":"do-not-inherit"}}
+{"schema":"lae.windows-broker.request.v1","request_id":"request_fixture_0002","kind":"invoke","action_id":"process.status.fixed","deadline_ms":10000,"arguments":{},"executable":"C:\\Windows\\System32\\cmd.exe","argv":["/c","whoami"],"cwd":"C:\\","environment":{"HF_TOKEN":"do-not-inherit"}}

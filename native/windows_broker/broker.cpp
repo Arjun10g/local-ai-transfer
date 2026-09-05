@@ -1,20 +1,53 @@
 #include "broker.hpp"
 
+#include "trust_anchor.hpp"
 #include "win32_process.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <utility>
 
 namespace lae::windows_broker {
 namespace {
 
-// Allows the worker's two bounded five-second process/Job proof windows plus
-// pipe cancellation, while still placing a hard bound on graceful EOF teardown.
+// Covers the currently unreachable clipboard worker's five-second manifest
+// deadline, bounded response I/O, and cancellation grace. It is not a process
+// or Job-reaping claim; this revision contains no child-launch implementation.
 constexpr DWORD kBrokerWorkerShutdownMs = 12000;
+constexpr DWORD kCompletedWorkerJoinMs = 1000;
+constexpr DWORD kWorkerStartDeadlineMs = kResponseWriteDeadlineMs + 1000;
+constexpr std::size_t kReplayCacheEntries = 1024;
 
 Response protocol_failure(std::string request_id, std::string code) {
   return Response{std::move(request_id), "failed", std::move(code),
                   nlohmann::json::object(), std::nullopt};
+}
+
+bool launch_kind(ActionKind kind) {
+  return kind == ActionKind::kProcess || kind == ActionKind::kApplication ||
+         kind == ActionKind::kBrowser || kind == ActionKind::kCopilot;
+}
+
+[[noreturn]] void fail_stop_on_stuck_worker() {
+  TerminateProcess(GetCurrentProcess(), 70);
+  std::abort();
+}
+
+bool bounded_join(std::thread& worker, DWORD timeout_ms,
+                  bool cancel_synchronous_io) {
+  if (!worker.joinable()) return true;
+  HANDLE thread = static_cast<HANDLE>(worker.native_handle());
+  bool cancellation_ok = true;
+  if (cancel_synchronous_io) {
+    SetLastError(ERROR_SUCCESS);
+    if (!CancelSynchronousIo(thread) && GetLastError() != ERROR_NOT_FOUND)
+      cancellation_ok = false;
+  }
+  if (WaitForSingleObject(thread, timeout_ms) != WAIT_OBJECT_0)
+    fail_stop_on_stuck_worker();
+  worker.join();  // The native thread handle has already proved termination.
+  return cancellation_ok;
 }
 
 }  // namespace
@@ -24,8 +57,23 @@ Broker::Broker(ManifestLease manifest) : manifest_(std::move(manifest)) {}
 Broker::~Broker() { cancel_and_reap(); }
 
 bool Broker::write(HANDLE output, const Response& response) noexcept {
-  std::lock_guard lock(output_mutex_);
+  std::unique_lock<std::timed_mutex> lock(output_mutex_, std::defer_lock);
+  if (!lock.try_lock_for(std::chrono::milliseconds(kResponseWriteDeadlineMs)))
+    return false;
   return write_response_frame(output, response);
+}
+
+bool Broker::remember_request_id(const std::string& request_id) {
+  std::lock_guard lock(replay_mutex_);
+  if (recent_request_id_set_.find(request_id) != recent_request_id_set_.end())
+    return false;
+  if (recent_request_ids_.size() >= kReplayCacheEntries) {
+    recent_request_id_set_.erase(recent_request_ids_.front());
+    recent_request_ids_.pop_front();
+  }
+  recent_request_ids_.push_back(request_id);
+  recent_request_id_set_.insert(request_id);
+  return true;
 }
 
 void Broker::reap_completed() {
@@ -35,7 +83,7 @@ void Broker::reap_completed() {
     if (active_ && active_->completed.load(std::memory_order_acquire))
       completed = std::move(active_);
   }
-  if (completed && completed->worker.joinable()) completed->worker.join();
+  if (completed) bounded_join(completed->worker, kCompletedWorkerJoinMs, false);
 }
 
 void Broker::cancel_and_reap() {
@@ -48,24 +96,23 @@ void Broker::cancel_and_reap() {
     }
   }
   if (active && active->worker.joinable()) {
-    if (active->start_event) SetEvent(active->start_event.get());
-    const DWORD waited = active->done_event
-                             ? WaitForSingleObject(active->done_event.get(),
-                                                   kBrokerWorkerShutdownMs)
-                             : WAIT_FAILED;
-    if (waited != WAIT_OBJECT_0) {
-      // A graceful worker that cannot finish inside its bounded Job-reap window
-      // is not allowed to strand descendants. Process death closes the broker's
-      // non-inherited Job handle and the kernel applies KILL_ON_JOB_CLOSE.
-      TerminateProcess(GetCurrentProcess(), 70);
-      return;
-    }
-    active->worker.join();
+    if (!active->start_event || !SetEvent(active->start_event.get()))
+      fail_stop_on_stuck_worker();
+    if (!bounded_join(active->worker, kBrokerWorkerShutdownMs, true))
+      fail_stop_on_stuck_worker();
   }
 }
 
 Response Broker::hello(const Request& request) const {
   nlohmann::json action_ids = nlohmann::json::array();
+  if (!release_activation_prerequisites_configured())
+    return Response{request.request_id,
+                    "failed",
+                    "broker_not_activated",
+                    {{"protocol", "lae.windows-broker.v1"},
+                     {"activation", "inactive_source"},
+                     {"action_ids", std::move(action_ids)}},
+                    std::nullopt};
   for (const auto& [action_id, ignored] : manifest_.manifest.actions) {
     (void)ignored;
     action_ids.push_back(action_id);
@@ -94,12 +141,21 @@ Response Broker::cancel(const Request& request) {
 
 bool Broker::start(const Request& request, HANDLE output) {
   reap_completed();
+  if (!release_activation_prerequisites_configured())
+    return write(output, protocol_failure(request.request_id,
+                                          "broker_not_activated"));
   const auto action = manifest_.manifest.actions.find(request.action_id);
   if (action == manifest_.manifest.actions.end())
     return write(output, protocol_failure(request.request_id, "action_denied"));
   std::string arguments_error;
   if (!action_arguments_match(action->second, request.arguments, arguments_error))
     return write(output, protocol_failure(request.request_id, arguments_error));
+  if (launch_kind(action->second.kind))
+    return write(output, protocol_failure(
+                             request.request_id,
+                             kSupervisorContainmentProven
+                                 ? "launch_confinement_unproven"
+                                 : "launch_containment_unproven"));
 
   std::lock_guard lock(active_mutex_);
   if (active_)
@@ -107,8 +163,7 @@ bool Broker::start(const Request& request, HANDLE output) {
   auto active = std::make_unique<ActiveRequest>();
   active->request_id = request.request_id;
   active->start_event = UniqueHandle(CreateEventW(nullptr, TRUE, FALSE, nullptr));
-  active->done_event = UniqueHandle(CreateEventW(nullptr, TRUE, FALSE, nullptr));
-  if (!active->start_event || !active->done_event)
+  if (!active->start_event)
     return write(output,
                  protocol_failure(request.request_id, "internal_failure"));
   ActiveRequest* state = active.get();
@@ -126,9 +181,9 @@ bool Broker::start(const Request& request, HANDLE output) {
   active->worker = std::thread(
       [this, state, request, action_copy, executable_copy, cwd_copy, has_executable,
       has_cwd, output] {
-        if (WaitForSingleObject(state->start_event.get(), INFINITE) != WAIT_OBJECT_0) {
+        if (WaitForSingleObject(state->start_event.get(),
+                                kWorkerStartDeadlineMs) != WAIT_OBJECT_0) {
           state->completed.store(true, std::memory_order_release);
-          SetEvent(state->done_event.get());
           return;
         }
         Response response = execute_bound_action(
@@ -136,14 +191,18 @@ bool Broker::start(const Request& request, HANDLE output) {
             has_cwd ? &cwd_copy : nullptr, manifest_, state->cancelled);
         if (!write(output, response)) state->cancelled.store(true, std::memory_order_release);
         state->completed.store(true, std::memory_order_release);
-        SetEvent(state->done_event.get());
       });
   active_ = std::move(active);
   const bool acknowledged = write(
       output, Response{request.request_id, "accepted", "ok", {{"accepted", true}},
                        std::nullopt});
   if (!acknowledged) active_->cancelled.store(true, std::memory_order_release);
-  SetEvent(active_->start_event.get());
+  if (!SetEvent(active_->start_event.get())) {
+    active_->cancelled.store(true, std::memory_order_release);
+    return acknowledged &&
+           write(output, protocol_failure(request.request_id,
+                                          "internal_failure"));
+  }
   return acknowledged;
 }
 
@@ -155,7 +214,7 @@ int Broker::serve(HANDLE input, HANDLE output) noexcept {
       std::string frame_error;
       const FrameStatus status = read_request_frame(input, frame, frame_error);
       if (status == FrameStatus::kEndOfStream) {
-        cancel_and_reap();  // Parent EOF cancels the full active Job.
+        cancel_and_reap();  // Parent EOF cancels and joins the active worker.
         return 0;
       }
       if (status != FrameStatus::kOk) {
@@ -171,6 +230,12 @@ int Broker::serve(HANDLE input, HANDLE output) noexcept {
           cancel_and_reap();
           return 3;
         }
+        continue;
+      }
+      if (!remember_request_id(request.request_id)) {
+        if (!write(output, protocol_failure(request.request_id,
+                                            "request_id_replayed")))
+          break;
         continue;
       }
       if (request.kind == RequestKind::kHello) {
