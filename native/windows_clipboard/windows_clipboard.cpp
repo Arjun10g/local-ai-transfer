@@ -245,8 +245,13 @@ bool sha256(std::string_view input,
     goto cleanup;
   ok = true;
 cleanup:
+  // CNG owns and may still access the caller-provided hash-object buffer until
+  // BCryptDestroyHash returns. Destroy the handle before wiping/freeing it.
+  if (hash) {
+    if (!BCRYPT_SUCCESS(BCryptDestroyHash(hash))) cleanup_fail_stop();
+    hash = nullptr;
+  }
   if (!object.empty()) SecureZeroMemory(object.data(), object.size());
-  if (hash) BCryptDestroyHash(hash);
   if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
   return ok;
 }
@@ -283,8 +288,13 @@ bool hmac_sha256(const std::array<std::uint8_t, 32>& key,
     goto cleanup;
   ok = true;
 cleanup:
+  // The HMAC hash-object buffer has the same lifetime requirement as the
+  // ordinary SHA-256 buffer: destroy the CNG handle before zeroizing storage.
+  if (hash) {
+    if (!BCRYPT_SUCCESS(BCryptDestroyHash(hash))) cleanup_fail_stop();
+    hash = nullptr;
+  }
   if (!object.empty()) SecureZeroMemory(object.data(), object.size());
-  if (hash) BCryptDestroyHash(hash);
   if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
   return ok;
 }
@@ -366,6 +376,23 @@ const char* status_name(Status status) noexcept {
     case Status::kInternalFailure: return "internal_failure";
   }
   return "internal_failure";
+}
+
+MutationAttemptState mutation_state_for_lookup(
+    JournalLookupState state) noexcept {
+  switch (state) {
+    case JournalLookupState::kNotDispatched:
+    case JournalLookupState::kFailedBeforeMutation:
+      return MutationAttemptState::kNotAttempted;
+    case JournalLookupState::kDispatched:
+    case JournalLookupState::kMutationPrepared:
+      return MutationAttemptState::kMayHaveBeenAttempted;
+    case JournalLookupState::kApplied:
+    case JournalLookupState::kMutationAttemptFailed:
+    case JournalLookupState::kUnknownAfterMutation:
+      return MutationAttemptState::kAttempted;
+  }
+  return MutationAttemptState::kMayHaveBeenAttempted;
 }
 
 Result result(Status status, Operation operation) {
@@ -954,16 +981,35 @@ Result execute_write(const BrokerClipboardCapability& capability,
   const JournalDispatch dispatch = journal.dispatch_write(
       capability.operation_id(), capability.request_digest(), content_digest,
       receipt.sequence_before);
+  const bool identity_after_dispatch =
+      revalidate_interactive_identity(identity);
+  if (!identity_after_dispatch) {
+    clipboard.close_or_fail_stop();
+    if (dispatch == JournalDispatch::kDispatched ||
+        dispatch == JournalDispatch::kAlreadyDispatched) {
+      receipt.journal_dispatch_durable = true;
+      receipt.mutation_attempt_state =
+          MutationAttemptState::kMayHaveBeenAttempted;
+      return journaled_unknown(Operation::kWrite, receipt);
+    }
+    return result(Status::kSessionRefused, Operation::kWrite);
+  }
   if (dispatch == JournalDispatch::kAlreadyDispatched) {
     Result output = result(Status::kAlreadyDispatched, Operation::kWrite);
     output.receipt = receipt;
     output.receipt.status = status_name(output.status);
     output.receipt.journal_dispatch_durable = true;
+    output.receipt.mutation_attempt_state =
+        MutationAttemptState::kMayHaveBeenAttempted;
     return output;
   }
   if (dispatch != JournalDispatch::kDispatched)
     return result(Status::kJournalUnavailable, Operation::kWrite);
   receipt.journal_dispatch_durable = true;
+  // Dispatch without a durable terminal record is conservatively unknown on
+  // restart. Never publish a false "not attempted" assertion for it.
+  receipt.mutation_attempt_state =
+      MutationAttemptState::kMayHaveBeenAttempted;
 
   // A desktop switch after OpenClipboard but before mutation is definitive:
   // nothing was changed, but the durable dispatch must be closed before a
@@ -974,25 +1020,63 @@ Result execute_write(const BrokerClipboardCapability& capability,
     const bool saved = journal.record_write_outcome(
         capability.operation_id(), JournalOutcome::kFailedBeforeMutation,
         receipt.sequence_before, 0);
+    const bool identity_after_journal =
+        revalidate_interactive_identity(identity);
     receipt.journal_outcome_durable = saved;
-    if (!saved) return journaled_unknown(Operation::kWrite, receipt);
+    if (!saved || !identity_after_journal)
+      return journaled_unknown(Operation::kWrite, receipt);
+    receipt.mutation_attempt_state = MutationAttemptState::kNotAttempted;
     Result output = result(Status::kSessionRefused, Operation::kWrite);
     output.receipt = receipt;
     output.receipt.status = status_name(output.status);
     return output;
   }
 
-  // mutation_attempted means the first destructive Win32 API was invoked; a
-  // durable dispatch alone is not a mutation attempt.
-  receipt.mutation_attempted = true;
-  if (!EmptyClipboard()) {
+  // Persist the last pre-mutation boundary. Failure refuses the Win32 call;
+  // recovery still reports dispatch-only as may-have-been-attempted rather
+  // than inventing a definitive negative.
+  const bool mutation_prepared = journal.record_mutation_prepared(
+      capability.operation_id(), receipt.sequence_before);
+  const bool identity_after_mutation_prepare =
+      revalidate_interactive_identity(identity);
+  receipt.journal_mutation_prepared_durable = mutation_prepared;
+  if (!mutation_prepared) {
+    clipboard.close_or_fail_stop();
+    return journaled_unknown(Operation::kWrite, receipt);
+  }
+  if (!identity_after_mutation_prepare) {
+    clipboard.close_or_fail_stop();
+    const bool saved = journal.record_write_outcome(
+        capability.operation_id(), JournalOutcome::kFailedBeforeMutation,
+        receipt.sequence_before, 0);
+    const bool identity_after_journal =
+        revalidate_interactive_identity(identity);
+    receipt.journal_outcome_durable = saved;
+    if (!saved || !identity_after_journal)
+      return journaled_unknown(Operation::kWrite, receipt);
+    receipt.mutation_attempt_state = MutationAttemptState::kNotAttempted;
+    Result output = result(Status::kSessionRefused, Operation::kWrite);
+    output.receipt = receipt;
+    output.receipt.status = status_name(output.status);
+    return output;
+  }
+
+  const BOOL emptied = EmptyClipboard();
+  // This live invocation returned, so the result can state "attempted". If
+  // the process dies inside the call, recovery sees only kMutationPrepared
+  // and reports may-have-been-attempted.
+  receipt.mutation_attempt_state = MutationAttemptState::kAttempted;
+  if (!emptied) {
     clipboard.close_or_fail_stop();
     const bool saved = journal.record_write_outcome(
         capability.operation_id(),
         JournalOutcome::kMutationAttemptFailed,
         receipt.sequence_before, 0);
+    const bool identity_after_journal =
+        revalidate_interactive_identity(identity);
     receipt.journal_outcome_durable = saved;
-    if (!saved) return journaled_unknown(Operation::kWrite, receipt);
+    if (!saved || !identity_after_journal)
+      return journaled_unknown(Operation::kWrite, receipt);
     Result output = result(Status::kClipboardBusy, Operation::kWrite);
     output.receipt = receipt;
     output.receipt.status = status_name(output.status);
@@ -1004,7 +1088,10 @@ Result execute_write(const BrokerClipboardCapability& capability,
     const bool saved = journal.record_write_outcome(
         capability.operation_id(), JournalOutcome::kFailedAfterMutation,
         receipt.sequence_before, 0);
+    const bool identity_after_journal =
+        revalidate_interactive_identity(identity);
     receipt.journal_outcome_durable = saved;
+    (void)identity_after_journal;
     return journaled_unknown(Operation::kWrite, receipt);
   }
   if (!SetClipboardData(CF_UNICODETEXT, memory.get())) {
@@ -1012,7 +1099,10 @@ Result execute_write(const BrokerClipboardCapability& capability,
     const bool saved = journal.record_write_outcome(
         capability.operation_id(), JournalOutcome::kFailedAfterMutation,
         receipt.sequence_before, 0);
+    const bool identity_after_journal =
+        revalidate_interactive_identity(identity);
     receipt.journal_outcome_durable = saved;
+    (void)identity_after_journal;
     return journaled_unknown(Operation::kWrite, receipt);
   }
   memory.release_to_clipboard();  // The system owns and frees it after success.
@@ -1026,12 +1116,14 @@ Result execute_write(const BrokerClipboardCapability& capability,
       receipt.sequence_after != receipt.sequence_before &&
       closed_sequence == receipt.sequence_after;
   const JournalOutcome outcome = exact_sequence ? JournalOutcome::kApplied :
-                                                  JournalOutcome::kUnknownAfterDispatch;
+                                                  JournalOutcome::kUnknownAfterMutation;
   const bool saved = journal.record_write_outcome(
       capability.operation_id(), outcome, receipt.sequence_before,
       receipt.sequence_after);
+  const bool identity_after_journal =
+      revalidate_interactive_identity(identity);
   receipt.journal_outcome_durable = saved;
-  if (!exact_sequence || !saved)
+  if (!exact_sequence || !saved || !identity_after_journal)
     return journaled_unknown(Operation::kWrite, receipt);
   Result output = result(Status::kOk, Operation::kWrite);
   output.receipt = receipt;
@@ -1201,9 +1293,15 @@ ReconciliationResult query_write_status(
       return output;
     }
     JournalLookup lookup;
-    if (!journal->lookup_write(capability->operation_id(),
-                               capability->request_digest(), lookup)) {
-      output.status = Status::kJournalUnavailable;
+    const bool lookup_ok = journal->lookup_write(
+        capability->operation_id(), capability->request_digest(), lookup);
+    // Journal lookup may block. Revalidate the retained session/desktop
+    // immediately after it returns, before trusting or publishing its state.
+    const bool identity_after_lookup =
+        revalidate_interactive_identity(identity);
+    if (!lookup_ok) {
+      output.status = identity_after_lookup ? Status::kJournalUnavailable :
+                                              Status::kMutationUnknown;
       output.receipt.status = status_name(output.status);
       return output;
     }
@@ -1212,44 +1310,65 @@ ReconciliationResult query_write_status(
     output.journal_sequence_after = lookup.sequence_after;
     output.receipt.journal_dispatch_durable =
         lookup.state != JournalLookupState::kNotDispatched;
+    output.receipt.journal_mutation_prepared_durable =
+        lookup.mutation_prepared_durable;
+    output.receipt.mutation_attempt_state =
+        mutation_state_for_lookup(lookup.state);
     output.receipt.journal_outcome_durable =
         lookup.state == JournalLookupState::kApplied ||
         lookup.state == JournalLookupState::kFailedBeforeMutation ||
-        lookup.state == JournalLookupState::kMutationAttemptFailed;
+        lookup.state == JournalLookupState::kMutationAttemptFailed ||
+        lookup.state == JournalLookupState::kUnknownAfterMutation;
     const bool lookup_shape =
         (lookup.state == JournalLookupState::kNotDispatched &&
-         lookup.sequence_before == 0 && lookup.sequence_after == 0) ||
+         lookup.sequence_before == 0 && lookup.sequence_after == 0 &&
+         !lookup.mutation_prepared_durable) ||
         (lookup.state == JournalLookupState::kDispatched &&
          lookup.sequence_before == capability->confirmed_sequence_number() &&
-         lookup.sequence_after == 0) ||
+         lookup.sequence_after == 0 &&
+         !lookup.mutation_prepared_durable) ||
+        (lookup.state == JournalLookupState::kMutationPrepared &&
+         lookup.sequence_before == capability->confirmed_sequence_number() &&
+         lookup.sequence_after == 0 &&
+         lookup.mutation_prepared_durable) ||
         (lookup.state == JournalLookupState::kApplied &&
          lookup.sequence_before == capability->confirmed_sequence_number() &&
          lookup.sequence_after != 0 &&
-         lookup.sequence_after != lookup.sequence_before) ||
+         lookup.sequence_after != lookup.sequence_before &&
+         lookup.mutation_prepared_durable) ||
         (lookup.state == JournalLookupState::kFailedBeforeMutation &&
          lookup.sequence_before == capability->confirmed_sequence_number() &&
          lookup.sequence_after == 0) ||
         (lookup.state == JournalLookupState::kMutationAttemptFailed &&
          lookup.sequence_before == capability->confirmed_sequence_number() &&
-         lookup.sequence_after == 0) ||
-        (lookup.state == JournalLookupState::kUnknown &&
-         lookup.sequence_before == capability->confirmed_sequence_number());
+         lookup.sequence_after == 0 &&
+         lookup.mutation_prepared_durable) ||
+        (lookup.state == JournalLookupState::kUnknownAfterMutation &&
+         lookup.sequence_before == capability->confirmed_sequence_number() &&
+         lookup.mutation_prepared_durable);
     if (!lookup_shape) {
       output.status = Status::kJournalUnavailable;
       output.receipt.status = status_name(output.status);
       return output;
     }
+    if (!identity_after_lookup) {
+      output.status = Status::kMutationUnknown;
+      output.receipt.status = status_name(output.status);
+      return output;
+    }
     if (lookup.state == JournalLookupState::kApplied) {
       const Status final_stop = stop_status(*context, deadline);
-      if (final_stop != Status::kOk) {
-        output.status = final_stop;
+      const bool identity_before_publication =
+          revalidate_interactive_identity(identity);
+      if (final_stop != Status::kOk || !identity_before_publication) {
+        output.status = final_stop != Status::kOk
+            ? final_stop : Status::kMutationUnknown;
         output.receipt.status = status_name(output.status);
         return output;
       }
       output.status = Status::kOk;
       output.receipt.sequence_before = lookup.sequence_before;
       output.receipt.sequence_after = lookup.sequence_after;
-      output.receipt.mutation_attempted = true;
       output.receipt.status = status_name(output.status);
       return output;
     }
@@ -1257,14 +1376,15 @@ ReconciliationResult query_write_status(
         lookup.state == JournalLookupState::kFailedBeforeMutation ||
         lookup.state == JournalLookupState::kMutationAttemptFailed) {
       const Status final_stop = stop_status(*context, deadline);
-      if (final_stop != Status::kOk) {
-        output.status = final_stop;
+      const bool identity_before_publication =
+          revalidate_interactive_identity(identity);
+      if (final_stop != Status::kOk || !identity_before_publication) {
+        output.status = final_stop != Status::kOk
+            ? final_stop : Status::kMutationUnknown;
         output.receipt.status = status_name(output.status);
         return output;
       }
       output.status = Status::kPostconditionAbsentManual;
-      output.receipt.mutation_attempted =
-          lookup.state == JournalLookupState::kMutationAttemptFailed;
       output.receipt.status = status_name(output.status);
       return output;
     }
@@ -1323,8 +1443,6 @@ ReconciliationResult query_write_status(
         : Status::kPostconditionAbsentManual;
     output.receipt.sequence_before = lookup.sequence_before;
     output.receipt.sequence_after = output.observed_sequence;
-    output.receipt.mutation_attempted =
-        lookup.state == JournalLookupState::kUnknown;
     output.receipt.status = status_name(output.status);
     return output;
   } catch (...) {

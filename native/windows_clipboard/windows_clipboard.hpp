@@ -61,27 +61,41 @@ enum class JournalOutcome : std::uint8_t {
   kFailedBeforeMutation,
   kMutationAttemptFailed,
   kFailedAfterMutation,
-  kUnknownAfterDispatch,
+  kUnknownAfterMutation,
 };
 
 enum class JournalLookupState : std::uint8_t {
   kNotDispatched,
   kDispatched,
+  kMutationPrepared,
   kApplied,
   kFailedBeforeMutation,
   kMutationAttemptFailed,
-  kUnknown,
+  kUnknownAfterMutation,
+};
+
+// A boolean cannot honestly represent restart state. A durable dispatch alone
+// cannot prove whether the previous process crossed the Win32 mutation call
+// boundary. kAttempted is used only by the live caller after EmptyClipboard
+// returned or by a durable terminal state that necessarily follows that call.
+enum class MutationAttemptState : std::uint8_t {
+  kNotAttempted,
+  kMayHaveBeenAttempted,
+  kAttempted,
 };
 
 struct JournalLookup final {
-  JournalLookupState state = JournalLookupState::kUnknown;
+  JournalLookupState state = JournalLookupState::kUnknownAfterMutation;
   std::uint32_t sequence_before = 0;
   std::uint32_t sequence_after = 0;
+  bool mutation_prepared_durable = false;
 };
 
 // A production implementation must durably persist dispatch before returning
-// kDispatched and durably persist outcome before returning true. This source
-// supplies no implementation and its journal availability gate is false.
+// kDispatched, the mutation-prepared marker before returning true, and every
+// terminal outcome before returning true. FailedAfterMutation is reconstructed
+// as kUnknownAfterMutation. This source supplies no implementation and its
+// journal availability gate is false.
 class JournalPort {
  public:
   virtual ~JournalPort() = default;
@@ -89,6 +103,12 @@ class JournalPort {
       const std::string& operation_id,
       const std::array<std::uint8_t, 32>& request_digest,
       const std::array<std::uint8_t, 32>& content_digest,
+      std::uint32_t sequence_before) noexcept = 0;
+  // Must durably record the last point before the first EmptyClipboard call.
+  // Failure prevents the call. A recovered marker is conservative evidence
+  // that mutation may have been attempted, not proof that the call occurred.
+  virtual bool record_mutation_prepared(
+      const std::string& operation_id,
       std::uint32_t sequence_before) noexcept = 0;
   virtual bool record_write_outcome(
       const std::string& operation_id,
@@ -192,8 +212,10 @@ struct Receipt final {
   std::uint32_t sequence_after = 0;
   bool sensitive = true;
   bool content_logged = false;
-  bool mutation_attempted = false;
+  MutationAttemptState mutation_attempt_state =
+      MutationAttemptState::kNotAttempted;
   bool journal_dispatch_durable = false;
+  bool journal_mutation_prepared_durable = false;
   bool journal_outcome_durable = false;
 };
 
@@ -206,7 +228,7 @@ struct Result final {
 
 struct ReconciliationResult final {
   Status status = Status::kInternalFailure;
-  JournalLookupState journal_state = JournalLookupState::kUnknown;
+  JournalLookupState journal_state = JournalLookupState::kUnknownAfterMutation;
   std::uint32_t journal_sequence_before = 0;
   std::uint32_t journal_sequence_after = 0;
   std::uint32_t observed_sequence = 0;

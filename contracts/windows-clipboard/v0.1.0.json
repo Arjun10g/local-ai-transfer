@@ -57,6 +57,7 @@
     "open_clipboard_and_validate_exact_confirmed_sequence",
     "durably_dispatch_exact_operation",
     "enter_noncancellable_commit",
+    "durably_record_mutation_prepared_before_first_emptyclipboard",
     "revalidate_retained_desktop_identity_immediately_before_mutation",
     "empty_all_confirmed_formats",
     "set_cf_unicodetext_and_transfer_ownership",
@@ -85,8 +86,9 @@
     "allowed_fields": [
       "content_logged",
       "journal_dispatch_durable",
+      "journal_mutation_prepared_durable",
       "journal_outcome_durable",
-      "mutation_attempted",
+      "mutation_attempt_state",
       "operation",
       "sensitive",
       "sequence_after",
@@ -96,12 +98,22 @@
     ],
     "clipboard_content_allowed": false,
     "content_digests_allowed": false,
-    "mutation_attempted_semantics": "first_EmptyClipboard_invocation_not_dispatch",
+    "mutation_attempt_state_semantics": {
+      "attempted": "live_EmptyClipboard_returned_or_durable_terminal_requires_invocation",
+      "may_have_been_attempted": "durable_dispatch_or_mutation_prepared_without_terminal_evidence",
+      "not_attempted": "not_dispatched_or_durable_failed_before_mutation_only"
+    },
+    "mutation_attempt_state_values": [
+      "attempted",
+      "may_have_been_attempted",
+      "not_attempted"
+    ],
     "raw_win32_errors_allowed": false
   },
   "reconciliation": {
     "applied_requires": "durable exact operation-bound applied outcome",
     "dispatched_only_exact_postcondition": "manual_resolution_no_replay",
+    "mutation_prepared_exact_postcondition": "manual_resolution_no_replay",
     "repeats_write": false,
     "sequence_and_content_are_compared": true
   },

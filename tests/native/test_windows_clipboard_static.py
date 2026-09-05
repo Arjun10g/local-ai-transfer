@@ -77,6 +77,9 @@ def modeled_decision(state):
     if operation == "query":
         journal_state = state.get("journal_state", "dispatched")
         trace.append(f"journal_lookup_{journal_state}")
+        if not state.get("post_journal_identity", True):
+            trace.append("revalidate_identity_after_journal_lookup")
+            return "mutation_unknown", trace
         if journal_state == "applied":
             return "ok", trace
         trace.extend(["read_current_postcondition", "manual_no_replay"])
@@ -120,6 +123,9 @@ def modeled_decision(state):
     trace.append("empty_all_confirmed_formats")
     if not state.get("empty", True):
         trace.append("durable_mutation_attempt_failed")
+        if not state.get("post_journal_identity", True):
+            trace.append("revalidate_identity_after_journal_outcome")
+            return "mutation_unknown", trace
         return "clipboard_busy", trace
     trace.append("set_unicode_text")
     if not state.get("set", True):
@@ -135,8 +141,22 @@ def modeled_decision(state):
     trace.append("durable_applied_outcome")
     if not state.get("outcome_saved", True):
         return "mutation_unknown", trace
+    if not state.get("post_journal_identity", True):
+        trace.append("revalidate_identity_after_journal_outcome")
+        return "mutation_unknown", trace
     trace.append("publish_redacted_receipt")
     return "ok", trace
+
+
+def modeled_mutation_attempt_state(state):
+    journal_state = state.get("journal_state")
+    if journal_state in {"dispatched", "mutation_prepared"}:
+        return "may_have_been_attempted"
+    if journal_state in {"applied", "mutation_attempt_failed", "unknown_after_mutation"}:
+        return "attempted"
+    if journal_state in {"not_dispatched", "failed_before_mutation"}:
+        return "not_attempted"
+    raise ValueError("unknown fixture journal state")
 
 
 class WindowsClipboardStaticTests(unittest.TestCase):
@@ -318,6 +338,20 @@ class WindowsClipboardStaticTests(unittest.TestCase):
             validate.index("GetTickCount64()"),
         )
 
+    def test_cng_hash_objects_are_destroyed_before_backing_buffers_are_wiped(self):
+        sha = self.cpp[
+            self.cpp.index("bool sha256") : self.cpp.index("bool hmac_sha256")
+        ]
+        hmac = self.cpp[
+            self.cpp.index("bool hmac_sha256") : self.cpp.index("void append_u32")
+        ]
+        for implementation in (sha, hmac):
+            destroy = implementation.index("BCryptDestroyHash(hash)")
+            wipe = implementation.index("SecureZeroMemory(object.data()")
+            self.assertLess(destroy, wipe)
+            self.assertIn("cleanup_fail_stop()", implementation[destroy:wipe])
+            self.assertIn("hash = nullptr", implementation[destroy:wipe])
+
     def test_exact_interactive_console_desktop_identity_is_checked(self):
         identity = self.cpp[
             self.cpp.index("bool session_identity") :
@@ -382,26 +416,35 @@ class WindowsClipboardStaticTests(unittest.TestCase):
             self.cpp.index("}  // namespace\n\nBrokerClipboardAuthority::~")
         ]
         dispatch = write.index("journal.dispatch_write")
-        pre_mutation = write.index(
+        pre_dispatch_identity = write.index(
             "revalidate_interactive_identity(identity)", dispatch
         )
-        attempted = write.index("receipt.mutation_attempted = true", dispatch)
+        prepared = write.index("journal.record_mutation_prepared", dispatch)
+        post_prepare_identity = write.index(
+            "revalidate_interactive_identity(identity)", prepared
+        )
         empty = write.index("EmptyClipboard()", dispatch)
+        attempted = write.index(
+            "MutationAttemptState::kAttempted", empty
+        )
         after_empty = write.index("revalidate_interactive_identity(identity)", empty)
         set_data = write.index("SetClipboardData(CF_UNICODETEXT", empty)
         before_close = write.index("identity_before_close", set_data)
         close = write.index("clipboard.close_or_fail_stop()", before_close)
         after_close = write.index("identity_after_close", close)
-        self.assertLess(dispatch, pre_mutation)
-        self.assertLess(pre_mutation, attempted)
-        self.assertLess(attempted, empty)
+        self.assertLess(dispatch, pre_dispatch_identity)
+        self.assertLess(pre_dispatch_identity, prepared)
+        self.assertLess(prepared, post_prepare_identity)
+        self.assertLess(post_prepare_identity, empty)
+        self.assertLess(empty, attempted)
         self.assertLess(empty, after_empty)
         self.assertLess(after_empty, set_data)
         self.assertLess(set_data, before_close)
         self.assertLess(before_close, close)
         self.assertLess(close, after_close)
-        pre_mutation_tail = write[pre_mutation:empty]
+        pre_mutation_tail = write[pre_dispatch_identity:empty]
         self.assertIn("JournalOutcome::kFailedBeforeMutation", pre_mutation_tail)
+        self.assertIn("receipt.journal_mutation_prepared_durable", pre_mutation_tail)
 
         read = self.cpp[
             self.cpp.index("Result execute_read") :
@@ -413,6 +456,50 @@ class WindowsClipboardStaticTests(unittest.TestCase):
         self.assertGreaterEqual(read.count("revalidate_interactive_identity(identity)"), 3)
         query = self.cpp[self.cpp.index("ReconciliationResult query_write_status(") :]
         self.assertGreaterEqual(query.count("revalidate_interactive_identity(identity)"), 3)
+        lookup = query.index("journal->lookup_write")
+        after_lookup = query.index("revalidate_interactive_identity(identity)", lookup)
+        lookup_shape = query.index("const bool lookup_shape", lookup)
+        self.assertLess(lookup, after_lookup)
+        self.assertLess(after_lookup, lookup_shape)
+
+    def test_every_blocking_journal_result_is_followed_by_identity_revalidation(self):
+        write = self.cpp[
+            self.cpp.index("Result execute_write") :
+            self.cpp.index("}  // namespace\n\nBrokerClipboardAuthority::~")
+        ]
+        for call in (
+            "journal.dispatch_write",
+            "journal.record_mutation_prepared",
+        ):
+            position = write.index(call)
+            revalidated = write.index(
+                "revalidate_interactive_identity(identity)", position
+            )
+            self.assertLess(revalidated, write.index("return ", position))
+        outcome_positions = [
+            match.start()
+            for match in re.finditer(r"journal\.record_write_outcome", write)
+        ]
+        self.assertEqual(len(outcome_positions), 6)
+        for position in outcome_positions:
+            revalidated = write.index(
+                "revalidate_interactive_identity(identity)", position
+            )
+            self.assertLess(revalidated, write.index("return ", position))
+
+        query = self.cpp[self.cpp.index("ReconciliationResult query_write_status(") :]
+        lookup = query.index("journal->lookup_write")
+        post_lookup = query.index("revalidate_interactive_identity(identity)", lookup)
+        self.assertLess(post_lookup, query.index("if (!lookup_ok)", lookup))
+        for terminal in (
+            "output.status = Status::kOk",
+            "output.status = Status::kPostconditionAbsentManual",
+        ):
+            position = query.index(terminal)
+            preceding = query.rfind(
+                "revalidate_interactive_identity(identity)", lookup, position
+            )
+            self.assertGreater(preceding, lookup)
 
     def test_open_clipboard_retry_is_bounded_cancelled_and_backed_off(self):
         open_body = self.cpp[
@@ -481,9 +568,11 @@ class WindowsClipboardStaticTests(unittest.TestCase):
         self.assertLess(confirmation, compare_sequence)
         self.assertLess(compare_sequence, dispatch)
         self.assertLess(dispatch, empty)
-        attempted = write.index("receipt.mutation_attempted = true")
-        self.assertLess(dispatch, attempted)
-        self.assertLess(attempted, empty)
+        prepared = write.index("journal.record_mutation_prepared")
+        attempted = write.index("MutationAttemptState::kAttempted", empty)
+        self.assertLess(dispatch, prepared)
+        self.assertLess(prepared, empty)
+        self.assertLess(empty, attempted)
         self.assertLess(empty, set_data)
         self.assertLess(empty, write.index("GetClipboardOwner() != owner.get()"))
         self.assertLess(write.index("GetClipboardOwner() != owner.get()"), set_data)
@@ -497,6 +586,8 @@ class WindowsClipboardStaticTests(unittest.TestCase):
         dispatch = write.index("journal.dispatch_write")
         after_dispatch = write[dispatch:]
         self.assertNotIn("stop_status", after_dispatch)
+        self.assertLess(after_dispatch.index("journal.record_mutation_prepared"),
+                        after_dispatch.index("EmptyClipboard()"))
         self.assertLess(after_dispatch.index("EmptyClipboard()"),
                         after_dispatch.index("SetClipboardData(CF_UNICODETEXT"))
         self.assertLess(after_dispatch.index("SetClipboardData(CF_UNICODETEXT"),
@@ -506,7 +597,7 @@ class WindowsClipboardStaticTests(unittest.TestCase):
         self.assertIn("JournalOutcome::kFailedBeforeMutation", after_dispatch)
         self.assertIn("JournalOutcome::kMutationAttemptFailed", after_dispatch)
         self.assertIn("JournalOutcome::kFailedAfterMutation", after_dispatch)
-        self.assertIn("JournalOutcome::kUnknownAfterDispatch", after_dispatch)
+        self.assertIn("JournalOutcome::kUnknownAfterMutation", after_dispatch)
         self.assertIn("JournalOutcome::kApplied", after_dispatch)
 
     def test_global_memory_lock_unlock_free_and_transfer_are_closed(self):
@@ -548,9 +639,14 @@ class WindowsClipboardStaticTests(unittest.TestCase):
         self.assertFalse(self.contract["receipt"]["content_digests_allowed"])
         self.assertFalse(self.contract["receipt"]["raw_win32_errors_allowed"])
         self.assertEqual(
-            self.contract["receipt"]["mutation_attempted_semantics"],
-            "first_EmptyClipboard_invocation_not_dispatch",
+            self.contract["receipt"]["mutation_attempt_state_values"],
+            ["attempted", "may_have_been_attempted", "not_attempted"],
         )
+        receipt_fields = self.contract["receipt"]["allowed_fields"]
+        self.assertIn("mutation_attempt_state", receipt_fields)
+        self.assertNotIn("mutation_attempted", receipt_fields)
+        self.assertIn("MutationAttemptState mutation_attempt_state", receipt)
+        self.assertNotIn("bool mutation_attempted", receipt)
 
     def test_lost_ack_query_never_writes_or_fabricates_completion(self):
         query = self.cpp[self.cpp.index("ReconciliationResult query_write_status(") :]
@@ -560,6 +656,8 @@ class WindowsClipboardStaticTests(unittest.TestCase):
         self.assertIn("JournalLookupState::kApplied", query)
         self.assertIn("JournalLookupState::kFailedBeforeMutation", query)
         self.assertIn("JournalLookupState::kMutationAttemptFailed", query)
+        self.assertIn("JournalLookupState::kMutationPrepared", query)
+        self.assertIn("JournalLookupState::kUnknownAfterMutation", query)
         self.assertIn("lookup.sequence_before == capability->confirmed_sequence_number()", query)
         self.assertIn("const bool lookup_shape", query)
         self.assertIn("Status::kPostconditionPresentManual", query)
@@ -575,9 +673,37 @@ class WindowsClipboardStaticTests(unittest.TestCase):
             dispatched_tail.index("SecureZeroMemory(observed_digest.data()"),
             dispatched_tail.index("const Status final_stop = stop_status"),
         )
-        self.assertIn(
-            "lookup.state == JournalLookupState::kUnknown",
-            dispatched_tail,
+        mapping = self.cpp[
+            self.cpp.index("MutationAttemptState mutation_state_for_lookup") :
+            self.cpp.index("Result result(")
+        ]
+        self.assertIn("JournalLookupState::kDispatched", mapping)
+        self.assertIn("JournalLookupState::kMutationPrepared", mapping)
+        self.assertIn("MutationAttemptState::kMayHaveBeenAttempted", mapping)
+        self.assertIn("JournalLookupState::kUnknownAfterMutation", mapping)
+        self.assertIn("MutationAttemptState::kAttempted", mapping)
+
+    def test_restart_attempt_state_is_tri_state_and_never_false_for_dispatch(self):
+        attempt_cases = self.cases["mutation_attempt_cases"]
+        self.assertGreaterEqual(len(attempt_cases), 6)
+        for case in attempt_cases:
+            with self.subTest(case=case["name"]):
+                self.assertEqual(
+                    modeled_mutation_attempt_state(case["state"]),
+                    case["expected_mutation_attempt_state"],
+                )
+        by_name = {case["name"]: case for case in attempt_cases}
+        self.assertEqual(
+            by_name["crash_after_dispatch_before_marker"][
+                "expected_mutation_attempt_state"
+            ],
+            "may_have_been_attempted",
+        )
+        self.assertEqual(
+            by_name["crash_inside_empty_after_marker"][
+                "expected_mutation_attempt_state"
+            ],
+            "may_have_been_attempted",
         )
 
     def test_no_process_shell_network_or_generic_clipboard_surface(self):
@@ -609,6 +735,8 @@ class WindowsClipboardStaticTests(unittest.TestCase):
             "set_failure_after_clear_is_never_replayed",
             "outcome_persistence_failure",
             "dispatched_only_matching_content_remains_manual",
+            "desktop_switch_during_journal_lookup",
+            "desktop_switch_after_applied_outcome_persistence",
         ):
             self.assertIn(name, by_name)
 

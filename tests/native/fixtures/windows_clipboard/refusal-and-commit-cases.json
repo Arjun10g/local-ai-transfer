@@ -80,6 +80,12 @@
     },
     {
       "expected_status": "mutation_unknown",
+      "expected_trace": ["validate_capability", "verify_interactive_identity", "check_cancel_deadline", "prepare_global_memory", "open_clipboard_bounded", "compare_confirmed_sequence", "durable_dispatch", "empty_all_confirmed_formats", "durable_mutation_attempt_failed", "revalidate_identity_after_journal_outcome"],
+      "name": "desktop_switch_during_failed_empty_outcome_persistence",
+      "state": {"empty": false, "gates": true, "operation": "write", "post_journal_identity": false}
+    },
+    {
+      "expected_status": "mutation_unknown",
       "expected_trace": ["validate_capability", "verify_interactive_identity", "check_cancel_deadline", "prepare_global_memory", "open_clipboard_bounded", "compare_confirmed_sequence", "durable_dispatch", "empty_all_confirmed_formats", "set_unicode_text", "durable_failed_after_mutation"],
       "name": "set_failure_after_clear_is_never_replayed",
       "state": {"gates": true, "operation": "write", "set": false}
@@ -115,6 +121,12 @@
       "state": {"gates": true, "journal_state": "applied", "operation": "query"}
     },
     {
+      "expected_status": "mutation_unknown",
+      "expected_trace": ["validate_capability", "verify_interactive_identity", "journal_lookup_applied", "revalidate_identity_after_journal_lookup"],
+      "name": "desktop_switch_during_journal_lookup",
+      "state": {"gates": true, "journal_state": "applied", "operation": "query", "post_journal_identity": false}
+    },
+    {
       "expected_status": "postcondition_present_manual",
       "expected_trace": ["validate_capability", "verify_interactive_identity", "journal_lookup_dispatched", "read_current_postcondition", "manual_no_replay"],
       "name": "dispatched_only_matching_content_remains_manual",
@@ -125,8 +137,51 @@
       "expected_trace": ["validate_capability", "verify_interactive_identity", "journal_lookup_dispatched", "read_current_postcondition", "manual_no_replay"],
       "name": "dispatched_only_missing_content_remains_manual",
       "state": {"content_matches": false, "gates": true, "journal_state": "dispatched", "operation": "query"}
+    },
+    {
+      "expected_status": "mutation_unknown",
+      "expected_trace": ["validate_capability", "verify_interactive_identity", "check_cancel_deadline", "prepare_global_memory", "open_clipboard_bounded", "compare_confirmed_sequence", "durable_dispatch", "empty_all_confirmed_formats", "set_unicode_text", "close_and_correlate_sequence", "durable_applied_outcome", "revalidate_identity_after_journal_outcome"],
+      "name": "desktop_switch_after_applied_outcome_persistence",
+      "state": {"gates": true, "operation": "write", "post_journal_identity": false}
     }
   ],
   "fixture_only": true,
+  "mutation_attempt_cases": [
+    {
+      "expected_mutation_attempt_state": "not_attempted",
+      "name": "never_dispatched",
+      "state": {"journal_state": "not_dispatched"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "crash_after_dispatch_before_marker",
+      "state": {"journal_state": "dispatched"}
+    },
+    {
+      "expected_mutation_attempt_state": "may_have_been_attempted",
+      "name": "crash_inside_empty_after_marker",
+      "state": {"journal_state": "mutation_prepared"}
+    },
+    {
+      "expected_mutation_attempt_state": "attempted",
+      "name": "empty_returned_failure",
+      "state": {"journal_state": "mutation_attempt_failed"}
+    },
+    {
+      "expected_mutation_attempt_state": "attempted",
+      "name": "applied_terminal",
+      "state": {"journal_state": "applied"}
+    },
+    {
+      "expected_mutation_attempt_state": "attempted",
+      "name": "unknown_after_mutation_terminal",
+      "state": {"journal_state": "unknown_after_mutation"}
+    },
+    {
+      "expected_mutation_attempt_state": "not_attempted",
+      "name": "failed_before_mutation_terminal",
+      "state": {"journal_state": "failed_before_mutation"}
+    }
+  ],
   "schema": "lae.windows-clipboard-static-cases.v1"
 }

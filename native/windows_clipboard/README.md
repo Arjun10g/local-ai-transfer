@@ -21,9 +21,10 @@ The latent path is intentionally conservative:
 - bounded retrying `OpenClipboard`, `CF_UNICODETEXT` only, strict scalar and
   UTF-8 conversion, and 64 KiB returned/input content cap;
 - explicit all-format replacement confirmation and exact preview sequence;
-- durable dispatch before `EmptyClipboard`, noncancellable commit, ownership
-  transfer only after successful `SetClipboardData`, then durable typed
-  outcome;
+- durable dispatch plus a durable mutation-prepared marker before
+  `EmptyClipboard`, a tri-state restart-safe mutation-attempt receipt,
+  noncancellable commit, ownership transfer only after successful
+  `SetClipboardData`, then durable typed outcome;
 - pre-hash strict UTF-8/size/NUL checks and fail-stop cleanup on unlock, free,
   or clipboard-close ambiguity;
 - sequence-bound, no-replay reconciliation whose ambiguous result is manual;
