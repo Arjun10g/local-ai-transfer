@@ -42,24 +42,19 @@ def identity_alive(pid: int, marker: str | None) -> bool:
 
 
 def _pending_intent(shadeform, phase_id: str, nonce: str | None) -> dict[str, object] | None:
-    """Return the latest bounded pending reservation/create event."""
+    """Return the latest canonical pending reservation/create event."""
     if nonce is None or not shadeform.NONCE.fullmatch(nonce):
         return None
     latest: dict[str, dict[str, object]] = {}
     try:
-        data = shadeform.bounded_stable_bytes(
-            shadeform.COST_LEDGER, 1_048_576, label="watchdog cost ledger",
-        )
-        lines = data.splitlines()
-        if len(lines) > 4096:
-            return None
-        for line in lines:
-            event = shadeform.strict_json_object(line, label="watchdog cost event")
+        for event in shadeform.cost_ledger_events():
+            if event.get("event_kind") == "genesis":
+                continue
             if (event.get("phase_id") == phase_id
                     and event.get("ownership_nonce") == nonce
                     and isinstance(event.get("instance_id"), str)):
                 latest[event["instance_id"]] = event
-    except (OSError, shadeform.ShadeformError, TypeError):
+    except (OSError, shadeform.ShadeformError, TypeError, ValueError):
         return None
     pending = [event for event in latest.values() if event.get("status") == "pending"]
     if not pending:
@@ -222,7 +217,9 @@ def main(argv: list[str] | None = None) -> int:
                 # reservation must be durable before the key is revoked.
                 shadeform.append_cost_event({
                     "instance_id": "attempt-" + (args.ownership_nonce or ""),
-                    "phase_id": args.phase_id, "status": "settled", "actual_cost_usd": 0.0,
+                    "phase_id": args.phase_id,
+                    "ownership_nonce": args.ownership_nonce,
+                    "status": "settled", "actual_cost_usd": 0.0,
                     "reservation": "pre-create-key-reconciled",
                 })
                 shadeform.append_incident({
@@ -231,13 +228,17 @@ def main(argv: list[str] | None = None) -> int:
                     "ownership_nonce": args.ownership_nonce,
                     "retry_required": False,
                 })
-                shadeform.verify_ssh_key_fingerprint(
-                    api_key, args.phase_id, reconciled_key_id,
+                key_cleanup = shadeform.delete_owned_ssh_key_exact(
+                    api_key,
+                    args.phase_id,
+                    reconciled_key_id,
+                    ownership_nonce=args.ownership_nonce or "",
                     expected_name=args.ssh_key_name or "",
                     expected_fingerprint=args.ssh_key_fingerprint or "",
-                    timeout=min(90.0, remaining),
+                    deadline=hard_deadline,
                 )
-                shadeform.delete_ssh_key(api_key, args.phase_id, reconciled_key_id, deadline=hard_deadline)
+                if key_cleanup.get("status") != "confirmed":
+                    return 1
                 return 0
             started_at = intent.get("create_started_at_utc")
             try:
@@ -247,6 +248,7 @@ def main(argv: list[str] | None = None) -> int:
                     "instance_create_intent", "instance_name", "ssh_key_id",
                     "hourly_usd", "backstop_hours", "create_started_at_utc",
                     "provider_delete_deadline_utc", "recorded_at_utc",
+                    "schema", "owner_binding_sha256",
                 }
                 if (
                     set(intent) != expected_intent_keys

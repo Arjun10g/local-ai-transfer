@@ -596,13 +596,22 @@ def _load_deletion_intent(phase_id: str, record: shadeform.OwnedResource) -> dic
     return confirmed
 
 
-def _bounded_confirmation_timestamp(intent: dict[str, object], observed: datetime | None = None) -> str:
+def _deterministic_confirmation_timestamp(intent: dict[str, object]) -> str:
+    """Return the precommitted provider backstop, never retry wall time.
+
+    Provider absence can be observed immediately before the immutable
+    confirmation write fails or the process exits.  Without a separately
+    durable observation, using the wall clock on retry would change settled
+    cost.  The owner-bound provider deadline is committed before creation and
+    is therefore the conservative, bounded timestamp that survives that
+    crash window.
+    """
+
     dispatched = _timestamp(intent.get("dispatched_at_utc"), field="deletion dispatch timestamp")
     ceiling = _timestamp(intent.get("confirmation_ceiling_utc"), field="deletion confirmation ceiling")
-    observation = observed or shadeform.utc_now()
-    if observation.tzinfo is None or observation.utcoffset() is None:
-        raise ValueError("deletion observation timestamp must be timezone-aware")
-    return max(dispatched, min(observation, ceiling)).isoformat()
+    if dispatched > ceiling:
+        raise ValueError("deletion dispatch exceeds its immutable provider backstop")
+    return ceiling.isoformat()
 
 
 def _same_owner(left: shadeform.OwnedResource, right: shadeform.OwnedResource) -> bool:
@@ -635,6 +644,58 @@ def _persist_recovery_owner(record: shadeform.OwnedResource) -> shadeform.OwnedR
     persisted, _ = _owned_state(record.phase_id, record.instance_id)
     if persisted is None or not _same_owner(persisted, record):
         raise RuntimeError("recovery ownership proof was not durably published")
+    return persisted
+
+
+def _ensure_recovery_pending_cost(record: shadeform.OwnedResource) -> dict[str, object]:
+    """Reuse or conservatively create one exact-owner pending reservation.
+
+    Both launchers append the exact-instance pending event before publishing the
+    normal owner record.  If that later publication fails, recovery must not
+    append a slightly lower estimate derived from a later timestamp.  The
+    immutable exact-owner row is reused unchanged and is also required to cover
+    at least the remaining provider-backed ownership window.
+    """
+
+    created_at = _timestamp(record.created_at_utc, field="resource creation timestamp")
+    conservative_until = _timestamp(
+        record.provider_delete_deadline_utc, field="provider delete deadline",
+    )
+    minimum_estimate = round(
+        record.hourly_usd
+        * max(0.0, (conservative_until - created_at).total_seconds())
+        / 3600.0,
+        6,
+    )
+    if not shadeform._valid_cost(minimum_estimate):
+        raise ValueError("recovery pending cost is invalid")
+    existing = shadeform.exact_owner_cost_state(
+        record.phase_id, record.ownership_nonce, record.instance_id,
+    )
+    if existing is not None:
+        if existing.get("status") != "pending":
+            raise RuntimeError("recovery exact-owner cost is already terminal")
+        estimate = existing.get("estimated_cost_usd")
+        if not shadeform._valid_cost(estimate) or float(estimate) < minimum_estimate:
+            raise RuntimeError("recovery exact-owner pending cost is under-reserved")
+        return existing
+    shadeform.append_cost_event({
+        "instance_id": record.instance_id,
+        "phase_id": record.phase_id,
+        "ownership_nonce": record.ownership_nonce,
+        "status": "pending",
+        "estimated_cost_usd": minimum_estimate,
+        "reservation": "recovery-owned-instance-before-delete",
+    })
+    persisted = shadeform.exact_owner_cost_state(
+        record.phase_id, record.ownership_nonce, record.instance_id,
+    )
+    if (
+        persisted is None
+        or persisted.get("status") != "pending"
+        or persisted.get("estimated_cost_usd") != minimum_estimate
+    ):
+        raise RuntimeError("recovery pending cost was not durably published")
     return persisted
 
 
@@ -691,6 +752,19 @@ def teardown_exact(phase_id: str, instance_id: str, *, env_file: Path = ROOT / "
                 or deletion.get("confirmed_at_utc") != intent.get("confirmed_at_utc")
             ):
                 raise RuntimeError("deletion evidence is incomplete; manual recovery is required")
+            fingerprint = evidence_owner.ssh_public_key_fingerprint
+            if fingerprint is None and evidence_owner.ssh_public_key is not None:
+                fingerprint = shadeform.ssh_public_key_fingerprint(
+                    evidence_owner.ssh_public_key,
+                )
+            if fingerprint is None or not shadeform.ssh_key_deletion_is_confirmed(
+                phase_id,
+                evidence_owner.ssh_key_id,
+                ownership_nonce=evidence_owner.ownership_nonce,
+                expected_name=evidence_owner.ssh_key_name,
+                expected_fingerprint=fingerprint,
+            ):
+                raise RuntimeError("SSH key deletion evidence is incomplete")
             return prior
         return _teardown_exact_locked(phase_id, exact, env_file=env_file, salvage=salvage, salvage_destination=salvage_destination, deadline=deadline)
 
@@ -709,7 +783,6 @@ def _teardown_exact_locked(phase_id: str, exact: str, *, env_file: Path, salvage
         "instance_id": exact,
         "owner": _owner_binding(record),
     }
-    key_already_cleaned = bool(prior and prior.get("key_cleanup_completed") is True)
     deletion_confirmed = bool(
         isinstance(deletion, dict)
         and deletion.get("success") is True
@@ -720,9 +793,10 @@ def _teardown_exact_locked(phase_id: str, exact: str, *, env_file: Path, salvage
     if isinstance(deletion, dict) and deletion.get("success") is True and not deletion_confirmed:
         raise RuntimeError("successful deletion receipt is not bound to a confirmed intent")
 
-    api_key: str | None = None
-    if not deletion_confirmed or not key_already_cleaned:
-        api_key = shadeform.require_env(shadeform.load_env(env_file), "SHADEFORM_API_KEY")
+    # A legacy receipt's boolean cannot prove remote key absence. The exact
+    # owner-bound key state machine below must find its durable confirmation or
+    # reconcile the provider before final completion/ownership clearing.
+    api_key = shadeform.require_env(shadeform.load_env(env_file), "SHADEFORM_API_KEY")
 
     if not deletion_confirmed:
         try:
@@ -735,7 +809,7 @@ def _teardown_exact_locked(phase_id: str, exact: str, *, env_file: Path, salvage
             try:
                 info = shadeform.verify_owned_instance_before_delete(api_key, phase_id, record, deadline=deadline)
                 if info.get("status") == "deleted":
-                    confirmed_at = _bounded_confirmation_timestamp(intent)
+                    confirmed_at = _deterministic_confirmation_timestamp(intent)
                     intent = _write_deletion_intent(
                         phase_id, record, status="confirmed", confirmed_at_utc=confirmed_at,
                         prior=intent, deadline=deadline,
@@ -757,7 +831,7 @@ def _teardown_exact_locked(phase_id: str, exact: str, *, env_file: Path, salvage
                     )
             except shadeform.ShadeformHTTPError as exc:
                 if exc.status == 404:
-                    confirmed_at = _bounded_confirmation_timestamp(intent)
+                    confirmed_at = _deterministic_confirmation_timestamp(intent)
                     intent = _write_deletion_intent(
                         phase_id, record, status="confirmed", confirmed_at_utc=confirmed_at,
                         prior=intent, deadline=deadline,
@@ -781,27 +855,7 @@ def _teardown_exact_locked(phase_id: str, exact: str, *, env_file: Path, salvage
         elif intent is None:
             try:
                 if not had_normal_record:
-                    created_at = _timestamp(record.created_at_utc, field="resource creation timestamp")
-                    conservative_until = _timestamp(
-                        record.provider_delete_deadline_utc,
-                        field="provider delete deadline",
-                    )
-                    estimated_cost = round(
-                        record.hourly_usd
-                        * max(0.0, (conservative_until - created_at).total_seconds())
-                        / 3600.0,
-                        6,
-                    )
-                    if not shadeform._valid_cost(estimated_cost):
-                        raise ValueError("recovery pending cost is invalid")
-                    shadeform.append_cost_event({
-                        "instance_id": exact,
-                        "phase_id": phase_id,
-                        "ownership_nonce": record.ownership_nonce,
-                        "status": "pending",
-                        "estimated_cost_usd": estimated_cost,
-                        "reservation": "recovery-owned-instance-before-delete",
-                    })
+                    _ensure_recovery_pending_cost(record)
                 fresh_info = shadeform.verify_owned_instance_before_delete(
                     api_key, phase_id, record, deadline=deadline,
                 )
@@ -828,7 +882,7 @@ def _teardown_exact_locked(phase_id: str, exact: str, *, env_file: Path, salvage
             raise RuntimeError("provider deletion lacks a durable dispatched intent")
         if intent.get("status") != "confirmed":
             try:
-                confirmed_at = _bounded_confirmation_timestamp(intent)
+                confirmed_at = _deterministic_confirmation_timestamp(intent)
                 intent = _write_deletion_intent(
                     phase_id, record, status="confirmed", confirmed_at_utc=confirmed_at,
                     prior=intent, deadline=deadline,
@@ -867,7 +921,13 @@ def _teardown_exact_locked(phase_id: str, exact: str, *, env_file: Path, salvage
             settled_cost = round(record.hourly_usd * elapsed_hours, 6)
             if not shadeform._valid_cost(settled_cost):
                 raise ValueError("computed settled cost is not finite and nonnegative")
-            shadeform.append_cost_event({"instance_id": exact, "phase_id": phase_id, "status": "settled", "actual_cost_usd": settled_cost})
+            shadeform.append_cost_event({
+                "instance_id": exact,
+                "phase_id": phase_id,
+                "ownership_nonce": record.ownership_nonce,
+                "status": "settled",
+                "actual_cost_usd": settled_cost,
+            })
             receipt["actual_cost_usd"] = settled_cost
             record.cost_usd = settled_cost
             receipt.pop("cost_bookkeeping_error_type", None)
@@ -891,6 +951,7 @@ def _teardown_exact_locked(phase_id: str, exact: str, *, env_file: Path, salvage
             shadeform.append_cost_event({
                 "instance_id": f"attempt-{record.ownership_nonce}",
                 "phase_id": phase_id,
+                "ownership_nonce": record.ownership_nonce,
                 "status": "settled",
                 "actual_cost_usd": 0.0,
                 "reservation": "pre-create-attempt-reconciled-by-teardown",
@@ -938,34 +999,25 @@ def _teardown_exact_locked(phase_id: str, exact: str, *, env_file: Path, salvage
             else "DeferredUntilOwnedRecordPersistence"
         )
         receipt["key_cleanup_deferred"] = True
-    elif pre_key_receipt_persisted and key_already_cleaned:
-        key_cleanup_ok = True
-        receipt["key_cleanup_completed"] = True
-        receipt["ssh_key_cleanup_error_type"] = None
-        receipt["key_cleanup_deferred"] = False
     elif pre_key_receipt_persisted:
-        key_cleanup_ok = True
         try:
             _require_time(deadline)
-            shadeform.verify_owned_ssh_key_before_delete(api_key, phase_id, record, deadline=deadline)
-            if deadline is None:
-                shadeform.delete_ssh_key(api_key, phase_id, record.ssh_key_id)
-            else:
-                shadeform.delete_ssh_key(api_key, phase_id, record.ssh_key_id, deadline=deadline)
+            key_result = shadeform.delete_owned_ssh_key_exact(
+                api_key,
+                phase_id,
+                record.ssh_key_id,
+                ownership_nonce=record.ownership_nonce,
+                expected_name=record.ssh_key_name,
+                expected_public_key=record.ssh_public_key,
+                expected_fingerprint=record.ssh_public_key_fingerprint,
+                record=record,
+                deadline=deadline,
+            )
+            key_cleanup_ok = key_result.get("status") == "confirmed"
+            if not key_cleanup_ok:
+                raise RuntimeError("SSH key deletion lacks durable confirmation")
             receipt["ssh_key_cleanup_error_type"] = None
             receipt["key_cleanup_deferred"] = False
-        except shadeform.ShadeformHTTPError as exc:
-            # The durable pre-key receipt is the exact dispatch intent.  On a
-            # restart after a transport/crash window, only a 404 from this
-            # exact key-info endpoint may confirm that revocation already won;
-            # do not send a second DELETE.
-            if exc.status == 404:
-                receipt["ssh_key_cleanup_error_type"] = None
-                receipt["key_cleanup_deferred"] = False
-                key_cleanup_ok = True
-            else:
-                receipt["ssh_key_cleanup_error_type"] = type(exc).__name__
-                key_cleanup_ok = False
         except Exception as exc:  # receipt retains the deletion even if bookkeeping fails
             receipt["ssh_key_cleanup_error_type"] = type(exc).__name__
             key_cleanup_ok = False

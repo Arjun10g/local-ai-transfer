@@ -8,6 +8,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.performance.lifecycle_test_isolation import (
+    direct_execute_methods,
+    install_lifecycle_execute_isolation,
+)
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -31,6 +36,12 @@ def load_watchdog_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def stored_cost_event(shadeform, event):
+    canonical = shadeform._canonical_cost_event(event, stored=False)
+    canonical["recorded_at_utc"] = "2026-01-01T00:00:00+00:00"
+    return shadeform._canonical_cost_event(canonical, stored=True)
 
 
 class FakeWatchdog:
@@ -97,6 +108,9 @@ def valid_receipt(run_id="test-run"):
 class RemoteExternalToolsReceiptTests(unittest.TestCase):
     def setUp(self):
         self.module = load_module()
+        self.lifecycle_paths = install_lifecycle_execute_isolation(
+            self, self.module.shadeform, prefix="remote-receipt-runtime-"
+        )
 
     def validate(self, data):
         return self.module.validate_receipt(
@@ -182,6 +196,14 @@ class RemoteExternalToolsReceiptTests(unittest.TestCase):
             with mock.patch.object(self.module.subprocess, "run", return_value=types.SimpleNamespace(stdout="")):
                 self.assertEqual(self.module._repository_commit(root), "b" * 40)
 
+    def test_every_execute_calling_test_method_has_runtime_isolation(self):
+        found = direct_execute_methods(ROOT / "tests" / "performance")
+        self.assertEqual(len(found), 12)
+        self.assertTrue(
+            all(item["isolated"] for item in found),
+            [item for item in found if not item["isolated"]],
+        )
+
     def test_instance_post_intent_is_bound_before_dispatch(self):
         events = []
         candidate = self.module.shadeform.Candidate("A100", "cloud", "region", "type", 1.0, 80, "ubuntu", False)
@@ -223,6 +245,9 @@ class RemoteExternalToolsReceiptTests(unittest.TestCase):
 class RemoteExternalToolsLifecycleTests(unittest.TestCase):
     def setUp(self):
         self.module = load_module()
+        self.lifecycle_paths = install_lifecycle_execute_isolation(
+            self, self.module.shadeform, prefix="remote-lifecycle-runtime-"
+        )
         self.candidate = self.module.shadeform.Candidate(
             "A100 80GB", "test-cloud", "test-region", "test-a100",
             1.0, 80, "ubuntu22.04_cuda12.4_shade_os", False,
@@ -247,11 +272,12 @@ class RemoteExternalToolsLifecycleTests(unittest.TestCase):
                       job_error=None, salvage=None, deletion_error=None, deletion_receipt=None,
                       create_error=None, instance_pending_error=False,
                       direct_cost_error=False, direct_attempt_error=False,
-                      record_persistence_error=False):
+                      record_persistence_error=False, real_recovery_ledger=False):
         events = []
         persisted = []
         teardown_deadlines = []
         watchdog_commands = []
+        recovery_records = []
         watchdog = FakeWatchdog()
         info = {"id": "instance-123456", "ip": "203.0.113.10", "ssh_user": "runner", "ssh_port": 22}
 
@@ -318,11 +344,50 @@ class RemoteExternalToolsLifecycleTests(unittest.TestCase):
             self.assertTrue(watchdog_commands, "watchdog must be prearmed before SSH-key mutation")
             return "key-123456"
 
+        def delete_key_after_exact_settlement(*_args, **_kwargs):
+            if real_recovery_ledger:
+                instance_state = self.module.shadeform.exact_owner_cost_state(
+                    self.args.phase_id, "a" * 32, "instance-123456",
+                )
+                attempt_state = self.module.shadeform.exact_owner_cost_state(
+                    self.args.phase_id, "a" * 32, "attempt-" + "a" * 32,
+                )
+                self.assertEqual(instance_state["status"], "settled")
+                self.assertEqual(attempt_state["status"], "settled")
+                self.assertIsNotNone(
+                    self.module.shadeform.read_recovery_owned_resource(
+                        self.args.phase_id,
+                    )
+                )
+            return {"status": "confirmed"}
+
         reserve_calls = []
+        real_reserve = self.module.shadeform.reserve_create_attempt
         def reserve(*_args, **kwargs):
             reserve_calls.append(kwargs)
+            if real_recovery_ledger:
+                return real_reserve(*_args, **kwargs)
             append_event({"instance_id": "attempt-" + "a" * 32, "phase_id": self.args.phase_id, "status": "pending", "estimated_cost_usd": 0.4})
             return "attempt-" + "a" * 32
+
+        real_write_owned = self.module.shadeform.write_owned_resource
+        real_recovered_teardown = self.module.shadeform_teardown_recovered
+        owned_write_calls = 0
+        def write_owned(record):
+            nonlocal owned_write_calls
+            owned_write_calls += 1
+            if record_persistence_error and owned_write_calls == 1:
+                raise OSError("owned record unavailable")
+            return real_write_owned(record)
+
+        def recovered_with_real_ledger(record, *_args, **kwargs):
+            recovery_records.append(record)
+            first = real_recovered_teardown(record, self.args.env_file, **kwargs)
+            # Exercise the same launcher fallback after a restart/completed
+            # receipt. Immutable owner evidence must make this idempotent.
+            second = real_recovered_teardown(record, self.args.env_file, **kwargs)
+            self.assertEqual(second, first)
+            return first
 
         with contextlib.ExitStack() as stack:
             patch = stack.enter_context
@@ -341,10 +406,15 @@ class RemoteExternalToolsLifecycleTests(unittest.TestCase):
             patch(mock.patch.object(self.module.shadeform, "instance_info", return_value=info))
             patch(mock.patch.object(self.module.shadeform, "create_instance", return_value="instance-123456", side_effect=create_error))
             direct_delete = patch(mock.patch.object(self.module.shadeform, "_delete_instance", return_value={"success": True, "status": "deleted"}))
-            delete_key = patch(mock.patch.object(self.module.shadeform, "delete_ssh_key", return_value={"status": "deleted"}))
-            patch(mock.patch.object(self.module.shadeform, "append_cost_event", side_effect=append_event))
-            patch(mock.patch.object(self.module.shadeform, "write_owned_resource", side_effect=OSError("owned record unavailable") if record_persistence_error else None))
-            if record_persistence_error:
+            delete_key = patch(mock.patch.object(
+                self.module.shadeform,
+                "delete_owned_ssh_key_exact",
+                side_effect=delete_key_after_exact_settlement,
+            ))
+            if not real_recovery_ledger:
+                patch(mock.patch.object(self.module.shadeform, "append_cost_event", side_effect=append_event))
+            patch(mock.patch.object(self.module.shadeform, "write_owned_resource", side_effect=write_owned if record_persistence_error else None))
+            if record_persistence_error and not real_recovery_ledger:
                 patch(mock.patch.object(self.module.shadeform, "read_owned_resource", return_value=types.SimpleNamespace(instance_id="instance-123456", status="created", cost_usd=None)))
             patch(mock.patch.object(self.module.shadeform, "process_start_marker", return_value="marker"))
             patch(mock.patch.object(self.module.subprocess, "Popen", side_effect=popen))
@@ -357,7 +427,12 @@ class RemoteExternalToolsLifecycleTests(unittest.TestCase):
             patch(mock.patch.object(self.module, "run_argv", side_effect=run_job))
             patch(mock.patch.object(self.module, "_salvage_receipt", return_value=salvage or {"status": "verified", "receipt": {"status": "PASS", "run_id": "test-run", "secret_free": True, "passed": 1, "failed": 0, "case_count": 1}}))
             patch(mock.patch.object(self.module, "shadeform_teardown", side_effect=teardown))
-            recovered = patch(mock.patch.object(self.module, "shadeform_teardown_recovered", side_effect=recovered_teardown))
+            if real_recovery_ledger:
+                patch(mock.patch.object(self.module.shadeform, "verify_owned_instance_before_delete", return_value={"status": "active"}))
+                patch(mock.patch.object(self.module.shadeform, "verify_owned_ssh_key_before_delete", return_value={"status": "active"}))
+                recovered = patch(mock.patch.object(self.module, "shadeform_teardown_recovered", side_effect=recovered_with_real_ledger))
+            else:
+                recovered = patch(mock.patch.object(self.module, "shadeform_teardown_recovered", side_effect=recovered_teardown))
             patch(mock.patch.object(self.module, "_persist_lifecycle", side_effect=persist))
             try:
                 result = self.module.execute(self.args)
@@ -365,7 +440,7 @@ class RemoteExternalToolsLifecycleTests(unittest.TestCase):
             except BaseException as exc:
                 result = None
                 raised = exc
-        return types.SimpleNamespace(result=result, raised=raised, events=events, persisted=persisted, watchdog=watchdog, reserve_calls=reserve_calls, add_key=add_key, delete_key=delete_key, direct_delete=direct_delete, recovered_teardown=recovered, teardown_deadlines=teardown_deadlines, watchdog_commands=watchdog_commands)
+        return types.SimpleNamespace(result=result, raised=raised, events=events, persisted=persisted, watchdog=watchdog, reserve_calls=reserve_calls, add_key=add_key, delete_key=delete_key, direct_delete=direct_delete, recovered_teardown=recovered, recovery_records=recovery_records, teardown_deadlines=teardown_deadlines, watchdog_commands=watchdog_commands)
 
     def assert_no_pending(self, outcome):
         latest = {event["instance_id"]: event["status"] for event in outcome.events}
@@ -466,10 +541,51 @@ class RemoteExternalToolsLifecycleTests(unittest.TestCase):
         self.assertFalse(outcome.watchdog.terminated)
 
     def test_owned_record_persistence_failure_uses_durable_recovery_teardown(self):
+        self.assertTrue(
+            self.module.shadeform.RUNTIME_ROOT.is_relative_to(
+                self.lifecycle_paths.runtime_root.parent
+            )
+        )
         outcome = self.run_lifecycle(record_persistence_error=True)
         self.assertIsInstance(outcome.raised, OSError)
         outcome.direct_delete.assert_not_called()
         outcome.recovered_teardown.assert_called_once()
+        self.assertTrue(outcome.watchdog.terminated)
+
+    def test_owned_record_failure_reuses_real_pending_reservation(self):
+        outcome = self.run_lifecycle(
+            record_persistence_error=True,
+            real_recovery_ledger=True,
+        )
+        self.assertIsInstance(outcome.raised, OSError)
+        self.assertEqual(outcome.direct_delete.call_count, 1)
+        self.assertEqual(outcome.delete_key.call_count, 1)
+        self.assertEqual(len(outcome.recovery_records), 1)
+        data = self.module.shadeform.bounded_stable_bytes(
+            self.module.shadeform.COST_LEDGER,
+            self.module.shadeform.MAX_COST_LEDGER_BYTES,
+            label="test cost ledger",
+        )
+        events = self.module.shadeform._cost_ledger_events(data)
+        instance = [
+            event for event in events
+            if event["instance_id"] == "instance-123456"
+        ]
+        self.assertEqual(
+            [event["status"] for event in instance],
+            ["pending", "settled"],
+        )
+        attempt = [
+            event for event in events
+            if event["instance_id"] == "attempt-" + "a" * 32
+        ]
+        self.assertEqual(
+            instance[0]["estimated_cost_usd"],
+            attempt[0]["estimated_cost_usd"],
+        )
+        self.assertLessEqual(instance[0]["estimated_cost_usd"], 0.3125)
+        self.assertEqual(attempt[-1]["status"], "settled")
+        self.assertEqual(self.module.shadeform.ledger_spend()[1], [])
         self.assertTrue(outcome.watchdog.terminated)
 
     def test_execution_flag_still_blocks_before_credentials(self):
@@ -495,7 +611,57 @@ class RemoteExternalToolsLifecycleTests(unittest.TestCase):
 class ExternalLifecycleBoundaryTests(unittest.TestCase):
     def setUp(self):
         self.module = load_module()
+        self.lifecycle_paths = install_lifecycle_execute_isolation(
+            self, self.module.shadeform, prefix="remote-boundary-runtime-"
+        )
         self.candidate = self.module.shadeform.Candidate("A100 80GB", "cloud", "region", "type", 1.0, 80, "ubuntu", False)
+
+    def inject_legacy_after_outer_preflight(self, phase_id):
+        self.module.shadeform.preflight_legacy_deletion_evidence(phase_id)
+        legacy = self.module.shadeform.legacy_deletion_evidence_paths(phase_id)[0]
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_bytes(b"{}")
+
+    def test_ssh_key_boundary_rechecks_legacy_evidence_before_post(self):
+        phase_id = "key-boundary-race"
+        self.inject_legacy_after_outer_preflight(phase_id)
+        with mock.patch.object(self.module.shadeform, "request") as transport:
+            with self.assertRaisesRegex(
+                self.module.shadeform.ShadeformError,
+                "legacy deletion evidence",
+            ):
+                self.module.shadeform.add_ssh_key(
+                    "token", phase_id, "j1m-" + "a" * 32, "ssh-ed25519 AAAA test",
+                )
+        transport.assert_not_called()
+
+    def test_instance_boundary_rechecks_legacy_evidence_before_post(self):
+        phase_id = "instance-boundary-race"
+        self.inject_legacy_after_outer_preflight(phase_id)
+        auto_delete = {
+            "date_threshold": (
+                self.module.shadeform.utc_now()
+                + self.module.shadeform.timedelta(hours=1)
+            ).isoformat(),
+            "spend_threshold": "1.00",
+        }
+        with mock.patch.object(self.module.shadeform, "request") as transport:
+            with self.assertRaisesRegex(
+                self.module.shadeform.ShadeformError,
+                "legacy deletion evidence",
+            ):
+                self.module.shadeform.create_instance(
+                    "token",
+                    {},
+                    phase_id=phase_id,
+                    run_id="test-run",
+                    candidate=self.candidate,
+                    ssh_key_id="key-123456",
+                    nonce="a" * 32,
+                    max_runtime_hours=0.25,
+                    auto_delete_contract=auto_delete,
+                )
+        transport.assert_not_called()
 
     def test_teardown_reserve_includes_fresh_instance_and_key_proofs(self):
         self.assertGreaterEqual(self.module.DELETION_RESERVE_SECONDS, 570.0)
@@ -536,7 +702,7 @@ class ExternalLifecycleBoundaryTests(unittest.TestCase):
                 self.module.shadeform, "request", return_value=response,
             ):
                 with self.assertRaises(self.module.shadeform.ShadeformError):
-                    self.module.shadeform.delete_ssh_key("token", "qa-remote-tools", "key-123456")
+                    self.module.shadeform._delete_ssh_key_once("token", "qa-remote-tools", "key-123456")
 
     def test_watchdog_work_deadline_leaves_hard_teardown_reserve(self):
         watchdog = load_watchdog_module()
@@ -555,13 +721,23 @@ class ExternalLifecycleBoundaryTests(unittest.TestCase):
     def test_watchdog_intent_uses_latest_event_and_rejects_direct_unrecorded_id(self):
         watchdog = load_watchdog_module()
         with tempfile.TemporaryDirectory() as directory:
-            ledger = Path(directory) / "cost.jsonl"
+            ledger = Path(directory).resolve() / "cost.jsonl"
             nonce = "a" * 32
+            pending = stored_cost_event(self.module.shadeform, {
+                "phase_id": "qa-remote-tools", "ownership_nonce": nonce,
+                "instance_id": "attempt-" + nonce, "status": "pending",
+                "estimated_cost_usd": 1.0,
+            })
+            settled = stored_cost_event(self.module.shadeform, {
+                "phase_id": "qa-remote-tools", "ownership_nonce": nonce,
+                "instance_id": "attempt-" + nonce, "status": "settled",
+                "actual_cost_usd": 0.0,
+            })
             ledger.write_text(
-                json.dumps({"phase_id": "qa-remote-tools", "ownership_nonce": nonce, "instance_id": "attempt-" + nonce, "status": "pending"}) + "\n"
-                + json.dumps({"phase_id": "qa-remote-tools", "ownership_nonce": nonce, "instance_id": "attempt-" + nonce, "status": "settled"}) + "\n",
+                json.dumps(pending) + "\n" + json.dumps(settled) + "\n",
                 encoding="utf-8",
             )
+            ledger.chmod(0o600)
             with mock.patch.object(self.module.shadeform, "COST_LEDGER", ledger):
                 self.assertFalse(watchdog._has_pending_intent(self.module.shadeform, "qa-remote-tools", nonce))
             with self.assertRaises(SystemExit):
@@ -577,16 +753,98 @@ class ExternalLifecycleBoundaryTests(unittest.TestCase):
     def test_watchdog_pending_intent_includes_unrecorded_instance_event(self):
         watchdog = load_watchdog_module()
         with tempfile.TemporaryDirectory() as directory:
-            ledger = Path(directory) / "cost.jsonl"
+            ledger = Path(directory).resolve() / "cost.jsonl"
             nonce = "a" * 32
+            pending = stored_cost_event(self.module.shadeform, {
+                "phase_id": "qa-remote-tools", "ownership_nonce": nonce,
+                "instance_id": "instance-123456", "status": "pending",
+                "estimated_cost_usd": 1.0,
+                "create_started_at_utc": "2026-09-05T00:00:00+00:00",
+            })
             ledger.write_text(
-                json.dumps({"phase_id": "qa-remote-tools", "ownership_nonce": nonce, "instance_id": "attempt-" + nonce, "status": "settled"}) + "\n"
-                + json.dumps({"phase_id": "qa-remote-tools", "ownership_nonce": nonce, "instance_id": "instance-123456", "status": "pending", "create_started_at_utc": "2026-09-05T00:00:00+00:00"}) + "\n",
+                json.dumps(pending) + "\n",
                 encoding="utf-8",
             )
+            ledger.chmod(0o600)
             with mock.patch.object(self.module.shadeform, "COST_LEDGER", ledger):
                 intent = watchdog._pending_intent(self.module.shadeform, "qa-remote-tools", nonce)
             self.assertEqual(intent["instance_id"], "instance-123456")
+
+    def test_watchdog_uses_strict_authoritative_ledger_and_stops_before_provider(self):
+        watchdog = load_watchdog_module()
+        phase = "qa-remote-tools"
+        nonce = "d" * 32
+        base = stored_cost_event(self.module.shadeform, {
+            "phase_id": phase,
+            "ownership_nonce": nonce,
+            "instance_id": "instance-123456",
+            "status": "pending",
+            "estimated_cost_usd": 1.0,
+        })
+        conflicting = stored_cost_event(self.module.shadeform, {
+            "phase_id": phase,
+            "ownership_nonce": "e" * 32,
+            "instance_id": "instance-123456",
+            "status": "pending",
+            "estimated_cost_usd": 1.0,
+        })
+        canonical = json.dumps(base, sort_keys=True, separators=(",", ":"))
+        cases = {
+            "torn": canonical.encode("utf-8"),
+            "duplicate": (
+                canonical.replace('"schema":', '"schema":"duplicate","schema":', 1)
+                + "\n"
+            ).encode("utf-8"),
+            "owner-conflict": (
+                canonical + "\n"
+                + json.dumps(conflicting, sort_keys=True, separators=(",", ":"))
+                + "\n"
+            ).encode("utf-8"),
+            "malformed": b'{"schema":"wrong"}\n',
+        }
+        for label, payload in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                ledger = root / "cost.jsonl"
+                ledger.write_bytes(payload)
+                ledger.chmod(0o600)
+                with mock.patch.object(self.module.shadeform, "COST_LEDGER", ledger):
+                    self.assertIsNone(
+                        watchdog._pending_intent(
+                            self.module.shadeform, phase, nonce,
+                        )
+                    )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            ledger = root / "cost.jsonl"
+            ledger.write_bytes(cases["torn"])
+            ledger.chmod(0o600)
+            with mock.patch.object(watchdog, "ROOT", root), \
+                    mock.patch.object(watchdog, "identity_alive", return_value=False), \
+                    mock.patch.object(self.module.shadeform, "COST_LEDGER", ledger), \
+                    mock.patch.object(self.module.shadeform, "load_env") as load_env, \
+                    mock.patch.object(self.module.shadeform, "reconcile_ssh_key") as reconcile, \
+                    mock.patch.object(self.module.shadeform, "request") as provider:
+                result = watchdog.main([
+                    "--phase-id", phase,
+                    "--instance-name", "ep-run-" + nonce,
+                    "--launcher-pid", "1234",
+                    "--max-seconds", "1",
+                    "--deadline-epoch", str(__import__("time").time() + 1000),
+                    "--provider-delete-deadline-epoch", str(__import__("time").time() + 900),
+                    "--allow-unrecorded-exact",
+                    "--ownership-nonce", nonce,
+                    "--ssh-key-id", "key-123456",
+                    "--cloud", "cloud", "--region", "region",
+                    "--instance-type", "type", "--hourly-usd", "1",
+                    "--gpu", "A100", "--gpu-count", "1", "--vram-gb", "80",
+                    "--os-image", "ubuntu",
+                ])
+            self.assertEqual(result, 1)
+            load_env.assert_not_called()
+            reconcile.assert_not_called()
+            provider.assert_not_called()
 
     def test_instance_reconciliation_requires_one_exact_nonce_match(self):
         expected_name = self.module.shadeform.owned_instance_name("run", "a" * 32)

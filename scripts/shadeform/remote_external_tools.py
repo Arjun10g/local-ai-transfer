@@ -807,6 +807,7 @@ def execute(args: argparse.Namespace) -> dict[str, object]:
     shadeform.preflight_legacy_deletion_evidence(args.phase_id)
     env = shadeform.load_env(args.env_file)
     _assert_review_markers(env)
+    budget_cap_usd = shadeform.configured_budget_cap_usd(env)
     plan = build_plan(phase_id=args.phase_id, run_id=args.run_id, runtime_hours=args.runtime_hours, fuzz_cases=args.fuzz_cases, soak_iterations=args.soak_iterations, env=env)
     # Use the exact provider auto-delete threshold rather than re-deriving it
     # from plan defaults; an operator ceiling may conservatively shorten it.
@@ -877,6 +878,7 @@ def execute(args: argparse.Namespace) -> dict[str, object]:
                 args.phase_id, nonce, candidate,
                 backstop_hours=provider_backstop_hours,
                 public_key_sha256=public_key_sha256,
+                expected_budget_cap_usd=budget_cap_usd,
                 public_key_fingerprint=key_fingerprint,
             )
             attempt_reserved = True
@@ -949,6 +951,7 @@ def execute(args: argparse.Namespace) -> dict[str, object]:
                 args.phase_id, nonce, candidate,
                 backstop_hours=provider_backstop_hours,
                 public_key_sha256=public_key_sha256,
+                expected_budget_cap_usd=budget_cap_usd,
                 public_key_fingerprint=key_fingerprint,
                 ssh_key_id=key_id,
             )
@@ -989,7 +992,7 @@ def execute(args: argparse.Namespace) -> dict[str, object]:
             # narrow crash window between provider success and ledger record.
             shadeform.write_owned_resource(record)
             recorded = True
-            shadeform.append_cost_event({"instance_id": attempt_id, "phase_id": args.phase_id, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
+            shadeform.append_cost_event({"instance_id": attempt_id, "phase_id": args.phase_id, "ownership_nonce": nonce, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
             attempt_settled = True
             lifecycle["watchdog"]["status"] = "running"
             lifecycle["stage"] = "activation"
@@ -1104,7 +1107,7 @@ def execute(args: argparse.Namespace) -> dict[str, object]:
             elif key_id is not None and not ambiguous_create and not key_ambiguity_unresolved:
                 if attempt_reserved and not attempt_settled:
                     try:
-                        shadeform.append_cost_event({"instance_id": attempt_id, "phase_id": args.phase_id, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
+                        shadeform.append_cost_event({"instance_id": attempt_id, "phase_id": args.phase_id, "ownership_nonce": nonce, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
                         attempt_settled = True
                         shadeform.append_incident({
                             "phase_id": args.phase_id,
@@ -1119,22 +1122,24 @@ def execute(args: argparse.Namespace) -> dict[str, object]:
                     key_id = None
             if instance_id is None and key_id is not None and not ambiguous_create and not key_ambiguity_unresolved and cleanup_failure is None:
                 try:
-                    key_timeout = min(90.0, execution_deadline - time.monotonic()) if execution_deadline is not None else 90.0
-                    if key_timeout < 1.0:
-                        raise TimeoutError("SSH key ownership verification deadline exhausted")
-                    shadeform.verify_ssh_key_ownership(
-                        api_key, args.phase_id, key_id,
-                        expected_name=key_name, expected_public_key=public_key,
-                        timeout=key_timeout,
+                    lifecycle["key_cleanup"] = shadeform.delete_owned_ssh_key_exact(
+                        api_key,
+                        args.phase_id,
+                        key_id,
+                        ownership_nonce=nonce,
+                        expected_name=key_name,
+                        expected_public_key=public_key,
+                        expected_fingerprint=key_fingerprint,
+                        deadline=execution_deadline,
                     )
-                    shadeform.delete_ssh_key(api_key, args.phase_id, key_id, deadline=execution_deadline)
-                    lifecycle["key_cleanup"] = {"status": "deleted"}
+                    if lifecycle["key_cleanup"].get("status") != "confirmed":
+                        raise RunnerError("exact SSH key deletion lacks durable confirmation")
                 except BaseException as exc:
                     lifecycle["key_cleanup"] = {"status": "failed", "code": _safe_failure_code(exc)}
                     cleanup_failure = RunnerError("exact SSH key deletion was not confirmed")
             if attempt_reserved and not attempt_settled and not ambiguous_create and not key_ambiguity_unresolved and cleanup_failure is None:
                 try:
-                    shadeform.append_cost_event({"instance_id": attempt_id, "phase_id": args.phase_id, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
+                    shadeform.append_cost_event({"instance_id": attempt_id, "phase_id": args.phase_id, "ownership_nonce": nonce, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
                     attempt_settled = True
                 except BaseException as exc:
                     cleanup_failure = RunnerError("create-attempt reservation was not settled")

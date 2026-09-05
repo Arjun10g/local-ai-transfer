@@ -885,6 +885,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
         eval_artifact = None
     env = sf.load_env(env_file)
     api_key = sf.require_env(env, "SHADEFORM_API_KEY")
+    budget_cap_usd = sf.configured_budget_cap_usd(env)
     runtime = float(config["modes"][mode]["runtime_hours"])
     # Validate the effective provider backstop before even reading the live
     # candidate catalogue. A too-short ceiling must not reach key generation,
@@ -968,6 +969,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 phase_id, nonce, candidate,
                 backstop_hours=float(config["modes"][mode]["provider_backstop_hours"]),
                 public_key_sha256=hashlib.sha256(public_key.encode("utf-8")).hexdigest(),
+                expected_budget_cap_usd=budget_cap_usd,
                 public_key_fingerprint=key_fingerprint,
             )
             attempt_reserved = True
@@ -1049,6 +1051,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 phase_id, nonce, candidate,
                 backstop_hours=float(config["modes"][mode]["provider_backstop_hours"]),
                 public_key_sha256=hashlib.sha256(public_key.encode("utf-8")).hexdigest(),
+                expected_budget_cap_usd=budget_cap_usd,
                 public_key_fingerprint=key_fingerprint,
                 ssh_key_id=key_id,
             )
@@ -1091,8 +1094,8 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             record = sf.OwnedResource(phase_id=phase_id, run_id=run_id, instance_id=instance_id, instance_name=expected_instance_name, ownership_nonce=nonce, ssh_key_id=key_id, ssh_key_name=f"j1m-{nonce}", gpu=candidate.gpu, cloud=candidate.cloud, region=candidate.region, hourly_usd=candidate.hourly_usd, created_at_utc=create_intent_started, provider_delete_deadline_utc=str(auto_delete["date_threshold"]), active_deadline_utc=(sf.utc_now() + sf.timedelta(seconds=activation_seconds)).isoformat(), run_deadline_utc=(sf.utc_now() + sf.timedelta(hours=runtime)).isoformat(), instance_type=candidate.instance_type, gpu_count=1, vram_gb=candidate.vram_gb, os_image=candidate.os_image, ssh_public_key=public_key, launcher_pid=launcher_pid, launcher_start_marker=launcher_start_marker, ssh_public_key_fingerprint=key_fingerprint)
             # Bind the exact instance cost before the owned record. The
             # pre-armed watchdog plus durable create intent covers a crash in
-            # either write, while the no-ledger fallback can reconcile the
-            # exact ID and settle before key cleanup.
+            # either write, while exact-owner recovery reuses this immutable
+            # reservation and settles it before key cleanup.
             sf.append_cost_event({"instance_id": instance_id, "phase_id": phase_id, "ownership_nonce": nonce, "create_started_at_utc": create_intent_started, "status": "pending", "estimated_cost_usd": round(candidate.hourly_usd * float(config["modes"][mode]["provider_backstop_hours"]), 6)})
             # Ownership record is written before any poll/upload. If this
             # fails, the fallback below still deletes the exact returned ID.
@@ -1102,7 +1105,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             # ownership/billing row. Keep the pre-create reservation history
             # but settle it to zero only after both durable writes and the
             # watchdog are in place.
-            sf.append_cost_event({"instance_id": attempt_id, "phase_id": phase_id, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
+            sf.append_cost_event({"instance_id": attempt_id, "phase_id": phase_id, "ownership_nonce": nonce, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
             j1m_runner.write_progress(progress_path, "wait-active-starting", phase_id=phase_id)
             wait_budget = int(_eval_timeout(execution_deadline, float(config["modes"][mode].get("activation_timeout_seconds", 1800))))
             info = sf.wait_active(api_key, phase_id, instance_id, timeout_seconds=wait_budget)
@@ -1332,7 +1335,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 # Key creation succeeded but instance creation did not.
                 if attempt_reserved and settle_attempt_after_cleanup:
                     try:
-                        sf.append_cost_event({"instance_id": attempt_id, "phase_id": phase_id, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
+                        sf.append_cost_event({"instance_id": attempt_id, "phase_id": phase_id, "ownership_nonce": nonce, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
                         attempt_settled_during_cleanup = True
                         try:
                             sf.append_incident({
@@ -1355,8 +1358,17 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                             pass
                 if not settle_attempt_after_cleanup or (attempt_settled_during_cleanup and attempt_cleanup_receipt_ok):
                     try:
-                        sf.verify_ssh_key_ownership(api_key, phase_id, key_id, expected_name=f"j1m-{nonce}", expected_public_key=public_key)
-                        lifecycle["key_cleanup"] = sf.delete_ssh_key(api_key, phase_id, key_id)
+                        lifecycle["key_cleanup"] = sf.delete_owned_ssh_key_exact(
+                            api_key,
+                            phase_id,
+                            key_id,
+                            ownership_nonce=nonce,
+                            expected_name=f"j1m-{nonce}",
+                            expected_public_key=public_key,
+                            expected_fingerprint=key_fingerprint,
+                        )
+                        if lifecycle["key_cleanup"].get("status") != "confirmed":
+                            raise RuntimeError("exact SSH key deletion lacks durable confirmation")
                     except Exception as exc:
                         lifecycle["key_cleanup"] = {"status": "failed", "error_type": type(exc).__name__}
                         try:
@@ -1371,7 +1383,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 stop_watchdog()
             if attempt_reserved and settle_attempt_after_cleanup and not attempt_settled_during_cleanup:
                 try:
-                    sf.append_cost_event({"instance_id": attempt_id, "phase_id": phase_id, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
+                    sf.append_cost_event({"instance_id": attempt_id, "phase_id": phase_id, "ownership_nonce": nonce, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
                 except Exception as exc:
                     try:
                         sf.append_incident({"phase_id": phase_id, "incident": "attempt-reservation-settlement-failed", "nonce": nonce, "error_type": type(exc).__name__})

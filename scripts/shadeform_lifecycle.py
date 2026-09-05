@@ -56,6 +56,34 @@ RUNTIME_ROOT = ROOT / "experiments" / "runtime"
 MARKDOWN_LEDGER = ROOT / "experiments" / "LEDGER.md"
 COST_LEDGER = ROOT / "experiments" / "runtime" / "cost-ledger.jsonl"
 INCIDENTS = ROOT / "experiments" / "runtime" / "incidents.jsonl"
+COST_EVENT_SCHEMA = "local_bmo.shadeform.cost-event.v2"
+COST_LEDGER_PROGRAM = "local-bmo-shadeform"
+COST_LEDGER_CURRENCY = "USD"
+COST_LEDGER_GENESIS_CONFIRMATION = (
+    "I_HAVE_REVIEWED_THE_COMPLETE_SHADEFORM_COST_BASELINE"
+)
+MAX_COST_LEDGER_BYTES = 1_048_576
+MAX_COST_LEDGER_LINES = 4096
+MAX_COST_EVENT_BYTES = 65_536
+MAX_MARKDOWN_LEDGER_BYTES = 1_048_576
+MAX_INCIDENT_CATALOG_BYTES = 1_048_576
+MAX_INCIDENT_EVIDENCE_BYTES = 1_048_576
+OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
+STAT_SUPPORTS_DIR_FD = os.stat in os.supports_dir_fd
+COST_EVENT_FIELDS = frozenset({
+    "schema", "instance_id", "phase_id", "ownership_nonce",
+    "owner_binding_sha256", "status", "estimated_cost_usd",
+    "actual_cost_usd", "recorded_at_utc", "reservation",
+    "ssh_key_name", "ssh_public_key_sha256", "candidate", "ssh_key_id",
+    "ssh_public_key_fingerprint", "intent_schema", "instance_create_intent",
+    "instance_name", "hourly_usd", "backstop_hours", "create_started_at_utc",
+    "provider_delete_deadline_utc",
+})
+COST_GENESIS_FIELDS = frozenset({
+    "schema", "event_kind", "program", "currency", "budget_cap_usd",
+    "prior_settled_spend_usd", "current_pending_owner_count",
+    "display_ledger_sha256", "incidents_sha256", "recorded_at_utc",
+})
 # The donor's incident log lived in a sibling repository. Ours is in this lane,
 # in this repository, because a preflight that depends on a file outside the
 # checkout is a preflight that silently stops happening.
@@ -110,7 +138,7 @@ class BackstopError(ShadeformError):
 
 
 class BudgetError(ShadeformError):
-    """The project budget in experiments/LEDGER.md forbids this action."""
+    """The reviewed authoritative JSON project budget forbids this action."""
 
 
 @dataclass(frozen=True)
@@ -416,7 +444,7 @@ def _ensure_durable_directory(path: Path) -> None:
         raise OSError("durable directory ancestor is not a real directory")
     for directory in reversed(missing):
         try:
-            directory.mkdir()
+            directory.mkdir(mode=0o700)
         except FileExistsError:
             pass
         if not directory.is_dir() or directory.is_symlink():
@@ -472,6 +500,19 @@ def bounded_stable_bytes(path: Path, limit: int, *, label: str) -> bytes:
         return b"".join(chunks)
     finally:
         os.close(descriptor)
+
+
+def required_bounded_text(path: Path, limit: int, *, label: str) -> str:
+    """Read required UTF-8 policy/display data through the stable-file guard."""
+
+    try:
+        data = bounded_stable_bytes(path, limit, label=label)
+    except FileNotFoundError as exc:
+        raise ShadeformError(f"{label} is unavailable") from exc
+    try:
+        return data.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ShadeformError(f"{label} is not valid UTF-8") from exc
 
 
 def strict_json_object(data: bytes, *, label: str) -> dict[str, Any]:
@@ -581,6 +622,11 @@ def clear_owned_resource(phase_id: str, instance_id: str) -> None:
 
 RECOVERY_OWNED_SCHEMA = "local_bmo.shadeform.recovery-owned-resource.v1"
 INSTANCE_CREATE_INTENT_SCHEMA = "local_bmo.shadeform.instance-create-intent.v1"
+SSH_KEY_DELETE_INTENT_SCHEMA = "local_bmo.shadeform.ssh-key-deletion-intent.v1"
+SSH_KEY_DELETE_CONFIRMATION_SCHEMA = (
+    "local_bmo.shadeform.ssh-key-deletion-confirmation.v1"
+)
+MAX_SSH_KEY_DELETE_EVIDENCE_BYTES = 65_536
 
 
 def recovery_owned_resource_path(phase_id: str) -> Path:
@@ -681,11 +727,541 @@ def _parse_ledger_row(line: str) -> dict[str, str] | None:
 def _valid_cost(value: object) -> bool:
     """Accept only JSON-number-like, finite, nonnegative cost values."""
 
-    return (isinstance(value, (int, float)) and not isinstance(value, bool) and
-            math.isfinite(float(value)) and value >= 0)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value)) and value >= 0
+    except (OverflowError, TypeError, ValueError):
+        return False
 
 
-def ledger_spend() -> tuple[float, list[str]]:
+def _canonical_cost_genesis(event: dict[str, Any]) -> dict[str, Any]:
+    """Validate the single reviewed baseline that anchors the JSON ledger."""
+
+    if set(event) != COST_GENESIS_FIELDS:
+        raise ValueError("cost ledger genesis has unknown or missing fields")
+    if event.get("schema") != COST_EVENT_SCHEMA or event.get("event_kind") != "genesis":
+        raise ValueError("cost ledger genesis schema is invalid")
+    if event.get("program") != COST_LEDGER_PROGRAM:
+        raise ValueError("cost ledger genesis program is invalid")
+    if event.get("currency") != COST_LEDGER_CURRENCY:
+        raise ValueError("cost ledger genesis currency is invalid")
+    cap = event.get("budget_cap_usd")
+    prior = event.get("prior_settled_spend_usd")
+    if not _valid_cost(cap) or float(cap) <= 0:
+        raise ValueError("cost ledger genesis cap must be finite and positive")
+    if not _valid_cost(prior) or float(prior) > float(cap):
+        raise ValueError("cost ledger genesis prior spend is invalid")
+    pending = event.get("current_pending_owner_count")
+    if isinstance(pending, bool) or not isinstance(pending, int) or pending != 0:
+        raise ValueError("cost ledger genesis requires an explicit zero pending baseline")
+    for field in ("display_ledger_sha256", "incidents_sha256"):
+        value = event.get(field)
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ValueError(f"cost ledger genesis {field} is invalid")
+    recorded = event.get("recorded_at_utc")
+    if not isinstance(recorded, str) or not 1 <= len(recorded) <= 64:
+        raise ValueError("cost ledger genesis timestamp is invalid")
+    try:
+        parsed = datetime.fromisoformat(recorded)
+    except ValueError as exc:
+        raise ValueError("cost ledger genesis timestamp is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("cost ledger genesis timestamp must be timezone-aware")
+    canonical = dict(event)
+    canonical["recorded_at_utc"] = parsed.isoformat()
+    try:
+        encoded = json.dumps(
+            canonical, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("cost ledger genesis is not bounded JSON data") from exc
+    if len(encoded) > MAX_COST_EVENT_BYTES:
+        raise ValueError("cost ledger genesis exceeds its byte bound")
+    if canonical != event:
+        raise ValueError("stored cost ledger genesis is not canonical")
+    return canonical
+
+
+def _open_private_canonical_parent(path: Path) -> int:
+    """Open and identity-bind an existing private canonical parent directory."""
+
+    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        raise ShadeformError("cost ledger requires POSIX no-follow directory handles")
+    if not OPEN_SUPPORTS_DIR_FD or not STAT_SUPPORTS_DIR_FD:
+        raise ShadeformError("cost ledger requires handle-relative filesystem operations")
+    requested = Path(path)
+    if not requested.is_absolute() or Path(os.path.abspath(requested)) != requested:
+        raise ShadeformError("cost ledger path must be absolute and normalized")
+    parent = requested.parent
+    try:
+        if parent.resolve(strict=True) != parent:
+            raise ShadeformError("cost ledger parent must have no symlink ancestors")
+    except OSError as exc:
+        raise ShadeformError("cost ledger parent is unavailable") from exc
+    try:
+        descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise ShadeformError("cost ledger parent no-follow open failed") from exc
+    try:
+        opened = os.fstat(descriptor)
+        current = os.stat(parent, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or not stat.S_ISDIR(current.st_mode)
+            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+            or opened.st_uid != os.getuid()
+            or stat.S_IMODE(opened.st_mode) & 0o077
+        ):
+            raise ShadeformError(
+                "cost ledger parent must be identity-stable and owner-private"
+            )
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _initialize_cost_ledger_genesis(
+    *,
+    program: str,
+    currency: str,
+    budget_cap_usd: float,
+    prior_settled_spend_usd: float,
+    current_pending_owner_count: int,
+    expected_display_ledger_sha256: str,
+    expected_incidents_sha256: str,
+    confirmation: str,
+) -> tuple[dict[str, Any], str]:
+    """Explicitly create the reviewed v2 JSON cost baseline exactly once.
+
+    This offline operation is deliberately not called by either launcher.  It
+    binds a human-reviewed spend assertion to exact bounded display/incident
+    bytes and has no credential, catalogue, provider, or process path.
+    """
+
+    if confirmation != COST_LEDGER_GENESIS_CONFIRMATION:
+        raise ShadeformError("cost ledger genesis review confirmation is absent")
+    for value, field in (
+        (expected_display_ledger_sha256, "display ledger hash"),
+        (expected_incidents_sha256, "incidents hash"),
+    ):
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ValueError(f"cost ledger genesis {field} is invalid")
+    try:
+        display = bounded_stable_bytes(
+            MARKDOWN_LEDGER,
+            MAX_MARKDOWN_LEDGER_BYTES,
+            label="cost genesis display ledger evidence",
+        )
+        incidents = bounded_stable_bytes(
+            INCIDENTS,
+            MAX_INCIDENT_EVIDENCE_BYTES,
+            label="cost genesis incident evidence",
+        )
+    except FileNotFoundError as exc:
+        raise ShadeformError("cost ledger genesis evidence is unavailable") from exc
+    if hashlib.sha256(display).hexdigest() != expected_display_ledger_sha256:
+        raise ShadeformError("cost ledger genesis display evidence hash does not match")
+    if hashlib.sha256(incidents).hexdigest() != expected_incidents_sha256:
+        raise ShadeformError("cost ledger genesis incident evidence hash does not match")
+
+    genesis = _canonical_cost_genesis({
+        "schema": COST_EVENT_SCHEMA,
+        "event_kind": "genesis",
+        "program": program,
+        "currency": currency,
+        "budget_cap_usd": budget_cap_usd,
+        "prior_settled_spend_usd": prior_settled_spend_usd,
+        "current_pending_owner_count": current_pending_owner_count,
+        "display_ledger_sha256": expected_display_ledger_sha256,
+        "incidents_sha256": expected_incidents_sha256,
+        "recorded_at_utc": utc_now().isoformat(),
+    })
+    payload = (
+        json.dumps(genesis, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        + "\n"
+    ).encode("utf-8")
+    if len(payload) > MAX_COST_EVENT_BYTES:
+        raise ValueError("cost ledger genesis exceeds its byte bound")
+
+    ledger_path = Path(COST_LEDGER)
+    parent_descriptor = _open_private_canonical_parent(ledger_path)
+    descriptor = -1
+    try:
+        fcntl.flock(parent_descriptor, fcntl.LOCK_EX)
+        try:
+            os.stat(ledger_path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise ShadeformError("cost ledger genesis target identity is unavailable") from exc
+        else:
+            try:
+                descriptor = os.open(
+                    ledger_path.name,
+                    os.O_RDONLY | os.O_NOFOLLOW,
+                    dir_fd=parent_descriptor,
+                )
+            except OSError as exc:
+                raise ShadeformError(
+                    "existing authoritative JSON cost ledger is unavailable"
+                ) from exc
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            existing_bytes, _ = _read_open_cost_ledger(
+                descriptor, parent_descriptor=parent_descriptor,
+            )
+            existing_events = _cost_ledger_events(existing_bytes)
+            if len(existing_events) != 1 or existing_events[0].get("event_kind") != "genesis":
+                raise ShadeformError(
+                    "existing authoritative JSON cost ledger is not a sole genesis"
+                )
+            expected = {
+                key: value for key, value in genesis.items()
+                if key != "recorded_at_utc"
+            }
+            actual = {
+                key: value for key, value in existing_events[0].items()
+                if key != "recorded_at_utc"
+            }
+            if actual != expected:
+                raise ShadeformError(
+                    "authoritative JSON cost ledger already exists with different genesis"
+                )
+            # A prior caller may have observed a fault after the file write but
+            # before the final durability barrier. Re-running the exact reviewed
+            # request completes those barriers without replacing history.
+            os.fsync(descriptor)
+            os.fsync(parent_descriptor)
+            return dict(existing_events[0]), "recovered_existing"
+
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        try:
+            descriptor = os.open(
+                ledger_path.name, flags, 0o600, dir_fd=parent_descriptor,
+            )
+        except FileExistsError as exc:
+            raise ShadeformError("authoritative JSON cost ledger already exists") from exc
+        except OSError as exc:
+            raise ShadeformError("cost ledger genesis no-follow creation failed") from exc
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        os.fchmod(descriptor, 0o600)
+        written = 0
+        while written < len(payload):
+            count = os.write(descriptor, payload[written:])
+            if count <= 0:
+                raise OSError("cost ledger genesis write made no progress")
+            written += count
+        os.fsync(descriptor)
+        read_back, _ = _read_open_cost_ledger(
+            descriptor, parent_descriptor=parent_descriptor,
+        )
+        if read_back != payload:
+            raise ShadeformError("cost ledger genesis bytes changed during publication")
+        opened = os.fstat(descriptor)
+        relative = os.stat(
+            ledger_path.name, dir_fd=parent_descriptor, follow_symlinks=False,
+        )
+        absolute = os.stat(ledger_path, follow_symlinks=False)
+        parent_opened = os.fstat(parent_descriptor)
+        parent_current = os.stat(ledger_path.parent, follow_symlinks=False)
+        identity = (opened.st_dev, opened.st_ino, opened.st_size)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or relative.st_nlink != 1
+            or absolute.st_nlink != 1
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or identity != (relative.st_dev, relative.st_ino, relative.st_size)
+            or identity != (absolute.st_dev, absolute.st_ino, absolute.st_size)
+            or opened.st_size != len(payload)
+            or (parent_opened.st_dev, parent_opened.st_ino)
+            != (parent_current.st_dev, parent_current.st_ino)
+            or parent_opened.st_uid != os.getuid()
+            or parent_current.st_uid != os.getuid()
+            or stat.S_IMODE(parent_opened.st_mode) & 0o077
+            or stat.S_IMODE(parent_current.st_mode) & 0o077
+        ):
+            raise ShadeformError("cost ledger genesis publication identity is unsafe")
+        os.fsync(parent_descriptor)
+        verified = _cost_ledger_events(read_back)
+        if verified != [genesis]:
+            raise ShadeformError("cost ledger genesis verification failed")
+        return dict(genesis), "created"
+    finally:
+        if descriptor >= 0:
+            with contextlib.suppress(OSError):
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+        with contextlib.suppress(OSError):
+            fcntl.flock(parent_descriptor, fcntl.LOCK_UN)
+        os.close(parent_descriptor)
+
+
+def initialize_cost_ledger_genesis(**kwargs: Any) -> dict[str, Any]:
+    """Create or exactly validate the reviewed baseline, returning its event."""
+
+    genesis, _ = _initialize_cost_ledger_genesis(**kwargs)
+    return genesis
+
+
+def initialize_cost_ledger_genesis_with_status(
+    **kwargs: Any,
+) -> tuple[dict[str, Any], str]:
+    """Offline CLI variant that distinguishes create from crash-safe recovery."""
+
+    return _initialize_cost_ledger_genesis(**kwargs)
+
+
+def cost_owner_binding_sha256(phase_id: str, ownership_nonce: str, instance_id: str) -> str:
+    """Bind one cost stream to an exact phase, owner nonce, and resource ID."""
+
+    phase = validate_phase_id(phase_id)
+    nonce = validate_nonce(ownership_nonce)
+    exact = validate_resource_id(instance_id, field="cost event instance id")
+    payload = json.dumps(
+        {"instance_id": exact, "ownership_nonce": nonce, "phase_id": phase},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _canonical_cost_event(event: dict[str, Any], *, stored: bool) -> dict[str, Any]:
+    if not isinstance(event, dict):
+        raise ValueError("cost event must be an object")
+    if event.get("event_kind") == "genesis":
+        if not stored:
+            raise ValueError("cost ledger genesis may only be created by the explicit initializer")
+        return _canonical_cost_genesis(event)
+    if not set(event) <= COST_EVENT_FIELDS:
+        raise ValueError("cost event contains unknown fields")
+    if stored and event.get("schema") != COST_EVENT_SCHEMA:
+        raise ValueError("cost event schema is invalid")
+    if not stored and any(
+        field in event for field in ("schema", "recorded_at_utc", "owner_binding_sha256")
+    ):
+        raise ValueError("cost event storage fields are host-owned")
+    instance_id = event.get("instance_id")
+    phase_id = event.get("phase_id")
+    ownership_nonce = event.get("ownership_nonce")
+    if not isinstance(instance_id, str) or not isinstance(phase_id, str) or not isinstance(ownership_nonce, str):
+        raise ValueError("cost event requires exact instance, phase, and owner nonce")
+    owner_binding = cost_owner_binding_sha256(phase_id, ownership_nonce, instance_id)
+    supplied_binding = event.get("owner_binding_sha256")
+    if (stored and supplied_binding != owner_binding) or (
+        not stored and supplied_binding is not None
+    ):
+        raise ValueError("cost event owner binding is invalid")
+    if instance_id.startswith("attempt-") and instance_id != f"attempt-{ownership_nonce}":
+        raise ValueError("cost attempt is not bound to its owner nonce")
+    status = event.get("status")
+    if status not in {"pending", "settled"}:
+        raise ValueError("cost event status is invalid")
+    if status == "pending":
+        if "actual_cost_usd" in event or not _valid_cost(event.get("estimated_cost_usd")):
+            raise ValueError("pending cost event requires a finite nonnegative estimate only")
+    elif "estimated_cost_usd" in event or not _valid_cost(event.get("actual_cost_usd")):
+        raise ValueError("settled cost event requires a finite nonnegative actual only")
+    canonical = dict(event)
+    canonical["schema"] = COST_EVENT_SCHEMA
+    canonical["phase_id"] = validate_phase_id(phase_id)
+    canonical["ownership_nonce"] = validate_nonce(ownership_nonce)
+    canonical["instance_id"] = validate_resource_id(instance_id, field="cost event instance id")
+    canonical["owner_binding_sha256"] = owner_binding
+    if stored:
+        recorded = event.get("recorded_at_utc")
+        if not isinstance(recorded, str) or not 1 <= len(recorded) <= 64:
+            raise ValueError("cost event recorded timestamp is invalid")
+        try:
+            parsed = datetime.fromisoformat(recorded)
+        except ValueError as exc:
+            raise ValueError("cost event recorded timestamp is invalid") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("cost event recorded timestamp must be timezone-aware")
+        canonical["recorded_at_utc"] = parsed.isoformat()
+    try:
+        encoded = json.dumps(
+            canonical, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("cost event is not bounded JSON data") from exc
+    if len(encoded) > MAX_COST_EVENT_BYTES:
+        raise ValueError("cost event exceeds its byte bound")
+    if stored and canonical != event:
+        raise ValueError("stored cost event is not canonical")
+    return canonical
+
+
+def _cost_ledger_events(data: bytes) -> list[dict[str, Any]]:
+    if not data or len(data) > MAX_COST_LEDGER_BYTES or not data.endswith(b"\n"):
+        raise ShadeformError("cost ledger is empty, partial, or oversized")
+    lines = data.splitlines()
+    if not lines or len(lines) > MAX_COST_LEDGER_LINES:
+        raise ShadeformError("cost ledger exceeds the bounded recovery line count")
+    events: list[dict[str, Any]] = []
+    owners_by_instance: dict[str, str] = {}
+    state_by_owner: dict[str, dict[str, Any]] = {}
+    for number, line in enumerate(lines, 1):
+        if not line or len(line) > MAX_COST_EVENT_BYTES:
+            raise ShadeformError(f"cost ledger line {number} is empty or oversized")
+        try:
+            event = _canonical_cost_event(
+                strict_json_object(line, label=f"cost ledger line {number}"),
+                stored=True,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ShadeformError(f"cost ledger line {number} is invalid") from exc
+        if event.get("event_kind") == "genesis":
+            if number != 1 or any(item.get("event_kind") == "genesis" for item in events):
+                raise ShadeformError("cost ledger genesis must be the unique first event")
+            events.append(event)
+            continue
+        instance_id = event["instance_id"]
+        owner_binding = event["owner_binding_sha256"]
+        previous_owner = owners_by_instance.setdefault(instance_id, owner_binding)
+        if previous_owner != owner_binding:
+            raise ShadeformError(
+                f"cost ledger line {number} reuses an instance for a different owner"
+            )
+        previous = state_by_owner.get(owner_binding)
+        if previous is None and event["status"] != "pending":
+            raise ShadeformError(f"cost ledger line {number} settles an unknown owner")
+        if (
+            previous is not None
+            and previous["status"] == "pending"
+            and event["status"] == "pending"
+            and event["estimated_cost_usd"] != previous["estimated_cost_usd"]
+        ):
+            raise ShadeformError(f"cost ledger line {number} changes a pending estimate")
+        if previous is not None and previous["status"] == "settled":
+            if event["status"] != "settled" or event["actual_cost_usd"] != previous["actual_cost_usd"]:
+                raise ShadeformError(f"cost ledger line {number} changes a settled owner")
+        state_by_owner[owner_binding] = event
+        events.append(event)
+    return events
+
+
+def _require_cost_ledger_path_identity(
+    opened: os.stat_result, *, parent_descriptor: int,
+) -> None:
+    try:
+        relative = os.stat(
+            Path(COST_LEDGER).name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        current = os.stat(COST_LEDGER, follow_symlinks=False)
+        parent_opened = os.fstat(parent_descriptor)
+        parent_current = os.stat(Path(COST_LEDGER).parent, follow_symlinks=False)
+    except OSError as exc:
+        raise ShadeformError("cost ledger path identity is unavailable") from exc
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or not stat.S_ISREG(relative.st_mode)
+        or not stat.S_ISREG(current.st_mode)
+        or opened.st_nlink != 1
+        or relative.st_nlink != 1
+        or current.st_nlink != 1
+        or opened.st_uid != os.getuid()
+        or relative.st_uid != os.getuid()
+        or current.st_uid != os.getuid()
+        or stat.S_IMODE(opened.st_mode) != 0o600
+        or stat.S_IMODE(relative.st_mode) != 0o600
+        or stat.S_IMODE(current.st_mode) != 0o600
+        or (opened.st_dev, opened.st_ino, opened.st_size)
+        != (relative.st_dev, relative.st_ino, relative.st_size)
+        or (opened.st_dev, opened.st_ino, opened.st_size)
+        != (current.st_dev, current.st_ino, current.st_size)
+        or not stat.S_ISDIR(parent_opened.st_mode)
+        or not stat.S_ISDIR(parent_current.st_mode)
+        or (parent_opened.st_dev, parent_opened.st_ino)
+        != (parent_current.st_dev, parent_current.st_ino)
+        or parent_opened.st_uid != os.getuid()
+        or parent_current.st_uid != os.getuid()
+        or stat.S_IMODE(parent_opened.st_mode) & 0o077
+        or stat.S_IMODE(parent_current.st_mode) & 0o077
+    ):
+        raise ShadeformError("cost ledger path identity or permissions are unsafe")
+
+
+def _read_open_cost_ledger(
+    descriptor: int, *, parent_descriptor: int,
+) -> tuple[bytes, os.stat_result]:
+    before = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or before.st_size > MAX_COST_LEDGER_BYTES
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) != 0o600
+    ):
+        raise ShadeformError(
+            "cost ledger is not bounded owner-private single-link regular data"
+        )
+    _require_cost_ledger_path_identity(
+        before, parent_descriptor=parent_descriptor,
+    )
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    total = 0
+    while total <= MAX_COST_LEDGER_BYTES:
+        chunk = os.read(descriptor, min(65_536, MAX_COST_LEDGER_BYTES + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > MAX_COST_LEDGER_BYTES:
+            raise ShadeformError("cost ledger exceeds its byte bound")
+    after = os.fstat(descriptor)
+    if (
+        after.st_nlink != 1
+        or after.st_uid != os.getuid()
+        or stat.S_IMODE(after.st_mode) != 0o600
+        or (before.st_dev, before.st_ino, before.st_size)
+        != (after.st_dev, after.st_ino, after.st_size)
+        or total != after.st_size
+    ):
+        raise ShadeformError("cost ledger changed during descriptor read")
+    _require_cost_ledger_path_identity(
+        after, parent_descriptor=parent_descriptor,
+    )
+    return b"".join(chunks), after
+
+
+def cost_ledger_events() -> list[dict[str, Any]]:
+    """Load the authoritative ledger through its one strict filesystem/parser path."""
+
+    ledger_path = Path(COST_LEDGER)
+    parent_descriptor = _open_private_canonical_parent(ledger_path)
+    descriptor = -1
+    try:
+        fcntl.flock(parent_descriptor, fcntl.LOCK_SH)
+        flags = os.O_RDONLY | os.O_NOFOLLOW
+        try:
+            descriptor = os.open(
+                ledger_path.name, flags, dir_fd=parent_descriptor,
+            )
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise ShadeformError("cost ledger no-follow open failed") from exc
+        fcntl.flock(descriptor, fcntl.LOCK_SH)
+        data, _ = _read_open_cost_ledger(
+            descriptor, parent_descriptor=parent_descriptor,
+        )
+        return _cost_ledger_events(data)
+    finally:
+        if descriptor >= 0:
+            with contextlib.suppress(OSError):
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+        with contextlib.suppress(OSError):
+            fcntl.flock(parent_descriptor, fcntl.LOCK_UN)
+        os.close(parent_descriptor)
+
+
+def ledger_spend(*, expected_budget_cap_usd: float | None = None) -> tuple[float, list[str]]:
     """Return (dollars already committed, instance IDs whose cost is still unrecorded).
 
     AGENTS.md 1.4: ``SHADEFORM_MAX_TOTAL_COST_USD`` is the budget for the whole
@@ -694,97 +1270,278 @@ def ledger_spend() -> tuple[float, list[str]]:
     money was never accounted for -- which is a stop, not a rounding error.
     """
 
-    if COST_LEDGER.is_file():
-        latest: dict[str, dict[str, Any]] = {}
-        if COST_LEDGER.stat().st_size > 1_048_576:
-            raise ShadeformError("cost ledger exceeds the bounded recovery size")
-        with COST_LEDGER.open("r", encoding="utf-8") as handle:
-            for number, line in enumerate(handle, 1):
-                if number > 4096:
-                    raise ShadeformError("cost ledger exceeds the bounded recovery line count")
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise ShadeformError(f"cost ledger line {number} is invalid JSON") from exc
-                if not isinstance(event, dict):
-                    raise ShadeformError(f"cost ledger line {number} is not an object")
-                status = event.get("status")
-                if status not in {"pending", "settled"}:
-                    raise ShadeformError(f"cost ledger line {number} has an unknown status")
-                if status == "pending":
-                    if "actual_cost_usd" in event or not _valid_cost(event.get("estimated_cost_usd")):
-                        raise ShadeformError(f"cost ledger line {number} has an invalid pending cost")
-                elif "estimated_cost_usd" in event or not _valid_cost(event.get("actual_cost_usd")):
-                    raise ShadeformError(f"cost ledger line {number} has an invalid settled cost")
-                instance_id = event.get("instance_id")
-                if not isinstance(instance_id, str) or not instance_id or len(instance_id) > 256:
-                    raise ShadeformError(f"cost ledger line {number} has no bounded instance identity")
-                latest[instance_id] = event
-        spent = 0.0
-        pending: list[str] = []
-        for instance_id, event in latest.items():
-            if event.get("status") == "pending":
-                pending.append(instance_id)
-            else:
-                actual = event.get("actual_cost_usd")
-                spent += float(actual)
-        return round(spent, 6), pending
-    if not MARKDOWN_LEDGER.is_file():
-        return 0.0, []
-    spent = 0.0
+    try:
+        events = cost_ledger_events()
+    except FileNotFoundError as exc:
+        # The Markdown ledger is an operator-readable projection. It is not an
+        # append-only, owner-bound source of truth and therefore can never
+        # authorize a provider mutation or establish a zero historical spend.
+        raise ShadeformError(
+            "authoritative JSON cost ledger is absent; budget state cannot be proven"
+        ) from exc
+    genesis = events[0] if events and events[0].get("event_kind") == "genesis" else None
+    if expected_budget_cap_usd is not None:
+        if not _valid_cost(expected_budget_cap_usd) or float(expected_budget_cap_usd) <= 0:
+            raise BudgetError("SHADEFORM_MAX_TOTAL_COST_USD must be finite and positive")
+        if genesis is None:
+            # Owner-only ledgers remain readable for exact cleanup and incident
+            # accounting, but can never authorize another provider mutation.
+            raise BudgetError(
+                "authoritative JSON cost ledger has no reviewed genesis baseline"
+            )
+        if float(genesis["budget_cap_usd"]) != float(expected_budget_cap_usd):
+            raise BudgetError(
+                "configured total-cost cap does not match the reviewed ledger genesis"
+            )
+    latest = {
+        event["owner_binding_sha256"]: event
+        for event in events
+        if event.get("event_kind") != "genesis"
+    }
+    spent = float(genesis["prior_settled_spend_usd"]) if genesis is not None else 0.0
     pending: list[str] = []
-    for line in MARKDOWN_LEDGER.read_text(encoding="utf-8").splitlines():
-        row = _parse_ledger_row(line)
-        if row is None:
-            continue
-        status = row["status"].strip().lower()
-        if status not in {"pending", "settled"} and status not in LEDGER_LIFECYCLE_STATUSES:
-            raise ShadeformError(f"markdown ledger entry {row['instance_id']} has an unknown status")
-        cost = row["cost"].strip().lstrip("$")
-        # Legacy operational rows remain pending until an exact terminal
-        # status (for example, ``deleted``) records a numeric cost. Numeric
-        # values on a nonterminal row must not make it look settled.
-        if status == "pending" or status not in TERMINAL_STATUSES | {"settled"}:
-            pending.append(row["instance_id"])
-            continue
-        try:
-            parsed_cost = float(cost)
-        except (TypeError, ValueError):
-            raise ShadeformError(f"markdown ledger entry {row['instance_id']} has invalid settled cost") from None
-        if not math.isfinite(parsed_cost) or parsed_cost < 0:
-            raise ShadeformError(f"markdown ledger entry {row['instance_id']} has invalid cost")
-        spent += parsed_cost
+    for event in latest.values():
+        if event.get("status") == "pending":
+            pending.append(event["instance_id"])
+        else:
+            actual = event.get("actual_cost_usd")
+            spent += float(actual)
+    if (
+        not math.isfinite(spent)
+        or (genesis is not None and spent > float(genesis["budget_cap_usd"]))
+    ):
+        raise BudgetError("authoritative cost ledger exceeds its reviewed cap")
     return round(spent, 6), pending
 
 
+def exact_owner_cost_state(
+    phase_id: str, ownership_nonce: str, instance_id: str,
+) -> dict[str, Any] | None:
+    """Return the latest canonical event for one exact owner/resource.
+
+    Recovery uses this before creating an exact-instance reservation.  The
+    complete ledger is still validated first, so a reused provider instance ID,
+    changed pending estimate, partial row, or different owner cannot be hidden
+    by selecting only the requested stream.
+    """
+
+    owner_binding = cost_owner_binding_sha256(
+        phase_id, ownership_nonce, instance_id,
+    )
+    try:
+        events = cost_ledger_events()
+    except FileNotFoundError:
+        return None
+    matches = [
+        event for event in events
+        if event.get("event_kind") != "genesis"
+        and event["owner_binding_sha256"] == owner_binding
+    ]
+    return dict(matches[-1]) if matches else None
+
+
 def append_cost_event(event: dict[str, Any]) -> None:
-    """Append one immutable settled/pending cost event; never rewrite history."""
+    """Append one immutable settled/pending event to an existing authority.
 
-    if not isinstance(event, dict) or not event.get("instance_id") or event.get("status") not in {"pending", "settled"}:
-        raise ValueError("cost event requires instance_id and status")
-    instance_id = event["instance_id"]
-    if not isinstance(instance_id, str) or len(instance_id) > 256:
-        raise ValueError("cost event instance_id must be bounded text")
-    status = event["status"]
-    if status == "pending":
-        if "actual_cost_usd" in event or not _valid_cost(event.get("estimated_cost_usd")):
-            raise ValueError("pending cost event requires a finite nonnegative estimate only")
-    elif "estimated_cost_usd" in event or not _valid_cost(event.get("actual_cost_usd")):
-        raise ValueError("settled cost event requires a finite nonnegative actual only")
-    _ensure_durable_directory(COST_LEDGER.parent)
-    lock_path = COST_LEDGER.with_suffix(".lock")
-    with lock_path.open("a+b") as lock_handle:
-        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-        with COST_LEDGER.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({**event, "recorded_at_utc": utc_now().isoformat()}, sort_keys=True) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        _fsync_directory(COST_LEDGER.parent)
-        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    Only the explicit genesis initializer may create ``COST_LEDGER``.  Cleanup
+    may append to a legacy owner-only ledger for exact recovery, but no generic
+    append is allowed to manufacture a new budget authority.
+    """
+
+    canonical = _canonical_cost_event(event, stored=False)
+    canonical["recorded_at_utc"] = utc_now().isoformat()
+    canonical = _canonical_cost_event(canonical, stored=True)
+    payload = (
+        json.dumps(canonical, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        + "\n"
+    ).encode("utf-8")
+    if len(payload) > MAX_COST_EVENT_BYTES:
+        raise ValueError("cost event exceeds its byte bound")
+    ledger_path = Path(COST_LEDGER)
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise ShadeformError("cost ledger no-follow open is unavailable")
+    parent_descriptor = _open_private_canonical_parent(ledger_path)
+    descriptor = -1
+    flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW
+    try:
+        try:
+            fcntl.flock(parent_descriptor, fcntl.LOCK_EX)
+            descriptor = os.open(
+                ledger_path.name,
+                flags,
+                dir_fd=parent_descriptor,
+            )
+        except FileNotFoundError as exc:
+            raise ShadeformError(
+                "authoritative JSON cost ledger is absent; explicit genesis is required"
+            ) from exc
+        except OSError as exc:
+            raise ShadeformError("cost ledger no-follow open failed") from exc
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        existing, before = _read_open_cost_ledger(
+            descriptor, parent_descriptor=parent_descriptor,
+        )
+        if not existing:
+            raise ShadeformError("existing cost ledger is empty or incomplete")
+        _cost_ledger_events(existing + payload)
+        written = 0
+        while written < len(payload):
+            count = os.write(descriptor, payload[written:])
+            if count <= 0:
+                raise OSError("cost ledger append made no progress")
+            written += count
+        os.fsync(descriptor)
+        after = os.fstat(descriptor)
+        if (
+            after.st_nlink != 1
+            or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+            or after.st_size != before.st_size + len(payload)
+        ):
+            raise ShadeformError("cost ledger changed during append")
+        _require_cost_ledger_path_identity(
+            after, parent_descriptor=parent_descriptor,
+        )
+        os.fsync(parent_descriptor)
+    finally:
+        if descriptor >= 0:
+            with contextlib.suppress(OSError):
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+        with contextlib.suppress(OSError):
+            fcntl.flock(parent_descriptor, fcntl.LOCK_UN)
+        os.close(parent_descriptor)
 
 
-def reserve_create_attempt(phase_id: str, nonce: str, candidate: Candidate, *, backstop_hours: float, public_key_sha256: str, public_key_fingerprint: str | None = None, ssh_key_id: str | None = None) -> str:
-    """Durably reserve one possible create POST before any provider mutation."""
+def configured_budget_cap_usd(env: dict[str, str]) -> float:
+    """Return the exact reviewed project cap requested by configuration."""
+
+    try:
+        cap = float(env.get("SHADEFORM_MAX_TOTAL_COST_USD", "50") or "50")
+    except (TypeError, ValueError) as exc:
+        raise BudgetError("SHADEFORM_MAX_TOTAL_COST_USD must be finite and positive") from exc
+    if not math.isfinite(cap) or cap <= 0:
+        raise BudgetError("SHADEFORM_MAX_TOTAL_COST_USD must be finite and positive")
+    return cap
+
+
+def _append_reserved_cost_event(
+    canonical: dict[str, Any], payload: bytes, *, expected_budget_cap_usd: float,
+) -> None:
+    """Atomically authorize and append one pre-create reservation."""
+
+    if not _valid_cost(expected_budget_cap_usd) or float(expected_budget_cap_usd) <= 0:
+        raise BudgetError("configured total-cost cap must be finite and positive")
+    ledger_path = Path(COST_LEDGER)
+    parent_descriptor = _open_private_canonical_parent(ledger_path)
+    descriptor = -1
+    try:
+        fcntl.flock(parent_descriptor, fcntl.LOCK_EX)
+        try:
+            descriptor = os.open(
+                ledger_path.name,
+                os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW,
+                dir_fd=parent_descriptor,
+            )
+        except FileNotFoundError as exc:
+            raise BudgetError(
+                "authoritative JSON cost ledger is absent; explicit genesis is required"
+            ) from exc
+        except OSError as exc:
+            raise ShadeformError("cost ledger no-follow open failed") from exc
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        existing, before = _read_open_cost_ledger(
+            descriptor, parent_descriptor=parent_descriptor,
+        )
+        events = _cost_ledger_events(existing)
+        if not events or events[0].get("event_kind") != "genesis":
+            raise BudgetError(
+                "authoritative JSON cost ledger has no reviewed genesis baseline"
+            )
+        genesis = events[0]
+        if (
+            genesis.get("program") != COST_LEDGER_PROGRAM
+            or genesis.get("currency") != COST_LEDGER_CURRENCY
+            or float(genesis["budget_cap_usd"]) != float(expected_budget_cap_usd)
+        ):
+            raise BudgetError(
+                "configured budget authority does not match the reviewed ledger genesis"
+            )
+
+        latest: dict[str, dict[str, Any]] = {}
+        for event in events[1:]:
+            latest[event["owner_binding_sha256"]] = event
+        owner = canonical["owner_binding_sha256"]
+        prior = latest.get(owner)
+        committed = float(genesis["prior_settled_spend_usd"])
+        for binding, event in latest.items():
+            if binding == owner:
+                continue
+            amount = (
+                event["estimated_cost_usd"]
+                if event["status"] == "pending"
+                else event["actual_cost_usd"]
+            )
+            committed = math.fsum((committed, float(amount)))
+        if prior is None:
+            proposal = float(canonical["estimated_cost_usd"])
+        elif prior["status"] != "pending":
+            raise BudgetError("create-attempt reservation is already settled")
+        else:
+            # The second reservation binds the exact provider SSH-key ID.  It
+            # costs no additional money and may not change any existing field.
+            if prior["estimated_cost_usd"] != canonical["estimated_cost_usd"]:
+                raise BudgetError("create-attempt reservation estimate changed")
+            for field, value in prior.items():
+                if field in {"schema", "recorded_at_utc", "owner_binding_sha256"}:
+                    continue
+                if field not in canonical or canonical[field] != value:
+                    raise BudgetError("create-attempt reservation binding changed")
+            proposal = float(prior["estimated_cost_usd"])
+        total = math.fsum((committed, proposal))
+        if not math.isfinite(total) or total > float(genesis["budget_cap_usd"]):
+            raise BudgetError("create-attempt reservation exceeds reviewed project budget")
+
+        _cost_ledger_events(existing + payload)
+        written = 0
+        while written < len(payload):
+            count = os.write(descriptor, payload[written:])
+            if count <= 0:
+                raise OSError("cost ledger reservation append made no progress")
+            written += count
+        os.fsync(descriptor)
+        after = os.fstat(descriptor)
+        if (
+            after.st_nlink != 1
+            or after.st_uid != os.getuid()
+            or stat.S_IMODE(after.st_mode) != 0o600
+            or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+            or after.st_size != before.st_size + len(payload)
+        ):
+            raise ShadeformError("cost ledger changed during reservation append")
+        _require_cost_ledger_path_identity(after, parent_descriptor=parent_descriptor)
+        os.fsync(parent_descriptor)
+    finally:
+        if descriptor >= 0:
+            with contextlib.suppress(OSError):
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+        with contextlib.suppress(OSError):
+            fcntl.flock(parent_descriptor, fcntl.LOCK_UN)
+        os.close(parent_descriptor)
+
+
+def reserve_create_attempt(
+    phase_id: str,
+    nonce: str,
+    candidate: Candidate,
+    *,
+    backstop_hours: float,
+    public_key_sha256: str,
+    expected_budget_cap_usd: float,
+    public_key_fingerprint: str | None = None,
+    ssh_key_id: str | None = None,
+) -> str:
+    """Atomically reserve one possible create POST before provider mutation."""
 
     validate_phase_id(phase_id)
     validate_nonce(nonce)
@@ -812,7 +1569,16 @@ def reserve_create_attempt(phase_id: str, nonce: str, candidate: Candidate, *, b
         event["ssh_key_id"] = ssh_key_id
     if public_key_fingerprint is not None:
         event["ssh_public_key_fingerprint"] = public_key_fingerprint
-    append_cost_event(event)
+    canonical = _canonical_cost_event(event, stored=False)
+    canonical["recorded_at_utc"] = utc_now().isoformat()
+    canonical = _canonical_cost_event(canonical, stored=True)
+    payload = (
+        json.dumps(canonical, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        + "\n"
+    ).encode("utf-8")
+    _append_reserved_cost_event(
+        canonical, payload, expected_budget_cap_usd=expected_budget_cap_usd,
+    )
     return attempt_id
 
 
@@ -906,8 +1672,9 @@ def update_markdown_ledger(record: OwnedResource) -> None:
     """Upsert exactly one human-readable row for one provisioned resource.
 
     One resource is one row, filled in as its lifecycle advances. Once a row has
-    reached a terminal status with a recorded cost it is history and this
-    refuses to touch it; nothing here can ever rewrite a different resource's row.
+    reached a terminal status with a recorded cost, only a terminal-status
+    refinement with the same identity and accounting cells is permitted;
+    nothing here can rewrite a different resource or its recorded cost.
     """
 
     _ensure_durable_directory(RUNTIME_ROOT)
@@ -915,9 +1682,11 @@ def update_markdown_ledger(record: OwnedResource) -> None:
     with lock_path.open("a+b") as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
         try:
-            if not MARKDOWN_LEDGER.is_file():
-                raise ShadeformError("experiments/LEDGER.md must exist before provider actions")
-            existing = MARKDOWN_LEDGER.read_text(encoding="utf-8")
+            existing = required_bounded_text(
+                MARKDOWN_LEDGER,
+                MAX_MARKDOWN_LEDGER_BYTES,
+                label="experiments/LEDGER.md",
+            )
             if LEDGER_HEADER not in existing:
                 raise ShadeformError("experiments/LEDGER.md has an unexpected schema")
             row = _ledger_row(record)
@@ -934,16 +1703,28 @@ def update_markdown_ledger(record: OwnedResource) -> None:
                     and previous["cost"].strip().lower() != "pending"
                     and line.strip() != row.strip()
                 ):
-                    raise ShadeformError(
-                        "refusing to rewrite a settled ledger row for "
-                        f"{record.instance_id}; append a correction instead"
+                    replacement = _parse_ledger_row(row)
+                    immutable = (
+                        "date", "phase", "instance_id", "gpu", "hourly",
+                        "purpose", "cost", "idle",
                     )
+                    if (
+                        replacement is None
+                        or replacement["status"] not in TERMINAL_STATUSES
+                        or any(previous[key] != replacement[key] for key in immutable)
+                    ):
+                        raise ShadeformError(
+                            "refusing to rewrite settled ledger identity/cost for "
+                            f"{record.instance_id}; append a correction instead"
+                        )
                 lines[index] = row
                 replaced = True
                 break
             if not replaced:
                 lines.append(row)
             payload = "\n".join(lines) + "\n"
+            if len(payload.encode("utf-8")) > MAX_MARKDOWN_LEDGER_BYTES:
+                raise ShadeformError("experiments/LEDGER.md would exceed its byte bound")
             fd, temp_name = tempfile.mkstemp(
                 prefix=f".{MARKDOWN_LEDGER.name}.", dir=MARKDOWN_LEDGER.parent
             )
@@ -969,16 +1750,20 @@ def _preflight(phase_id: str | None = None) -> None:
     a preflight that can be satisfied by a stat() is not one.
     """
 
-    if not MARKDOWN_LEDGER.is_file():
-        raise ShadeformError("experiments/LEDGER.md must exist before provider actions")
-    MARKDOWN_LEDGER.read_text(encoding="utf-8")
-    if not INCIDENT_LOG.is_file():
-        # Not relative_to(ROOT): the constant is monkeypatchable, and an error
-        # path that can itself raise is worse than no error path.
-        raise ShadeformError(
-            f"the failure-mode catalogue must exist before provider actions: {INCIDENT_LOG}"
-        )
-    INCIDENT_LOG.read_text(encoding="utf-8")
+    markdown = required_bounded_text(
+        MARKDOWN_LEDGER,
+        MAX_MARKDOWN_LEDGER_BYTES,
+        label="experiments/LEDGER.md",
+    )
+    if LEDGER_HEADER not in markdown:
+        raise ShadeformError("experiments/LEDGER.md has an unexpected schema")
+    incident_catalog = required_bounded_text(
+        INCIDENT_LOG,
+        MAX_INCIDENT_CATALOG_BYTES,
+        label="failure-mode catalogue",
+    )
+    if not incident_catalog.strip():
+        raise ShadeformError("failure-mode catalogue is empty")
     if phase_id is not None:
         validate_phase_id(phase_id)
 
@@ -1110,16 +1895,11 @@ def _hourly_usd(value: object) -> float | None:
 def remaining_budget_usd(env: dict[str, str]) -> float:
     """Dollars left in the project budget, refusing to guess past an unaccounted row."""
 
-    try:
-        cap = float(env.get("SHADEFORM_MAX_TOTAL_COST_USD", "50") or "50")
-    except (TypeError, ValueError) as exc:
-        raise BudgetError("SHADEFORM_MAX_TOTAL_COST_USD must be finite and positive") from exc
-    if not math.isfinite(cap) or cap <= 0:
-        raise BudgetError("SHADEFORM_MAX_TOTAL_COST_USD must be finite and positive")
-    spent, pending = ledger_spend()
+    cap = configured_budget_cap_usd(env)
+    spent, pending = ledger_spend(expected_budget_cap_usd=cap)
     if pending:
         raise BudgetError(
-            "experiments/LEDGER.md still records cost 'pending' for "
+            "authoritative JSON cost ledger still records cost 'pending' for "
             f"{', '.join(pending)}; account for that run before launching another"
         )
     return round(cap - spent, 6)
@@ -1332,6 +2112,11 @@ def create_ephemeral_ssh_key(env: dict[str, str], directory: Path) -> tuple[Path
 
 
 def add_ssh_key(api_key: str, phase_id: str, name: str, public_key: str) -> str:
+    # Repeat the launcher's early guard at the shared mutation boundary.
+    # Legacy phase-only evidence can appear after caller preflight and cannot
+    # safely be associated with this owner. No provider POST may be dispatched
+    # once it exists.
+    preflight_legacy_deletion_evidence(phase_id)
     try:
         response = request(
             api_key,
@@ -1444,7 +2229,9 @@ def reconcile_ssh_key(
     return matches[0]
 
 
-def delete_ssh_key(api_key: str, phase_id: str, key_id: str, *, deadline: float | None = None) -> dict[str, Any]:
+def _delete_ssh_key_once(api_key: str, phase_id: str, key_id: str, *, deadline: float | None = None) -> dict[str, Any]:
+    """Issue the transport request only; callers need durable reconciliation."""
+
     exact = validate_resource_id(key_id, field="SSH key id")
     timeout = min(90.0, deadline - time.monotonic()) if deadline is not None else 90.0
     if timeout < 1.0:
@@ -1615,6 +2402,11 @@ def create_instance(
         "auto_delete": dict(auto_delete),
     }
     try:
+        # This is the final shared boundary before the instance POST.  Keep
+        # the earlier caller check for fail-fast behavior, but repeat it here
+        # so evidence introduced between caller validation and dispatch stops
+        # the mutation.
+        preflight_legacy_deletion_evidence(phase_id)
         response = request(
             api_key, "POST", "/instances/create", payload, phase_id=phase_id, timeout=180
         )
@@ -1866,6 +2658,342 @@ def verify_owned_ssh_key_before_delete(
             timeout=timeout,
         )
     raise ShadeformError("owned record lacks SSH key material for deletion proof")
+
+
+def _ssh_key_delete_owner(
+    phase_id: str,
+    ownership_nonce: str,
+    ssh_key_id: str,
+    *,
+    expected_name: str,
+    expected_public_key: str | None,
+    expected_fingerprint: str | None,
+    record: OwnedResource | None,
+) -> dict[str, str]:
+    """Reconstruct one exact key owner from durable local authority."""
+
+    phase = validate_phase_id(phase_id)
+    nonce = validate_nonce(ownership_nonce)
+    key_id = validate_resource_id(ssh_key_id, field="SSH key id")
+    if (
+        not isinstance(expected_name, str)
+        or not expected_name
+        or len(expected_name) > 256
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in expected_name)
+    ):
+        raise ValueError("expected SSH key name is invalid")
+    calculated_fingerprint: str | None = None
+    public_key_sha256: str | None = None
+    if expected_public_key is not None:
+        calculated_fingerprint = ssh_public_key_fingerprint(expected_public_key)
+        public_key_sha256 = hashlib.sha256(expected_public_key.encode("utf-8")).hexdigest()
+        if expected_fingerprint is not None and expected_fingerprint != calculated_fingerprint:
+            raise ShadeformError("SSH key deletion fingerprint binding changed")
+    fingerprint = expected_fingerprint or calculated_fingerprint
+    if not isinstance(fingerprint, str) or re.fullmatch(r"[A-Za-z0-9+/]{43}", fingerprint) is None:
+        raise ValueError("SSH key deletion requires an exact fingerprint")
+
+    if record is not None:
+        _validate_owned_resource(record)
+        if (
+            record.phase_id != phase
+            or record.ownership_nonce != nonce
+            or record.ssh_key_id != key_id
+            or record.ssh_key_name != expected_name
+        ):
+            raise ShadeformError("owned record does not match the SSH key delete owner")
+        durable_records = tuple(
+            item for item in (
+                read_owned_resource(phase), read_recovery_owned_resource(phase),
+            )
+            if item is not None
+        )
+        if not any(asdict(item) == asdict(record) for item in durable_records):
+            raise ShadeformError("SSH key delete owner is not durably recorded")
+
+    # The enriched pre-create reservation is the common durable authority for
+    # normal, recovery, watchdog, and key-only cleanup paths.
+    try:
+        events = cost_ledger_events()
+    except FileNotFoundError as exc:
+        raise ShadeformError("SSH key deletion cost authority is absent") from exc
+    attempt_events = [
+        event for event in events
+        if event.get("event_kind") != "genesis"
+        and event.get("phase_id") == phase
+        and event.get("ownership_nonce") == nonce
+        and event.get("instance_id") == f"attempt-{nonce}"
+    ]
+    if any(
+        (event.get("ssh_key_id") is not None and event.get("ssh_key_id") != key_id)
+        or (event.get("ssh_key_name") is not None and event.get("ssh_key_name") != expected_name)
+        or (
+            event.get("ssh_public_key_fingerprint") is not None
+            and event.get("ssh_public_key_fingerprint") != fingerprint
+        )
+        for event in attempt_events
+    ):
+        raise ShadeformError("SSH key deletion reservation history changed owner")
+    matching = [
+        event for event in attempt_events
+        if event.get("reservation") == "pre-create-attempt"
+        and event.get("ssh_key_name") == expected_name
+        and event.get("ssh_public_key_fingerprint") == fingerprint
+    ]
+    if not matching or any(
+        event.get("ssh_key_id") not in {None, key_id} for event in matching
+    ):
+        raise ShadeformError("SSH key deletion lacks an exact reservation binding")
+    reserved_public_digests = {
+        event.get("ssh_public_key_sha256") for event in matching
+    }
+    if len(reserved_public_digests) != 1:
+        raise ShadeformError("SSH key deletion reservation public-key binding changed")
+    reserved_public_sha = next(iter(reserved_public_digests))
+    if not isinstance(reserved_public_sha, str) or re.fullmatch(r"[0-9a-f]{64}", reserved_public_sha) is None:
+        raise ShadeformError("SSH key deletion reservation lacks its public-key digest")
+    if public_key_sha256 is not None and public_key_sha256 != reserved_public_sha:
+        raise ShadeformError("SSH key deletion public-key binding changed")
+    return {
+        "phase_id": phase,
+        "ownership_nonce": nonce,
+        "ssh_key_id": key_id,
+        "ssh_key_name": expected_name,
+        "ssh_public_key_fingerprint": fingerprint,
+        "ssh_public_key_sha256": reserved_public_sha,
+    }
+
+
+def _ssh_key_delete_evidence_path(owner: dict[str, str], kind: str) -> Path:
+    if kind not in {"intent", "confirmation"}:
+        raise ValueError("invalid SSH key deletion evidence kind")
+    digest = hashlib.sha256(
+        json.dumps(owner, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return RUNTIME_ROOT / f"{owner['phase_id']}.{digest}.ssh-key-deletion-{kind}.json"
+
+
+def _canonical_ssh_key_delete_evidence(
+    payload: dict[str, Any], *, owner: dict[str, str], kind: str,
+) -> dict[str, Any]:
+    schema = (
+        SSH_KEY_DELETE_INTENT_SCHEMA
+        if kind == "intent"
+        else SSH_KEY_DELETE_CONFIRMATION_SCHEMA
+    )
+    fields = {"schema", "owner", "status", "dispatched_at_utc"}
+    if kind == "confirmation":
+        fields |= {"confirmed_at_utc", "evidence"}
+    if set(payload) != fields or payload.get("schema") != schema:
+        raise ShadeformError(f"SSH key deletion {kind} schema is invalid")
+    if payload.get("owner") != owner:
+        raise ShadeformError(f"SSH key deletion {kind} owner binding is invalid")
+    expected_status = "dispatched" if kind == "intent" else "confirmed"
+    if payload.get("status") != expected_status:
+        raise ShadeformError(f"SSH key deletion {kind} status is invalid")
+    for field in ("dispatched_at_utc", "confirmed_at_utc"):
+        if field not in payload:
+            continue
+        value = payload.get(field)
+        if not isinstance(value, str) or not 1 <= len(value) <= 64:
+            raise ShadeformError(f"SSH key deletion {kind} timestamp is invalid")
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise ShadeformError(f"SSH key deletion {kind} timestamp is invalid") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None or parsed.isoformat() != value:
+            raise ShadeformError(f"SSH key deletion {kind} timestamp is invalid")
+    if kind == "confirmation":
+        if payload.get("evidence") not in {"provider-404", "provider-deleted"}:
+            raise ShadeformError("SSH key deletion confirmation evidence is invalid")
+        if datetime.fromisoformat(payload["confirmed_at_utc"]) < datetime.fromisoformat(
+            payload["dispatched_at_utc"]
+        ):
+            raise ShadeformError("SSH key deletion confirmation predates dispatch")
+    encoded = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    if len(encoded) > MAX_SSH_KEY_DELETE_EVIDENCE_BYTES:
+        raise ShadeformError(f"SSH key deletion {kind} exceeds its byte bound")
+    return dict(payload)
+
+
+def _read_ssh_key_delete_evidence(
+    owner: dict[str, str], kind: str,
+) -> dict[str, Any] | None:
+    path = _ssh_key_delete_evidence_path(owner, kind)
+    try:
+        data = bounded_stable_bytes(
+            path, MAX_SSH_KEY_DELETE_EVIDENCE_BYTES,
+            label=f"SSH key deletion {kind}",
+        )
+    except FileNotFoundError:
+        return None
+    payload = strict_json_object(data, label=f"SSH key deletion {kind}")
+    return _canonical_ssh_key_delete_evidence(payload, owner=owner, kind=kind)
+
+
+def _create_ssh_key_delete_evidence(
+    owner: dict[str, str], kind: str, payload: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    canonical = _canonical_ssh_key_delete_evidence(payload, owner=owner, kind=kind)
+    data = (json.dumps(canonical, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    try:
+        durable_create_new(_ssh_key_delete_evidence_path(owner, kind), data)
+        return canonical, True
+    except FileExistsError:
+        existing = _read_ssh_key_delete_evidence(owner, kind)
+        if existing is None:
+            raise ShadeformError(f"SSH key deletion {kind} raced publication")
+        if kind == "intent":
+            # A timestamp chosen by another exact-owner actor is authoritative.
+            return existing, False
+        if existing != canonical:
+            raise ShadeformError("SSH key deletion confirmation is immutable")
+        return existing, False
+
+
+def _remaining_key_delete_timeout(deadline: float | None) -> float:
+    timeout = 90.0 if deadline is None else min(90.0, deadline - time.monotonic())
+    if timeout < 1.0:
+        raise TimeoutError("SSH key deletion deadline exhausted")
+    return timeout
+
+
+def _exact_ssh_key_provider_state(
+    api_key: str,
+    owner: dict[str, str],
+    *,
+    expected_public_key: str | None,
+    deadline: float | None,
+) -> tuple[str, str | None]:
+    try:
+        if expected_public_key is not None:
+            info = verify_ssh_key_ownership(
+                api_key,
+                owner["phase_id"],
+                owner["ssh_key_id"],
+                expected_name=owner["ssh_key_name"],
+                expected_public_key=expected_public_key,
+                timeout=_remaining_key_delete_timeout(deadline),
+            )
+        else:
+            info = verify_ssh_key_fingerprint(
+                api_key,
+                owner["phase_id"],
+                owner["ssh_key_id"],
+                expected_name=owner["ssh_key_name"],
+                expected_fingerprint=owner["ssh_public_key_fingerprint"],
+                timeout=_remaining_key_delete_timeout(deadline),
+            )
+    except ShadeformHTTPError as exc:
+        if exc.status == 404:
+            return "absent", "provider-404"
+        raise
+    if info.get("status") == "deleted":
+        return "absent", "provider-deleted"
+    return "present", None
+
+
+def delete_owned_ssh_key_exact(
+    api_key: str,
+    phase_id: str,
+    ssh_key_id: str,
+    *,
+    ownership_nonce: str,
+    expected_name: str,
+    expected_public_key: str | None = None,
+    expected_fingerprint: str | None = None,
+    record: OwnedResource | None = None,
+    deadline: float | None = None,
+) -> dict[str, Any]:
+    """Delete one exact owned key through a durable, no-replay state machine."""
+
+    owner = _ssh_key_delete_owner(
+        phase_id,
+        ownership_nonce,
+        ssh_key_id,
+        expected_name=expected_name,
+        expected_public_key=expected_public_key,
+        expected_fingerprint=expected_fingerprint,
+        record=record,
+    )
+    confirmation = _read_ssh_key_delete_evidence(owner, "confirmation")
+    if confirmation is not None:
+        intent = _read_ssh_key_delete_evidence(owner, "intent")
+        if intent is None or confirmation["dispatched_at_utc"] != intent["dispatched_at_utc"]:
+            raise ShadeformError("SSH key deletion confirmation lacks its exact intent")
+        return {"status": "confirmed", "evidence": confirmation["evidence"]}
+
+    intent = _read_ssh_key_delete_evidence(owner, "intent")
+    if intent is None:
+        state, _ = _exact_ssh_key_provider_state(
+            api_key, owner, expected_public_key=expected_public_key, deadline=deadline,
+        )
+        if state != "present":
+            raise ShadeformError("SSH key absence without a durable intent requires manual recovery")
+        requested_intent = {
+            "schema": SSH_KEY_DELETE_INTENT_SCHEMA,
+            "owner": owner,
+            "status": "dispatched",
+            "dispatched_at_utc": utc_now().isoformat(),
+        }
+        intent, claimed = _create_ssh_key_delete_evidence(
+            owner, "intent", requested_intent,
+        )
+        if claimed:
+            _delete_ssh_key_once(
+                api_key, owner["phase_id"], owner["ssh_key_id"], deadline=deadline,
+            )
+
+    # Once the intent exists, every caller queries first and never reissues the
+    # DELETE.  Accepted-but-present/deleting and transport ambiguity therefore
+    # retain exact recovery evidence and ownership for a later retry.
+    state, evidence = _exact_ssh_key_provider_state(
+        api_key, owner, expected_public_key=expected_public_key, deadline=deadline,
+    )
+    if state != "absent" or evidence is None:
+        raise AmbiguousProviderOutcome(
+            "SSH key deletion is not yet authoritatively confirmed"
+        )
+    confirmed = {
+        "schema": SSH_KEY_DELETE_CONFIRMATION_SCHEMA,
+        "owner": owner,
+        "status": "confirmed",
+        "dispatched_at_utc": intent["dispatched_at_utc"],
+        "confirmed_at_utc": utc_now().isoformat(),
+        "evidence": evidence,
+    }
+    confirmation, _ = _create_ssh_key_delete_evidence(
+        owner, "confirmation", confirmed,
+    )
+    return {"status": "confirmed", "evidence": confirmation["evidence"]}
+
+
+def ssh_key_deletion_is_confirmed(
+    phase_id: str,
+    ssh_key_id: str,
+    *,
+    ownership_nonce: str,
+    expected_name: str,
+    expected_fingerprint: str,
+) -> bool:
+    """Validate retained exact-owner key intent/confirmation without a request."""
+
+    owner = _ssh_key_delete_owner(
+        phase_id,
+        ownership_nonce,
+        ssh_key_id,
+        expected_name=expected_name,
+        expected_public_key=None,
+        expected_fingerprint=expected_fingerprint,
+        record=None,
+    )
+    intent = _read_ssh_key_delete_evidence(owner, "intent")
+    confirmation = _read_ssh_key_delete_evidence(owner, "confirmation")
+    return bool(
+        intent is not None
+        and confirmation is not None
+        and confirmation["dispatched_at_utc"] == intent["dispatched_at_utc"]
+    )
 
 
 def wait_active(

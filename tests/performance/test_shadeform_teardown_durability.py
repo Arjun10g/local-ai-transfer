@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -16,13 +17,29 @@ from scripts.shadeform import remote_external_tools
 class ShadeformTeardownDurabilityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.originals = (sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER, sf.INCIDENTS)
         sf.RUNTIME_ROOT = self.root / "runtime"
         sf.MARKDOWN_LEDGER = self.root / "LEDGER.md"
         sf.COST_LEDGER = sf.RUNTIME_ROOT / "cost-ledger.jsonl"
         sf.INCIDENTS = sf.RUNTIME_ROOT / "incidents.jsonl"
+        sf.RUNTIME_ROOT.mkdir(mode=0o700)
         sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
+        sf.INCIDENTS.write_text('{"incident":"fixture"}\n', encoding="utf-8")
+        sf.initialize_cost_ledger_genesis(
+            program=sf.COST_LEDGER_PROGRAM,
+            currency=sf.COST_LEDGER_CURRENCY,
+            budget_cap_usd=50.0,
+            prior_settled_spend_usd=0.0,
+            current_pending_owner_count=0,
+            expected_display_ledger_sha256=hashlib.sha256(
+                sf.MARKDOWN_LEDGER.read_bytes()
+            ).hexdigest(),
+            expected_incidents_sha256=hashlib.sha256(
+                sf.INCIDENTS.read_bytes()
+            ).hexdigest(),
+            confirmation=sf.COST_LEDGER_GENESIS_CONFIRMATION,
+        )
         self.env_file = self.root / "env"
         self.env_file.write_text("SHADEFORM_API_KEY=fixture-only\n", encoding="utf-8")
 
@@ -90,7 +107,7 @@ class ShadeformTeardownDurabilityTests(unittest.TestCase):
                 mock.patch.object(sf, "_delete_instance") as delete, \
                 mock.patch.object(sf, "append_cost_event", side_effect=lambda event: events.append(dict(event))), \
                 mock.patch.object(sf, "verify_owned_ssh_key_before_delete", return_value={}), \
-                mock.patch.object(sf, "delete_ssh_key", return_value={"success": True}):
+                mock.patch.object(sf, "delete_owned_ssh_key_exact", return_value={"status": "confirmed"}):
             receipt = teardown.teardown_exact(record.phase_id, record.instance_id, env_file=self.env_file)
         delete.assert_not_called()
         instance_event = next(event for event in events if event["instance_id"] == record.instance_id)
@@ -117,7 +134,7 @@ class ShadeformTeardownDurabilityTests(unittest.TestCase):
                 mock.patch.object(sf, "_delete_instance", side_effect=delete), \
                 mock.patch.object(sf, "append_cost_event"), \
                 mock.patch.object(sf, "verify_owned_ssh_key_before_delete", return_value={}), \
-                mock.patch.object(sf, "delete_ssh_key", return_value={"success": True}):
+                mock.patch.object(sf, "delete_owned_ssh_key_exact", return_value={"status": "confirmed"}):
             receipt = teardown.teardown_exact(record.phase_id, record.instance_id, env_file=self.env_file)
         self.assertEqual(order, ["full-proof", "delete"])
         self.assertEqual(receipt["status"], "complete")
@@ -149,7 +166,7 @@ class ShadeformTeardownDurabilityTests(unittest.TestCase):
                 mock.patch.object(sf, "_delete_instance") as delete, \
                 mock.patch.object(sf, "append_cost_event", side_effect=lambda event: events.append(dict(event))), \
                 mock.patch.object(sf, "verify_owned_ssh_key_before_delete", return_value={}), \
-                mock.patch.object(sf, "delete_ssh_key", return_value={"success": True}):
+                mock.patch.object(sf, "delete_owned_ssh_key_exact", return_value={"status": "confirmed"}):
             receipt = teardown.teardown_exact(record.phase_id, record.instance_id, env_file=self.env_file)
         delete.assert_not_called()
         cost = next(event["actual_cost_usd"] for event in events if event["instance_id"] == record.instance_id)
@@ -169,12 +186,12 @@ class ShadeformTeardownDurabilityTests(unittest.TestCase):
                 raise OSError("final receipt fsync failed")
             return real_writer(*args, **kwargs)
 
-        delete_key = mock.Mock(return_value={"success": True})
+        delete_key = mock.Mock(return_value={"status": "confirmed"})
         with mock.patch.object(sf, "verify_owned_instance_before_delete", return_value={}), \
                 mock.patch.object(sf, "_delete_instance", return_value={"success": True}), \
                 mock.patch.object(sf, "append_cost_event"), \
                 mock.patch.object(sf, "verify_owned_ssh_key_before_delete", return_value={}), \
-                mock.patch.object(sf, "delete_ssh_key", delete_key), \
+                mock.patch.object(sf, "delete_owned_ssh_key_exact", delete_key), \
                 mock.patch.object(teardown, "_write_deletion_receipt", side_effect=fail_final):
             with self.assertRaises(RuntimeError):
                 teardown.teardown_exact(record.phase_id, record.instance_id, env_file=self.env_file)
@@ -182,15 +199,21 @@ class ShadeformTeardownDurabilityTests(unittest.TestCase):
         delete_key.assert_called_once()
 
         with mock.patch.object(sf, "append_cost_event"), \
-                mock.patch.object(sf, "verify_owned_ssh_key_before_delete", side_effect=sf.ShadeformHTTPError(404, "absent")), \
-                mock.patch.object(sf, "delete_ssh_key") as second_delete:
+                mock.patch.object(sf, "delete_owned_ssh_key_exact", return_value={"status": "confirmed"}) as second_delete:
             receipt = teardown.teardown_exact(record.phase_id, record.instance_id, env_file=self.env_file)
-        second_delete.assert_not_called()
+        second_delete.assert_called_once()
         self.assertEqual(receipt["status"], "complete")
         self.assertIsNone(sf.read_owned_resource(record.phase_id))
 
     def test_recovered_caller_crash_after_provider_delete_retains_exact_retry_state(self) -> None:
         record = self.record(phase="recovered-delete-crash", instance="instance-recovered-crash")
+        sf.append_cost_event({
+            "instance_id": f"attempt-{record.ownership_nonce}",
+            "phase_id": record.phase_id,
+            "ownership_nonce": record.ownership_nonce,
+            "status": "pending",
+            "estimated_cost_usd": 3.0,
+        })
         real_intent_writer = teardown._write_deletion_intent
 
         def fail_confirmation(*args, **kwargs):
@@ -201,7 +224,6 @@ class ShadeformTeardownDurabilityTests(unittest.TestCase):
         first_delete = mock.Mock(return_value={"success": True, "status": "deleted"})
         with mock.patch.object(sf, "verify_owned_instance_before_delete", return_value={"status": "active"}), \
                 mock.patch.object(sf, "_delete_instance", first_delete), \
-                mock.patch.object(sf, "append_cost_event"), \
                 mock.patch.object(teardown, "_write_deletion_intent", side_effect=fail_confirmation):
             with self.assertRaises(RuntimeError):
                 teardown.teardown_recovered_exact(record, env_file=self.env_file)
@@ -211,12 +233,299 @@ class ShadeformTeardownDurabilityTests(unittest.TestCase):
 
         with mock.patch.object(sf, "verify_owned_instance_before_delete", return_value={"status": "deleted"}), \
                 mock.patch.object(sf, "_delete_instance") as second_delete, \
-                mock.patch.object(sf, "append_cost_event"), \
                 mock.patch.object(sf, "verify_owned_ssh_key_before_delete", return_value={}), \
-                mock.patch.object(sf, "delete_ssh_key", return_value={"success": True}):
+                mock.patch.object(sf, "delete_owned_ssh_key_exact", return_value={"status": "confirmed"}):
             receipt = teardown.teardown_recovered_exact(record, env_file=self.env_file)
         second_delete.assert_not_called()
         self.assertEqual(receipt["status"], "complete")
+
+    def test_ambiguous_key_delete_reconciles_absence_without_second_delete(self) -> None:
+        record = self.record(
+            phase="transient-key-cleanup",
+            instance="instance-transient-key-cleanup",
+            nonce="9" * 32,
+            key_id="key-transient-cleanup",
+        )
+        for instance_id in (record.instance_id, f"attempt-{record.ownership_nonce}"):
+            sf.append_cost_event({
+                "instance_id": instance_id,
+                "phase_id": record.phase_id,
+                "ownership_nonce": record.ownership_nonce,
+                "status": "pending",
+                "estimated_cost_usd": 3.0,
+            })
+        sf.write_owned_resource(record)
+        delete_instance = mock.Mock(return_value={"success": True, "status": "deleted"})
+        key_proof = mock.Mock(side_effect=[
+            {},
+            sf.ShadeformHTTPError(404, "exact key absent after ambiguous delete"),
+        ])
+        delete_key = mock.Mock(side_effect=[
+            OSError("ambiguous key delete transport"),
+            {"status": "confirmed"},
+        ])
+        with mock.patch.object(sf, "verify_owned_instance_before_delete", return_value={"status": "active"}), \
+                mock.patch.object(sf, "_delete_instance", delete_instance), \
+                mock.patch.object(sf, "verify_owned_ssh_key_before_delete", key_proof), \
+                mock.patch.object(sf, "delete_owned_ssh_key_exact", delete_key):
+            first = teardown.teardown_exact(
+                record.phase_id, record.instance_id, env_file=self.env_file,
+            )
+            self.assertEqual(first["status"], "deleted-key-cleanup-failed")
+            self.assertTrue(first["retry_required"])
+            retained = sf.read_owned_resource(record.phase_id)
+            self.assertIsNotNone(retained)
+            self.assertEqual(retained.status, "deleted-key-cleanup-failed")
+
+            second = teardown.teardown_exact(
+                record.phase_id, record.instance_id, env_file=self.env_file,
+            )
+        self.assertEqual(second["status"], "complete")
+        self.assertFalse(second["retry_required"])
+        delete_instance.assert_called_once()
+        self.assertEqual(key_proof.call_count, 0)
+        self.assertEqual(delete_key.call_count, 2)
+        self.assertIsNone(sf.read_owned_resource(record.phase_id))
+
+    def test_confirmation_fault_uses_same_provider_ceiling_before_or_after_retry(self) -> None:
+        evidence_paths: list[Path] = []
+        cases = (
+            ("before", datetime(2026, 1, 1, 2, 0, tzinfo=timezone.utc), False),
+            ("after-404", datetime(2026, 2, 1, tzinfo=timezone.utc), True),
+        )
+        for suffix, retry_at, retry_404 in cases:
+            with self.subTest(retry=suffix):
+                record = self.record(
+                    phase=f"confirmation-fault-{suffix}",
+                    instance=f"instance-confirmation-fault-{suffix}",
+                    nonce=("1" if suffix == "before" else "2") * 32,
+                    key_id=f"key-confirmation-fault-{suffix}",
+                )
+                record.created_at_utc = "2026-01-01T00:00:00+00:00"
+                record.provider_delete_deadline_utc = "2026-01-01T03:00:00+00:00"
+                sf.write_owned_resource(record)
+                real_intent_writer = teardown._write_deletion_intent
+
+                def fail_confirmation(*args, **kwargs):
+                    if kwargs.get("status") == "confirmed":
+                        raise OSError("confirmation barrier failed")
+                    return real_intent_writer(*args, **kwargs)
+
+                first_delete = mock.Mock(return_value={"success": True, "status": "deleted"})
+                observed_at = datetime(2026, 1, 1, 1, 15, tzinfo=timezone.utc)
+                with mock.patch.object(sf, "utc_now", return_value=observed_at), \
+                        mock.patch.object(sf, "verify_owned_instance_before_delete", return_value={"status": "active"}), \
+                        mock.patch.object(sf, "_delete_instance", first_delete), \
+                        mock.patch.object(teardown, "_write_deletion_intent", side_effect=fail_confirmation):
+                    with self.assertRaisesRegex(RuntimeError, "confirmation could not be persisted"):
+                        teardown.teardown_exact(record.phase_id, record.instance_id, env_file=self.env_file)
+                first_delete.assert_called_once()
+                dispatched = teardown._load_deletion_intent(record.phase_id, record)
+                self.assertEqual(dispatched["status"], "dispatched")
+
+                order: list[str] = []
+
+                def append_cost(event):
+                    self.assertEqual(event["ownership_nonce"], record.ownership_nonce)
+                    order.append(f"cost:{event['instance_id']}")
+
+                def verify_key(*_args, **_kwargs):
+                    order.append("key-verify")
+                    return {}
+
+                def delete_key(*_args, **_kwargs):
+                    order.append("key-delete")
+                    return {"success": True}
+
+                real_receipt_writer = teardown._write_deletion_receipt
+
+                def write_receipt(*args, **kwargs):
+                    order.append(f"receipt:{args[1]['status']}")
+                    return real_receipt_writer(*args, **kwargs)
+
+                verification = (
+                    sf.ShadeformHTTPError(404, "gone")
+                    if retry_404 else {"status": "deleted"}
+                )
+                with mock.patch.object(sf, "utc_now", return_value=retry_at), \
+                        mock.patch.object(sf, "verify_owned_instance_before_delete", side_effect=(verification if retry_404 else None), return_value=(None if retry_404 else verification)), \
+                        mock.patch.object(sf, "_delete_instance") as second_delete, \
+                        mock.patch.object(sf, "append_cost_event", side_effect=append_cost), \
+                        mock.patch.object(sf, "verify_owned_ssh_key_before_delete", side_effect=verify_key), \
+                        mock.patch.object(sf, "delete_owned_ssh_key_exact", side_effect=delete_key), \
+                        mock.patch.object(teardown, "_write_deletion_receipt", side_effect=write_receipt):
+                    receipt = teardown.teardown_exact(
+                        record.phase_id, record.instance_id, env_file=self.env_file,
+                    )
+                second_delete.assert_not_called()
+                evidence_paths.append(teardown._deletion_confirmation_path(record.phase_id, record))
+                self.assertEqual(receipt["status"], "complete")
+                self.assertEqual(
+                    receipt["deletion"]["confirmed_at_utc"],
+                    record.provider_delete_deadline_utc,
+                )
+                self.assertEqual(receipt["actual_cost_usd"], 3.0)
+                self.assertEqual(
+                    order,
+                    [
+                        f"cost:{record.instance_id}",
+                        f"cost:attempt-{record.ownership_nonce}",
+                        "receipt:recovery-pending",
+                        "key-verify",
+                        "key-delete",
+                        "receipt:complete",
+                    ],
+                )
+        self.assertEqual(len(evidence_paths), 2)
+        self.assertNotEqual(evidence_paths[0], evidence_paths[1])
+
+    def test_cost_ledger_owner_collision_cannot_settle_another_reservation(self) -> None:
+        instance = "instance-owner-collision"
+        phase = "owner-cost-collision"
+        first_nonce = "3" * 32
+        second_nonce = "4" * 32
+        sf.append_cost_event({
+            "instance_id": instance,
+            "phase_id": phase,
+            "ownership_nonce": first_nonce,
+            "status": "pending",
+            "estimated_cost_usd": 3.0,
+        })
+        before = sf.bounded_stable_bytes(
+            sf.COST_LEDGER, sf.MAX_COST_LEDGER_BYTES, label="test cost ledger",
+        )
+        with self.assertRaisesRegex(sf.ShadeformError, "different owner|unknown owner"):
+            sf.append_cost_event({
+                "instance_id": instance,
+                "phase_id": phase,
+                "ownership_nonce": second_nonce,
+                "status": "settled",
+                "actual_cost_usd": 1.0,
+            })
+        self.assertEqual(
+            sf.bounded_stable_bytes(
+                sf.COST_LEDGER, sf.MAX_COST_LEDGER_BYTES, label="test cost ledger",
+            ),
+            before,
+        )
+        self.assertEqual(sf.ledger_spend(), (0.0, [instance]))
+        sf.append_cost_event({
+            "instance_id": instance,
+            "phase_id": phase,
+            "ownership_nonce": first_nonce,
+            "status": "settled",
+            "actual_cost_usd": 1.0,
+        })
+        self.assertEqual(sf.ledger_spend(), (1.0, []))
+        rows = [
+            json.loads(line) for line in sf.COST_LEDGER.read_text().splitlines()
+            if '"event_kind":"genesis"' not in line
+        ]
+        self.assertTrue(all(row["ownership_nonce"] == first_nonce for row in rows))
+        self.assertTrue(all(row["schema"] == sf.COST_EVENT_SCHEMA for row in rows))
+        self.assertTrue(all(row["owner_binding_sha256"] == sf.cost_owner_binding_sha256(
+            phase, first_nonce, instance,
+        ) for row in rows))
+
+    def test_teardown_terminal_cost_rows_preserve_exact_owner_continuity(self) -> None:
+        record = self.record(
+            phase="teardown-cost-owner", instance="instance-teardown-cost-owner",
+            nonce="7" * 32, key_id="key-teardown-cost-owner",
+        )
+        sf.append_cost_event({
+            "instance_id": record.instance_id,
+            "phase_id": record.phase_id,
+            "ownership_nonce": record.ownership_nonce,
+            "status": "pending",
+            "estimated_cost_usd": 3.0,
+        })
+        sf.append_cost_event({
+            "instance_id": f"attempt-{record.ownership_nonce}",
+            "phase_id": record.phase_id,
+            "ownership_nonce": record.ownership_nonce,
+            "status": "pending",
+            "estimated_cost_usd": 3.0,
+        })
+        sf.write_owned_resource(record)
+        with mock.patch.object(sf, "verify_owned_instance_before_delete", return_value={}), \
+                mock.patch.object(sf, "_delete_instance", return_value={"success": True}), \
+                mock.patch.object(sf, "verify_owned_ssh_key_before_delete", return_value={}), \
+                mock.patch.object(sf, "delete_owned_ssh_key_exact", return_value={"status": "confirmed"}):
+            receipt = teardown.teardown_exact(
+                record.phase_id, record.instance_id, env_file=self.env_file,
+            )
+        self.assertEqual(receipt["status"], "complete")
+        self.assertEqual(sf.ledger_spend(), (3.0, []))
+        rows = [json.loads(line) for line in sf.COST_LEDGER.read_text().splitlines()]
+        instance_rows = [row for row in rows if row["instance_id"] == record.instance_id]
+        self.assertEqual([row["status"] for row in instance_rows], ["pending", "settled"])
+        self.assertEqual(
+            {row["owner_binding_sha256"] for row in instance_rows},
+            {sf.cost_owner_binding_sha256(
+                record.phase_id, record.ownership_nonce, record.instance_id,
+            )},
+        )
+
+    def test_cost_ledger_refuses_symlink_hardlink_duplicate_and_path_swap(self) -> None:
+        event = {
+            "instance_id": "instance-ledger-path",
+            "phase_id": "ledger-path-safety",
+            "ownership_nonce": "5" * 32,
+            "status": "pending",
+            "estimated_cost_usd": 1.0,
+        }
+        sf._ensure_durable_directory(sf.COST_LEDGER.parent)
+        original_authority = sf.COST_LEDGER.read_bytes()
+        sf.COST_LEDGER.unlink()
+        target = self.root / "outside-cost-ledger"
+        target.write_bytes(b"outside")
+        sf.COST_LEDGER.symlink_to(target)
+        with self.assertRaises((OSError, sf.ShadeformError)):
+            sf.append_cost_event(event)
+        self.assertEqual(target.read_bytes(), b"outside")
+        sf.COST_LEDGER.unlink()
+        sf.COST_LEDGER.write_bytes(original_authority)
+        sf.COST_LEDGER.chmod(0o600)
+        sf.append_cost_event(event)
+        alias = self.root / "cost-ledger-alias"
+        os.link(sf.COST_LEDGER, alias)
+        with self.assertRaises(sf.ShadeformError):
+            sf.ledger_spend()
+        with self.assertRaises(sf.ShadeformError):
+            sf.append_cost_event({**event, "estimated_cost_usd": 2.0})
+        alias.unlink()
+
+        original = sf.COST_LEDGER.read_bytes()
+        sf.COST_LEDGER.write_bytes(
+            original.replace(b'"schema":', b'"schema":"duplicate","schema":', 1)
+        )
+        with self.assertRaisesRegex(sf.ShadeformError, "duplicate"):
+            sf.ledger_spend()
+        sf.COST_LEDGER.write_bytes(original)
+
+        with mock.patch.object(
+            sf,
+            "_require_cost_ledger_path_identity",
+            side_effect=[None, None, sf.ShadeformError("simulated path swap")],
+        ):
+            with self.assertRaisesRegex(sf.ShadeformError, "path swap"):
+                sf.append_cost_event(event)
+
+    def test_cost_ledger_fsync_fault_never_reports_append_success(self) -> None:
+        sf._ensure_durable_directory(sf.COST_LEDGER.parent)
+        event = {
+            "instance_id": "instance-ledger-fsync",
+            "phase_id": "ledger-fsync-safety",
+            "ownership_nonce": "6" * 32,
+            "status": "pending",
+            "estimated_cost_usd": 1.0,
+        }
+        with mock.patch.object(sf.os, "fsync", side_effect=OSError("fsync failed")):
+            with self.assertRaisesRegex(OSError, "fsync failed"):
+                sf.append_cost_event(event)
+        # A full row may have reached the descriptor, but the caller observed
+        # failure and it remains conservatively pending rather than settled.
+        self.assertEqual(sf.ledger_spend(), (0.0, [event["instance_id"]]))
 
     def test_two_sequential_owners_share_phase_without_reusing_evidence(self) -> None:
         phase = "sequential-owner"
@@ -235,7 +544,7 @@ class ShadeformTeardownDurabilityTests(unittest.TestCase):
                     mock.patch.object(sf, "_delete_instance", return_value={"success": True}), \
                     mock.patch.object(sf, "append_cost_event"), \
                     mock.patch.object(sf, "verify_owned_ssh_key_before_delete", return_value={}), \
-                    mock.patch.object(sf, "delete_ssh_key", return_value={"success": True}):
+                    mock.patch.object(sf, "delete_owned_ssh_key_exact", return_value={"status": "confirmed"}):
                 return teardown.teardown_exact(phase, record.instance_id, env_file=self.env_file)
 
         first_receipt = complete(first)
@@ -280,7 +589,7 @@ class ShadeformTeardownDurabilityTests(unittest.TestCase):
                 mock.patch.object(sf, "_delete_instance", delete), \
                 mock.patch.object(sf, "append_cost_event"), \
                 mock.patch.object(sf, "verify_owned_ssh_key_before_delete", return_value={}), \
-                mock.patch.object(sf, "delete_ssh_key", return_value={"success": True}):
+                mock.patch.object(sf, "delete_owned_ssh_key_exact", return_value={"status": "confirmed"}):
             receipt = teardown.teardown_exact(phase, current.instance_id, env_file=self.env_file)
 
         self.assertEqual(receipt["instance_id"], current.instance_id)
@@ -303,7 +612,7 @@ class ShadeformTeardownDurabilityTests(unittest.TestCase):
                 mock.patch.object(sf, "_delete_instance", return_value={"success": True}), \
                 mock.patch.object(sf, "append_cost_event"), \
                 mock.patch.object(sf, "verify_owned_ssh_key_before_delete", return_value={}), \
-                mock.patch.object(sf, "delete_ssh_key", return_value={"success": True}):
+                mock.patch.object(sf, "delete_owned_ssh_key_exact", return_value={"status": "confirmed"}):
             receipt = teardown.teardown_exact(
                 record.phase_id, record.instance_id, env_file=self.env_file,
             )
