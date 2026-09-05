@@ -188,6 +188,10 @@ class MutationFenceModel:
         self.shutting_down = False
         self.mutations = 0
         self.successes = 0
+        self.hash_updates = 0
+        self.drain_bytes = 0
+        self.cleanup_mutations = 0
+        self.root_termination_issued = False
 
     def shutdown_wins(self, event_signal_succeeds: bool = True) -> None:
         # The atomic publication and signal attempt share the shutdown fence.
@@ -206,8 +210,29 @@ class MutationFenceModel:
         self.successes += 1
         return True
 
-    def consume_completed_read(self) -> bool:
+    def precheck(self) -> bool:
         return not self.shutting_down
+
+    def consume_hash(self) -> bool:
+        if self.shutting_down:
+            return False
+        self.hash_updates += 1
+        return True
+
+    def append_drain(self, count: int) -> bool:
+        if self.shutting_down:
+            return False
+        self.drain_bytes += count
+        return True
+
+    def cleanup_root_once(self) -> bool:
+        # Cleanup is permitted after shutdown, but its mutation is serialized
+        # and idempotent under the same fence.
+        if self.root_termination_issued:
+            return True
+        self.root_termination_issued = True
+        self.cleanup_mutations += 1
+        return True
 
 
 class WindowsProcessTransactionStaticTests(unittest.TestCase):
@@ -237,6 +262,18 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
         self.assertGreaterEqual(len(self.contract["unresolved_activation_blockers"]), 8)
         self.assertEqual(self.contract["containment"]["evidence"],
                          "uncompiled_static_source_design_only")
+        self.assertIs(
+            self.contract["containment"]["forward_mutation_after_shutdown"],
+            False,
+        )
+        self.assertEqual(
+            self.contract["containment"]["cleanup_after_shutdown"],
+            "mandatory_serialized_idempotent_root_termination_and_registry_detach",
+        )
+        self.assertIs(
+            self.contract["containment"]["cleanup_waits_hold_mutation_fence"],
+            False,
+        )
         self.assertEqual(self.contract["limits"]["max_cleanup_reserve_ms"], 120000)
         self.assertEqual(self.contract["limits"]["max_transaction_horizon_ms"], 240000)
         self.assertTrue(any("cooperative cancellation" in item
@@ -363,8 +400,8 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
         self.assertLess(registry.index("try_emplace"), registry.index("std::move(child)"))
         cleanup = self.tx[self.tx.index("bool terminate_unregistered"):
                           self.tx.index("DispatchStatus create_monitor")]
-        self.assertIn("context.authority->poisoned = true", cleanup)
-        self.assertIn("TerminateJobObject", cleanup)
+        self.assertIn("context.authority->poisoned.store(true", cleanup)
+        self.assertIn("children.terminate_root_once", cleanup)
         self.assertIn("wait_job_empty_until", cleanup)
         self.assertIn("cleanup_deadline_at_ms", cleanup)
         self.assertIn("!context.child.process ||", cleanup)
@@ -443,7 +480,7 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
         shutdown = self.cpp[self.cpp.index("bool stop_supervisor"):
                             self.cpp.index("JournalOutcome durable_journal_authorize")]
         failure = shutdown.index("return false;", shutdown.index("terminate_and_reap_all"))
-        close_registry = shutdown.index("state.children.close_all()")
+        close_registry = shutdown.index("state.children.close_all(launch.mutation_fence)")
         close_job = shutdown.index("state.root_job.reset()")
         self.assertLess(failure, close_registry)
         self.assertLess(failure, close_job)
@@ -529,8 +566,9 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
                     model.shutdown_wins()
                     self.assertFalse(model.terminal_wins())
                 elif boundary == "during_sync_read":
+                    self.assertTrue(model.precheck())
                     model.shutdown_wins()
-                    self.assertFalse(model.consume_completed_read())
+                    self.assertFalse(model.consume_hash())
                 else:
                     model.shutdown_wins(event_signal_succeeds=False)
                     self.assertFalse(model.mutation_wins())
@@ -545,21 +583,95 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
         final_first.shutdown_wins()
         self.assertEqual(final_first.successes, 1)
 
+    def test_check_to_hash_and_drain_append_are_fence_owned(self):
+        hash_model = MutationFenceModel()
+        self.assertTrue(hash_model.precheck())
+        hash_model.shutdown_wins()
+        self.assertFalse(hash_model.consume_hash())
+        self.assertEqual(hash_model.hash_updates, 0)
+
+        drain_model = MutationFenceModel()
+        self.assertTrue(drain_model.precheck())
+        drain_model.shutdown_wins()
+        self.assertFalse(drain_model.append_drain(32))
+        self.assertEqual(drain_model.drain_bytes, 0)
+
+    def test_cleanup_is_serialized_idempotent_and_allowed_after_shutdown(self):
+        model = MutationFenceModel()
+        model.shutdown_wins()
+        self.assertTrue(model.cleanup_root_once())
+        self.assertTrue(model.cleanup_root_once())
+        self.assertEqual(model.cleanup_mutations, 1)
+        self.assertFalse(model.mutation_wins())
+
     def test_sync_and_awaited_reads_recheck_stop_before_consuming_bytes(self):
         read = self.tx[self.tx.index("bool overlapped_read"):
                        self.tx.index("bool hash_retained_executable")]
-        usable = self.tx[self.tx.index("bool read_result_usable"):
+        usable = self.tx[self.tx.index("bool consume_hash_chunk"):
                          self.tx.index("bool append_bytes")]
         self.assertIn("std::lock_guard fence(authority.mutation_fence)", usable)
         self.assertIn("authority.shutting_down.load", usable)
-        self.assertIn("WaitForSingleObject(cancellation, 0) == WAIT_TIMEOUT", usable)
-        self.assertGreaterEqual(read.count("read_result_usable("), 3)
+        self.assertIn("WaitForSingleObject(cancellation, 0) != WAIT_TIMEOUT", usable)
+        self.assertIn("BCryptHashData", usable)
+        self.assertIn("BCryptFinishHash", usable)
         self.assertIn("transferred = 0", read)
+        hashing = self.tx[self.tx.index("bool hash_retained_executable"):
+                          self.tx.index("bool append_quoted_argument")]
+        self.assertIn("consume_hash_chunk", hashing)
+        self.assertIn("finish_hash_under_fence", hashing)
+        self.assertNotIn("BCryptHashData(hash", hashing)
         drain = self.cpp[self.cpp.index("DWORD WINAPI drain_child_pipe"):
                          self.cpp.index("bool settle_drain_worker")]
-        self.assertGreaterEqual(drain.count("drain_result_usable(*context)"), 2)
+        self.assertGreaterEqual(
+            drain.count("std::lock_guard fence(*context->mutation_fence)"), 2)
+        self.assertGreaterEqual(
+            drain.count("drain_result_usable_locked(*context)"), 2)
+        self.assertEqual(drain.count("context->captured.store"), 6)
+        self.assertEqual(
+            drain.count("std::lock_guard fence(*context->mutation_fence)"), 4)
         self.assertIn("SecureZeroMemory(context->bytes.data() + total, read)",
                       drain)
+        settle = self.cpp[self.cpp.index("bool settle_child_drains"):
+                          self.cpp.index("class ChildRegistry")]
+        self.assertIn(
+            "std::lock_guard fence(*child.stdout_context->mutation_fence)",
+            settle,
+        )
+        self.assertLess(settle.index("std::lock_guard fence"),
+                        settle.index("child.stdout_bytes ="))
+        self.assertIn("capture_usable", settle)
+        self.assertIn("? child.stdout_context->captured.load", settle)
+        self.assertIn("? child.stderr_context->captured.load", settle)
+
+    def test_terminal_claim_is_fenced_with_exact_sequence_and_stop_state(self):
+        wrapper = self.tx[self.tx.index("const JournalOutcome journal"):]
+        finish = wrapper[wrapper.index("const auto finish_claimed_terminal"):
+                         wrapper.index("switch (journal.status)")]
+        self.assertIn("std::lock_guard fence(authority.mutation_fence)", finish)
+        self.assertIn("prepared.journal_transition_claimed_sequence != journal.sequence", finish)
+        self.assertIn("authority.poisoned.load", finish)
+        self.assertIn("authority.shutting_down.load", finish)
+        self.assertIn("GetTickCount64() >= deadline_at_ms", finish)
+        self.assertIn("WaitForSingleObject(supervisor.cancellation.get(), 0) != WAIT_TIMEOUT", finish)
+        self.assertLess(finish.index("std::lock_guard fence"),
+                        finish.index("authority.journal.begin_next_operation()"))
+
+    def test_cleanup_mutations_share_fence_and_root_termination_is_once(self):
+        registry = self.cpp[self.cpp.index("class ChildRegistry"):
+                            self.cpp.index("struct SupervisorState")]
+        helper = registry[registry.index("bool terminate_root_once_locked"):
+                          registry.index("std::mutex mutex_")]
+        self.assertIn("std::lock_guard fence(cleanup_fence)", helper)
+        self.assertIn("root_termination_issued_", helper)
+        self.assertIn("TerminateJobObject(root_job, 1)", helper)
+        self.assertEqual(registry.count("TerminateJobObject(root_job, 1)"), 1)
+        self.assertGreaterEqual(registry.count("terminate_root_once_locked("), 3)
+        self.assertIn("std::lock_guard fence(cleanup_fence);\n      children_.erase", registry)
+        self.assertIn("std::lock_guard fence(cleanup_fence);\n    for (auto&", registry)
+        cleanup = self.tx[self.tx.index("bool terminate_unregistered"):
+                          self.tx.index("DispatchStatus create_monitor")]
+        self.assertIn("children.terminate_root_once", cleanup)
+        self.assertNotIn("TerminateJobObject", cleanup)
 
     def test_preparation_rechecks_stop_between_resource_acquisitions(self):
         launch = self.tx[self.tx.index("PreparedLaunch prepared"):

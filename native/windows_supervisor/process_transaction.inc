@@ -101,7 +101,7 @@ struct ProcessLaunchAuthority final {
   const std::uint64_t root_generation = 0;
   const bool recovered = false;
   bool active = false;
-  bool poisoned = false;
+  std::atomic<bool> poisoned{false};
   std::atomic<bool> shutting_down{false};
 };
 
@@ -206,7 +206,8 @@ bool checkpoint(const SupervisorState& supervisor,
                 const ProcessLaunchAuthority& authority,
                 const LaunchPlan& plan, HANDLE cancellation) noexcept {
   const std::uint64_t now = GetTickCount64();
-  return process_launch_gates_open() && !authority.poisoned &&
+  return process_launch_gates_open() &&
+      !authority.poisoned.load(std::memory_order_acquire) &&
       !authority.shutting_down.load(std::memory_order_acquire) &&
       authority.root_generation != 0 && supervisor.root_job &&
       plan.limits.deadline_at_ms > now &&
@@ -214,14 +215,38 @@ bool checkpoint(const SupervisorState& supervisor,
       (!cancellation || WaitForSingleObject(cancellation, 0) == WAIT_TIMEOUT);
 }
 
-bool read_result_usable(ProcessLaunchAuthority& authority,
-                        HANDLE cancellation,
-                        std::uint64_t deadline_at_ms) noexcept {
+bool consume_hash_chunk(ProcessLaunchAuthority& authority,
+                        HANDLE cancellation, std::uint64_t deadline_at_ms,
+                        BCRYPT_HASH_HANDLE hash, void* bytes,
+                        DWORD count) noexcept {
+  if (!hash || !bytes || count == 0) return false;
   std::lock_guard fence(authority.mutation_fence);
-  return GetTickCount64() < deadline_at_ms &&
-      !authority.shutting_down.load(std::memory_order_acquire) &&
-      (!cancellation ||
-       WaitForSingleObject(cancellation, 0) == WAIT_TIMEOUT);
+  if (!process_launch_gates_open() ||
+      authority.poisoned.load(std::memory_order_acquire) ||
+      authority.shutting_down.load(std::memory_order_acquire) ||
+      GetTickCount64() >= deadline_at_ms ||
+      (cancellation &&
+       WaitForSingleObject(cancellation, 0) != WAIT_TIMEOUT))
+    return false;
+  return BCryptHashData(hash, reinterpret_cast<PUCHAR>(bytes), count, 0) == 0;
+}
+
+bool finish_hash_under_fence(ProcessLaunchAuthority& authority,
+                             HANDLE cancellation,
+                             std::uint64_t deadline_at_ms,
+                             BCRYPT_HASH_HANDLE hash,
+                             std::array<std::byte, 32>& output) noexcept {
+  if (!hash) return false;
+  std::lock_guard fence(authority.mutation_fence);
+  if (!process_launch_gates_open() ||
+      authority.poisoned.load(std::memory_order_acquire) ||
+      authority.shutting_down.load(std::memory_order_acquire) ||
+      GetTickCount64() >= deadline_at_ms ||
+      (cancellation &&
+       WaitForSingleObject(cancellation, 0) != WAIT_TIMEOUT))
+    return false;
+  return BCryptFinishHash(hash, reinterpret_cast<PUCHAR>(output.data()),
+                          static_cast<ULONG>(output.size()), 0) == 0;
 }
 
 bool append_bytes(std::array<std::byte, 32768>& output, std::size_t& used,
@@ -423,20 +448,10 @@ bool overlapped_read(HANDLE file, OVERLAPPED& operation, void* buffer,
   transferred = 0;
   if (!operation.hEvent || !ResetEvent(operation.hEvent)) return false;
   if (ReadFile(file, buffer, requested, nullptr, &operation)) {
-    if (GetOverlappedResult(file, &operation, &transferred, FALSE)) {
-      if (read_result_usable(authority, cancellation, deadline_at_ms))
-        return true;
-      transferred = 0;
-      return false;
-    }
+    if (GetOverlappedResult(file, &operation, &transferred, FALSE)) return true;
     if (GetLastError() == ERROR_IO_INCOMPLETE) {
-      const bool settled = settle_started_overlapped_read(
+      return settle_started_overlapped_read(
           file, operation, transferred, cleanup_deadline_at_ms, true);
-      if (settled &&
-          read_result_usable(authority, cancellation, deadline_at_ms))
-        return true;
-      transferred = 0;
-      return false;
     }
     return false;
   }
@@ -456,13 +471,8 @@ bool overlapped_read(HANDLE file, OVERLAPPED& operation, void* buffer,
     const DWORD count = cancellation ? 2u : 1u;
     const DWORD result = WaitForMultipleObjects(count, waits, FALSE, slice);
     if (result == WAIT_OBJECT_0) {
-      const bool settled = settle_started_overlapped_read(
+      return settle_started_overlapped_read(
           file, operation, transferred, cleanup_deadline_at_ms, false);
-      if (settled &&
-          read_result_usable(authority, cancellation, deadline_at_ms))
-        return true;
-      transferred = 0;
-      return false;
     }
     if (cancellation && result == WAIT_OBJECT_0 + 1) {
       (void)settle_started_overlapped_read(
@@ -515,15 +525,16 @@ bool hash_retained_executable(HANDLE file, std::uint32_t exact_size,
     if (!overlapped_read(file, operation, chunk.data(), request, read,
                          cancellation, authority, deadline_at_ms,
                          cleanup_deadline_at_ms) || read != request ||
-        BCryptHashData(hash, reinterpret_cast<PUCHAR>(chunk.data()), read, 0) != 0) {
+        !consume_hash_chunk(authority, cancellation, deadline_at_ms,
+                            hash, chunk.data(), read)) {
       ok = false;
       break;
     }
     offset += read;
   }
   if (ok)
-    ok = BCryptFinishHash(hash, reinterpret_cast<PUCHAR>(output.data()),
-                          static_cast<ULONG>(output.size()), 0) == 0;
+    ok = finish_hash_under_fence(authority, cancellation, deadline_at_ms,
+                                 hash, output);
   BCryptDestroyHash(hash);
   SecureZeroMemory(object.data(), object.size());
   SecureZeroMemory(chunk.data(), chunk.size());
@@ -731,7 +742,8 @@ bool persist_launch_record(DurableJournalAdapter& adapter,
     // transition precedes shutdown; if shutdown wins, this refuses.
     std::lock_guard fence(context->authority->mutation_fence);
     const std::uint64_t now = GetTickCount64();
-    if (!process_launch_gates_open() || context->authority->poisoned ||
+    if (!process_launch_gates_open() ||
+        context->authority->poisoned.load(std::memory_order_acquire) ||
         context->authority->shutting_down.load(std::memory_order_acquire) ||
         !context->supervisor->root_job || now >= deadline_at_ms ||
         (context->supervisor->cancellation &&
@@ -791,8 +803,12 @@ bool start_drain_workers(Child& child, const LaunchLimits& limits,
   child.stderr_context->source = child.stderr_read.get();
   child.stdout_context->cancellation = cancellation;
   child.stderr_context->cancellation = cancellation;
+  child.stdout_context->mutation_fence = &authority.mutation_fence;
+  child.stderr_context->mutation_fence = &authority.mutation_fence;
   child.stdout_context->shutting_down = &authority.shutting_down;
   child.stderr_context->shutting_down = &authority.shutting_down;
+  child.stdout_context->poisoned = &authority.poisoned;
+  child.stderr_context->poisoned = &authority.poisoned;
   child.stdout_context->deadline_at_ms = limits.deadline_at_ms;
   child.stderr_context->deadline_at_ms = limits.deadline_at_ms;
   child.stdout_context->limit = limits.stdout_limit;
@@ -930,8 +946,10 @@ bool terminate_unregistered(PreparedLaunch& context) noexcept {
   // creation-time JOB_LIST membership makes the retained root Job the
   // authoritative containment boundary. Never infer "nothing to reap" from a
   // moved-from local Child.
-  context.authority->poisoned = true;
-  if (!TerminateJobObject(context.supervisor->root_job.get(), 1))
+  context.authority->poisoned.store(true, std::memory_order_release);
+  if (!context.supervisor->children.terminate_root_once(
+          context.supervisor->root_job.get(),
+          context.authority->mutation_fence))
     launch_cleanup_fail_stop();
   const bool primary_reaped = !context.child.process ||
       wait_reaped_until(context.child.process.get(),
@@ -1034,8 +1052,9 @@ DispatchStatus create_monitor_reap_after_durable_start(
       !same_identity_handle(context->executable.get(), plan.expected_executable)) {
     const bool reaped = context->supervisor->children.terminate_and_reap(
         capability.operation_id, context->supervisor->root_job.get(),
-        plan.limits.cleanup_deadline_at_ms, nullptr);
-    context->authority->poisoned = true;
+        plan.limits.cleanup_deadline_at_ms,
+        context->authority->mutation_fence, nullptr);
+    context->authority->poisoned.store(true, std::memory_order_release);
     context->receipt.job_reaped = reaped;
     if (!reaped) launch_cleanup_fail_stop();
     return DispatchStatus::kTerminalFailure;
@@ -1048,11 +1067,13 @@ DispatchStatus create_monitor_reap_after_durable_start(
   if (!context->supervisor->children.operate_and_unregister(
           capability.operation_id, context->supervisor->root_job.get(),
           monitor_registered_child, &monitor, plan.limits.deadline_at_ms,
+          context->authority->mutation_fence,
           child_outcome)) {
     const bool reaped = context->supervisor->children.terminate_and_reap(
         capability.operation_id, context->supervisor->root_job.get(),
-        plan.limits.cleanup_deadline_at_ms, nullptr);
-    context->authority->poisoned = true;
+        plan.limits.cleanup_deadline_at_ms,
+        context->authority->mutation_fence, nullptr);
+    context->authority->poisoned.store(true, std::memory_order_release);
     context->receipt.job_reaped = reaped;
     if (!reaped) launch_cleanup_fail_stop();
     return DispatchStatus::kTerminalFailure;
@@ -1077,7 +1098,8 @@ DispatchStatus create_monitor_reap_after_durable_start(
   SupervisorState& supervisor = process_state();
   ProcessLaunchAuthority& authority = process_launch_authority();
   std::lock_guard transaction_lock(authority.mutex);
-  if (authority.active || authority.poisoned ||
+  if (authority.active ||
+      authority.poisoned.load(std::memory_order_acquire) ||
       authority.shutting_down.load(std::memory_order_acquire) ||
       !authority.recovered || !authority.durable_adapter ||
       !authority.durable_adapter->authority_ready() ||
@@ -1203,29 +1225,39 @@ DispatchStatus create_monitor_reap_after_durable_start(
       create_monitor_reap_after_durable_start, &prepared);
   output = prepared.receipt;
   output.journal_bound = journal.durable_state == JournalState::kTerminalDurable;
-  const auto finish_claimed_terminal = [&]() noexcept {
+  const auto finish_claimed_terminal = [&](bool success) noexcept {
     std::lock_guard fence(authority.mutation_fence);
+    const std::uint64_t deadline_at_ms = success
+        ? plan.limits.deadline_at_ms
+        : plan.limits.cleanup_deadline_at_ms;
     if (journal.sequence == 0 ||
-        prepared.journal_transition_claimed_sequence != journal.sequence)
+        prepared.journal_transition_claimed_sequence != journal.sequence ||
+        authority.poisoned.load(std::memory_order_acquire) ||
+        authority.shutting_down.load(std::memory_order_acquire) ||
+        GetTickCount64() >= deadline_at_ms ||
+        (supervisor.cancellation &&
+         WaitForSingleObject(supervisor.cancellation.get(), 0) != WAIT_TIMEOUT))
       return false;
-    // A matching transition claim proves this operation won the fence before
-    // any later shutdown publication, so local state may close without a new
-    // mutation authorization or a long wait under the fence.
+    // Exact durable sequence and current stop/deadline state are checked in
+    // the same short fence scope as the local terminal-state transition.
     return authority.journal.begin_next_operation();
   };
   switch (journal.status) {
     case DispatchStatus::kTerminalSuccess:
       if (!output.journal_bound || !output.job_reaped ||
           output.status != LaunchResultCode::kOk) {
-        authority.poisoned = true;
+        authority.poisoned.store(true, std::memory_order_release);
         output.status = LaunchResultCode::kDispatchedUnknown;
         return output;
       }
-      if (!finish_claimed_terminal()) authority.poisoned = true;
+      if (!finish_claimed_terminal(true)) {
+        authority.poisoned.store(true, std::memory_order_release);
+        output.status = LaunchResultCode::kDispatchedUnknown;
+      }
       return output;
     case DispatchStatus::kTerminalFailure:
       if (!output.journal_bound || !output.job_reaped) {
-        authority.poisoned = true;
+        authority.poisoned.store(true, std::memory_order_release);
         output.status = LaunchResultCode::kDispatchedUnknown;
         return output;
       }
@@ -1234,7 +1266,10 @@ DispatchStatus create_monitor_reap_after_durable_start(
       // leak that stale kOk, nor an untouched default, across a durable failure.
       if (!concrete_terminal_failure(output.status))
         output.status = LaunchResultCode::kTerminalFailure;
-      if (!finish_claimed_terminal()) authority.poisoned = true;
+      if (!finish_claimed_terminal(false)) {
+        authority.poisoned.store(true, std::memory_order_release);
+        output.status = LaunchResultCode::kDispatchedUnknown;
+      }
       return output;
     case DispatchStatus::kPreDispatchFailure:
       output.status = LaunchResultCode::kPreDispatchFailure;
@@ -1247,7 +1282,7 @@ DispatchStatus create_monitor_reap_after_durable_start(
       output.status = LaunchResultCode::kDispatchedUnknown;
       return output;
   }
-  authority.poisoned = true;
+  authority.poisoned.store(true, std::memory_order_release);
   output.status = LaunchResultCode::kDispatchedUnknown;
   return output;
 }

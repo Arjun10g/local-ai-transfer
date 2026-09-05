@@ -334,7 +334,7 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
         ):
             self.assertIn(token, self.cpp)
         self.assertIn("state.children.terminate_and_reap_all", self.cpp)
-        self.assertIn("state.children.close_all()", self.cpp)
+        self.assertIn("state.children.close_all(launch.mutation_fence)", self.cpp)
         self.assertIn("kMaxChildren = 8", self.cpp)
         self.assertIn("kMaxWaitMs = 120000", self.cpp)
         self.assertIn("create_child_job", self.cpp)
@@ -343,10 +343,12 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
     def test_reap_ignores_cancellation_after_root_termination(self):
         start = self.cpp.index("bool terminate_and_reap_all")
         reap = self.cpp[start:self.cpp.index("void close_all", start)]
-        self.assertIn("TerminateJobObject(root_job, 1)", reap)
+        self.assertIn("terminate_root_once_locked(root_job, cleanup_fence)", reap)
         self.assertIn("wait_reaped_until(child.process.get(), cleanup_deadline_at_ms, nullptr)", reap)
         self.assertNotIn("wait_reaped_until(child.process.get(), cleanup_deadline_at_ms, cancellation)", reap)
-        self.assertEqual(reap.count("TerminateJobObject(root_job, 1)"), 1)
+        registry = self.cpp[self.cpp.index("class ChildRegistry"):
+                            self.cpp.index("struct SupervisorState")]
+        self.assertEqual(registry.count("TerminateJobObject(root_job, 1)"), 1)
         self.assertIn("wait_job_empty_until(root_job, cleanup_deadline_at_ms)", reap)
 
     def test_public_header_cannot_forge_authority(self):

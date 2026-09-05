@@ -36,6 +36,8 @@ using creation-time `PROC_THREAD_ATTRIBUTE_JOB_LIST`, a suspended child, one
 serialized active launch, retained startup-attribute payloads, one owned
 cancellation event/absolute cleanup deadline, guarded join-before-free drain
 contexts, a shutdown/mutation/finalization linearization fence,
+journal-sequence-bound terminal claims, fenced hash/capture consumption, and
+serialized idempotent cleanup mutations with waits outside the fence,
 journal-outcome-derived terminal receipts, and a private
 durable-adapter interface. No adapter
 implementation or startup-recovery installation is present, and the public
