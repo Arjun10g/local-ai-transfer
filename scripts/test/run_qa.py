@@ -26,13 +26,23 @@ from qa.clean_machine.package import scan_tree
 from qa.harness.evidence import DEFAULT_ENV_ALLOWLIST, audit_environment
 
 
-PYTHON_TEST_ROOTS = ("tests/qa", "tests/release", "tests/security", "tests/performance", "tests/model", "tests/native")
 _SUMMARY_KEYS = ("tests", "suites", "pass", "fail", "cancelled", "skipped", "todo")
 MAX_DISCOVERY_ENTRIES = 4096
 MAX_DISCOVERY_FILES = 1024
 MAX_DISCOVERY_BYTES = 16 * 1024 * 1024
 MAX_DISCOVERY_DEPTH = 8
 MAX_OUTPUT_BYTES = 4 * 1024 * 1024
+MAX_TAP_BYTES = 4 * 1024 * 1024
+MAX_TAP_LINES = 100_000
+MAX_TAP_LINE_CHARS = 16 * 1024
+
+NONCONVENTIONAL_TEST_PATHS = frozenset({
+    "tests/native/http_negative_tests.py",
+    "tests/native/model_validator_tests.cpp",
+    "tests/native/real_init_guard.py",
+    "tests/native/real_model_smoke.py",
+    "tests/native/runtime_tests.cpp",
+})
 
 # Every current test file is classified. New tests must be assigned a class
 # here before they can enter evidence; unknown files fail closed.
@@ -46,8 +56,14 @@ TEST_INVENTORY = {
     "tests/host/process-run.test.mjs": "process_fixture",
     "tests/host/real-native-engine.test.mjs": "real_model",
     "tests/host/tool-chain-vertical.test.mjs": "loopback_fixture",
+    "tests/host/windows-fs-refusal-slice.test.mjs": "windows_refusal_static",
     "tests/model/production_tool_fixture_parity.test.mjs": "model_fixture",
     "tests/model/test_tool_call_eval.py": "model_fixture",
+    "tests/native/http_negative_tests.py": "loopback_fixture",
+    "tests/native/model_validator_tests.cpp": "native_build",
+    "tests/native/real_init_guard.py": "real_model",
+    "tests/native/real_model_smoke.py": "real_model",
+    "tests/native/runtime_tests.cpp": "native_build",
     "tests/native/test_windows_process_broker_static.py": "native_static",
     "tests/performance/test_j1m_lifecycle.py": "lifecycle",
     "tests/performance/test_model_specs.py": "model_fixture",
@@ -146,8 +162,14 @@ def python_unittest_command(root: Path) -> list[str]:
 
 
 def discovered_test_paths(root: Path) -> set[str]:
-    paths = set(discover_node_tests(root))
-    paths.update(module.replace(".", "/") + ".py" for module in discover_python_test_modules(root))
+    base = Path(root).absolute()
+    paths = set(discover_node_tests(base))
+    paths.update(module.replace(".", "/") + ".py" for module in discover_python_test_modules(base))
+    extra = _discover_test_files(
+        base,
+        lambda path: path.relative_to(base).as_posix() in NONCONVENTIONAL_TEST_PATHS,
+    )
+    paths.update(path.relative_to(base).as_posix() for path in extra)
     return paths
 
 
@@ -171,23 +193,44 @@ def inventory_check(root: Path) -> dict[str, Any]:
 def parse_tap_report(output: str) -> dict[str, int]:
     """Parse and structurally validate a bounded Node TAP report."""
 
+    if len(output) > MAX_TAP_BYTES or len(output.encode("utf-8")) > MAX_TAP_BYTES:
+        raise ReporterError("TAP report exceeds byte bound")
     lines = [line.rstrip("\r") for line in output.splitlines() if line.strip()]
+    if len(lines) > MAX_TAP_LINES or any(len(line) > MAX_TAP_LINE_CHARS for line in lines):
+        raise ReporterError("TAP report exceeds structural bounds")
     if not lines or lines[0] != "TAP version 13":
         raise ReporterError("missing TAP version")
+    record_pattern = re.compile(
+        r"(ok|not ok) (\d+) - ([^#\r\n]+?)(?: # (SKIP|TODO)(?: [^#\r\n]+)?)?"
+    )
+    supported_comment_patterns = (
+        re.compile(r"# Subtest: [^\r\n]+"),
+        re.compile(r"# duration_ms (?:0|[1-9]\d*)(?:\.\d+)?"),
+        *(re.compile(rf"# {key} \d+") for key in _SUMMARY_KEYS),
+    )
+    supported_diagnostic_patterns = (
+        re.compile(r"  ---"),
+        re.compile(r"  \.\.\."),
+        re.compile(r"  duration_ms: (?:0|[1-9]\d*)(?:\.\d+)?"),
+        re.compile(r"  type: '(?:test|suite)'"),
+    )
     for line in lines[1:]:
-        if line.startswith("#") or line.startswith("  ") or re.match(r"^(ok|not ok) \d+ - .+$", line) or re.fullmatch(r"1\.\.\d+", line):
+        if (
+            record_pattern.fullmatch(line)
+            or re.fullmatch(r"1\.\.\d+", line)
+            or any(pattern.fullmatch(line) for pattern in supported_comment_patterns)
+            or any(pattern.fullmatch(line) for pattern in supported_diagnostic_patterns)
+        ):
             continue
-        raise ReporterError("unexpected reporter output")
+        raise ReporterError("unexpected or unsupported TAP reporter output")
     plans = [match for match in (re.fullmatch(r"1\.\.(\d+)", line) for line in lines) if match]
     if len(plans) != 1:
         raise ReporterError("TAP plan missing or duplicated")
     test_lines = []
     for line in lines:
-        match = re.fullmatch(r"(ok|not ok) (\d+) - (.*?)(?:\s+#\s+(SKIP|TODO)(?:\s+.*)?)?", line)
+        match = record_pattern.fullmatch(line)
         if match:
             test_lines.append((int(match.group(2)), match.group(1), match.group(3), match.group(4)))
-        elif re.match(r"^(?:ok|not ok) \d+ - ", line):
-            raise ReporterError("unknown TAP directive")
     if not test_lines:
         raise ReporterError("zero-count Node suite")
     if [number for number, _status, _name, _directive in test_lines] != list(range(1, len(test_lines) + 1)):
@@ -206,6 +249,7 @@ def parse_tap_report(output: str) -> dict[str, int]:
     calculated = {
         "pass": sum(status == "ok" and directive is None for _number, status, _name, directive in test_lines),
         "fail": sum(status == "not ok" and directive not in {"SKIP", "TODO"} for _number, status, _name, directive in test_lines),
+        "cancelled": 0,
         "skipped": sum(directive == "SKIP" for _number, _status, _name, directive in test_lines),
         "todo": sum(directive == "TODO" for _number, _status, _name, directive in test_lines),
     }
@@ -281,159 +325,291 @@ def _reparse(info: os.stat_result) -> bool:
 
 
 def _absolute_output_path(path: Path) -> Path:
+    if not _safe_file_output_supported():
+        raise ValueError("secure file output is unavailable on this platform; use --output -")
     value = Path(os.path.abspath(os.fspath(path)))
     folded = [part.casefold() for part in value.parts]
     protected = {name.casefold() for name in PROTECTED_OUTPUT_NAMES}
     if any(part in protected for part in folded) or any(folded[index:index + 2] == ["experiments", "runtime"] for index in range(len(folded) - 1)):
         raise ValueError("output path overlaps protected operator evidence")
-    current = Path(value.anchor)
-    for part in value.parts[1:]:
-        current /= part
-        try:
-            info = current.lstat()
-        except FileNotFoundError:
-            continue
-        except OSError as error:
-            raise ValueError("output path cannot be inspected") from error
-        # macOS exposes /var (and on some versions /tmp) as stable system
-        # aliases. They are not caller-controlled output ancestors; retain
-        # the stricter rejection for every other supplied link/reparse path.
-        trusted_system_alias = platform.system() == "Darwin" and current in {Path("/var"), Path("/tmp")}
-        if _reparse(info) and not trusted_system_alias:
-            raise ValueError("output path contains a link or reparse point")
-        if current != value and not stat.S_ISDIR(info.st_mode) and not trusted_system_alias:
-            raise ValueError("output parent is not a directory")
-    try:
-        info = value.lstat()
-    except FileNotFoundError:
-        return value
-    if not stat.S_ISREG(info.st_mode) or int(info.st_nlink) != 1:
-        raise ValueError("output target must be an unlinked regular file")
+    if not value.is_absolute() or not value.name or value.name in {".", ".."}:
+        raise ValueError("output path is invalid")
     return value
 
 
-def validate_output_path(path: Path) -> Path:
-    """Validate a lexical output path without resolving links or aliases."""
+def _safe_file_output_supported() -> bool:
+    if os.name == "nt" or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        return False
+    required = (os.open, os.mkdir, os.stat, os.unlink, os.link)
+    return all(function in os.supports_dir_fd for function in required)
 
-    return _absolute_output_path(path)
+
+def _snapshot(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        int(info.st_dev),
+        int(info.st_ino),
+        int(info.st_mode),
+        int(info.st_uid),
+        int(info.st_gid),
+        int(info.st_nlink),
+        int(info.st_size),
+    )
 
 
-def _ensure_output_parent(path: Path) -> None:
-    missing: list[Path] = []
-    current = path.parent
+def _identity(info: os.stat_result) -> tuple[int, int]:
+    return int(info.st_dev), int(info.st_ino)
+
+
+def _validate_directory_info(info: os.stat_result) -> None:
+    allowed_owners = {0, os.geteuid()}
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or int(info.st_uid) not in allowed_owners
+        or stat.S_IMODE(info.st_mode) & 0o022
+        or int(info.st_nlink) < 1
+        or int(info.st_size) < 0
+    ):
+        raise ValueError("output directory ownership, mode, link count, or type is unsafe")
+
+
+def _validate_private_file_info(info: os.stat_result, *, size: int, links: int = 1) -> None:
+    if _reparse(info):
+        raise ValueError("output path contains a link or reparse point")
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or int(info.st_uid) != os.geteuid()
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or int(info.st_nlink) != links
+        or int(info.st_size) != size
+        or size < 0
+        or size > MAX_OUTPUT_BYTES
+    ):
+        raise ValueError("output file ownership, mode, link count, size, or type changed")
+
+
+def _directory_flags() -> int:
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+
+def _open_output_directory(path: Path, *, create: bool) -> int:
+    """Walk an absolute directory from a pinned root fd without following links."""
+
+    if not _safe_file_output_supported():
+        raise ValueError("secure file output is unavailable on this platform; use --output -")
+    if not path.is_absolute() or path.anchor != os.path.sep:
+        raise ValueError("output directory must be an absolute local path")
+    descriptor = os.open(path.anchor, _directory_flags())
+    try:
+        _validate_directory_info(os.fstat(descriptor))
+        for component in path.parts[1:]:
+            try:
+                before = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                if not create:
+                    raise ValueError("output parent does not exist") from None
+                try:
+                    os.mkdir(component, 0o700, dir_fd=descriptor)
+                    os.fsync(descriptor)
+                except OSError as error:
+                    raise ValueError("output parent cannot be created safely") from error
+                before = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
+            except OSError as error:
+                raise ValueError("output parent cannot be inspected") from error
+            _validate_directory_info(before)
+            try:
+                child = os.open(component, _directory_flags(), dir_fd=descriptor)
+            except OSError as error:
+                raise ValueError("output parent cannot be opened without following links") from error
+            try:
+                after = os.fstat(child)
+                _validate_directory_info(after)
+                if _snapshot(before) != _snapshot(after):
+                    raise ValueError("output parent changed while it was opened")
+            except BaseException:
+                os.close(child)
+                raise
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _verify_parent_path_identity(path: Path, expected: os.stat_result) -> None:
+    descriptor = _open_output_directory(path, create=False)
+    try:
+        current = os.fstat(descriptor)
+        _validate_directory_info(current)
+        if _snapshot(current) != _snapshot(expected):
+            raise ValueError("output parent path identity or metadata changed")
+    finally:
+        os.close(descriptor)
+
+
+def _stat_at_optional(parent_fd: int, name: str) -> os.stat_result | None:
+    try:
+        return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise ValueError("output entry cannot be inspected") from error
+
+
+def _read_descriptor_bounded(descriptor: int) -> bytes:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    total = 0
     while True:
-        try:
-            info = current.lstat()
-        except FileNotFoundError:
-            missing.append(current)
-            if current.parent == current:
-                raise ValueError("output parent does not exist")
-            current = current.parent
-            continue
-        trusted_system_alias = platform.system() == "Darwin" and current in {Path("/var"), Path("/tmp")}
-        if (_reparse(info) and not trusted_system_alias) or not stat.S_ISDIR(info.st_mode):
-            raise ValueError("output parent is unsafe")
-        break
-    for directory in reversed(missing):
-        directory.mkdir()
-        info = directory.lstat()
-        if _reparse(info) or not stat.S_ISDIR(info.st_mode):
-            raise ValueError("output parent changed during creation")
+        chunk = os.read(descriptor, min(64 * 1024, MAX_OUTPUT_BYTES + 1 - total))
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > MAX_OUTPUT_BYTES:
+            raise ValueError("output exceeds byte bound")
+
+
+def _reopen_verified_temp(
+    parent_fd: int,
+    name: str,
+    expected: os.stat_result,
+    data: bytes,
+    *,
+    links: int = 1,
+) -> int:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(name, flags, dir_fd=parent_fd)
+    except OSError as error:
+        raise ValueError("temporary output cannot be reopened safely") from error
+    try:
+        before = os.fstat(descriptor)
+        _validate_private_file_info(before, size=len(data), links=links)
+        if _snapshot(before) != _snapshot(expected):
+            raise ValueError("reopened temporary output identity changed")
+        if _read_descriptor_bounded(descriptor) != data:
+            raise ValueError("temporary output content changed")
+        after = os.fstat(descriptor)
+        if _snapshot(after) != _snapshot(before):
+            raise ValueError("temporary output changed while being verified")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _unlink_temp_if_exact(parent_fd: int, name: str, expected: os.stat_result) -> None:
+    current = _stat_at_optional(parent_fd, name)
+    if current is None or _identity(current) != _identity(expected):
+        return
+    try:
+        os.unlink(name, dir_fd=parent_fd)
+    except OSError:
+        return
+
+
+def validate_output_path(path: Path) -> Path:
+    """Validate an existing parent and target through stable POSIX handles."""
+
+    target = _absolute_output_path(path)
+    parent_fd = _open_output_directory(target.parent, create=False)
+    try:
+        parent = os.fstat(parent_fd)
+        _verify_parent_path_identity(target.parent, parent)
+        current = _stat_at_optional(parent_fd, target.name)
+        if current is not None:
+            _validate_private_file_info(current, size=int(current.st_size))
+    finally:
+        os.close(parent_fd)
+    return target
 
 
 def write_output_atomically(path: Path, text: str) -> None:
-    target = validate_output_path(path)
+    # This check deliberately precedes Path/os.fspath access. Windows has no
+    # accepted handle-relative publisher in this source-only lane.
+    if not _safe_file_output_supported():
+        raise ValueError("secure file output is unavailable on this platform; use --output -")
+    target = _absolute_output_path(path)
     data = text.encode("utf-8")
     if len(data) > MAX_OUTPUT_BYTES:
         raise ValueError("output exceeds byte bound")
-    _ensure_output_parent(target)
-    target = validate_output_path(target)
-    parent = target.parent
-    parent_before = parent.stat(follow_symlinks=False)
-    old_info = None
+    parent_fd = _open_output_directory(target.parent, create=True)
     try:
-        old_info = target.lstat()
-    except FileNotFoundError:
-        pass
+        _validate_directory_info(os.fstat(parent_fd))
+        if _stat_at_optional(parent_fd, target.name) is not None:
+            raise ValueError("output target already exists; evidence publication is create-new")
+    except BaseException:
+        os.close(parent_fd)
+        raise
     temporary_name = f".{target.name}.tmp-{os.getpid()}-{os.urandom(8).hex()}"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    use_dir_fd = os.name != "nt" and hasattr(os, "supports_dir_fd") and os.open in os.supports_dir_fd
-    parent_fd = None
-    temporary = parent / temporary_name
-    if use_dir_fd:
-        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        parent_fd = os.open(parent, directory_flags)
-        opened_parent = os.fstat(parent_fd)
-        if (opened_parent.st_ino, opened_parent.st_dev) != (parent_before.st_ino, parent_before.st_dev):
-            os.close(parent_fd)
-            raise ValueError("output parent changed during write")
-    descriptor = None
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    writer = None
+    reader = None
+    target_reader = None
+    initial = None
+    published = False
     try:
-        descriptor = os.open(temporary_name if use_dir_fd else temporary, flags, 0o600, dir_fd=parent_fd) if use_dir_fd else os.open(temporary, flags, 0o600)
+        writer = os.open(temporary_name, flags, 0o600, dir_fd=parent_fd)
+        os.fchmod(writer, 0o600)
         written = 0
         while written < len(data):
-            count = os.write(descriptor, data[written:])
+            count = os.write(writer, data[written:])
             if count <= 0:
                 raise ValueError("output write made no progress")
             written += count
-        os.fsync(descriptor)
-        final_temp = os.fstat(descriptor)
-        if not stat.S_ISREG(final_temp.st_mode) or final_temp.st_nlink != 1:
-            raise ValueError("temporary output identity changed")
-    except BaseException:
+        os.fsync(writer)
+        initial = os.fstat(writer)
+        _validate_private_file_info(initial, size=len(data))
+        staged = _stat_at_optional(parent_fd, temporary_name)
+        if staged is None or _snapshot(staged) != _snapshot(initial):
+            raise ValueError("temporary output path identity changed")
+        reader = _reopen_verified_temp(parent_fd, temporary_name, initial, data)
+        _verify_parent_path_identity(target.parent, os.fstat(parent_fd))
+        if _stat_at_optional(parent_fd, target.name) is not None:
+            raise ValueError("output target appeared during publication")
         try:
-            if use_dir_fd:
-                os.unlink(temporary_name, dir_fd=parent_fd)
-            else:
-                os.unlink(temporary)
-        except OSError:
-            pass
-        if parent_fd is not None:
-            os.close(parent_fd)
-        raise
+            os.link(
+                temporary_name,
+                target.name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError as error:
+            raise ValueError("output target appeared during publication") from error
+        except OSError as error:
+            raise ValueError("handle-relative output publication failed") from error
+        linked_writer = os.fstat(writer)
+        _validate_private_file_info(linked_writer, size=len(data), links=2)
+        target_info = _stat_at_optional(parent_fd, target.name)
+        if target_info is None or _identity(target_info) != _identity(initial):
+            raise ValueError("published output does not match the verified temporary identity")
+        _validate_private_file_info(target_info, size=len(data), links=2)
+        target_reader = _reopen_verified_temp(parent_fd, target.name, target_info, data, links=2)
+        os.fsync(parent_fd)
+        current_temp = _stat_at_optional(parent_fd, temporary_name)
+        if current_temp is None or _identity(current_temp) != _identity(initial):
+            raise ValueError("temporary output changed before finalization")
+        os.unlink(temporary_name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+        final_writer = os.fstat(writer)
+        _validate_private_file_info(final_writer, size=len(data), links=1)
+        if _read_descriptor_bounded(writer) != data:
+            raise ValueError("final output content changed")
+        if _snapshot(os.fstat(writer)) != _snapshot(final_writer):
+            raise ValueError("final output changed while being verified")
+        final_target = _stat_at_optional(parent_fd, target.name)
+        if final_target is None or _snapshot(final_target) != _snapshot(final_writer):
+            raise ValueError("final output identity or metadata changed")
+        _verify_parent_path_identity(target.parent, os.fstat(parent_fd))
+        published = True
     finally:
-        if descriptor is not None:
-            os.close(descriptor)
-    try:
-        temp_info = os.stat(temporary_name, dir_fd=parent_fd, follow_symlinks=False) if use_dir_fd else temporary.lstat()
-        if not stat.S_ISREG(temp_info.st_mode) or int(temp_info.st_nlink) != 1:
-            raise ValueError("temporary output identity changed")
-        current_parent = os.fstat(parent_fd) if use_dir_fd else parent.stat(follow_symlinks=False)
-        if (current_parent.st_ino, current_parent.st_dev) != (parent_before.st_ino, parent_before.st_dev):
-            raise ValueError("output parent changed during write")
-        try:
-            current = os.stat(target.name, dir_fd=parent_fd, follow_symlinks=False) if use_dir_fd else target.lstat()
-        except FileNotFoundError:
-            current = None
-        if (old_info is None) != (current is None) or old_info is not None and (old_info.st_dev, old_info.st_ino) != (current.st_dev, current.st_ino):
-            raise ValueError("output target changed during write")
-        if use_dir_fd:
-            os.replace(temporary_name, target.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-        else:
-            os.replace(temporary, target)
-        descriptor = None
-        try:
-            descriptor = os.dup(parent_fd) if use_dir_fd else os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-            os.fsync(descriptor)
-        finally:
+        if not published and initial is not None:
+            _unlink_temp_if_exact(parent_fd, temporary_name, initial)
+        for descriptor in (target_reader, reader, writer, parent_fd):
             if descriptor is not None:
                 os.close(descriptor)
-    finally:
-        try:
-            if use_dir_fd:
-                os.unlink(temporary_name, dir_fd=parent_fd)
-            else:
-                os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            # The output is already fail-closed if cleanup cannot remove the
-            # private temporary name; never follow or truncate that path.
-            pass
-        if parent_fd is not None:
-            os.close(parent_fd)
 
 
 def main() -> int:
@@ -443,8 +619,10 @@ def main() -> int:
     parser.add_argument("--skip-native", action="store_true", help="record native execution as skipped; safe mode never runs it")
     parser.add_argument("--release", action="store_true", help="apply strict release policy; evidence remains BLOCKED without target proof")
     args = parser.parse_args()
+    if args.output != "-" and not _safe_file_output_supported():
+        print("secure file output is unavailable on this platform; use --output -", file=sys.stderr)
+        return 2
     root = Path(args.root).resolve()
-    output = validate_output_path(Path(args.output))
     plan = safe_plan(root, release=args.release, skip_native=args.skip_native)
     summary = {
         "schema_version": "qa-run.safe.v1",
@@ -454,8 +632,13 @@ def main() -> int:
         **plan,
         "limitations": ["No test subprocess, CMake/native fixture, model, browser, network, provider, or lifecycle execution occurs in safe mode."],
     }
-    write_output_atomically(output, json.dumps(summary, indent=2, sort_keys=True) + "\n")
-    print(json.dumps({"output": str(output), "mode": summary["mode"], "status": summary["status"], "release_blockers": summary["release_blockers"]}, sort_keys=True))
+    serialized = json.dumps(summary, indent=2, sort_keys=True) + "\n"
+    if args.output == "-":
+        print(serialized, end="")
+    else:
+        output = Path(args.output)
+        write_output_atomically(output, serialized)
+        print(json.dumps({"output": str(output), "mode": summary["mode"], "status": summary["status"], "release_blockers": summary["release_blockers"]}, sort_keys=True))
     return 1
 
 

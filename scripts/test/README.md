@@ -6,18 +6,26 @@ From a clean checkout, run:
 python3 scripts/test/run_qa.py --skip-native --output out/evidence/qa-local/safe-summary.json
 ```
 
-This command is a plan-only safe gate. It inventories every
-`tests/**/test_*.py`, host test, and security test against an explicit reviewed
-classification, but never executes a test subprocess. Native/CMake fixtures,
+This command is a plan-only safe gate. It inventories every conventional
+`tests/**/test_*.py` and `tests/**/*.test.mjs` entry plus the fixed native test
+programs against an explicit reviewed classification, but never executes a test subprocess. Native/CMake fixtures,
 real-model tests, lifecycle tests, provider/browser tests, and loopback tests
 are recorded as `SKIP`/`UNPROVEN`; unknown inventory entries fail closed. The
 release tree is scanned only through its bounded source scanner. The result is
-always `BLOCKED` until an separately approved runner provides target evidence.
+always `BLOCKED` until a separately approved runner provides target evidence.
 The output path may not overlap `experiments/runtime` or operator ledgers.
+File output is create-new, private (`0600`), and available only where POSIX
+directory-handle-relative publication and no-follow opens are supported. It is
+refused on Windows because this source lane has no accepted native handle
+publisher. Use `--output -` for an in-memory/stdout summary on such platforms;
+stdout output does not change the always-`BLOCKED` result.
 
 `--skip-native` is retained for compatibility and is inherent in safe mode; it
 does not merely skip a standalone CMake record while allowing a native fixture
 test to run. No ambient model environment or credential is consulted.
+The retained TAP helper accepts only TAP 13 records, `SKIP`/`TODO` record
+directives, the fixed Node summary fields, bounded duration lines, and the
+minimal documented diagnostic framing; unknown `#` directives are rejected.
 
 ## Remote external-tool QA
 

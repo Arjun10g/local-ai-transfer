@@ -127,7 +127,12 @@ class PackageScannerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "weights.gguf").write_bytes(b"secret model bytes")
-            with mock.patch.dict(scan_tree.__globals__, {"read_bounded_file": mock.Mock(side_effect=AssertionError("forbidden read"))}):
+            with (
+                mock.patch.dict(scan_tree.__globals__, {"read_bounded_file": mock.Mock(side_effect=AssertionError("forbidden read"))}),
+                mock.patch.object(Path, "open", side_effect=AssertionError("forbidden content open")),
+                mock.patch.object(Path, "read_text", side_effect=AssertionError("forbidden content read")),
+                mock.patch.object(Path, "read_bytes", side_effect=AssertionError("forbidden content read")),
+            ):
                 result = scan_tree(root, metadata_only=True)
             self.assertEqual("FAIL", result["status"])
             self.assertEqual("ADVISORY-METADATA-ONLY", result["authorization"])
