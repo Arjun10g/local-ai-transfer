@@ -170,7 +170,7 @@ def scan_secrets(data: bytes) -> bool:
     return SECRET_RE.search(data.decode("utf-8", errors="ignore")) is not None
 
 
-def scan_tree(root: str | Path, *, require_runtime: bool = False) -> dict[str, object]:
+def scan_tree(root: str | Path, *, require_runtime: bool = False, metadata_only: bool = False) -> dict[str, object]:
     if require_runtime:
         return {
             "status": "FAIL",
@@ -198,6 +198,19 @@ def scan_tree(root: str | Path, *, require_runtime: bool = False) -> dict[str, o
     findings.extend(f"forbidden-entrypoint:{name}" for name in sorted(files & FORBIDDEN_PACKAGE_PATHS))
     findings.extend(f"forbidden-artifact:{name}" for name in sorted(files) if Path(name).suffix.lower() in FORBIDDEN_SUFFIXES or "node_modules" in Path(name).parts)
     findings.extend(f"missing-required:{name}" for name in sorted(REQUIRED_STATIC - files))
+
+    # Safe plan mode is metadata/path classification only. In particular, do
+    # not open model weights, native binaries, or any other package content
+    # merely to produce an advisory local plan.
+    if metadata_only:
+        return {
+            "status": "PASS" if not findings else "FAIL",
+            "files": sorted(files),
+            "findings": findings,
+            "dependencies": "SKIP-metadata-only",
+            "native_windows_launch": "SKIP",
+            "authorization": "ADVISORY-METADATA-ONLY",
+        }
 
     if "RELEASE_MANIFEST.json" in files:
         try:

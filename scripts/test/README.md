@@ -1,25 +1,34 @@
-# QA entry point
+# Safe QA entry point
 
 From a clean checkout, run:
 
 ```text
-python3 scripts/test/run_qa.py --output out/evidence/qa-local/summary.json
+python3 scripts/test/run_qa.py --skip-native --output out/evidence/qa-local/safe-summary.json
 ```
 
-This script is the canonical complete gate. It enumerates every
-`tests/**/test_*.py` module explicitly, avoiding the `tests/qa` versus top-level
-`qa` package shadowing that occurs with `unittest discover -s tests` when no
-top-level directory is supplied. For Python-only diagnosis, use
-`python3 -m unittest discover -s tests -t . -p 'test_*.py'`.
+This command is a plan-only safe gate. Apart from generated `__pycache__`
+directories, it inventories every regular file under `tests/` against an
+explicit executable-test or support-file classification, but never executes a
+test subprocess. Native/CMake fixtures,
+real-model tests, lifecycle tests, provider/browser tests, and loopback tests
+are recorded as `SKIP`/`UNPROVEN`; unknown inventory entries fail closed. The
+release tree is scanned only through its bounded source scanner. The result is
+always `BLOCKED` until a separately approved runner provides target evidence.
+The output path may not overlap `experiments/runtime` or operator ledgers.
+File output is create-new, private (`0600`) beneath a current-user `0700`
+parent, and available only where POSIX directory-handle-relative publication
+and no-follow opens are supported. A failed post-link verification removes and
+fsyncs only the exact staged identity before retry is allowed. It is
+refused on Windows because this source lane has no accepted native handle
+publisher. Use `--output -` for an in-memory/stdout summary on such platforms;
+stdout output does not change the always-`BLOCKED` result.
 
-The command runs Python fixture tests, contract conformance, adversarial
-fixtures, Node's built-in host and `tests/security` tests when Node is available, the REL-001
-skeleton scan, and local CMake/CTest if available. It never installs packages
-or contacts a network. Any unavailable/native-Windows/real-model/Shadeform
-capability is recorded as mandatory `SKIP`/`UNPROVEN`, not `PASS`. A successful
-fixture run is therefore a typed `CONDITIONAL_PASS` with `release_passed=false`
-until every mandatory target-evidence record is proven. Node 24 specifically is
-mandatory release evidence even if a different local Node version runs the tests.
+`--skip-native` is retained for compatibility and is inherent in safe mode; it
+does not merely skip a standalone CMake record while allowing a native fixture
+test to run. No ambient model environment or credential is consulted.
+The retained TAP helper accepts only TAP 13 records, `SKIP`/`TODO` record
+directives, the fixed Node summary fields, bounded duration lines, and the
+minimal documented diagnostic framing; unknown `#` directives are rejected.
 
 ## Remote external-tool QA
 
