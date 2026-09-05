@@ -21,18 +21,22 @@
 - Fact: production model evaluation proves only tool proposal/arguments. The
   hostile external-tools harness uses injected Graph/CDP/Copilot fakes and does
   not execute a real account, browser, Copilot service, or Windows process.
-  Disabled/unconfigured provider definitions are still advertised to the model;
-  Graph/browser/Copilot proposal and replay state is memory-only; no durable
-  secret-free user-action receipt exists; and browser/Copilot executable paths
-  are not bound to immutable file identity across preview and spawn.
+  Disabled/unconfigured provider definitions are now withheld from the model,
+  and a reviewed secret-free action-journal/controller barrier is merged.
+  However, its Node pathname store deliberately refuses every production
+  action until a native handle-relative protected store exists. Graph provider
+  reconciliation is not implemented, browser/Copilot proposal state remains
+  memory-only, and browser/Copilot executable paths are not bound to immutable
+  file identity across preview and spawn.
 - Impact: a passing model score or mocked provider run cannot establish safe
   end-to-end mail, Teams, browser-action, or Copilot readiness. A host restart
   after an ambiguous provider write can permit duplicate work, and a mutable
   executable can change after preview/version inspection.
 - Workaround: keep all external providers disabled by default and all writes
-  confirmation-bound. Add deterministic HostServer/controller vertical tests,
-  active-tool filtering, durable ambiguous-write/idempotency state and action
-  receipts, and executable identity pinning before any write-capable live test.
+  confirmation-bound. Preserve per-generation active-tool filtering and the
+  fail-closed journal barrier; add the native protected journal, provider-owned
+  reconciliation, and executable identity pinning before any write-capable live
+  test.
 - Needed from: S3 implementation, S4 independent review, and S0 gate decision.
 - State: OPEN; blocks Phase 4/6 readiness and all full-access claims.
 
