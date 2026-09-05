@@ -17,6 +17,7 @@
 #include <mutex>
 #include <limits>
 #include <memory>
+#include <new>
 #include <set>
 #include <string>
 #include <string_view>
@@ -30,6 +31,7 @@ namespace {
 
 constexpr DWORD kWaitSliceMs = 250;
 constexpr DWORD kMaxWaitMs = 120000;
+constexpr std::uint64_t kMaxCleanupHorizonMs = 2ull * kMaxWaitMs;
 // One direct root Job is the only supported containment model.  The registry
 // and the Job capacity intentionally share one limit.
 constexpr std::size_t kMaxChildren = 8;
@@ -860,18 +862,23 @@ bool root_job_policy_proven(HANDLE root_job) noexcept {
       !kNestedJobPolicyProven;
 }
 
-bool wait_reaped(HANDLE process, DWORD deadline_ms,
-                 HANDLE cancellation = nullptr) noexcept {
-  if (!process || deadline_ms > kMaxWaitMs) return false;
-  const ULONGLONG deadline = GetTickCount64() + deadline_ms;
-  while (GetTickCount64() < deadline) {
+bool cleanup_deadline_valid(std::uint64_t deadline_at_ms) noexcept {
+  const std::uint64_t now = GetTickCount64();
+  return deadline_at_ms > now &&
+      deadline_at_ms - now <= kMaxCleanupHorizonMs;
+}
+
+bool wait_reaped_until(HANDLE process, std::uint64_t deadline_at_ms,
+                       HANDLE cancellation = nullptr) noexcept {
+  if (!process || !cleanup_deadline_valid(deadline_at_ms)) return false;
+  while (GetTickCount64() < deadline_at_ms) {
     const ULONGLONG now = GetTickCount64();
-    const DWORD remaining = static_cast<DWORD>(deadline - now);
+    const DWORD remaining = static_cast<DWORD>(deadline_at_ms - now);
     const DWORD wait_ms = (remaining < kWaitSliceMs) ? remaining : kWaitSliceMs;
     HANDLE handles[2] = {process, cancellation};
     const DWORD count = cancellation ? 2u : 1u;
     const DWORD result = WaitForMultipleObjects(count, handles, FALSE, wait_ms);
-    if (result == WAIT_OBJECT_0) return true;
+    if (result == WAIT_OBJECT_0) return GetTickCount64() < deadline_at_ms;
     if (cancellation && result == WAIT_OBJECT_0 + 1) return false;
     if (result != WAIT_TIMEOUT) return false;
   }
@@ -887,18 +894,15 @@ bool job_empty(HANDLE job) noexcept {
   return info.ActiveProcesses == 0;
 }
 
-bool wait_job_empty_bounded(HANDLE root_job, DWORD maximum_ms) noexcept {
-  if (!root_job || maximum_ms == 0 || maximum_ms > kMaxWaitMs) return false;
-  const std::uint64_t start = GetTickCount64();
-  if (start > std::numeric_limits<std::uint64_t>::max() - maximum_ms)
-    return false;
-  const std::uint64_t deadline = start + maximum_ms;
+bool wait_job_empty_until(HANDLE root_job,
+                          std::uint64_t deadline_at_ms) noexcept {
+  if (!root_job || !cleanup_deadline_valid(deadline_at_ms)) return false;
   do {
-    if (job_empty(root_job)) return true;
     const std::uint64_t now = GetTickCount64();
-    if (now >= deadline) return false;
+    if (now >= deadline_at_ms) return false;
+    if (job_empty(root_job)) return GetTickCount64() < deadline_at_ms;
     Sleep(static_cast<DWORD>(std::min<std::uint64_t>(kWaitSliceMs,
-                                                     deadline - now)));
+                                                     deadline_at_ms - now)));
   } while (true);
 }
 
@@ -963,30 +967,44 @@ DWORD WINAPI drain_child_pipe(void* opaque) noexcept {
 }
 
 bool settle_drain_worker(UniqueHandle& worker, DrainContext* context,
-                         DWORD maximum_ms) noexcept {
-  if (!context || !worker || maximum_ms > kWorkerSettlementMs) return false;
+                         std::uint64_t deadline_at_ms) noexcept {
+  const std::uint64_t started = GetTickCount64();
+  if (!context || !worker || started >= deadline_at_ms) return false;
+  DWORD maximum_ms = static_cast<DWORD>(std::min<std::uint64_t>(
+      kWorkerSettlementMs, deadline_at_ms - started));
   DWORD wait = WaitForSingleObject(worker.get(), 0);
   if (wait == WAIT_TIMEOUT) {
     // Cancel the exact worker thread that owns the synchronous ReadFile. Its
     // heap context remains registry-owned until the thread is proven stopped.
     if (!CancelSynchronousIo(worker.get()) && GetLastError() != ERROR_NOT_FOUND)
       return false;
+    const std::uint64_t now = GetTickCount64();
+    if (now >= deadline_at_ms) return false;
+    maximum_ms = static_cast<DWORD>(std::min<std::uint64_t>(
+        maximum_ms, deadline_at_ms - now));
     wait = WaitForSingleObject(worker.get(), maximum_ms);
   }
   if (wait != WAIT_OBJECT_0) return false;
+  if (GetTickCount64() >= deadline_at_ms) return false;
   DWORD code = ERROR_GEN_FAILURE;
   if (!GetExitCodeThread(worker.get(), &code) || code == STILL_ACTIVE)
     return false;
+  if (GetTickCount64() >= deadline_at_ms) return false;
   return code == ERROR_SUCCESS || code == ERROR_OPERATION_ABORTED ||
       code == ERROR_BROKEN_PIPE || code == ERROR_HANDLE_EOF ||
       code == ERROR_BUFFER_OVERFLOW || code == ERROR_INVALID_DATA;
 }
 
-bool settle_child_drains(Child& child) noexcept {
+bool settle_child_drains(Child& child,
+                         std::uint64_t deadline_at_ms) noexcept {
+  if (!child.stdout_worker && !child.stderr_worker &&
+      !child.stdout_context && !child.stderr_context) return true;
+  if (!child.stdout_worker || !child.stderr_worker ||
+      !child.stdout_context || !child.stderr_context) return false;
   const bool stdout_settled = settle_drain_worker(
-      child.stdout_worker, child.stdout_context.get(), kWorkerSettlementMs);
+      child.stdout_worker, child.stdout_context.get(), deadline_at_ms);
   const bool stderr_settled = settle_drain_worker(
-      child.stderr_worker, child.stderr_context.get(), kWorkerSettlementMs);
+      child.stderr_worker, child.stderr_context.get(), deadline_at_ms);
   if (!stdout_settled || !stderr_settled) return false;
   child.stdout_bytes = child.stdout_context->captured.load(std::memory_order_acquire);
   child.stderr_bytes = child.stderr_context->captured.load(std::memory_order_acquire);
@@ -1041,6 +1059,7 @@ class ChildRegistry final {
   bool operate_and_unregister(std::uint64_t stable_id, HANDLE root_job,
                               RegisteredOperation operation,
                               void* context,
+                              std::uint64_t settlement_deadline_at_ms,
                               RegisteredOutcome& outcome) noexcept {
     std::lock_guard lock(mutex_);
     const auto found = children_.find(stable_id);
@@ -1049,7 +1068,8 @@ class ChildRegistry final {
     Child& child = found->second;
     if (!operation(child, root_job, context) ||
         WaitForSingleObject(child.process.get(), 0) != WAIT_OBJECT_0 ||
-        !job_empty(root_job) || !settle_child_drains(child)) return false;
+        !job_empty(root_job) ||
+        !settle_child_drains(child, settlement_deadline_at_ms)) return false;
     outcome.stdout_bytes = child.stdout_bytes;
     outcome.stderr_bytes = child.stderr_bytes;
     outcome.output_overflow = child.output_overflow;
@@ -1074,57 +1094,44 @@ class ChildRegistry final {
   }
 
   bool terminate_and_reap(std::uint64_t stable_id, HANDLE root_job,
-                          DWORD deadline_ms, HANDLE cancellation = nullptr) noexcept {
+                          std::uint64_t cleanup_deadline_at_ms,
+                          HANDLE cancellation = nullptr) noexcept {
     std::lock_guard lock(mutex_);
-    if (deadline_ms > kMaxWaitMs || !root_job) return false;
+    if (!root_job || !cleanup_deadline_valid(cleanup_deadline_at_ms)) return false;
     (void)cancellation;
     const auto found = children_.find(stable_id);
     if (found == children_.end()) return false;
     Child& child = found->second;
     // Once the root is terminated, cancellation cannot shorten mandatory
     // whole-tree reap. The hard deadline remains the only bound.
-    const ULONGLONG start = GetTickCount64();
-    if (start > std::numeric_limits<ULONGLONG>::max() - deadline_ms)
-      return false;
-    const ULONGLONG end = start + deadline_ms;
     if (!TerminateJobObject(root_job, 1) ||
-        !wait_reaped(child.process.get(), deadline_ms, nullptr)) return false;
-    const ULONGLONG now = GetTickCount64();
-    const DWORD remaining = now >= end ? 0 : static_cast<DWORD>(end - now);
-    if (remaining == 0 || !wait_job_empty_bounded(root_job, remaining) ||
-        !settle_child_drains(child)) return false;
+        !wait_reaped_until(child.process.get(), cleanup_deadline_at_ms, nullptr) ||
+        !wait_job_empty_until(root_job, cleanup_deadline_at_ms) ||
+        !settle_child_drains(child, cleanup_deadline_at_ms)) return false;
     children_.erase(found);
     return true;
   }
 
-  bool terminate_and_reap_all(HANDLE root_job, DWORD deadline_ms,
+  bool terminate_and_reap_all(HANDLE root_job,
+                              std::uint64_t cleanup_deadline_at_ms,
                               HANDLE cancellation = nullptr) noexcept {
     std::lock_guard lock(mutex_);
-    if (deadline_ms > kMaxWaitMs || !root_job) return false;
+    if (!root_job || !cleanup_deadline_valid(cleanup_deadline_at_ms)) return false;
     (void)cancellation;
-    const ULONGLONG start = GetTickCount64();
-    if (start > std::numeric_limits<ULONGLONG>::max() - deadline_ms)
-      return false;
-    const ULONGLONG end = start + deadline_ms;
     // Issue exactly one root termination. Repeating it per child can race the
     // accounting query and falsely reject a tree that is still draining.
     bool ok = TerminateJobObject(root_job, 1) != FALSE;
     for (auto& [ignored, child] : children_) {
       (void)ignored;
       const ULONGLONG now = GetTickCount64();
-      const DWORD remaining = now >= end
-                                  ? 0
-                                  : static_cast<DWORD>(end - now);
       // Cancellation is intentionally ignored during mandatory reap; returning
       // early here would leave a kill-on-close root live.
-      if (remaining == 0 || !wait_reaped(child.process.get(), remaining, nullptr))
+      if (now >= cleanup_deadline_at_ms ||
+          !wait_reaped_until(child.process.get(), cleanup_deadline_at_ms, nullptr))
         ok = false;
-      if (!settle_child_drains(child)) ok = false;
+      if (!settle_child_drains(child, cleanup_deadline_at_ms)) ok = false;
     }
-    const ULONGLONG after_children = GetTickCount64();
-    const DWORD remaining = after_children >= end
-        ? 0 : static_cast<DWORD>(end - after_children);
-    if (remaining == 0 || !wait_job_empty_bounded(root_job, remaining))
+    if (!wait_job_empty_until(root_job, cleanup_deadline_at_ms))
       ok = false;
     return ok;
   }
@@ -1133,10 +1140,10 @@ class ChildRegistry final {
     std::lock_guard lock(mutex_);
     for (auto& [ignored, child] : children_) {
       (void)ignored;
-      if ((child.stdout_worker || child.stderr_worker) &&
-          !settle_child_drains(child)) {
+      if (child.stdout_worker || child.stderr_worker || child.stdout_context ||
+          child.stderr_context) {
         // Destroying a live worker's heap context would be a UAF. A process
-        // fail-stop is safer than returning with unowned asynchronous I/O.
+        // fail-stop is safer than inventing a fresh cleanup deadline here.
         std::terminate();
       }
       child.process.reset();
@@ -1447,17 +1454,27 @@ bool consume_capability(
 
 bool initialize_supervisor(SupervisorState& state,
                            BootstrapProof& bootstrap) noexcept {
-  if (!trust_gates_open() || !adopt_bootstrap(bootstrap, state.bootstrap_handles))
+  if (!trust_gates_open() || state.root_job || state.cancellation ||
+      state.bootstrap_handles.read || state.bootstrap_handles.write ||
+      !adopt_bootstrap(bootstrap, state.bootstrap_handles))
     return false;
+  state.cancellation.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+  if (!state.cancellation) {
+    state.bootstrap_handles.read.reset();
+    state.bootstrap_handles.write.reset();
+    return false;
+  }
   state.root_job.reset(create_root_job());
   if (!state.root_job || !root_job_policy_proven(state.root_job.get())) {
     state.root_job.reset();
+    state.cancellation.reset();
     state.bootstrap_handles.read.reset();
     state.bootstrap_handles.write.reset();
     return false;
   }
   if (!state.issuer.initialize_epoch()) {
     state.root_job.reset();
+    state.cancellation.reset();
     state.bootstrap_handles.read.reset();
     state.bootstrap_handles.write.reset();
     return false;
@@ -1478,17 +1495,38 @@ bool executable_identity_bound(const FixedIdentity& expected,
 }
 
 bool stop_supervisor(SupervisorState& state, DWORD deadline_ms) noexcept {
-  if (!trust_gates_open() || deadline_ms > kMaxWaitMs) return false;
-  bool ok = state.children.terminate_and_reap_all(state.root_job.get(), deadline_ms,
-                                                   state.cancellation.get());
-  if (state.root_job) {
-    // Closing a kill-on-close root is mandatory even when bounded reap reports
-    // an ambiguity. It is cleanup, never success evidence; the caller still
-    // receives failure when any child could not be proven reaped.
-    state.root_job.reset();
+  if (!trust_gates_open() || deadline_ms == 0 || deadline_ms > kMaxWaitMs ||
+      !state.cancellation || !state.root_job) return false;
+  const std::uint64_t now = GetTickCount64();
+  if (now > std::numeric_limits<std::uint64_t>::max() - deadline_ms)
+    return false;
+  const std::uint64_t cleanup_deadline_at_ms = now + deadline_ms;
+  ProcessLaunchAuthority& launch = process_launch_authority();
+  launch.shutting_down.store(true, std::memory_order_release);
+  // Signal before waiting for the transaction or registry lock so a monitor
+  // holding the registry lock can leave its wait and retain/settle ownership.
+  if (!SetEvent(state.cancellation.get())) return false;
+  std::unique_lock<std::mutex> transaction_lock(launch.mutex, std::defer_lock);
+  while (!transaction_lock.try_lock()) {
+    const std::uint64_t observed = GetTickCount64();
+    if (observed >= cleanup_deadline_at_ms) return false;
+    Sleep(static_cast<DWORD>(std::min<std::uint64_t>(
+        kWaitSliceMs, cleanup_deadline_at_ms - observed)));
+  }
+  if (!state.children.terminate_and_reap_all(
+          state.root_job.get(), cleanup_deadline_at_ms,
+          state.cancellation.get()) || !job_empty(state.root_job.get())) {
+    // Retain the signaled event, root Job, registry, and all worker contexts.
+    // A later explicit shutdown attempt may continue cleanup; no settlement is
+    // claimed and kill-on-close still protects supervisor death.
+    return false;
   }
   state.children.close_all();
-  return ok;
+  state.root_job.reset();
+  state.cancellation.reset();
+  state.bootstrap_handles.read.reset();
+  state.bootstrap_handles.write.reset();
+  return true;
 }
 
 JournalOutcome durable_journal_authorize(

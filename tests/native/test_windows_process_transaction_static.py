@@ -93,6 +93,46 @@ class TransactionModel:
             self.active = False
 
 
+@dataclass
+class IoSettlement:
+    returned: bool
+    settled: bool
+    cancellation_issued: bool
+    fail_stop: bool
+
+
+def model_overlapped_read(path: str) -> IoSettlement:
+    if path == "sync_success":
+        return IoSettlement(True, True, False, False)
+    if path in {"sync_terminal_error", "not_started"}:
+        return IoSettlement(False, True, False, False)
+    if path == "pending_success":
+        return IoSettlement(True, True, False, False)
+    if path in {
+        "pending_terminal_error", "deadline", "cancel", "wait_error",
+        "cancel_api_error_then_terminal",
+    }:
+        return IoSettlement(False, True, path != "pending_terminal_error", False)
+    if path in {"pending_never_signals", "get_still_incomplete"}:
+        return IoSettlement(False, False, True, True)
+    raise AssertionError("unknown fixture path")
+
+
+@dataclass
+class ShutdownSettlement:
+    cancellation_signalled: bool
+    authority_retained: bool
+    job_closed: bool
+
+
+def model_shutdown(lock_acquired: bool, reap_proved: bool) -> ShutdownSettlement:
+    # Signal always precedes lock acquisition. A timeout or ambiguous reap
+    # retains every authority object; only full proof permits close.
+    if not lock_acquired or not reap_proved:
+        return ShutdownSettlement(True, True, False)
+    return ShutdownSettlement(True, False, True)
+
+
 class WindowsProcessTransactionStaticTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -118,6 +158,12 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
         self.assertTrue(all(value is False for value in self.contract["availability"].values()))
         self.assertIs(self.contract["journal"]["adapter_implementation_present"], False)
         self.assertGreaterEqual(len(self.contract["unresolved_activation_blockers"]), 8)
+        self.assertEqual(self.contract["containment"]["evidence"],
+                         "uncompiled_static_source_design_only")
+        self.assertEqual(self.contract["limits"]["max_cleanup_reserve_ms"], 120000)
+        self.assertEqual(self.contract["limits"]["max_transaction_horizon_ms"], 240000)
+        self.assertTrue(any("cooperative cancellation" in item
+                            for item in self.contract["unresolved_activation_blockers"]))
 
     def test_no_public_or_product_integration_surface(self):
         for token in (
@@ -168,13 +214,17 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
         self.assertNotIn("class DurableJournalAdapter", self.hpp)
 
     def test_creation_is_in_root_job_at_first_existence(self):
-        prepare = self.tx[self.tx.index("bool prepare_startup_attributes"):
-                          self.tx.index("bool start_drain_workers")]
-        self.assertIn("PROC_THREAD_ATTRIBUTE_HANDLE_LIST", prepare)
-        self.assertIn("PROC_THREAD_ATTRIBUTE_JOB_LIST", prepare)
-        self.assertIn("root_job.get()", prepare)
+        owner = self.tx[self.tx.index("class StartupAttributeOwner"):
+                        self.tx.index("struct PreparedLaunch")]
+        self.assertIn("PROC_THREAD_ATTRIBUTE_HANDLE_LIST", owner)
+        self.assertIn("PROC_THREAD_ATTRIBUTE_JOB_LIST", owner)
+        self.assertIn("const std::array<HANDLE, 3> inherited_handles_", owner)
+        self.assertIn("const std::array<HANDLE, 1> job_handles_", owner)
+        self.assertIn("std::unique_ptr<StartupAttributeOwner>", self.tx)
         create = self.tx[self.tx.index("STARTUPINFOEXW startup"):
                          self.tx.index("if (!launched)")]
+        self.assertIn("payloads_match", create)
+        self.assertIn("startup_attributes->get()", create)
         self.assertIn("CREATE_SUSPENDED", create)
         self.assertIn("EXTENDED_STARTUPINFO_PRESENT", create)
         self.assertIn("CreateProcessAsUserW", create)
@@ -234,7 +284,8 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
                           self.tx.index("DispatchStatus create_monitor")]
         self.assertIn("context.authority->poisoned = true", cleanup)
         self.assertIn("TerminateJobObject", cleanup)
-        self.assertIn("wait_job_empty_bounded", cleanup)
+        self.assertIn("wait_job_empty_until", cleanup)
+        self.assertIn("cleanup_deadline_at_ms", cleanup)
         self.assertIn("!context.child.process ||", cleanup)
         self.assertIn("authority.active", self.tx)
 
@@ -253,6 +304,92 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
             {"status", "stdout_bytes", "stderr_bytes", "exit_code",
              "journal_bound", "job_reaped", "mutation_attempted"},
         )
+
+    def test_overlapped_read_settles_before_stack_objects_can_return(self):
+        settle = self.tx[self.tx.index("bool settle_started_overlapped_read"):
+                         self.tx.index("bool overlapped_read")]
+        read = self.tx[self.tx.index("bool overlapped_read"):
+                       self.tx.index("bool hash_retained_executable")]
+        self.assertIn("CancelIoEx(file, &operation)", settle)
+        self.assertIn("WaitForSingleObject(operation.hEvent", settle)
+        self.assertIn("GetOverlappedResult(file, &operation", settle)
+        self.assertIn("GetTickCount64() >= cleanup_deadline_at_ms", settle)
+        self.assertIn("ERROR_IO_INCOMPLETE", settle)
+        self.assertIn("launch_cleanup_fail_stop()", settle)
+        for branch in (
+            "now >= deadline_at_ms", "WAIT_OBJECT_0 + 1",
+            "result != WAIT_TIMEOUT", "ERROR_IO_INCOMPLETE",
+        ):
+            self.assertIn(branch, read)
+        self.assertGreaterEqual(read.count("settle_started_overlapped_read("), 4)
+        self.assertIn("if (!operation.hEvent || !ResetEvent(operation.hEvent))", read)
+
+    def test_overlapped_model_covers_every_terminal_and_ambiguous_path(self):
+        for path in (
+            "sync_success", "sync_terminal_error", "not_started",
+            "pending_success", "pending_terminal_error", "deadline", "cancel",
+            "wait_error", "cancel_api_error_then_terminal",
+        ):
+            with self.subTest(path=path):
+                result = model_overlapped_read(path)
+                self.assertTrue(result.settled)
+                self.assertFalse(result.fail_stop)
+        for path in ("pending_never_signals", "get_still_incomplete"):
+            with self.subTest(path=path):
+                result = model_overlapped_read(path)
+                self.assertFalse(result.returned)
+                self.assertFalse(result.settled)
+                self.assertTrue(result.fail_stop)
+
+    def test_cancellation_event_and_shutdown_order_are_supervisor_owned(self):
+        initialize = self.cpp[self.cpp.index("bool initialize_supervisor"):
+                              self.cpp.index("bool executable_identity_bound",
+                                             self.cpp.index("bool initialize_supervisor"))]
+        shutdown = self.cpp[self.cpp.index("bool stop_supervisor"):
+                            self.cpp.index("JournalOutcome durable_journal_authorize")]
+        self.assertIn("state.cancellation.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr))", initialize)
+        signal = shutdown.index("SetEvent(state.cancellation.get())")
+        lock = shutdown.index("transaction_lock.try_lock()")
+        registry = shutdown.index("terminate_and_reap_all(")
+        self.assertLess(signal, lock)
+        self.assertLess(lock, registry)
+        self.assertIn("cleanup_deadline_at_ms = now + deadline_ms", shutdown)
+        self.assertIn("cleanup_deadline_at_ms,", shutdown)
+        self.assertNotIn("kMaxWaitMs, nullptr", shutdown)
+        self.assertIn("return GetTickCount64() < deadline_at_ms", self.cpp)
+
+    def test_shutdown_retains_authority_when_settlement_is_unproved(self):
+        shutdown = self.cpp[self.cpp.index("bool stop_supervisor"):
+                            self.cpp.index("JournalOutcome durable_journal_authorize")]
+        failure = shutdown.index("return false;", shutdown.index("terminate_and_reap_all"))
+        close_registry = shutdown.index("state.children.close_all()")
+        close_job = shutdown.index("state.root_job.reset()")
+        self.assertLess(failure, close_registry)
+        self.assertLess(failure, close_job)
+        self.assertIn("Retain the signaled event, root Job, registry", shutdown)
+        self.assertIn("launch.shutting_down.store(true", shutdown)
+
+    def test_shutdown_model_signals_first_and_never_drops_ambiguous_ownership(self):
+        for lock_acquired, reap_proved in ((False, False), (True, False)):
+            with self.subTest(lock=lock_acquired, reap=reap_proved):
+                result = model_shutdown(lock_acquired, reap_proved)
+                self.assertTrue(result.cancellation_signalled)
+                self.assertTrue(result.authority_retained)
+                self.assertFalse(result.job_closed)
+        complete = model_shutdown(True, True)
+        self.assertTrue(complete.cancellation_signalled)
+        self.assertFalse(complete.authority_retained)
+        self.assertTrue(complete.job_closed)
+
+    def test_cleanup_uses_bound_absolute_deadlines(self):
+        for token in (
+            "wait_reaped_until", "wait_job_empty_until",
+            "cleanup_deadline_at_ms", "now >= deadline_at_ms",
+        ):
+            self.assertIn(token, self.cpp + self.tx)
+        self.assertIn("plan.limits.cleanup_deadline_at_ms", self.tx)
+        self.assertNotIn("wait_reaped(context.child.process.get(), kMaxWaitMs", self.tx)
+        self.assertNotIn("wait_job_empty_bounded", self.cpp + self.tx)
 
     def test_model_refuses_all_pre_dispatch_faults_without_create(self):
         for fault in ("gate", "shape", "identity", "token", "pipes"):

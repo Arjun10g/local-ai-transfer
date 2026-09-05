@@ -344,10 +344,10 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
         start = self.cpp.index("bool terminate_and_reap_all")
         reap = self.cpp[start:self.cpp.index("void close_all", start)]
         self.assertIn("TerminateJobObject(root_job, 1)", reap)
-        self.assertIn("wait_reaped(child.process.get(), remaining, nullptr)", reap)
-        self.assertNotIn("wait_reaped(child.process.get(), remaining, cancellation)", reap)
+        self.assertIn("wait_reaped_until(child.process.get(), cleanup_deadline_at_ms, nullptr)", reap)
+        self.assertNotIn("wait_reaped_until(child.process.get(), cleanup_deadline_at_ms, cancellation)", reap)
         self.assertEqual(reap.count("TerminateJobObject(root_job, 1)"), 1)
-        self.assertIn("wait_job_empty_bounded(root_job, remaining)", reap)
+        self.assertIn("wait_job_empty_until(root_job, cleanup_deadline_at_ms)", reap)
 
     def test_public_header_cannot_forge_authority(self):
         self.assertNotIn("IssuedCapability", self.hpp)

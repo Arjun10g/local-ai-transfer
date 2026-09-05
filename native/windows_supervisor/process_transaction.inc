@@ -32,6 +32,7 @@ enum class LaunchResultCode : std::uint8_t {
 
 struct LaunchLimits final {
   std::uint64_t deadline_at_ms = 0;
+  std::uint64_t cleanup_deadline_at_ms = 0;
   std::uint64_t timeout_ms = 0;
   std::uint32_t stdout_limit = 0;
   std::uint32_t stderr_limit = 0;
@@ -79,6 +80,7 @@ struct ProcessLaunchAuthority final {
   const bool recovered = false;
   bool active = false;
   bool poisoned = false;
+  std::atomic<bool> shutting_down{false};
 };
 
 ProcessLaunchAuthority& process_launch_authority() noexcept {
@@ -303,6 +305,7 @@ bool digest_plan(const LaunchPlan& plan, std::uint64_t root_generation,
 
   used = 0;
   if (!append_u64(material, used, plan.limits.deadline_at_ms) ||
+      !append_u64(material, used, plan.limits.cleanup_deadline_at_ms) ||
       !append_u64(material, used, plan.limits.timeout_ms) ||
       !append_u32(material, used, plan.limits.stdout_limit) ||
       !append_u32(material, used, plan.limits.stderr_limit) ||
@@ -336,23 +339,69 @@ bool same_identity_handle(HANDLE retained, const FixedIdentity& expected) noexce
       executable_identity_bound(expected, observed);
 }
 
+[[noreturn]] void launch_cleanup_fail_stop() noexcept;
+
+bool settle_started_overlapped_read(HANDLE file, OVERLAPPED& operation,
+                                    DWORD& transferred,
+                                    std::uint64_t cleanup_deadline_at_ms,
+                                    bool request_cancellation) noexcept {
+  if (request_cancellation &&
+      !CancelIoEx(file, &operation) && GetLastError() != ERROR_NOT_FOUND) {
+    // Cancellation refusal does not prove that the operation stopped. Continue
+    // to wait for the exact event; failing to settle is a process fail-stop.
+  }
+  const std::uint64_t before_wait = GetTickCount64();
+  if (before_wait >= cleanup_deadline_at_ms) launch_cleanup_fail_stop();
+  DWORD wait_ms = static_cast<DWORD>(std::min<std::uint64_t>(
+      kWorkerSettlementMs, cleanup_deadline_at_ms - before_wait));
+  DWORD wait = WaitForSingleObject(operation.hEvent, wait_ms);
+  if (wait != WAIT_OBJECT_0) {
+    // A failed/timeout wait never proves settlement, even if cancellation was
+    // already requested once. Reissue cancellation for the exact operation.
+    (void)CancelIoEx(file, &operation);
+    const std::uint64_t retry_at = GetTickCount64();
+    if (retry_at >= cleanup_deadline_at_ms) launch_cleanup_fail_stop();
+    wait_ms = static_cast<DWORD>(std::min<std::uint64_t>(
+        kWorkerSettlementMs, cleanup_deadline_at_ms - retry_at));
+    wait = WaitForSingleObject(operation.hEvent, wait_ms);
+    if (wait != WAIT_OBJECT_0) launch_cleanup_fail_stop();
+  }
+  if (GetOverlappedResult(file, &operation, &transferred, FALSE)) {
+    if (GetTickCount64() >= cleanup_deadline_at_ms) {
+      transferred = 0;
+      return false;
+    }
+    return true;
+  }
+  const DWORD error = GetLastError();
+  if (error == ERROR_IO_INCOMPLETE) launch_cleanup_fail_stop();
+  // ERROR_OPERATION_ABORTED and every other terminal I/O error prove that the
+  // exact OVERLAPPED is no longer pending. They are operation failure, never
+  // permission to use partial bytes.
+  transferred = 0;
+  return false;
+}
+
 bool overlapped_read(HANDLE file, OVERLAPPED& operation, void* buffer,
                      DWORD requested, DWORD& transferred, HANDLE cancellation,
-                     std::uint64_t deadline_at_ms) noexcept {
+                     std::uint64_t deadline_at_ms,
+                     std::uint64_t cleanup_deadline_at_ms) noexcept {
   transferred = 0;
-  ResetEvent(operation.hEvent);
-  if (ReadFile(file, buffer, requested, nullptr, &operation))
-    return GetOverlappedResult(file, &operation, &transferred, FALSE) != FALSE;
+  if (!operation.hEvent || !ResetEvent(operation.hEvent)) return false;
+  if (ReadFile(file, buffer, requested, nullptr, &operation)) {
+    if (GetOverlappedResult(file, &operation, &transferred, FALSE)) return true;
+    if (GetLastError() == ERROR_IO_INCOMPLETE)
+      return settle_started_overlapped_read(
+          file, operation, transferred, cleanup_deadline_at_ms, true);
+    return false;
+  }
   if (GetLastError() != ERROR_IO_PENDING) return false;
   for (;;) {
     const std::uint64_t now = GetTickCount64();
     if (now >= deadline_at_ms ||
         (cancellation && WaitForSingleObject(cancellation, 0) == WAIT_OBJECT_0)) {
-      if (!CancelIoEx(file, &operation) && GetLastError() != ERROR_NOT_FOUND)
-        return false;
-      if (WaitForSingleObject(operation.hEvent, kWorkerSettlementMs) != WAIT_OBJECT_0)
-        std::terminate();
-      GetOverlappedResult(file, &operation, &transferred, FALSE);
+      (void)settle_started_overlapped_read(
+          file, operation, transferred, cleanup_deadline_at_ms, true);
       return false;
     }
     const DWORD slice = static_cast<DWORD>(std::min<std::uint64_t>(
@@ -361,14 +410,24 @@ bool overlapped_read(HANDLE file, OVERLAPPED& operation, void* buffer,
     const DWORD count = cancellation ? 2u : 1u;
     const DWORD result = WaitForMultipleObjects(count, waits, FALSE, slice);
     if (result == WAIT_OBJECT_0)
-      return GetOverlappedResult(file, &operation, &transferred, FALSE) != FALSE;
-    if (cancellation && result == WAIT_OBJECT_0 + 1) continue;
-    if (result != WAIT_TIMEOUT) return false;
+      return settle_started_overlapped_read(
+          file, operation, transferred, cleanup_deadline_at_ms, false);
+    if (cancellation && result == WAIT_OBJECT_0 + 1) {
+      (void)settle_started_overlapped_read(
+          file, operation, transferred, cleanup_deadline_at_ms, true);
+      return false;
+    }
+    if (result != WAIT_TIMEOUT) {
+      (void)settle_started_overlapped_read(
+          file, operation, transferred, cleanup_deadline_at_ms, true);
+      return false;
+    }
   }
 }
 
 bool hash_retained_executable(HANDLE file, std::uint32_t exact_size,
                               HANDLE cancellation, std::uint64_t deadline_at_ms,
+                              std::uint64_t cleanup_deadline_at_ms,
                               std::array<std::byte, 32>& output) noexcept {
   if (!file || exact_size == 0 || exact_size > kMaxIdentityFileBytes) return false;
   BCRYPT_ALG_HANDLE algorithm = nullptr;
@@ -400,7 +459,8 @@ bool hash_retained_executable(HANDLE file, std::uint32_t exact_size,
         chunk.size(), exact_size - offset));
     DWORD read = 0;
     if (!overlapped_read(file, operation, chunk.data(), request, read,
-                         cancellation, deadline_at_ms) || read != request ||
+                         cancellation, deadline_at_ms,
+                         cleanup_deadline_at_ms) || read != request ||
         BCryptHashData(hash, reinterpret_cast<PUCHAR>(chunk.data()), read, 0) != 0) {
       ok = false;
       break;
@@ -499,6 +559,70 @@ bool create_restricted_low_token(UniqueHandle& token,
   return true;
 }
 
+class StartupAttributeOwner final {
+ public:
+  static std::unique_ptr<StartupAttributeOwner> create(
+      HANDLE child_stdin, HANDLE child_stdout, HANDLE child_stderr,
+      HANDLE root_job) noexcept {
+    if (!child_stdin || !child_stdout || !child_stderr || !root_job)
+      return nullptr;
+    std::unique_ptr<StartupAttributeOwner> owner(
+        new (std::nothrow) StartupAttributeOwner(
+            child_stdin, child_stdout, child_stderr, root_job));
+    if (!owner || !owner->initialize()) return nullptr;
+    return owner;
+  }
+
+  ~StartupAttributeOwner() {
+    if (attributes_) DeleteProcThreadAttributeList(attributes_);
+  }
+  StartupAttributeOwner(const StartupAttributeOwner&) = delete;
+  StartupAttributeOwner& operator=(const StartupAttributeOwner&) = delete;
+
+  PPROC_THREAD_ATTRIBUTE_LIST get() const noexcept { return attributes_; }
+
+  bool payloads_match(HANDLE child_stdin, HANDLE child_stdout,
+                      HANDLE child_stderr, HANDLE root_job) const noexcept {
+    return attributes_ && inherited_handles_[0] == child_stdin &&
+        inherited_handles_[1] == child_stdout &&
+        inherited_handles_[2] == child_stderr &&
+        job_handles_[0] == root_job;
+  }
+
+ private:
+  StartupAttributeOwner(HANDLE child_stdin, HANDLE child_stdout,
+                        HANDLE child_stderr, HANDLE root_job) noexcept
+      : inherited_handles_{child_stdin, child_stdout, child_stderr},
+        job_handles_{root_job} {}
+
+  bool initialize() noexcept {
+    SIZE_T bytes = 0;
+    InitializeProcThreadAttributeList(nullptr, 2, 0, &bytes);
+    if (bytes == 0 || bytes > 65536) return false;
+    try { attribute_storage_.resize(bytes); }
+    catch (...) { return false; }
+    attributes_ = reinterpret_cast<PPROC_THREAD_ATTRIBUTE_LIST>(
+        attribute_storage_.data());
+    if (!InitializeProcThreadAttributeList(attributes_, 2, 0, &bytes)) {
+      attributes_ = nullptr;
+      return false;
+    }
+    return UpdateProcThreadAttribute(
+               attributes_, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+               const_cast<HANDLE*>(inherited_handles_.data()),
+               sizeof(inherited_handles_), nullptr, nullptr) != FALSE &&
+        UpdateProcThreadAttribute(
+               attributes_, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST,
+               const_cast<HANDLE*>(job_handles_.data()),
+               sizeof(job_handles_), nullptr, nullptr) != FALSE;
+  }
+
+  const std::array<HANDLE, 3> inherited_handles_;
+  const std::array<HANDLE, 1> job_handles_;
+  std::vector<std::byte> attribute_storage_;
+  PPROC_THREAD_ATTRIBUTE_LIST attributes_ = nullptr;
+};
+
 struct PreparedLaunch final {
   SupervisorState* supervisor = nullptr;
   ProcessLaunchAuthority* authority = nullptr;
@@ -513,13 +637,8 @@ struct PreparedLaunch final {
   Child child;
   std::wstring command_line;
   std::vector<wchar_t> environment;
-  std::vector<std::byte> attribute_storage;
-  PPROC_THREAD_ATTRIBUTE_LIST attributes = nullptr;
+  std::unique_ptr<StartupAttributeOwner> startup_attributes;
   LaunchReceipt receipt{};
-
-  ~PreparedLaunch() {
-    if (attributes) DeleteProcThreadAttributeList(attributes);
-  }
 };
 
 bool make_pipe_pair(UniqueHandle& parent_read, UniqueHandle& child_write) noexcept {
@@ -549,26 +668,10 @@ bool make_stdin_pair(UniqueHandle& child_read, UniqueHandle& parent_write) noexc
 }
 
 bool prepare_startup_attributes(PreparedLaunch& context) noexcept {
-  SIZE_T bytes = 0;
-  InitializeProcThreadAttributeList(nullptr, 2, 0, &bytes);
-  if (bytes == 0 || bytes > 65536) return false;
-  try { context.attribute_storage.resize(bytes); }
-  catch (...) { return false; }
-  context.attributes = reinterpret_cast<PPROC_THREAD_ATTRIBUTE_LIST>(
-      context.attribute_storage.data());
-  if (!InitializeProcThreadAttributeList(context.attributes, 2, 0, &bytes))
-    return false;
-  HANDLE inherited[3] = {
-    context.child_stdin_read.get(), context.child_stdout_write.get(),
-    context.child_stderr_write.get(),
-  };
-  HANDLE job_list[1] = {context.supervisor->root_job.get()};
-  return UpdateProcThreadAttribute(
-             context.attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-             inherited, sizeof(inherited), nullptr, nullptr) != FALSE &&
-      UpdateProcThreadAttribute(
-             context.attributes, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST,
-             job_list, sizeof(job_list), nullptr, nullptr) != FALSE;
+  context.startup_attributes = StartupAttributeOwner::create(
+      context.child_stdin_read.get(), context.child_stdout_write.get(),
+      context.child_stderr_write.get(), context.supervisor->root_job.get());
+  return context.startup_attributes != nullptr;
 }
 
 bool start_drain_workers(Child& child, const LaunchLimits& limits) noexcept {
@@ -590,7 +693,7 @@ bool start_drain_workers(Child& child, const LaunchLimits& limits) noexcept {
   if (!child.stderr_worker) {
     CancelSynchronousIo(child.stdout_worker.get());
     if (!settle_drain_worker(child.stdout_worker, child.stdout_context.get(),
-                             kWorkerSettlementMs)) std::terminate();
+                             limits.cleanup_deadline_at_ms)) std::terminate();
     return false;
   }
   return true;
@@ -654,9 +757,11 @@ bool monitor_registered_child(Child& child, HANDLE root_job,
         kWaitSliceMs, plan.limits.deadline_at_ms - now)));
   }
   if (!job_empty(root_job)) return false;
+  if (GetTickCount64() >= plan.limits.deadline_at_ms) return false;
   DWORD exit_code = 0;
   if (!GetExitCodeProcess(child.process.get(), &exit_code) ||
       exit_code == STILL_ACTIVE) return false;
+  if (GetTickCount64() >= plan.limits.deadline_at_ms) return false;
   context->receipt->exit_code = exit_code;
   context->receipt->status = exit_code == 0
       ? LaunchResultCode::kOk : LaunchResultCode::kExitFailure;
@@ -664,10 +769,10 @@ bool monitor_registered_child(Child& child, HANDLE root_job,
 }
 
 [[noreturn]] void launch_cleanup_fail_stop() noexcept {
-  // After process creation, losing the last owner of a live worker or child is
-  // worse than terminating the supervisor. Process termination closes the
-  // retained kill-on-close root Job and cannot be reported as acknowledgement;
-  // startup recovery sees the durable start as unknown/manual.
+  // Losing the last owner of pending I/O, a live worker, or a child is worse
+  // than terminating the supervisor. Process termination closes the retained
+  // kill-on-close root Job. If a durable start exists, startup recovery keeps
+  // it unknown/manual; pre-dispatch I/O never fabricates a journal record.
   std::terminate();
 }
 
@@ -682,12 +787,16 @@ bool terminate_unregistered(PreparedLaunch& context) noexcept {
   if (!TerminateJobObject(context.supervisor->root_job.get(), 1))
     launch_cleanup_fail_stop();
   const bool primary_reaped = !context.child.process ||
-      wait_reaped(context.child.process.get(), kMaxWaitMs, nullptr);
+      wait_reaped_until(context.child.process.get(),
+                        context.plan->limits.cleanup_deadline_at_ms, nullptr);
   if (!primary_reaped ||
-      !wait_job_empty_bounded(context.supervisor->root_job.get(), kMaxWaitMs))
+      !wait_job_empty_until(context.supervisor->root_job.get(),
+                            context.plan->limits.cleanup_deadline_at_ms))
     launch_cleanup_fail_stop();
   if ((context.child.stdout_worker || context.child.stderr_worker) &&
-      !settle_child_drains(context.child)) launch_cleanup_fail_stop();
+      !settle_child_drains(context.child,
+                           context.plan->limits.cleanup_deadline_at_ms))
+    launch_cleanup_fail_stop();
   context.receipt.job_reaped = true;
   return true;
 }
@@ -718,7 +827,16 @@ DispatchStatus create_monitor_reap_after_durable_start(
   startup.StartupInfo.hStdInput = context->child_stdin_read.get();
   startup.StartupInfo.hStdOutput = context->child_stdout_write.get();
   startup.StartupInfo.hStdError = context->child_stderr_write.get();
-  startup.lpAttributeList = context->attributes;
+  if (!context->startup_attributes ||
+      !context->startup_attributes->payloads_match(
+          context->child_stdin_read.get(), context->child_stdout_write.get(),
+          context->child_stderr_write.get(),
+          context->supervisor->root_job.get())) {
+    context->receipt.status = LaunchResultCode::kPreDispatchFailure;
+    context->receipt.job_reaped = true;
+    return DispatchStatus::kPreDispatchFailure;
+  }
+  startup.lpAttributeList = context->startup_attributes->get();
   PROCESS_INFORMATION created{};
   context->receipt.mutation_attempted = true;
   const DWORD flags = CREATE_SUSPENDED | CREATE_NO_WINDOW |
@@ -757,7 +875,7 @@ DispatchStatus create_monitor_reap_after_durable_start(
       !same_identity_handle(context->executable.get(), plan.expected_executable)) {
     const bool reaped = context->supervisor->children.terminate_and_reap(
         capability.operation_id, context->supervisor->root_job.get(),
-        kMaxWaitMs, nullptr);
+        plan.limits.cleanup_deadline_at_ms, nullptr);
     context->authority->poisoned = true;
     context->receipt.job_reaped = reaped;
     if (!reaped) launch_cleanup_fail_stop();
@@ -770,10 +888,11 @@ DispatchStatus create_monitor_reap_after_durable_start(
   ChildRegistry::RegisteredOutcome child_outcome{};
   if (!context->supervisor->children.operate_and_unregister(
           capability.operation_id, context->supervisor->root_job.get(),
-          monitor_registered_child, &monitor, child_outcome)) {
+          monitor_registered_child, &monitor, plan.limits.deadline_at_ms,
+          child_outcome)) {
     const bool reaped = context->supervisor->children.terminate_and_reap(
         capability.operation_id, context->supervisor->root_job.get(),
-        kMaxWaitMs, nullptr);
+        plan.limits.cleanup_deadline_at_ms, nullptr);
     context->authority->poisoned = true;
     context->receipt.job_reaped = reaped;
     if (!reaped) launch_cleanup_fail_stop();
@@ -800,6 +919,7 @@ DispatchStatus create_monitor_reap_after_durable_start(
   ProcessLaunchAuthority& authority = process_launch_authority();
   std::lock_guard transaction_lock(authority.mutex);
   if (authority.active || authority.poisoned ||
+      authority.shutting_down.load(std::memory_order_acquire) ||
       !authority.recovered || !authority.durable_adapter ||
       !authority.durable_adapter->authority_ready() ||
       !supervisor.root_job || !root_job_policy_proven(supervisor.root_job.get()) ||
@@ -827,6 +947,11 @@ DispatchStatus create_monitor_reap_after_durable_start(
   const std::uint64_t validated_at_ms = GetTickCount64();
   if (plan.limits.deadline_at_ms <= validated_at_ms ||
       plan.limits.deadline_at_ms - validated_at_ms > plan.limits.timeout_ms ||
+      plan.limits.cleanup_deadline_at_ms <= plan.limits.deadline_at_ms ||
+      plan.limits.cleanup_deadline_at_ms - plan.limits.deadline_at_ms >
+          kMaxWaitMs ||
+      plan.limits.cleanup_deadline_at_ms - validated_at_ms >
+          kMaxCleanupHorizonMs ||
       capability.expires_at_ms < plan.limits.deadline_at_ms) {
     output.status = LaunchResultCode::kInvalidRequest;
     return output;
@@ -847,7 +972,9 @@ DispatchStatus create_monitor_reap_after_durable_start(
       !executable_identity_bound(plan.expected_executable, observed) ||
       !hash_retained_executable(prepared.executable.get(), observed.size,
                                 supervisor.cancellation.get(),
-                                plan.limits.deadline_at_ms, content_sha) ||
+                                plan.limits.deadline_at_ms,
+                                plan.limits.cleanup_deadline_at_ms,
+                                content_sha) ||
       content_sha != plan.expected_content_sha256 ||
       !create_restricted_low_token(prepared.token, digests.token) ||
       digests.token != plan.expected_token_policy_digest ||
