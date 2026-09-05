@@ -42,6 +42,8 @@ IGNORED_GENERATED_DIRECTORY_NAMES = frozenset({"__pycache__"})
 # category therefore fail closed rather than escaping through a filename
 # convention.
 TEST_INVENTORY = {
+    "tests/host/action-journal-container-model.test.mjs": "host_fixture",
+    "tests/host/action-journal-protocol.test.mjs": "host_fixture",
     "tests/host/action-journal.test.mjs": "host_fixture",
     "tests/host/external-tools.test.mjs": "provider_fixture",
     "tests/host/fixture-host.test.mjs": "loopback_fixture",
@@ -106,6 +108,7 @@ REVIEWED_TEST_SUPPORT_FILES = frozenset({
     "tests/performance/__init__.py",
     "tests/performance/lifecycle_test_isolation.py",
     "tests/qa/__init__.py",
+    "tests/reference/action-journal-container-model.mjs",
     "tests/release/__init__.py",
     "tests/security/README.md",
     "tests/security/__init__.py",
