@@ -70,14 +70,39 @@ target_link_libraries(lae_compilecheck_windows_release_verifier PRIVATE
   bcrypt
   ntdll)
 
+# process_transaction.inc is deliberately listed as HEADER_FILE_ONLY: it is
+# included by authority.cpp inside the same anonymous translation-unit
+# namespace and must never be compiled or linked as an independent surface.
+set_source_files_properties(
+  "${_LAE_INERT_NATIVE_ROOT}/windows_supervisor/process_transaction.inc"
+  PROPERTIES HEADER_FILE_ONLY TRUE)
+add_library(lae_compilecheck_windows_supervisor STATIC
+  "${_LAE_INERT_NATIVE_ROOT}/windows_supervisor/authority.cpp"
+  "${_LAE_INERT_NATIVE_ROOT}/windows_supervisor/process_transaction.inc")
+_lae_configure_inert_compile_check(lae_compilecheck_windows_supervisor)
+target_link_libraries(lae_compilecheck_windows_supervisor PRIVATE
+  advapi32
+  bcrypt
+  wintrust)
+
+add_library(lae_compilecheck_windows_clipboard STATIC
+  "${_LAE_INERT_NATIVE_ROOT}/windows_clipboard/windows_clipboard.cpp")
+_lae_configure_inert_compile_check(lae_compilecheck_windows_clipboard)
+target_link_libraries(lae_compilecheck_windows_clipboard PRIVATE
+  advapi32
+  bcrypt
+  user32)
+
 # A finite convenience target for remote evidence commands. It has no product
 # consumer and is unreachable when the enclosing option is OFF.
 add_custom_target(lae_inert_windows_compile_checks
   DEPENDS
     lae_compilecheck_action_journal_helper
+    lae_compilecheck_windows_clipboard
     lae_compilecheck_windows_hardware_attestor
     lae_compilecheck_windows_readonly_fs
-    lae_compilecheck_windows_release_verifier)
+    lae_compilecheck_windows_release_verifier
+    lae_compilecheck_windows_supervisor)
 
 unset(_LAE_INERT_NATIVE_ROOT)
 unset(_LAE_INERT_REPOSITORY_ROOT)
