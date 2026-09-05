@@ -146,16 +146,22 @@ test('mocked HostServer drives validated read and confirmed mutation through mod
   const response = await fetch(`${address.url}/api/chat`, { method: 'POST', headers: { ...auth(address.token), 'content-type': 'application/json' }, body: JSON.stringify({ session_id: session.session_id, request_id: 'request_vertical01', message: 'read then draft' }) });
   assert.equal(response.status, 200); const stream = new SseReader(response.body);
   const confirmation = await stream.until(event => event.event === 'tool.confirmation_required');
-  assert.ok(confirmation); assert.equal(confirmation.data.call.name, 'mail.create_draft'); assert.deepEqual(confirmation.data.preview.recipients, ['alice@example.com']);
+  assert.ok(confirmation); assert.equal(confirmation.request_id, 'request_vertical01'); assert.equal(confirmation.session_id, session.session_id); assert.deepEqual(confirmation.data.call, { id: 'call_draft01', name: 'mail.create_draft' }); assert.deepEqual(confirmation.data.preview.recipients, ['alice@example.com']);
+  const wrongRequest = await fetch(`${address.url}/api/tool-confirmations/${confirmation.data.confirmation_id}`, { method: 'POST', headers: { ...auth(address.token), 'content-type': 'application/json' }, body: JSON.stringify({ approved: true, request_id: 'request_wrong01', call_id: confirmation.data.call.id }) });
+  assert.equal(wrongRequest.status, 404); assert.deepEqual(await wrongRequest.json(), { accepted: false }); assert.equal(observations.draftExecutions, 0);
+  const wrongCall = await fetch(`${address.url}/api/tool-confirmations/${confirmation.data.confirmation_id}`, { method: 'POST', headers: { ...auth(address.token), 'content-type': 'application/json' }, body: JSON.stringify({ approved: true, request_id: confirmation.request_id, call_id: 'call_wrong01' }) });
+  assert.equal(wrongCall.status, 404); assert.deepEqual(await wrongCall.json(), { accepted: false }); assert.equal(observations.draftExecutions, 0);
   const approved = await fetch(`${address.url}/api/tool-confirmations/${confirmation.data.confirmation_id}`, { method: 'POST', headers: { ...auth(address.token), 'content-type': 'application/json' }, body: JSON.stringify({ approved: true, request_id: confirmation.request_id, call_id: confirmation.data.call.id }) });
   assert.equal(approved.status, 200); assert.deepEqual(await approved.json(), { accepted: true });
   const events = await stream.finish();
 
-  assert.equal(events.at(-2).event, 'message.completed'); assert.equal(events.at(-1).event, 'metrics.snapshot');
-  for (let index = 1; index < events.length; index++) assert.equal(events[index].sequence, events[index - 1].sequence + 1);
+  assert.deepEqual(events.map(event => event.event), ['message.started', 'message.started', 'tool.proposed', 'tool.started', 'tool.completed', 'message.started', 'tool.proposed', 'tool.confirmation_required', 'tool.started', 'tool.completed', 'message.started', 'message.delta', 'message.completed', 'metrics.snapshot']);
+  for (let index = 0; index < events.length; index++) { assert.equal(events[index].sequence, index); assert.equal(events[index].request_id, 'request_vertical01'); assert.equal(events[index].session_id, session.session_id); }
   const proposed = events.filter(event => event.event === 'tool.proposed'); const started = events.filter(event => event.event === 'tool.started'); const completed = events.filter(event => event.event === 'tool.completed');
-  assert.deepEqual(proposed.map(event => event.data.call.name), ['mail.read_message', 'mail.create_draft']);
+  assert.deepEqual(proposed.map(event => event.data.call), [{ id: 'call_read01', name: 'mail.read_message' }, { id: 'call_draft01', name: 'mail.create_draft' }]);
+  assert.deepEqual(started.map(event => event.data.call), proposed.map(event => event.data.call));
   assert.deepEqual(started.map(event => event.data.authorization), ['policy', 'user_confirmation']);
+  assert.deepEqual(completed.map(event => ({ id: event.data.result.id, name: event.data.result.name })), proposed.map(event => event.data.call));
   assert.deepEqual(completed.map(event => event.data.result.status), ['ok', 'ok']);
   assert.deepEqual({ readPreviews: observations.readPreviews, readExecutions: observations.readExecutions, draftPreviews: observations.draftPreviews, draftExecutions: observations.draftExecutions }, { readPreviews: 1, readExecutions: 1, draftPreviews: 1, draftExecutions: 1 });
   assert.deepEqual(observations.authorization, { kind: 'user_confirmation' });

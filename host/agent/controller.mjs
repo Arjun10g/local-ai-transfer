@@ -67,6 +67,15 @@ function validateToolArgumentShape(tool, call) {
 }
 function publicToolCall(call) { return { id: call.id, name: call.name }; }
 
+function executionRegistryEntries(toolRegistry) {
+  if (toolRegistry === undefined) return [];
+  if (!toolRegistry || typeof toolRegistry !== 'object' || Array.isArray(toolRegistry)) throw new TypeError('toolRegistry must be an object');
+  return Object.entries(toolRegistry).map(([name, tool]) => {
+    if (!tool || typeof tool !== 'object' || Array.isArray(tool) || tool.name !== name || typeof tool.execute !== 'function') throw new TypeError(`toolRegistry entry ${name} must provide its matching name and execute function`);
+    return [name, tool];
+  });
+}
+
 async function invokeWithTimeout(tool, operation, call, signal) {
   // Tools must honor the supplied AbortSignal; the race bounds the controller
   // even when a misbehaving implementation cannot be interrupted immediately.
@@ -89,7 +98,7 @@ export class ConversationController {
     if (!Number.isInteger(maxHistoryMessages) || maxHistoryMessages < 1 || !Number.isInteger(maxHistoryBytes) || maxHistoryBytes < 1024) throw new TypeError('history limits are invalid');
     this.engine = engine; this.maxToolCalls = maxToolCalls; this.confirmationTimeoutMs = confirmationTimeoutMs; this.maxSessions = maxSessions; this.maxHistoryMessages = maxHistoryMessages; this.maxHistoryBytes = maxHistoryBytes; this.clock = 0;
     this.sessions = new Map(); this.active = null; this.pending = new Map();
-    this.tools = new Map([[timeNowDefinition.name, { ...timeNowDefinition, execute: ({ id, arguments: args }) => timeNowTool({ id, arguments: args }) }], ...(toolRegistry ? Object.entries(toolRegistry) : [])]);
+    this.tools = new Map([[timeNowDefinition.name, { ...timeNowDefinition, execute: ({ id, arguments: args }) => timeNowTool({ id, arguments: args }) }], ...executionRegistryEntries(toolRegistry)]);
   }
   createSession(sessionId = opaque('ses')) {
     if (!sessionIdPattern.test(sessionId)) throw new Error('invalid session id');

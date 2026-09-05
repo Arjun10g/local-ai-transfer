@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createLocalToolDefinitionCatalog } from '../../host/tools/local/index.mjs';
 import { createExternalToolDefinitionCatalog } from '../../host/providers/index.mjs';
-import { modelToolDefinitions } from '../../host/agent/controller.mjs';
+import { ConversationController, modelToolDefinitions } from '../../host/agent/controller.mjs';
 
 const fixture = JSON.parse(await readFile(new URL('./production_tool_call_eval.json', import.meta.url), 'utf8'));
 
@@ -12,6 +12,18 @@ function catalogDefinitions() {
   const external = createExternalToolDefinitionCatalog();
   return modelToolDefinitions(new Map([...Object.entries(local), ...Object.entries(external)]));
 }
+
+test('schema catalogs are pure definitions and are rejected as execution registries', () => {
+  const catalog = { ...createLocalToolDefinitionCatalog(), ...createExternalToolDefinitionCatalog() };
+  const hookNames = ['execute', 'preview', 'authorize', 'confirmationRequired', 'confirmation', 'confirm'];
+  for (const [name, definition] of Object.entries(catalog)) {
+    for (const hook of hookNames) assert.notEqual(typeof definition[hook], 'function', `${name}: ${hook} must not be executable`);
+  }
+  assert.throws(
+    () => new ConversationController({ engine: { async *generate() {} }, toolRegistry: catalog }),
+    /must provide its matching name and execute function/u
+  );
+});
 
 test('production evaluation fixture exactly matches the explicit definition catalog', () => {
   assert.equal(fixture.schema, 'local_bmo.tool-call-eval.v1');

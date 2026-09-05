@@ -27,7 +27,7 @@ function workspaceSets(workspaces) {
 // Schema/evaluation catalog only. Production must use
 // createLocalToolRegistry(), which applies the configured-capability filter.
 export function createLocalToolDefinitionCatalog() {
-  return { [timeNowDefinition.name]: timeNowDefinition, ...systemDefinitions, ...filesystemDefinitions, [processDefinition.name]: createProcessRunTools() };
+  return { [timeNowDefinition.name]: timeNowDefinition, ...systemDefinitions, ...filesystemDefinitions, [processDefinition.name]: processDefinition };
 }
 
 export function createLocalToolRegistry({ workspaces = [], applications = {}, process_actions: processActions = {}, processEnvironment = {}, browserExecutable, platform, networkProvider = 'disabled', grantControl } = {}) {
