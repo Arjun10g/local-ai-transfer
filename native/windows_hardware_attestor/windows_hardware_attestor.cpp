@@ -742,12 +742,14 @@ bool collect_smbios(Evidence& evidence) {
       if (encoded_size != 0 && encoded_size != 0xffff) {
         MemoryEvidence memory{};
         memory.slot_index = static_cast<std::uint32_t>(evidence.firmware.memory.size());
-        if (encoded_size == 0x7fff && formatted >= 32)
+        if (encoded_size == 0x7fff) {
+          if (formatted < 32) return false;
           memory.capacity_bytes = static_cast<std::uint64_t>(read_u32(item + 28)) * 1'048'576;
-        else if ((encoded_size & 0x8000) != 0)
+        } else if ((encoded_size & 0x8000) != 0) {
           memory.capacity_bytes = static_cast<std::uint64_t>(encoded_size & 0x7fff) * 1024;
-        else
+        } else {
           memory.capacity_bytes = static_cast<std::uint64_t>(encoded_size) * 1'048'576;
+        }
         memory.data_width = read_u16(item + 10);
         memory.memory_type = item[18];
         memory.speed_mts = formatted >= 23 ? read_u16(item + 21) : 0;

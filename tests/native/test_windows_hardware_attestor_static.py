@@ -169,6 +169,23 @@ class WindowsHardwareAttestorStaticTests(unittest.TestCase):
         observed = self.schema["$defs"]["observed"]
         self.assertEqual(set(self.fixture["observed"]), set(observed["required"]))
 
+    def test_strict_fixture_parser_rejects_duplicate_keys(self):
+        duplicate = '{"fixture":true,"fixture":false}'
+        with self.assertRaisesRegex(ValueError, "duplicate key"):
+            json.loads(
+                duplicate,
+                object_pairs_hook=lambda items: self._strict_pairs(items),
+            )
+
+    @staticmethod
+    def _strict_pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError(f"duplicate key: {key}")
+            result[key] = value
+        return result
+
     def test_schema_rejects_fixture_as_target_evidence(self):
         self.assertEqual(self.schema["properties"]["target_evidence_accepted"]["const"], False)
         self.assertEqual(self.schema["properties"]["verdict"]["const"], "NOT_READY")
