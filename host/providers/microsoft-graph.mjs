@@ -382,7 +382,7 @@ export class MicrosoftGraphProvider {
       if (call.name === 'mail.send_draft' && ['provider_timeout', 'provider_failed'].includes(error?.code) && !operation.signal.aborted && saved.draftBinding && saved.prewrite_verified && saved.post_attempted && saved.reconciliation_allowed) {
         try { return await this.reconcileSendDraft(call, args, binding, null, saved, operation.signal); } catch {}
       }
-      if (call.name === 'mail.mark_read' && ['provider_timeout', 'provider_failed'].includes(error?.code) && !operation.signal.aborted) {
+      if (call.name === 'mail.mark_read' && ['provider_timeout', 'provider_failed'].includes(error?.code) && !operation.signal.aborted && saved.post_attempted) {
         try { const after = await this.readMessageState(args.message_id, operation.signal); if (after.is_read === args.is_read) return verifiedResult({ call, binding, response: null, resource: { id: after.id, is_read: after.is_read }, reconciliation: 'timeout_get_verified' }); return result(call, 'ok', reconcilingPayload({ reconciliation: 'timeout_state_unknown' })); } catch {}
       }
       if (call.name === 'teams.send_message' && ['provider_timeout', 'provider_failed'].includes(error?.code) && !operation.signal.aborted && saved.prewrite_verified && saved.post_attempted && saved.reconciliation_allowed) {

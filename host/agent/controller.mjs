@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { makeEvent } from './assistant-events.mjs';
 import { makeToolResult, parseToolCall, validateToolResult, EnvelopeError } from './tool-envelope.mjs';
 import { createActionBinding } from './action-journal.mjs';
-import { readProviderAttestation } from './provider-attestation.mjs';
+import { readProviderAttestation, transferProviderAttestation } from './provider-attestation.mjs';
 import { timeNowDefinition, timeNowTool } from '../tools/time-now.mjs';
 
 export const STATES = Object.freeze(['IDLE', 'BUILDING_PROMPT', 'INFERENCING', 'TOOL_PROPOSED', 'WAITING_CONFIRMATION', 'TOOL_RUNNING', 'CONTINUING_MODEL', 'COMPLETED', 'CANCELLED', 'FAILED']);
@@ -22,7 +22,7 @@ const RECONCILIATION_REQUIRED_EFFECTS = new Set(['create_draft', 'send_mail', 'm
 const PRIVATE_JOURNAL_KEYS = new Set(['operation_id', 'operation_digest', 'arguments_digest', 'preview_digest', 'response_digest', 'resource_digest']);
 const providerAttestationMatches = (result, expectedBinding, call) => {
   const attestation = readProviderAttestation(result);
-  return result?.status === 'ok' && attestation?.provider === 'microsoft_graph' && attestation.call_id === call.id && attestation.tool_name === call.name && attestation.operation_id === expectedBinding.id && attestation.operation_digest === expectedBinding.operationDigest && attestation.arguments_digest === expectedBinding.argumentsDigest && attestation.preview_digest === expectedBinding.previewDigest && typeof attestation.proof === 'string';
+  return result?.status === 'ok' && attestation?.provider === 'microsoft_graph' && attestation.call_id === call.id && attestation.tool_name === call.name && attestation.operation_id === expectedBinding.id && attestation.operation_digest === expectedBinding.operationDigest && attestation.arguments_digest === expectedBinding.argumentsDigest && attestation.preview_digest === expectedBinding.previewDigest && SAFE_RECONCILIATIONS.has(attestation.proof);
 };
 function stripPrivateJournalMetadata(value) {
   if (Array.isArray(value)) return value.map(stripPrivateJournalMetadata);
@@ -251,8 +251,10 @@ export class ConversationController {
           const internal = activeJournalOperation?.reconcile ? { journal_binding: { operation_id: activeJournalOperation.id, operation_digest: activeJournalOperation.operationDigest, arguments_digest: activeJournalOperation.argumentsDigest, preview_digest: activeJournalOperation.previewDigest } } : undefined;
           result = await invokeWithTimeout(tool, tool.execute, { ...call, ...(authorization.kind === 'policy' ? {} : { authorization }), ...(internal ? { internal } : {}) }, controller.signal);
         }
+        const hostResult = result;
         try { result = validateToolResult(result); } catch { throw Object.assign(new Error('invalid_tool_result'), { code: 'invalid_tool_result' }); }
         if (result.id !== call.id || result.name !== call.name) throw Object.assign(new Error('tool_result_mismatch'), { code: 'tool_result_mismatch' });
+        transferProviderAttestation(hostResult, result);
         let strictModelResult = false; let controllerVerified = false; let modelBinding = null;
         if (activeJournalOperation) {
           strictModelResult = activeJournalOperation.reconcile === true;

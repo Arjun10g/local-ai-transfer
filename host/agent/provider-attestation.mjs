@@ -12,3 +12,13 @@ export function attachProviderAttestation(result, attestation) {
 export function readProviderAttestation(result) {
   return result && typeof result === 'object' ? attestations.get(result) ?? null : null;
 }
+
+// Envelope validation intentionally returns a structured clone. Preserve the
+// identity-bound attestation only from the original host object; serialized
+// fields can never create or alter this association.
+export function transferProviderAttestation(source, target) {
+  const attestation = readProviderAttestation(source);
+  if (!attestation || !target || typeof target !== 'object') return target;
+  attestations.set(target, attestation);
+  return target;
+}
