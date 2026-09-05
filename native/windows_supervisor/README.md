@@ -31,7 +31,15 @@ bounded redacted metadata can cross a loopback boundary. A durable
 ActionJournal authority is a hard prerequisite: its start record must be
 durable before dispatch and its terminal record durable before acknowledgement.
 
-The retained executing-image section identity gate is false, so the pathname
-reopen code cannot authorize a bootstrap. The reference implementation is not a proof of Windows API behavior. It has
+The source-only process-transaction include models supervisor-owned ordering
+using creation-time `PROC_THREAD_ATTRIBUTE_JOB_LIST`, a suspended child, one
+serialized active launch, and a private durable-adapter interface. No adapter
+implementation or startup-recovery installation is present, and the public
+header exposes no process API. See
+`contracts/windows-process-transaction/v0.1.0.md`.
+
+The retained executing-image section and retained working-directory identity
+gates are false, so pathname-based process creation cannot authorize a launch.
+The reference implementation is not a proof of Windows API behavior. It has
 no compile, target, Authenticode, package, process-tree, cancellable-I/O, or
 live evidence. Production and target availability remain **false**.

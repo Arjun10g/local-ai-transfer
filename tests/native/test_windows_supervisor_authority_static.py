@@ -88,6 +88,8 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
                 "durable_journal_authority", "nested_job_policy_proven",
                 "broker_issued_identity_proven",
                 "retained_executing_section_identity_proven",
+                "retained_working_directory_identity_proven",
+                "supervisor_owned_process_transaction_accepted",
             },
         )
         self.assertEqual(
@@ -106,7 +108,6 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
             self.assertNotIn("GetEnvironmentVariable", text)
             self.assertNotIn("INFINITE", text)
             self.assertNotIn("TerminateThread", text)
-            self.assertNotIn("CancelSynchronousIo", text)
         self.assertIn("#if defined(_WIN32)", self.cpp)
         self.assertIn("#if !defined(_WIN32)", self.hpp)
         self.assertIn("#define WIN32_LEAN_AND_MEAN", self.hpp)
@@ -186,6 +187,8 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
         self.assertIn("epoch_initialized_", self.cpp)
         self.assertIn("std::array<std::byte, kCapabilityBytes> candidate{}", self.cpp)
         self.assertIn("kRetainedExecutingSectionIdentityProven = false", self.hpp)
+        self.assertIn("kRetainedWorkingDirectoryIdentityProven = false", self.hpp)
+        self.assertIn("kSupervisorOwnedProcessTransactionAccepted = false", self.hpp)
 
     def test_bootstrap_process_and_pipe_proof_is_os_bound(self):
         for token in (
@@ -253,7 +256,7 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
 
     def test_registry_raii_and_fail_stop_cleanup(self):
         for token in (
-            "class UniqueHandle", "Child(Child&&)", "children_.emplace",
+            "class UniqueHandle", "Child(Child&&)", "children_.try_emplace",
             "catch (...)", "bool unregister", "bool terminate_and_reap",
             "TerminateJobObject(root_job, 1)", "job_empty(root_job)",
             "state.root_job.reset()", "stop_supervisor(process_state(), kMaxWaitMs)",
@@ -344,7 +347,7 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
         self.assertIn("wait_reaped(child.process.get(), remaining, nullptr)", reap)
         self.assertNotIn("wait_reaped(child.process.get(), remaining, cancellation)", reap)
         self.assertEqual(reap.count("TerminateJobObject(root_job, 1)"), 1)
-        self.assertIn("if (!job_empty(root_job)) ok = false", reap)
+        self.assertIn("wait_job_empty_bounded(root_job, remaining)", reap)
 
     def test_public_header_cannot_forge_authority(self):
         self.assertNotIn("IssuedCapability", self.hpp)

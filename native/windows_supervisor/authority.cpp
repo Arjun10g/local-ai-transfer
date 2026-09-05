@@ -12,10 +12,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <map>
 #include <mutex>
 #include <limits>
+#include <memory>
 #include <set>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -34,6 +37,8 @@ constexpr std::size_t kMaxFrameBytes = 65536;
 constexpr std::size_t kCapabilityBytes = 32;
 constexpr std::size_t kMaxDigestBytes = 32;
 constexpr std::size_t kMaxJournalRecords = 64;
+constexpr std::size_t kMaxCapturedBytesPerStream = 64 * 1024;
+constexpr DWORD kWorkerSettlementMs = 2000;
 // Each operation needs one durable start plus one durable terminal/unknown
 // record. Reserve both sequence numbers before invoking provider code.
 constexpr std::uint64_t kRequiredJournalSequences = 2;
@@ -212,11 +217,33 @@ class UniqueHandle final {
   HANDLE value_ = INVALID_HANDLE_VALUE;
 };
 
+struct DrainContext final {
+  HANDLE source = INVALID_HANDLE_VALUE;
+  std::array<std::byte, kMaxCapturedBytesPerStream> bytes{};
+  DWORD limit = 0;
+  std::atomic<DWORD> captured{0};
+  std::atomic<DWORD> error{ERROR_IO_PENDING};
+  std::atomic<bool> overflow{false};
+
+  ~DrainContext() { SecureZeroMemory(bytes.data(), bytes.size()); }
+};
+
 struct Child final {
   UniqueHandle process;
+  UniqueHandle primary_thread;
+  UniqueHandle stdout_read;
+  UniqueHandle stderr_read;
+  UniqueHandle stdout_worker;
+  UniqueHandle stderr_worker;
+  std::unique_ptr<DrainContext> stdout_context;
+  std::unique_ptr<DrainContext> stderr_context;
   FixedIdentity executable{};
   std::uint64_t stable_id = 0;
   bool membership_verified = false;
+  bool resumed = false;
+  bool output_overflow = false;
+  std::uint32_t stdout_bytes = 0;
+  std::uint32_t stderr_bytes = 0;
   Child() = default;
   Child(const Child&) = delete;
   Child& operator=(const Child&) = delete;
@@ -860,12 +887,136 @@ bool job_empty(HANDLE job) noexcept {
   return info.ActiveProcesses == 0;
 }
 
+bool wait_job_empty_bounded(HANDLE root_job, DWORD maximum_ms) noexcept {
+  if (!root_job || maximum_ms == 0 || maximum_ms > kMaxWaitMs) return false;
+  const std::uint64_t start = GetTickCount64();
+  if (start > std::numeric_limits<std::uint64_t>::max() - maximum_ms)
+    return false;
+  const std::uint64_t deadline = start + maximum_ms;
+  do {
+    if (job_empty(root_job)) return true;
+    const std::uint64_t now = GetTickCount64();
+    if (now >= deadline) return false;
+    Sleep(static_cast<DWORD>(std::min<std::uint64_t>(kWaitSliceMs,
+                                                     deadline - now)));
+  } while (true);
+}
+
+DWORD WINAPI drain_child_pipe(void* opaque) noexcept {
+  auto* context = static_cast<DrainContext*>(opaque);
+  if (!context || !context->source || context->source == INVALID_HANDLE_VALUE)
+    return ERROR_INVALID_HANDLE;
+  DWORD total = 0;
+  for (;;) {
+    if (context->limit == 0 || context->limit > context->bytes.size()) {
+      context->error.store(ERROR_INVALID_DATA, std::memory_order_release);
+      return ERROR_INVALID_DATA;
+    }
+    if (total == context->limit) {
+      // Probe one byte without appending it. Exact-limit output followed by
+      // EOF is valid; only an actual additional byte is overflow.
+      std::byte probe{};
+      DWORD read = 0;
+      if (!ReadFile(context->source, &probe, 1, &read, nullptr)) {
+        const DWORD error = GetLastError();
+        SecureZeroMemory(&probe, sizeof(probe));
+        if (error == ERROR_BROKEN_PIPE || error == ERROR_HANDLE_EOF) {
+          context->captured.store(total, std::memory_order_release);
+          context->error.store(ERROR_SUCCESS, std::memory_order_release);
+          return ERROR_SUCCESS;
+        }
+        context->error.store(error, std::memory_order_release);
+        return error;
+      }
+      SecureZeroMemory(&probe, sizeof(probe));
+      if (read == 0) {
+        context->captured.store(total, std::memory_order_release);
+        context->error.store(ERROR_SUCCESS, std::memory_order_release);
+        return ERROR_SUCCESS;
+      }
+      context->overflow.store(true, std::memory_order_release);
+      context->error.store(ERROR_BUFFER_OVERFLOW, std::memory_order_release);
+      return ERROR_BUFFER_OVERFLOW;
+    }
+    DWORD read = 0;
+    const DWORD room = context->limit - total;
+    if (!ReadFile(context->source, context->bytes.data() + total, room,
+                  &read, nullptr)) {
+      const DWORD error = GetLastError();
+      if (error == ERROR_BROKEN_PIPE || error == ERROR_HANDLE_EOF) {
+        context->captured.store(total, std::memory_order_release);
+        context->error.store(ERROR_SUCCESS, std::memory_order_release);
+        return ERROR_SUCCESS;
+      }
+      context->captured.store(total, std::memory_order_release);
+      context->error.store(error, std::memory_order_release);
+      return error;
+    }
+    if (read == 0) {
+      context->captured.store(total, std::memory_order_release);
+      context->error.store(ERROR_SUCCESS, std::memory_order_release);
+      return ERROR_SUCCESS;
+    }
+    total += read;
+    context->captured.store(total, std::memory_order_release);
+  }
+}
+
+bool settle_drain_worker(UniqueHandle& worker, DrainContext* context,
+                         DWORD maximum_ms) noexcept {
+  if (!context || !worker || maximum_ms > kWorkerSettlementMs) return false;
+  DWORD wait = WaitForSingleObject(worker.get(), 0);
+  if (wait == WAIT_TIMEOUT) {
+    // Cancel the exact worker thread that owns the synchronous ReadFile. Its
+    // heap context remains registry-owned until the thread is proven stopped.
+    if (!CancelSynchronousIo(worker.get()) && GetLastError() != ERROR_NOT_FOUND)
+      return false;
+    wait = WaitForSingleObject(worker.get(), maximum_ms);
+  }
+  if (wait != WAIT_OBJECT_0) return false;
+  DWORD code = ERROR_GEN_FAILURE;
+  if (!GetExitCodeThread(worker.get(), &code) || code == STILL_ACTIVE)
+    return false;
+  return code == ERROR_SUCCESS || code == ERROR_OPERATION_ABORTED ||
+      code == ERROR_BROKEN_PIPE || code == ERROR_HANDLE_EOF ||
+      code == ERROR_BUFFER_OVERFLOW || code == ERROR_INVALID_DATA;
+}
+
+bool settle_child_drains(Child& child) noexcept {
+  const bool stdout_settled = settle_drain_worker(
+      child.stdout_worker, child.stdout_context.get(), kWorkerSettlementMs);
+  const bool stderr_settled = settle_drain_worker(
+      child.stderr_worker, child.stderr_context.get(), kWorkerSettlementMs);
+  if (!stdout_settled || !stderr_settled) return false;
+  child.stdout_bytes = child.stdout_context->captured.load(std::memory_order_acquire);
+  child.stderr_bytes = child.stderr_context->captured.load(std::memory_order_acquire);
+  child.output_overflow =
+      child.stdout_context->overflow.load(std::memory_order_acquire) ||
+      child.stderr_context->overflow.load(std::memory_order_acquire);
+  child.stdout_worker.reset();
+  child.stderr_worker.reset();
+  child.stdout_read.reset();
+  child.stderr_read.reset();
+  child.stdout_context.reset();
+  child.stderr_context.reset();
+  return true;
+}
+
 class ChildRegistry final {
  public:
-  bool insert(Child child, HANDLE root_job) noexcept {
+  using RegisteredOperation = bool (*)(Child&, HANDLE, void*) noexcept;
+  struct RegisteredOutcome final {
+    std::uint32_t stdout_bytes = 0;
+    std::uint32_t stderr_bytes = 0;
+    bool output_overflow = false;
+  };
+
+  bool insert(Child& child, HANDLE root_job) noexcept {
     std::lock_guard lock(mutex_);
     if (children_.size() >= kMaxChildren || child.stable_id == 0 ||
-        !child.process || !root_job ||
+        !child.process || !child.primary_thread || !child.stdout_read ||
+        !child.stderr_read || !child.stdout_context || !child.stderr_context ||
+        !root_job ||
         children_.find(child.stable_id) != children_.end())
       return false;
     // Never trust a caller-provided boolean: membership is queried against
@@ -873,12 +1024,37 @@ class ChildRegistry final {
     if (!verify_membership(child.process.get(), root_job)) return false;
     child.membership_verified = true;
     try {
-      auto [ignored, inserted] = children_.emplace(child.stable_id, std::move(child));
-      (void)ignored;
-      return inserted;
+      // Allocate and publish an empty slot before transferring any retained
+      // handle. If allocation fails, the caller still owns the complete
+      // suspended child and can terminate the root Job. Move assignment is
+      // noexcept, so a successful slot reservation cannot strand ownership
+      // between the caller and registry.
+      auto [slot, inserted] = children_.try_emplace(child.stable_id);
+      if (!inserted) return false;
+      slot->second = std::move(child);
+      return true;
     } catch (...) {
       return false;
     }
+  }
+
+  bool operate_and_unregister(std::uint64_t stable_id, HANDLE root_job,
+                              RegisteredOperation operation,
+                              void* context,
+                              RegisteredOutcome& outcome) noexcept {
+    std::lock_guard lock(mutex_);
+    const auto found = children_.find(stable_id);
+    if (found == children_.end() || !root_job || !operation ||
+        !verify_membership(found->second.process.get(), root_job)) return false;
+    Child& child = found->second;
+    if (!operation(child, root_job, context) ||
+        WaitForSingleObject(child.process.get(), 0) != WAIT_OBJECT_0 ||
+        !job_empty(root_job) || !settle_child_drains(child)) return false;
+    outcome.stdout_bytes = child.stdout_bytes;
+    outcome.stderr_bytes = child.stderr_bytes;
+    outcome.output_overflow = child.output_overflow;
+    children_.erase(found);
+    return true;
   }
 
   static bool verify_membership(HANDLE process, HANDLE root_job) noexcept {
@@ -907,9 +1083,16 @@ class ChildRegistry final {
     Child& child = found->second;
     // Once the root is terminated, cancellation cannot shorten mandatory
     // whole-tree reap. The hard deadline remains the only bound.
+    const ULONGLONG start = GetTickCount64();
+    if (start > std::numeric_limits<ULONGLONG>::max() - deadline_ms)
+      return false;
+    const ULONGLONG end = start + deadline_ms;
     if (!TerminateJobObject(root_job, 1) ||
-        !wait_reaped(child.process.get(), deadline_ms, nullptr) ||
-        !job_empty(root_job)) return false;
+        !wait_reaped(child.process.get(), deadline_ms, nullptr)) return false;
+    const ULONGLONG now = GetTickCount64();
+    const DWORD remaining = now >= end ? 0 : static_cast<DWORD>(end - now);
+    if (remaining == 0 || !wait_job_empty_bounded(root_job, remaining) ||
+        !settle_child_drains(child)) return false;
     children_.erase(found);
     return true;
   }
@@ -919,7 +1102,10 @@ class ChildRegistry final {
     std::lock_guard lock(mutex_);
     if (deadline_ms > kMaxWaitMs || !root_job) return false;
     (void)cancellation;
-    const ULONGLONG end = GetTickCount64() + deadline_ms;
+    const ULONGLONG start = GetTickCount64();
+    if (start > std::numeric_limits<ULONGLONG>::max() - deadline_ms)
+      return false;
+    const ULONGLONG end = start + deadline_ms;
     // Issue exactly one root termination. Repeating it per child can race the
     // accounting query and falsely reject a tree that is still draining.
     bool ok = TerminateJobObject(root_job, 1) != FALSE;
@@ -933,8 +1119,13 @@ class ChildRegistry final {
       // early here would leave a kill-on-close root live.
       if (remaining == 0 || !wait_reaped(child.process.get(), remaining, nullptr))
         ok = false;
+      if (!settle_child_drains(child)) ok = false;
     }
-    if (!job_empty(root_job)) ok = false;
+    const ULONGLONG after_children = GetTickCount64();
+    const DWORD remaining = after_children >= end
+        ? 0 : static_cast<DWORD>(end - after_children);
+    if (remaining == 0 || !wait_job_empty_bounded(root_job, remaining))
+      ok = false;
     return ok;
   }
 
@@ -942,6 +1133,12 @@ class ChildRegistry final {
     std::lock_guard lock(mutex_);
     for (auto& [ignored, child] : children_) {
       (void)ignored;
+      if ((child.stdout_worker || child.stderr_worker) &&
+          !settle_child_drains(child)) {
+        // Destroying a live worker's heap context would be a UAF. A process
+        // fail-stop is safer than returning with unowned asynchronous I/O.
+        std::terminate();
+      }
       child.process.reset();
     }
     children_.clear();
@@ -981,6 +1178,12 @@ enum class DispatchStatus : std::uint8_t {
   kPersistenceFailure,
 };
 
+enum class DurableLoadResult : std::uint8_t {
+  kEmpty,
+  kRecord,
+  kRefused,
+};
+
 struct JournalOutcome final {
   DispatchStatus status = DispatchStatus::kPreDispatchFailure;
   JournalState durable_state = JournalState::kUnknown;
@@ -1006,13 +1209,73 @@ using JournalPersist = bool (*)(const JournalRecord&) noexcept;
 // supervisor's authority boundary.
 using JournalLoad = bool (*)(JournalRecord&) noexcept;
 using DispatchOperation = DispatchStatus (*)(const IssuedCapability&) noexcept;
+using OwnedDispatchOperation = DispatchStatus (*)(
+    const IssuedCapability&, void*) noexcept;
+
+// This is a module-private contract, not a hook accepted from a request. The
+// supervisor will own the one implementation that talks to the authenticated
+// native journal helper. No implementation is installed in this inert slice.
+class DurableJournalAdapter {
+ public:
+  virtual ~DurableJournalAdapter() = default;
+  virtual bool authority_ready() const noexcept = 0;
+  virtual bool append_and_readback_exact(
+      const JournalRecord& record) noexcept = 0;
+  virtual DurableLoadResult load_latest_exact(
+      JournalRecord& record) noexcept = 0;
+};
 
 class JournalAuthority final {
  public:
   JournalOutcome dispatch(const IssuedCapability& capability, JournalPersist persist,
                           DispatchOperation operation) noexcept {
+    if (!persist || !operation) return {};
+    return dispatch_impl(
+        capability,
+        [persist](const JournalRecord& record) noexcept {
+          return persist(record);
+        },
+        [operation](const IssuedCapability& issued) noexcept {
+          return operation(issued);
+        });
+  }
+
+  JournalOutcome dispatch_owned(const IssuedCapability& capability,
+                                DurableJournalAdapter& adapter,
+                                OwnedDispatchOperation operation,
+                                void* context) noexcept {
+    if (!adapter.authority_ready() || !operation) return {};
+    return dispatch_impl(
+        capability,
+        [&adapter](const JournalRecord& record) noexcept {
+          return adapter.append_and_readback_exact(record);
+        },
+        [operation, context](const IssuedCapability& issued) noexcept {
+          return operation(issued, context);
+        });
+  }
+
+  bool recover_owned(DurableJournalAdapter& adapter) noexcept {
+    if (!trust_gates_open() || !adapter.authority_ready()) return false;
+    JournalRecord latest{};
+    const DurableLoadResult loaded = adapter.load_latest_exact(latest);
+    if (loaded == DurableLoadResult::kEmpty) {
+      return sequence_ == 0 && state_ == JournalState::kIdle;
+    }
+    if (loaded != DurableLoadResult::kRecord) {
+      state_ = JournalState::kUnknown;
+      return false;
+    }
+    return recover_record(latest);
+  }
+
+ private:
+  template <typename Persist, typename Operation>
+  JournalOutcome dispatch_impl(const IssuedCapability& capability,
+                               Persist persist,
+                               Operation operation) noexcept {
     JournalOutcome outcome{};
-    if (!trust_gates_open() || !persist || !operation || state_ != JournalState::kIdle ||
+    if (!trust_gates_open() || state_ != JournalState::kIdle ||
         capability.operation_id == 0 || !valid_scope(capability.operation_scope))
       return outcome;
     // Sequence exhaustion must be decided before the operation callback. At
@@ -1086,6 +1349,7 @@ class JournalAuthority final {
     return JournalOutcome{operation_status, state_, completed.sequence};
   }
 
+ public:
   JournalState query() const noexcept { return state_; }
 
   // A terminal record closes one operation.  The private adapter may then
@@ -1105,7 +1369,16 @@ class JournalAuthority final {
   bool recover(JournalLoad load) noexcept {
     if (!trust_gates_open() || !load) return false;
     JournalRecord latest{};
-    if (!load(latest) || latest.sequence == 0 || latest.operation_id == 0 ||
+    if (!load(latest)) {
+      state_ = JournalState::kUnknown;
+      return false;
+    }
+    return recover_record(latest);
+  }
+
+ private:
+  bool recover_record(const JournalRecord& latest) noexcept {
+    if (latest.sequence == 0 || latest.operation_id == 0 ||
         !valid_scope(latest.scope) || !nonzero_digest(latest.operation_digest) ||
         !nonzero_digest(latest.argument_digest) ||
         !nonzero_digest(latest.preview_digest) ||
@@ -1121,6 +1394,8 @@ class JournalAuthority final {
     return true;
   }
 
+ public:
+
   bool recovery_required() const noexcept {
     return state_ == JournalState::kUnknown;
   }
@@ -1129,7 +1404,9 @@ class JournalAuthority final {
     return state_ == JournalState::kTerminalDurable;
   }
 
+
  private:
+
   bool can_reserve_sequences(std::uint64_t count) const noexcept {
     return count != 0 && sequence_ <=
         std::numeric_limits<std::uint64_t>::max() - count;
@@ -1157,6 +1434,16 @@ class JournalAuthority final {
   JournalState state_ = JournalState::kIdle;
   std::uint64_t sequence_ = 0;
 };
+
+bool consume_capability(
+    SupervisorState& state, const IssuedCapability& capability,
+    std::uint64_t now_ms, std::uint64_t session_id, std::uint32_t scope,
+    std::uint64_t operation_id,
+    const std::array<std::byte, kMaxDigestBytes>& operation_digest,
+    const std::array<std::byte, kMaxDigestBytes>& argument_digest,
+    const std::array<std::byte, kMaxDigestBytes>& preview_digest) noexcept;
+
+#include "process_transaction.inc"
 
 bool initialize_supervisor(SupervisorState& state,
                            BootstrapProof& bootstrap) noexcept {
