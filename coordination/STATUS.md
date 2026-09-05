@@ -46,8 +46,9 @@
 - The bounded action-journal wire protocol is source-merged at `3746421`, but
   it is inert: no native helper, durable store, transport, trust anchor,
   packaging, activation, or production availability was added.
-- Browser reconciliation candidate `5dc2ad2` remains unmerged/rejected pending
-  repair and independent review. No live browser readiness is claimed.
+- Browser candidate `5dc2ad2` is rejected; repair
+  `fc317fce023f9364e7f19b69a700124d1936f8ca` remains unmerged and unreviewed.
+  No live browser readiness is claimed.
 - The strongest recorded general remote tool evaluation is 27/34, below its
   gate. The later production-profile result is 13/32 and failed that profile;
   these are distinct results and neither establishes model/tool readiness.

@@ -19,7 +19,7 @@
 | Remote external-tools lifecycle | DISABLED | S2/S3/S4 | Source hardening merged; `REMOTE_EXECUTION_ENABLED=False`; explicit approved cost-ledger genesis and separate live authorization required |
 | Live web/search provider | UNASSESSED | S0/S3 | Provider approval and synthetic live-run evidence |
 | Microsoft Graph mail/Teams provider | REQUESTED_LIVE_UNASSESSED | S0/S3/S4 | Reconciliation source is merged, but production journal, delegated scope/admin consent, synthetic account, redaction, and live package evidence remain absent |
-| Isolated browser action provider | REQUESTED_SOURCE_REJECTED | S0/S3/S4 | Candidate `5dc2ad2` remains unmerged/rejected; approved browser, repaired source, production journal, and synthetic Windows action evidence required |
+| Isolated browser action provider | REQUESTED_SOURCE_REJECTED | S0/S3/S4 | Candidate `5dc2ad2` is rejected; repair `fc317fce023f9364e7f19b69a700124d1936f8ca` remains unmerged/unreviewed; approved browser, production journal, and synthetic Windows action evidence required |
 | GitHub Copilot CLI bridge | REQUESTED | S0/S3/S4 | Existing approved CLI/license, explicit cloud-egress approval, synthetic prompt-only evidence |
 | Operator `full_access` capability grants | REQUESTED | S0/S3/S4 | Local grant/revoke UX, immutable safety floor, adversarial tests, corporate approval |
 | Release signing/attestation | UNASSESSED | S0/S4 | Corporate mechanism and credential handling |

@@ -9,8 +9,9 @@
   integration, process launch, recovery deployment, or activation.
 - Consequently Graph/browser/Copilot/process mutations remain hidden/refused
   when production durability is required. Graph reconciliation source being
-  merged is not live-provider readiness; browser candidate `5dc2ad2` remains
-  unmerged/rejected.
+  merged is not live-provider readiness; browser candidate `5dc2ad2` is
+  rejected and repair `fc317fce023f9364e7f19b69a700124d1936f8ca` remains
+  unmerged/unreviewed.
 - Overall action-journal/production-action state: `NOT_READY`; no formal gate is
   approved.
 
