@@ -32,13 +32,23 @@
   },
   "barrier": {
     "durable_order": ["authorized", "dispatching", "exact_readback", "external_dispatch"],
+    "external_dispatch_admission": ["active_borrow", "owner_mutex", "closing_poison_unknown_checks", "publish_capability"],
     "lost_ack": "exact_read_only_lookup_no_retry",
     "success_path": ["dispatching", "reconciling", "completed"],
     "ambiguous_path": "unknown_manual_no_replay",
-    "failed_definitive": "provably_pre_dispatch_only",
+    "completion_proof": "exact_acknowledged_external_receipt_and_event_proof_plus_journal_readback",
+    "failed_definitive": "lease_api_rejects_post_dispatch; provably_pre_dispatch_only",
     "abandonment_after_dispatch": "poison_owner_and_block"
   },
   "lock_order": ["admission_cas", "owner_mutex", "store_internals"],
+  "lifetime": {
+    "registry_attachment": "terminal entries remain until lease destructor detaches",
+    "owner_destruction_with_live_lease": "unproven destruction fail-stops before store/lease teardown",
+    "registry_insertion": "candidate attaches only after potentially-throwing insertion succeeds"
+  },
+  "poison": {
+    "reload_storage_readback_failure": "sticky; owner cannot return ready or retry authority"
+  },
   "wait_rule": "owner_mutex_never_held_over_process_pipe_or_provider_wait",
   "forbidden_lease_state": ["hmac_key", "session_nonce", "raw_json", "process_handle"],
   "topology": {

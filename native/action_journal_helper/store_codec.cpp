@@ -1392,7 +1392,10 @@ StoreStatus JournalAuthorityOwner::apply(const DecodedRequest& request,
         poisoned_.load(std::memory_order_acquire))
       return StoreStatus::kInternal;
     const StoreStatus preflight = mutation_preflight_locked(request, io);
-    if (preflight != StoreStatus::kOk) return preflight;
+    if (preflight != StoreStatus::kOk) {
+      poison_for(preflight);
+      return preflight;
+    }
     try {
       const auto status = store_.apply(request, io, result);
       poison_for(status);
@@ -1665,6 +1668,19 @@ bool process_proof_id_matches(const std::array<std::uint8_t, 16>& expected,
       process_nonzero(proof.external_event_digest);
 }
 
+std::string process_transition_receipt(
+    std::string_view operation, const JournalEvent& previous,
+    const char* method, const char* state, std::string_view authorization,
+    std::string_view resolution, const nlohmann::json& body) {
+  const std::string canonical = body.dump();
+  return helper_digest("receipt", {
+      operation, std::string_view("\0", 1), previous.receipt_digest,
+      std::string_view("\0", 1), method, std::string_view("\0", 1),
+      canonical, std::string_view("\0", 1), state,
+      std::string_view("\0", 1), authorization, std::string_view("\0", 1),
+      resolution});
+}
+
 }  // namespace
 
 ProcessDispatchLease::ProcessDispatchLease(
@@ -1673,10 +1689,11 @@ ProcessDispatchLease::ProcessDispatchLease(
     : owner_(&owner), binding_(binding), operation_text_(std::move(operation_text)) {}
 
 ProcessDispatchLease::~ProcessDispatchLease() noexcept {
-  if (owner_ != nullptr) {
+  if (owner_ != nullptr && owner_attached_) {
     owner_->release_process_dispatch_lease(*this);
-    owner_ = nullptr;
   }
+  owner_ = nullptr;
+  owner_attached_ = false;
 }
 
 ProcessDispatchLeaseStatus JournalAuthorityOwner::acquire_process_dispatch_lease(
@@ -1694,8 +1711,10 @@ ProcessDispatchLeaseStatus JournalAuthorityOwner::acquire_process_dispatch_lease
         poisoned_.load(std::memory_order_acquire))
       return ProcessDispatchLeaseStatus::kOwnerNotReady;
     const StoreStatus reloaded = store_.reload(io);
-    if (reloaded != StoreStatus::kOk)
+    if (reloaded != StoreStatus::kOk) {
+      poisoned_.store(true, std::memory_order_release);
       return ProcessDispatchLeaseStatus::kStorageFailure;
+    }
     if (unknown_manual_present_locked())
       return ProcessDispatchLeaseStatus::kUnknownManualBlocked;
     if (!process_binding_valid(binding, store_.container_id_))
@@ -1727,7 +1746,13 @@ ProcessDispatchLeaseStatus JournalAuthorityOwner::acquire_process_dispatch_lease
     std::unique_ptr<ProcessDispatchLease> candidate(
         new (std::nothrow) ProcessDispatchLease(*this, binding, operation));
     if (!candidate) return ProcessDispatchLeaseStatus::kStorageFailure;
-    leased_operations_.emplace(operation, candidate.get());
+    // Candidate destruction must not call back into mutex_ while emplace is
+    // still holding it.  Attach only after the potentially throwing map
+    // operation commits; a failed insertion therefore destroys a detached
+    // candidate and cannot deadlock or mutate the owner table.
+    const auto inserted = leased_operations_.emplace(operation, candidate.get());
+    if (!inserted.second) return ProcessDispatchLeaseStatus::kAlreadyLeased;
+    candidate->owner_attached_ = true;
     lease = std::move(candidate);
     return ProcessDispatchLeaseStatus::kOk;
   } catch (...) {
@@ -1740,9 +1765,14 @@ ProcessDispatchLeaseStatus JournalAuthorityOwner::transition_lease(
     ProcessDispatchLease& lease, const char* method, const char* expected_state,
     const nlohmann::json& body, StorageIoControl io,
     ProcessDispatchReadbackProof* proof) noexcept {
-  if (lease.owner_ != this || lease.one_shot_used_ || method == nullptr ||
-      expected_state == nullptr)
+  if (lease.owner_ != this || method == nullptr || expected_state == nullptr)
     return ProcessDispatchLeaseStatus::kOneShotUsed;
+  // The shared response parser accepts reconciling -> fail_definitive for
+  // legacy journal recovery.  A dispatch lease never may use that path:
+  // definitive failure is a pre-dispatch owner mutation, not a post-dispatch
+  // lease operation.
+  if (std::strcmp(method, "fail_definitive") == 0)
+    return ProcessDispatchLeaseStatus::kInvalidState;
   ActiveBorrow borrow(*this);
   if (!borrow.acquired()) return ProcessDispatchLeaseStatus::kOwnerNotReady;
   try {
@@ -1753,55 +1783,138 @@ ProcessDispatchLeaseStatus JournalAuthorityOwner::transition_lease(
     if (admission_closing() || shutting_down_ ||
         poisoned_.load(std::memory_order_acquire))
       return ProcessDispatchLeaseStatus::kOwnerNotReady;
+    if ((std::strcmp(method, "dispatch") == 0 &&
+         (lease.one_shot_used_ || lease.dispatching_persisted_)) ||
+        (std::strcmp(method, "acknowledge") == 0 &&
+         (lease.one_shot_used_ || !lease.external_started_ ||
+          lease.acknowledged_)) ||
+        (std::strcmp(method, "begin_reconciliation") == 0 &&
+         (lease.one_shot_used_ || !lease.external_started_)) ||
+        (std::strcmp(method, "complete") == 0 &&
+         (lease.one_shot_used_ || !lease.external_started_ ||
+          !lease.acknowledged_)) ||
+        (std::strcmp(method, "mark_unknown") == 0 &&
+         (lease.one_shot_used_ || !lease.external_started_)))
+      return ProcessDispatchLeaseStatus::kOneShotUsed;
+    if (std::strcmp(method, "complete") == 0) {
+      std::array<std::uint8_t, 32> receipt_digest{};
+      std::array<std::uint8_t, 32> event_digest{};
+      if (!body.contains("receipt_digest") ||
+          !body.contains("external_event_digest") ||
+          !body["receipt_digest"].is_string() ||
+          !body["external_event_digest"].is_string() ||
+          !process_decode_hex(body["receipt_digest"].get_ref<const std::string&>(),
+                              receipt_digest.data(), receipt_digest.size()) ||
+          !process_decode_hex(body["external_event_digest"].get_ref<const std::string&>(),
+                              event_digest.data(), event_digest.size()) ||
+          receipt_digest != lease.acknowledged_receipt_digest_ ||
+          event_digest != lease.acknowledged_event_digest_)
+        return ProcessDispatchLeaseStatus::kBindingMismatch;
+    }
     const StoreStatus reloaded = store_.reload(io);
-    if (reloaded != StoreStatus::kOk)
+    if (reloaded != StoreStatus::kOk) {
+      poisoned_.store(true, std::memory_order_release);
       return ProcessDispatchLeaseStatus::kStorageFailure;
+    }
     if (unknown_manual_present_locked() && std::strcmp(method, "complete") != 0 &&
-        std::strcmp(method, "fail_definitive") != 0)
+        std::strcmp(method, "fail_definitive") != 0 &&
+        std::strcmp(method, "mark_unknown") != 0)
       return ProcessDispatchLeaseStatus::kUnknownManualBlocked;
     const auto current = store_.records_.find(lease.operation_text_);
-    if (current == store_.records_.end() || current->second.events.empty() ||
-        current->second.events.back().state !=
-            (std::strcmp(method, "dispatch") == 0 ? "authorized" :
-             std::strcmp(method, "acknowledge") == 0 ? "dispatching" :
-             std::strcmp(method, "begin_reconciliation") == 0 ?
-                 (current->second.events.back().state == "acknowledged" ?
-                     "acknowledged" : "dispatching") :
-                 std::strcmp(method, "complete") == 0 ?
-                 "reconciling" : "dispatching"))
+    if (current == store_.records_.end() || current->second.events.empty())
       return ProcessDispatchLeaseStatus::kInvalidState;
+    const std::string& current_state = current->second.events.back().state;
+    const bool current_state_valid =
+        (std::strcmp(method, "dispatch") == 0 && current_state == "authorized") ||
+        (std::strcmp(method, "acknowledge") == 0 && current_state == "dispatching") ||
+        (std::strcmp(method, "begin_reconciliation") == 0 &&
+         (current_state == "dispatching" || current_state == "acknowledged")) ||
+        (std::strcmp(method, "complete") == 0 && current_state == "reconciling") ||
+        (std::strcmp(method, "mark_unknown") == 0 &&
+         (current_state == "dispatching" || current_state == "acknowledged" ||
+          current_state == "reconciling"));
+    if (!current_state_valid) return ProcessDispatchLeaseStatus::kInvalidState;
+    const std::string authorization = current->second.events.back().authorization_kind;
+    std::string resolution;
+    if (std::strcmp(method, "acknowledge") == 0)
+      resolution = "provider_acknowledged";
+    else if (std::strcmp(method, "complete") == 0)
+      resolution = body["resolution"].get<std::string>();
+    else if (std::strcmp(method, "mark_unknown") == 0)
+      resolution = "dispatch_ambiguous";
+    const std::string expected_receipt = process_transition_receipt(
+        lease.operation_text_, current->second.events.back(), method,
+        expected_state, authorization, resolution, body);
+    if (expected_receipt.empty()) {
+      poisoned_.store(true, std::memory_order_release);
+      return ProcessDispatchLeaseStatus::kStorageFailure;
+    }
     DecodedRequest request;
     request.method = method;
     request.operation_id = lease.operation_text_;
     request.body = body;
     EncodedResult result;
     const StoreStatus status = store_.mutation(request, io, result);
-    if (status != StoreStatus::kOk || result.state != expected_state)
+    if (status != StoreStatus::kOk || result.state != expected_state) {
+      if (status != StoreStatus::kInvalidTransition &&
+          status != StoreStatus::kNotFound &&
+          status != StoreStatus::kMutationConflict)
+        poisoned_.store(true, std::memory_order_release);
       return status == StoreStatus::kMutationConflict
           ? ProcessDispatchLeaseStatus::kMutationConflict
           : ProcessDispatchLeaseStatus::kStorageFailure;
+    }
     const StoreStatus readback = store_.reload(io);
-    if (readback != StoreStatus::kOk) return ProcessDispatchLeaseStatus::kStorageFailure;
+    if (readback != StoreStatus::kOk) {
+      poisoned_.store(true, std::memory_order_release);
+      return ProcessDispatchLeaseStatus::kStorageFailure;
+    }
     const auto verified = store_.records_.find(lease.operation_text_);
-    if (verified == store_.records_.end() || verified->second.events.empty())
+    if (verified == store_.records_.end() || verified->second.events.empty()) {
+      poisoned_.store(true, std::memory_order_release);
       return ProcessDispatchLeaseStatus::kReadbackMismatch;
+    }
     const JournalEvent& event = verified->second.events.back();
     if (event.state != expected_state || event.action != method ||
-        event.authorization_kind != lease.binding_.authorization_kind)
+        event.authorization_kind != lease.binding_.authorization_kind ||
+        event.receipt_digest != expected_receipt)
+      {
+      poisoned_.store(true, std::memory_order_release);
       return ProcessDispatchLeaseStatus::kReadbackMismatch;
+      }
     if (proof != nullptr) {
       proof->operation_id = lease.binding_.operation_id;
       proof->sequence = event.sequence;
       if (!process_decode_hex(event.receipt_digest, proof->receipt_digest.data(),
                               proof->receipt_digest.size()) ||
-          !protocol_event_digest(event.canonical_json, proof->event_digest))
+          !protocol_event_digest(event.canonical_json, proof->event_digest)) {
+        poisoned_.store(true, std::memory_order_release);
         return ProcessDispatchLeaseStatus::kReadbackMismatch;
+      }
     }
+    if (std::strcmp(method, "acknowledge") == 0) {
+      std::array<std::uint8_t, 32> external_receipt{};
+      std::array<std::uint8_t, 32> external_event{};
+      if (!body["provider_receipt_digest"].is_string() ||
+          !body["external_event_digest"].is_string() ||
+          !process_decode_hex(body["provider_receipt_digest"].get_ref<const std::string&>(),
+                              external_receipt.data(), external_receipt.size()) ||
+          !process_decode_hex(body["external_event_digest"].get_ref<const std::string&>(),
+                              external_event.data(), external_event.size()) ||
+          !process_nonzero(external_receipt) || !process_nonzero(external_event)) {
+        poisoned_.store(true, std::memory_order_release);
+        return ProcessDispatchLeaseStatus::kReadbackMismatch;
+      }
+      lease.acknowledged_ = true;
+      lease.acknowledged_receipt_digest_ = external_receipt;
+      lease.acknowledged_event_digest_ = external_event;
+    }
+    if (std::strcmp(method, "dispatch") == 0)
+      lease.dispatching_persisted_ = true;
     if (std::strcmp(method, "complete") == 0 ||
         std::strcmp(method, "mark_unknown") == 0) {
       lease.terminal_ = true;
       lease.one_shot_used_ = true;
-      leased_operations_.erase(lease.operation_text_);
     }
     return ProcessDispatchLeaseStatus::kOk;
   } catch (...) {
@@ -1813,11 +1926,10 @@ ProcessDispatchLeaseStatus JournalAuthorityOwner::transition_lease(
 ProcessDispatchLeaseStatus JournalAuthorityOwner::persist_dispatching(
     ProcessDispatchLease& lease, StorageIoControl io,
     ProcessDispatchReadbackProof& proof) noexcept {
-  if (lease.dispatching_persisted_ || lease.one_shot_used_)
-    return ProcessDispatchLeaseStatus::kOneShotUsed;
+  // transition_lease publishes lease.dispatching_persisted_ = true while
+  // holding owner_mutex, before this method returns to the caller.
   const auto status = transition_lease(
       lease, "dispatch", "dispatching", nlohmann::json::object(), io, &proof);
-  if (status == ProcessDispatchLeaseStatus::kOk) lease.dispatching_persisted_ = true;
   return status;
 }
 
@@ -1828,23 +1940,50 @@ ProcessDispatchLeaseStatus ProcessDispatchLease::persist_dispatching(
 }
 
 ProcessDispatchLeaseStatus ProcessDispatchLease::begin_external_dispatch() noexcept {
-  if (owner_ == nullptr || !dispatching_persisted_ || one_shot_used_ ||
-      external_started_)
+  if (owner_ == nullptr)
     return ProcessDispatchLeaseStatus::kOneShotUsed;
-  external_started_ = true;
-  return ProcessDispatchLeaseStatus::kOk;
+  return owner_->begin_external_dispatch(*this);
+}
+
+ProcessDispatchLeaseStatus JournalAuthorityOwner::begin_external_dispatch(
+    ProcessDispatchLease& lease) noexcept {
+  ActiveBorrow borrow(*this);
+  if (!borrow.acquired()) return ProcessDispatchLeaseStatus::kOwnerNotReady;
+  try {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto registered = leased_operations_.find(lease.operation_text_);
+    if (registered == leased_operations_.end() || registered->second != &lease)
+      return ProcessDispatchLeaseStatus::kMutationConflict;
+    if (admission_closing() || shutting_down_ ||
+        poisoned_.load(std::memory_order_acquire))
+      return ProcessDispatchLeaseStatus::kOwnerNotReady;
+    if (unknown_manual_present_locked())
+      return ProcessDispatchLeaseStatus::kUnknownManualBlocked;
+    if (!lease.dispatching_persisted_ || lease.one_shot_used_ ||
+        lease.external_started_)
+      return ProcessDispatchLeaseStatus::kOneShotUsed;
+    lease.external_started_ = true;
+    return ProcessDispatchLeaseStatus::kOk;
+  } catch (...) {
+    poisoned_.store(true, std::memory_order_release);
+    return ProcessDispatchLeaseStatus::kStorageFailure;
+  }
 }
 
 ProcessDispatchLeaseStatus JournalAuthorityOwner::acknowledge_external(
     ProcessDispatchLease& lease, const ProcessExternalProof& proof,
     StorageIoControl io) noexcept {
-  if (!lease.external_started_ || !process_proof_id_matches(lease.binding_.operation_id, proof))
+  if (!process_proof_id_matches(lease.binding_.operation_id, proof))
     return ProcessDispatchLeaseStatus::kBindingMismatch;
   nlohmann::json body = {
       {"provider_receipt_digest", process_hex(proof.external_receipt_digest)},
       {"external_event_digest", process_hex(proof.external_event_digest)},
   };
-  return transition_lease(lease, "acknowledge", "acknowledged", body, io, nullptr);
+  ProcessDispatchReadbackProof readback;
+  const auto status = transition_lease(
+      lease, "acknowledge", "acknowledged", body, io, &readback);
+  if (status != ProcessDispatchLeaseStatus::kOk) return status;
+  return ProcessDispatchLeaseStatus::kOk;
 }
 
 ProcessDispatchLeaseStatus ProcessDispatchLease::acknowledge_external(
@@ -1856,7 +1995,7 @@ ProcessDispatchLeaseStatus ProcessDispatchLease::acknowledge_external(
 ProcessDispatchLeaseStatus JournalAuthorityOwner::lookup_lost_ack(
     ProcessDispatchLease& lease, StorageIoControl io,
     ProcessDispatchReadbackProof& proof) noexcept {
-  if (lease.owner_ != this || !lease.dispatching_persisted_ || lease.one_shot_used_)
+  if (lease.owner_ != this)
     return ProcessDispatchLeaseStatus::kOneShotUsed;
   ActiveBorrow borrow(*this);
   if (!borrow.acquired()) return ProcessDispatchLeaseStatus::kOwnerNotReady;
@@ -1865,8 +2004,15 @@ ProcessDispatchLeaseStatus JournalAuthorityOwner::lookup_lost_ack(
     const auto registered = leased_operations_.find(lease.operation_text_);
     if (registered == leased_operations_.end() || registered->second != &lease)
       return ProcessDispatchLeaseStatus::kMutationConflict;
+    if (admission_closing() || shutting_down_ ||
+        poisoned_.load(std::memory_order_acquire) ||
+        !lease.dispatching_persisted_ || lease.one_shot_used_)
+      return ProcessDispatchLeaseStatus::kOwnerNotReady;
     const StoreStatus status = store_.reload(io);
-    if (status != StoreStatus::kOk) return ProcessDispatchLeaseStatus::kStorageFailure;
+    if (status != StoreStatus::kOk) {
+      poisoned_.store(true, std::memory_order_release);
+      return ProcessDispatchLeaseStatus::kStorageFailure;
+    }
     const auto found = store_.records_.find(lease.operation_text_);
     if (found == store_.records_.end() || found->second.events.empty())
       return ProcessDispatchLeaseStatus::kLostAcknowledgement;
@@ -1878,8 +2024,10 @@ ProcessDispatchLeaseStatus JournalAuthorityOwner::lookup_lost_ack(
     proof.sequence = event.sequence;
     if (!process_decode_hex(event.receipt_digest, proof.receipt_digest.data(),
                             proof.receipt_digest.size()) ||
-        !protocol_event_digest(event.canonical_json, proof.event_digest))
+        !protocol_event_digest(event.canonical_json, proof.event_digest)) {
+      poisoned_.store(true, std::memory_order_release);
       return ProcessDispatchLeaseStatus::kReadbackMismatch;
+    }
     return ProcessDispatchLeaseStatus::kOk;
   } catch (...) {
     poisoned_.store(true, std::memory_order_release);
@@ -1895,7 +2043,7 @@ ProcessDispatchLeaseStatus ProcessDispatchLease::lookup_lost_ack(
 
 ProcessDispatchLeaseStatus ProcessDispatchLease::begin_reconciliation(
     std::string_view reason, StorageIoControl io) noexcept {
-  if (owner_ == nullptr || !external_started_ || one_shot_used_ ||
+  if (owner_ == nullptr ||
       (reason != "lost_ack" && reason != "provider_timeout" &&
        reason != "transport_closed" && reason != "startup_recovery" &&
        reason != "postcondition_pending"))
@@ -1907,8 +2055,7 @@ ProcessDispatchLeaseStatus ProcessDispatchLease::begin_reconciliation(
 
 ProcessDispatchLeaseStatus ProcessDispatchLease::complete_external(
     const ProcessExternalProof& proof, StorageIoControl io) noexcept {
-  if (owner_ == nullptr || !external_started_ || one_shot_used_ ||
-      !process_proof_id_matches(binding_.operation_id, proof))
+  if (owner_ == nullptr || !process_proof_id_matches(binding_.operation_id, proof))
     return ProcessDispatchLeaseStatus::kBindingMismatch;
   nlohmann::json body = {
       {"external_event_digest", process_hex(proof.external_event_digest)},
@@ -1920,7 +2067,7 @@ ProcessDispatchLeaseStatus ProcessDispatchLease::complete_external(
 
 ProcessDispatchLeaseStatus ProcessDispatchLease::mark_unknown(
     StorageIoControl io) noexcept {
-  if (owner_ == nullptr || !external_started_ || one_shot_used_)
+  if (owner_ == nullptr)
     return ProcessDispatchLeaseStatus::kInvalidState;
   nlohmann::json body = {{"resolution", "dispatch_ambiguous"}};
   const auto status = owner_->transition_lease(
@@ -1938,7 +2085,14 @@ void JournalAuthorityOwner::release_process_dispatch_lease(
     if ((lease.dispatching_persisted_ || lease.external_started_) &&
         !lease.terminal_)
       poisoned_.store(true, std::memory_order_release);
-    leased_operations_.erase(found);
+    // Keep terminal entries attached until the lease destructor detaches.
+    // Otherwise a terminal lease could outlive the owner table and call a
+    // freed owner from its destructor.  begin_shutdown therefore fail-stops
+    // instead of destroying an owner with any live lease object.
+    if (lease.owner_attached_) {
+      leased_operations_.erase(found);
+      lease.owner_attached_ = false;
+    }
   } catch (...) {
     poisoned_.store(true, std::memory_order_release);
   }

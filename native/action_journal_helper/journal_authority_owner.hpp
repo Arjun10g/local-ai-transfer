@@ -133,8 +133,15 @@ class ProcessDispatchLease final {
   std::string operation_text_;
   bool dispatching_persisted_ = false;
   bool external_started_ = false;
+  bool acknowledged_ = false;
+  std::array<std::uint8_t, 32> acknowledged_receipt_digest_{};
+  std::array<std::uint8_t, 32> acknowledged_event_digest_{};
   bool terminal_ = false;
   bool one_shot_used_ = false;
+  // The owner table owns this attachment bit.  It is set only after the
+  // map insertion succeeds, so a throwing insertion cannot destroy a
+  // candidate while re-entering the owner mutex.
+  bool owner_attached_ = false;
 };
 
 const char* process_dispatch_lease_status_name(
@@ -226,6 +233,8 @@ class JournalAuthorityOwner final {
       ProcessDispatchLease& lease, const char* method,
       const char* state, const nlohmann::json& body,
       StorageIoControl io, ProcessDispatchReadbackProof* proof) noexcept;
+  ProcessDispatchLeaseStatus begin_external_dispatch(
+      ProcessDispatchLease& lease) noexcept;
 
   // Bit 63 closes admission.  The lower 32 bits are the borrower count;
   // bits 32..62 are reserved and must stay zero.  A single aligned word is

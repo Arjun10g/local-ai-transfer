@@ -49,7 +49,7 @@ class LeaseModel:
             return "already_leased"
         if len(self.registry) >= self.maximum:
             return "lease_limit"
-        self.registry[operation] = {"dispatching": False, "started": False, "terminal": False}
+        self.registry[operation] = {"dispatching": False, "started": False, "terminal": False, "state": "authorized"}
         return "ok"
 
     def persist(self, operation, exact_readback=True):
@@ -68,6 +68,32 @@ class LeaseModel:
         if lease is None or not lease["dispatching"] or lease["terminal"]:
             return "invalid_state"
         lease["started"] = True
+        lease["state"] = "dispatching"
+        return "ok"
+
+    def acknowledge(self, operation):
+        lease = self.registry.get(operation)
+        if lease is None or not lease["started"] or lease["terminal"]:
+            return "invalid_state"
+        lease["state"] = "acknowledged"
+        lease["external_proof"] = ("receipt-a", "event-a")
+        return "ok"
+
+    def reconcile(self, operation):
+        lease = self.registry.get(operation)
+        if lease is None or not lease["started"] or lease["terminal"]:
+            return "invalid_state"
+        lease["state"] = "reconciling"
+        return "ok"
+
+    def complete(self, operation, proof):
+        lease = self.registry.get(operation)
+        if lease is None or lease.get("state") != "reconciling":
+            return "invalid_state"
+        if proof != lease.get("external_proof"):
+            return "binding_mismatch"
+        lease["terminal"] = True
+        lease["state"] = "completed"
         return "ok"
 
     def mutation(self, operation):
@@ -89,7 +115,7 @@ class LeaseModel:
 
     def mark_unknown(self, operation):
         lease = self.registry.get(operation)
-        if lease is None or not lease["started"]:
+        if lease is None or not lease["started"] or lease.get("state") not in {"dispatching", "acknowledged", "reconciling"}:
             return "invalid_state"
         lease["terminal"] = True
         self.unknown = True
@@ -152,6 +178,8 @@ class ProcessDispatchLeaseStaticTests(unittest.TestCase):
         self.assertLess(barrier, external)
         self.assertIn('event.state != expected_state', self.store)
         self.assertIn('event.action != method', self.store)
+        self.assertIn('event.receipt_digest != expected_receipt', self.store)
+        self.assertIn('process_transition_receipt(', self.store)
 
     def test_lost_ack_is_read_only_and_never_retries(self):
         self.assertIn("lookup_lost_ack", self.owner)
@@ -179,6 +207,77 @@ class ProcessDispatchLeaseStaticTests(unittest.TestCase):
         self.assertIn("poisoned_.store(true", self.store)
         self.assertIn("ProcessDispatchLeaseStatus::kAmbiguousNoReplay", self.store)
         self.assertIn("kUnknownManualBlocked", self.store)
+
+    def test_unknown_is_valid_from_all_post_dispatch_history_states(self):
+        for state in ("dispatching", "acknowledged", "reconciling"):
+            model = LeaseModel()
+            operation = "act_" + state[0] * 32
+            self.assertEqual(model.acquire(operation), "ok")
+            self.assertEqual(model.persist(operation), "ok")
+            self.assertEqual(model.begin_dispatch(operation), "ok")
+            if state == "acknowledged":
+                self.assertEqual(model.acknowledge(operation), "ok")
+            elif state == "reconciling":
+                self.assertEqual(model.reconcile(operation), "ok")
+            self.assertEqual(model.mark_unknown(operation), "ambiguous_no_replay")
+        self.assertIn('current_state == "acknowledged"', self.store)
+        self.assertIn('current_state == "reconciling"', self.store)
+
+    def test_external_begin_is_admitted_and_atomic_against_close_poison_unknown(self):
+        begin = self.store.index("JournalAuthorityOwner::begin_external_dispatch")
+        region = self.store[begin:]
+        self.assertIn("ActiveBorrow borrow(*this)", region)
+        self.assertIn("admission_closing()", region)
+        self.assertIn("poisoned_.load", region)
+        self.assertIn("unknown_manual_present_locked()", region)
+        self.assertIn("lease.external_started_ = true", region)
+        self.assertLess(region.index("unknown_manual_present_locked()"), region.index("lease.external_started_ = true"))
+
+    def test_terminal_registry_attachment_prevents_owner_uaf(self):
+        transition = self.store.index("ProcessDispatchLeaseStatus JournalAuthorityOwner::transition_lease")
+        terminal = self.store.index("lease.terminal_ = true", transition)
+        self.assertNotIn("leased_operations_.erase", self.store[terminal:terminal + 220])
+        self.assertIn("Keep terminal entries attached", self.store)
+        self.assertIn("if (!leased_operations_.empty())", self.store)
+        self.assertIn("owner_attached_", self.owner)
+
+    def test_registry_insert_is_transactional_before_lease_destructor_callback(self):
+        insertion = self.store.index("const auto inserted = leased_operations_.emplace")
+        attachment = self.store.index("candidate->owner_attached_ = true", insertion)
+        self.assertLess(insertion, attachment)
+        self.assertIn("failed insertion", self.store)
+        destructor = self.owner.index("~ProcessDispatchLease() noexcept")
+        self.assertIn("owner_attached_", self.owner[destructor:])
+
+    def test_completion_is_exactly_the_acknowledged_external_proof(self):
+        self.assertIn("acknowledged_receipt_digest_", self.owner)
+        self.assertIn("acknowledged_event_digest_", self.owner)
+        self.assertIn("receipt_digest != lease.acknowledged_receipt_digest_", self.store)
+        self.assertIn("event_digest != lease.acknowledged_event_digest_", self.store)
+        self.assertIn("lease.acknowledged_ = true", self.store)
+        model = LeaseModel()
+        operation = "act_" + "f" * 32
+        self.assertEqual(model.acquire(operation), "ok")
+        self.assertEqual(model.persist(operation), "ok")
+        self.assertEqual(model.begin_dispatch(operation), "ok")
+        self.assertEqual(model.acknowledge(operation), "ok")
+        self.assertEqual(model.reconcile(operation), "ok")
+        self.assertEqual(model.complete(operation, ("receipt-b", "event-b")), "binding_mismatch")
+        self.assertEqual(model.complete(operation, ("receipt-a", "event-a")), "ok")
+
+    def test_fail_definitive_is_not_a_post_dispatch_lease_transition(self):
+        fail = self.store.index('std::strcmp(method, "fail_definitive")')
+        self.assertIn("return ProcessDispatchLeaseStatus::kInvalidState", self.store[fail:])
+        self.assertIn("pre-dispatch-only", text(ROOT / "native/action_journal_helper/JOURNAL_AUTHORITY_OWNER.md"))
+
+    def test_storage_reload_and_readback_failures_latch_poison(self):
+        self.assertIn("poison_for(preflight)", self.store)
+        transition = self.store.index("ProcessDispatchLeaseStatus JournalAuthorityOwner::transition_lease")
+        self.assertIn("poisoned_.store(true", self.store[transition:])
+        lookup = self.store.index("ProcessDispatchLeaseStatus JournalAuthorityOwner::lookup_lost_ack")
+        self.assertIn("poisoned_.store(true", self.store[lookup:])
+        fail = self.store.index('std::strcmp(method, "fail_definitive")')
+        self.assertIn("return ProcessDispatchLeaseStatus::kInvalidState", self.store[fail:])
 
     def test_registry_bounded_and_lease_noncopyable(self):
         model = LeaseModel()
