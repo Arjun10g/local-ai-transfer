@@ -33,7 +33,7 @@
   "barrier": {
     "durable_order": ["authorized", "dispatching", "exact_readback", "external_dispatch"],
     "external_dispatch_admission": ["active_borrow", "owner_mutex", "closing_poison_unknown_checks", "publish_capability"],
-    "lost_ack": "exact_read_only_lookup_no_retry",
+    "lost_ack": "exact_read_only_lookup_with_caller_external_proof_binding_no_retry",
     "success_path": ["dispatching", "reconciling", "completed"],
     "ambiguous_path": "unknown_manual_no_replay",
     "completion_proof": "exact_acknowledged_external_receipt_and_event_proof_plus_journal_readback",

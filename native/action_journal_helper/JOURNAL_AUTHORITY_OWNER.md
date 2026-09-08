@@ -56,8 +56,12 @@ Every dispatch transition reloads and then verifies the exact resulting event
 state, action, authorization, receipt digest, and event digest. Completion
 also requires the exact external receipt/event proof previously acknowledged;
 an arbitrary nonzero proof is insufficient. Lost acknowledgement is a
-read-only lookup and never retries dispatch. `mark_unknown` is valid from
-dispatching, acknowledged, or reconciling and is terminal no-replay. The
+read-only lookup only after the lease crossed `begin_external_dispatch`: the
+caller supplies the external proof, which is bound to the canonical
+acknowledged receipt digest and retained in the lease without appending an
+acknowledge event. Recovery never retries dispatch or acknowledge; a
+mismatched proof or divergent readback poisons the owner. `mark_unknown` is
+valid from dispatching, acknowledged, or reconciling and is terminal no-replay. The
 lease surface has no definitive-failure operation: the shared parser's
 reconciling recovery branch cannot be reached through this API; definitive
 failure remains pre-dispatch-only. Reload, storage, and readback failures latch

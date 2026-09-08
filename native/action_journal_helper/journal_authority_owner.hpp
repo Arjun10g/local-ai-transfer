@@ -113,7 +113,8 @@ class ProcessDispatchLease final {
   ProcessDispatchLeaseStatus acknowledge_external(
       const ProcessExternalProof& proof, StorageIoControl io) noexcept;
   ProcessDispatchLeaseStatus lookup_lost_ack(
-      StorageIoControl io, ProcessDispatchReadbackProof& proof) noexcept;
+      const ProcessExternalProof& proof, StorageIoControl io,
+      ProcessDispatchReadbackProof& readback) noexcept;
   ProcessDispatchLeaseStatus begin_reconciliation(
       std::string_view reason, StorageIoControl io) noexcept;
   ProcessDispatchLeaseStatus complete_external(

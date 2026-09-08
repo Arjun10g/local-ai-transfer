@@ -131,10 +131,21 @@ class LeaseModel:
             return "unknown_manual_blocked"
         return "ok"
 
-    def lost_ack_lookup(self, operation, outcome="not_found"):
-        if operation not in self.registry:
+    def lost_ack_lookup(self, operation, outcome="not_found",
+                        proof=("receipt-a", "event-a")):
+        lease = self.registry.get(operation)
+        if lease is None:
             return "mutation_conflict"
+        if lease["terminal"] or lease["state"] == "acknowledged":
+            return "one_shot_used"
+        if not lease["started"]:
+            return "invalid_state"
         if outcome == "exact_ack":
+            if proof != ("receipt-a", "event-a"):
+                self.poisoned = True
+                return "readback_mismatch"
+            lease["state"] = "acknowledged"
+            lease["external_proof"] = proof
             return "ok"
         self.poisoned = True
         return "readback_mismatch" if outcome in {"corrupt", "divergent"} else "lost_acknowledgement"
@@ -243,6 +254,42 @@ class ProcessDispatchLeaseStaticTests(unittest.TestCase):
         self.assertIn("kLostAcknowledgement", tail)
         self.assertNotIn("persist_dispatching(lease", tail)
         self.assertNotIn("begin_external_dispatch", tail)
+        self.assertNotIn("acknowledge_external(lease", tail)
+
+    def test_lost_ack_requires_external_start_and_recovers_exact_proof(self):
+        operation = "act_" + "e" * 32
+        model = LeaseModel()
+        self.assertEqual(model.acquire(operation), "ok")
+        self.assertEqual(model.persist(operation), "ok")
+        self.assertEqual(model.lost_ack_lookup(operation, "exact_ack"),
+                         "invalid_state")
+        self.assertFalse(model.poisoned)
+        self.assertEqual(model.begin_dispatch(operation), "ok")
+        self.assertEqual(model.lost_ack_lookup(operation, "exact_ack",
+                                               ("wrong", "proof")),
+                         "readback_mismatch")
+        self.assertTrue(model.poisoned)
+
+        model = LeaseModel()
+        self.assertEqual(model.acquire(operation), "ok")
+        self.assertEqual(model.persist(operation), "ok")
+        self.assertEqual(model.begin_dispatch(operation), "ok")
+        self.assertEqual(model.lost_ack_lookup(operation, "exact_ack"), "ok")
+        self.assertEqual(model.lost_ack_lookup(operation, "exact_ack"),
+                         "one_shot_used")
+        self.assertEqual(model.reconcile(operation), "ok")
+        self.assertEqual(model.complete(operation, ("receipt-a", "event-a")),
+                         "ok")
+
+        lookup = self.store.index("JournalAuthorityOwner::lookup_lost_ack")
+        tail = self.store[lookup:]
+        self.assertIn("const ProcessExternalProof& external_proof", tail)
+        self.assertIn("!lease.external_started_", tail)
+        self.assertIn("lease.acknowledged_ = true", tail)
+        self.assertIn("lease.acknowledged_receipt_digest_ = external_proof.external_receipt_digest", tail)
+        self.assertIn("lease.acknowledged_event_digest_ = external_proof.external_event_digest", tail)
+        self.assertIn("process_transition_receipt(", tail)
+        self.assertIn("event.receipt_digest != expected_receipt", tail)
 
     def test_lost_ack_failures_poison_after_authoritative_lookup(self):
         for outcome in ("not_found", "invalid", "corrupt", "divergent"):

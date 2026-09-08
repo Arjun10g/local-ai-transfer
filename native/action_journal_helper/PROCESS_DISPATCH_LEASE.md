@@ -20,13 +20,18 @@ one-use. `persist_dispatching` is the linearization barrier: it durably appends
 receipt proof. Only after that proof may `begin_external_dispatch` be called.
 This source slice has no OS mutation method.
 
-Acknowledgement recovery is an exact read-only reload/lookup. It never retries
-dispatch. Post-dispatch completion requires the matching external proof and
-the `dispatching -> reconciling -> completed` path. A missing or ambiguous
-proof becomes `unknown_manual` with no replay. Destruction of a lease after
-dispatch poisons the owner and blocks further work. Any `unknown_manual`
-record globally blocks new prepare, lease, and dispatch work until explicit
-resolution.
+Acknowledgement recovery is an exact read-only reload/lookup after the lease
+has crossed `begin_external_dispatch`. The caller supplies the external
+receipt/event proof; recovery recomputes the canonical acknowledged receipt
+digest from that proof and the on-disk dispatching event, then stores the exact
+proof in the lease without appending an acknowledge event. It never retries
+dispatch or acknowledge. A missing, divergent, or mismatched proof becomes a
+fail-closed readback failure. Post-dispatch completion requires the recovered
+matching external proof and the `dispatching -> acknowledged -> reconciling ->
+completed` path. A missing or ambiguous proof becomes `unknown_manual` with no
+replay. Destruction of a lease after dispatch poisons the owner and blocks
+further work. Any `unknown_manual` record globally blocks new prepare, lease,
+and dispatch work until explicit resolution.
 
 All public lease methods return a finite status even when bounded string, JSON,
 hash, map, or storage work reports an exception. The lease constructor is

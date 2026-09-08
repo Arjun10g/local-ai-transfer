@@ -2014,10 +2014,15 @@ ProcessDispatchLeaseStatus ProcessDispatchLease::acknowledge_external(
 }
 
 ProcessDispatchLeaseStatus JournalAuthorityOwner::lookup_lost_ack(
-    ProcessDispatchLease& lease, StorageIoControl io,
-    ProcessDispatchReadbackProof& proof) noexcept {
+    ProcessDispatchLease& lease, const ProcessExternalProof& external_proof,
+    StorageIoControl io, ProcessDispatchReadbackProof& proof) noexcept {
   if (lease.owner_ != this)
     return ProcessDispatchLeaseStatus::kOneShotUsed;
+  // A lost acknowledgement is meaningful only after this exact lease crossed
+  // the external mutation barrier.  Rejecting before the authoritative
+  // lookup keeps a caller-side ordering error non-mutating/non-poisoning.
+  if (!process_proof_id_matches(lease.binding_.operation_id, external_proof))
+    return ProcessDispatchLeaseStatus::kBindingMismatch;
   ActiveBorrow borrow(*this);
   if (!borrow.acquired()) return ProcessDispatchLeaseStatus::kOwnerNotReady;
   try {
@@ -2026,9 +2031,12 @@ ProcessDispatchLeaseStatus JournalAuthorityOwner::lookup_lost_ack(
     if (registered == leased_operations_.end() || registered->second != &lease)
       return ProcessDispatchLeaseStatus::kMutationConflict;
     if (admission_closing() || shutting_down_ ||
-        poisoned_.load(std::memory_order_acquire) ||
-        !lease.dispatching_persisted_ || lease.one_shot_used_)
+        poisoned_.load(std::memory_order_acquire))
       return ProcessDispatchLeaseStatus::kOwnerNotReady;
+    if (lease.one_shot_used_ || lease.acknowledged_)
+      return ProcessDispatchLeaseStatus::kOneShotUsed;
+    if (!lease.dispatching_persisted_ || !lease.external_started_)
+      return ProcessDispatchLeaseStatus::kInvalidState;
     const StoreStatus status = store_.reload(io);
     if (status != StoreStatus::kOk) {
       poisoned_.store(true, std::memory_order_release);
@@ -2039,20 +2047,50 @@ ProcessDispatchLeaseStatus JournalAuthorityOwner::lookup_lost_ack(
       poisoned_.store(true, std::memory_order_release);
       return ProcessDispatchLeaseStatus::kLostAcknowledgement;
     }
-    const JournalEvent& event = found->second.events.back();
+    const auto& events = found->second.events;
+    if (events.size() < 2) {
+      poisoned_.store(true, std::memory_order_release);
+      return ProcessDispatchLeaseStatus::kReadbackMismatch;
+    }
+    const JournalEvent& event = events.back();
     if (event.state != "acknowledged" || event.action != "acknowledge" ||
         event.authorization_kind != lease.binding_.authorization_kind) {
       poisoned_.store(true, std::memory_order_release);
       return ProcessDispatchLeaseStatus::kLostAcknowledgement;
     }
-    proof.operation_id = lease.binding_.operation_id;
-    proof.sequence = event.sequence;
-    if (!process_decode_hex(event.receipt_digest, proof.receipt_digest.data(),
-                            proof.receipt_digest.size()) ||
-        !protocol_event_digest(event.canonical_json, proof.event_digest)) {
+    const JournalEvent& previous = events[events.size() - 2];
+    if (previous.state != "dispatching" || previous.action != "dispatch" ||
+        event.sequence != previous.sequence + 1) {
       poisoned_.store(true, std::memory_order_release);
       return ProcessDispatchLeaseStatus::kReadbackMismatch;
     }
+    // The acknowledged event stores only the canonical receipt digest.  Bind
+    // the caller-supplied external proof to that digest before recovering the
+    // in-memory acknowledgement; this is read-only and never retries the
+    // acknowledge mutation.
+    const nlohmann::json body = {
+        {"provider_receipt_digest",
+         process_hex(external_proof.external_receipt_digest)},
+        {"external_event_digest",
+         process_hex(external_proof.external_event_digest)},
+    };
+    const std::string expected_receipt = process_transition_receipt(
+        lease.operation_text_, previous, "acknowledge", "acknowledged",
+        event.authorization_kind, "provider_acknowledged", body);
+    ProcessDispatchReadbackProof recovered;
+    recovered.operation_id = lease.binding_.operation_id;
+    recovered.sequence = event.sequence;
+    if (event.receipt_digest != expected_receipt ||
+        !process_decode_hex(event.receipt_digest, recovered.receipt_digest.data(),
+                            recovered.receipt_digest.size()) ||
+        !protocol_event_digest(event.canonical_json, recovered.event_digest)) {
+      poisoned_.store(true, std::memory_order_release);
+      return ProcessDispatchLeaseStatus::kReadbackMismatch;
+    }
+    lease.acknowledged_ = true;
+    lease.acknowledged_receipt_digest_ = external_proof.external_receipt_digest;
+    lease.acknowledged_event_digest_ = external_proof.external_event_digest;
+    proof = recovered;
     return ProcessDispatchLeaseStatus::kOk;
   } catch (...) {
     poisoned_.store(true, std::memory_order_release);
@@ -2061,9 +2099,11 @@ ProcessDispatchLeaseStatus JournalAuthorityOwner::lookup_lost_ack(
 }
 
 ProcessDispatchLeaseStatus ProcessDispatchLease::lookup_lost_ack(
-    StorageIoControl io, ProcessDispatchReadbackProof& proof) noexcept {
+    const ProcessExternalProof& external_proof, StorageIoControl io,
+    ProcessDispatchReadbackProof& readback) noexcept {
   return owner_ == nullptr ? ProcessDispatchLeaseStatus::kOneShotUsed
-                           : owner_->lookup_lost_ack(*this, io, proof);
+                           : owner_->lookup_lost_ack(*this, external_proof, io,
+                                                     readback);
 }
 
 ProcessDispatchLeaseStatus ProcessDispatchLease::begin_reconciliation(
