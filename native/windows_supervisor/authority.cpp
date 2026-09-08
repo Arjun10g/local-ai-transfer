@@ -4,6 +4,8 @@
 
 #include "../action_journal_helper/journal_authority_owner.hpp"
 #include "../action_journal_storage/windows_storage.hpp"
+#include "borrow_ticket.hpp"
+#include "../action_journal_helper/pipe_server.hpp"
 
 #include <array>
 #include <atomic>
@@ -30,8 +32,6 @@ using JournalAuthorityOwner =
     action_journal_helper::JournalAuthorityOwner;
 constexpr std::size_t kMaxChildren = 8;
 constexpr std::size_t kMaxLeases = 8;
-constexpr std::uint32_t kMaxActiveBorrows = 4096;
-constexpr std::uint32_t kShutdownWaitMs = 250;
 struct SupervisorState;
 
 struct SupervisorStartupHandoff final {
@@ -53,161 +53,39 @@ struct ProcessTransactionFence final {
   bool drained = false;
 };
 
-enum class BorrowKind : std::uint8_t { kPipe, kProcess };
-
-// The control word contains closing/poison bits plus both bounded borrower
-// counts.  A ticket acquisition increments the relevant counts in one CAS,
-// so shutdown cannot observe a process ticket between its overall and
-// process-specific increments.  The control block is intentionally separate
-// from SupervisorState and may outlive it while a released ticket is being
-// destroyed.
-class BorrowControlBlock final {
- public:
-  static constexpr std::uint32_t kClosing = 1u << 30;
-  static constexpr std::uint32_t kPoisoned = 1u << 31;
-  static constexpr std::uint32_t kCounterBits = 13;
-  static constexpr std::uint32_t kCounterMask = (1u << kCounterBits) - 1u;
-  static constexpr std::uint32_t kProcessShift = kCounterBits;
-  static constexpr std::uint32_t kProcessMask = kCounterMask << kProcessShift;
-
-  bool try_acquire(BorrowKind kind) noexcept {
-    std::uint32_t current = state.load(std::memory_order_acquire);
-    for (;;) {
-      if ((current & (kClosing | kPoisoned)) != 0) return false;
-      const std::uint32_t active = current & kCounterMask;
-      const std::uint32_t process = (current & kProcessMask) >> kProcessShift;
-      if (active >= kMaxActiveBorrows ||
-          (kind == BorrowKind::kProcess && process >= kMaxActiveBorrows)) {
-        state.fetch_or(kPoisoned, std::memory_order_acq_rel);
-        drained.notify_all();
-        return false;
-      }
-      std::uint32_t next = current + 1u;
-      if (kind == BorrowKind::kProcess) next += (1u << kProcessShift);
-      if (state.compare_exchange_weak(current, next,
-                                      std::memory_order_acq_rel,
-                                      std::memory_order_acquire)) {
-        return true;
-      }
-    }
+struct PipeCallFence final {
+  bool begin() noexcept {
+    if (closing.load(std::memory_order_acquire)) return false;
+    bool expected = false;
+    return active.compare_exchange_strong(expected, true,
+                                          std::memory_order_acq_rel,
+                                          std::memory_order_acquire);
   }
 
   void close_admission() noexcept {
-    state.fetch_or(kClosing, std::memory_order_acq_rel);
-    drained.notify_all();
+    closing.store(true, std::memory_order_release);
+    changed.notify_all();
   }
 
-  void poison() noexcept {
-    state.fetch_or(kPoisoned, std::memory_order_acq_rel);
-    drained.notify_all();
+  void end() noexcept {
+    active.store(false, std::memory_order_release);
+    changed.notify_all();
   }
 
-  void release(BorrowKind kind) noexcept {
-    std::uint32_t current = state.load(std::memory_order_acquire);
-    for (;;) {
-      const std::uint32_t active = current & kCounterMask;
-      const std::uint32_t process = (current & kProcessMask) >> kProcessShift;
-      if (active == 0 || (kind == BorrowKind::kProcess && process == 0)) {
-        poison();
-        return;
-      }
-      std::uint32_t next = current - 1u;
-      if (kind == BorrowKind::kProcess) next -= (1u << kProcessShift);
-      if (state.compare_exchange_weak(current, next,
-                                      std::memory_order_acq_rel,
-                                      std::memory_order_acquire)) {
-        drained.notify_all();
-        return;
-      }
-    }
-  }
-
-  bool wait_process_drained() noexcept {
-    return wait_for([](std::uint32_t value) {
-      return ((value & kProcessMask) >> kProcessShift) == 0;
-    });
-  }
-
-  bool wait_all_drained() noexcept {
-    return wait_for([](std::uint32_t value) {
-      return (value & kCounterMask) == 0;
-    });
-  }
-
- private:
-  template <typename Predicate>
-  bool wait_for(Predicate predicate) noexcept {
+  bool wait_drained() noexcept {
     try {
       std::unique_lock<std::mutex> lock(wait_mutex);
-      const bool drained_now = drained.wait_for(
-          lock, std::chrono::milliseconds(kShutdownWaitMs), [&] {
-            const std::uint32_t value = state.load(std::memory_order_acquire);
-            return predicate(value);
-          });
-      return drained_now && (state.load(std::memory_order_acquire) & kPoisoned) == 0;
+      return changed.wait_for(lock, std::chrono::milliseconds(kShutdownWaitMs),
+                              [&] { return !active.load(std::memory_order_acquire); });
     } catch (...) {
-      poison();
       return false;
     }
   }
 
-  std::atomic<std::uint32_t> state{0};
+  std::atomic_bool closing{false};
+  std::atomic_bool active{false};
   std::mutex wait_mutex;
-  std::condition_variable drained;
-};
-
-class BorrowTicket final {
- public:
-  BorrowTicket() noexcept = default;
-  ~BorrowTicket() noexcept { release(); }
-  BorrowTicket(const BorrowTicket&) = delete;
-  BorrowTicket& operator=(const BorrowTicket&) = delete;
-  BorrowTicket(BorrowTicket&& other) noexcept
-      : control_(std::move(other.control_)), owner_(other.owner_), kind_(other.kind_) {
-    other.owner_ = nullptr;
-  }
-  BorrowTicket& operator=(BorrowTicket&& other) noexcept {
-    if (this != &other) {
-      release();
-      control_ = std::move(other.control_);
-      owner_ = other.owner_;
-      kind_ = other.kind_;
-      other.owner_ = nullptr;
-    }
-    return *this;
-  }
-
-  bool proven() const noexcept {
-    return owner_ != nullptr && control_ != nullptr;
-  }
-  JournalAuthorityOwner* get() const noexcept {
-    return proven() ? owner_ : nullptr;
-  }
-  void release() noexcept {
-    if (control_ != nullptr) control_->release(kind_);
-    control_.reset();
-    owner_ = nullptr;
-  }
-
- private:
-  friend struct SupervisorState;
-  BorrowTicket(std::shared_ptr<BorrowControlBlock> control,
-               JournalAuthorityOwner* owner, BorrowKind kind) noexcept
-      : control_(std::move(control)), owner_(owner), kind_(kind) {}
-
-  std::shared_ptr<BorrowControlBlock> control_;
-  JournalAuthorityOwner* owner_ = nullptr;
-  BorrowKind kind_ = BorrowKind::kProcess;
-};
-
-struct PipeServerBorrow final {
-  BorrowTicket ticket;
-  bool stopped = false;
-  void attach(BorrowTicket value) noexcept { ticket = std::move(value); }
-  void stop() noexcept {
-    ticket.release();
-    stopped = true;
-  }
+  std::condition_variable changed;
 };
 
 struct ChildRegistry final {
@@ -269,6 +147,20 @@ struct SupervisorState final {
     return true;
   }
 
+  action_journal_helper::HelperStatus run_pipe_helper() noexcept {
+    // Move the ticket to a call-local handoff.  Shutdown closes this fence
+    // and waits for the call to return before releasing the state ticket.
+    if (!pipe_call.begin())
+      return action_journal_helper::HelperStatus::kStorageUnavailable;
+    PipeServerBorrow in_flight = std::move(pipe);
+    const auto result =
+        action_journal_helper::run_foreground_helper_from_inherited_stdin(
+            std::move(in_flight));
+    pipe = std::move(in_flight);
+    pipe_call.end();
+    return result;
+  }
+
   bool shutdown_ordered() noexcept {
     if (shutdown_complete.load(std::memory_order_acquire)) return true;
     bool expected = false;
@@ -278,12 +170,17 @@ struct SupervisorState final {
       return false;
     process_fence.stop_admission();
     borrow_domain->close_admission();
+    pipe_call.close_admission();
     process_fence.drain();
     children.drain();
     // Process tickets must be gone before stopping the pipe.  The pipe owns
     // its own ticket, so it is released next and the final wait drains every
     // remaining ticket before leases or the owner can be destroyed.
     if (!borrow_domain->wait_process_drained()) {
+      borrow_domain->poison();
+      return false;
+    }
+    if (!pipe_call.wait_drained()) {
       borrow_domain->poison();
       return false;
     }
@@ -313,6 +210,7 @@ struct SupervisorState final {
   std::unique_ptr<JournalAuthorityOwner> journal_owner;
   std::shared_ptr<BorrowControlBlock> borrow_domain;
   ProcessTransactionFence process_fence;
+  PipeCallFence pipe_call;
   ChildRegistry children;
   PipeServerBorrow pipe;
   LeaseRegistry leases;

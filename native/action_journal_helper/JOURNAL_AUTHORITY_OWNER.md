@@ -7,7 +7,7 @@ it acquires one validated `JournalStorageLease`, constructs one
 `FixedContainerStore` that borrows that lease, and performs the complete
 recovery scan before returning a ready owner.
 
-The pipe server receives a borrowed owner. It does not acquire storage,
+The pipe server receives a move-only `PipeServerBorrow` ticket. It does not acquire storage,
 construct a store, or select a pathname authority. The owner mutex serializes
 decoded store applications only; protocol HMAC/nonce handling and all named
 pipe reads/writes remain outside that lock. The owner and store are destroyed

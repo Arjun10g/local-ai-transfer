@@ -138,7 +138,7 @@ class WindowsActionJournalHelperStaticTests(unittest.TestCase):
         )
         self.assertLess(
             self.pipe.index("read_bootstrap(issuer.bootstrap_pipe.get(), bootstrap)"),
-            self.pipe.index("owner.ready()"),
+            self.pipe.index("owner->ready()"),
         )
         self.assertNotIn("JournalAuthorityOwner::open", self.pipe)
         authority = self.contract["bootstrap"]["issuer_authority"]
@@ -152,8 +152,10 @@ class WindowsActionJournalHelperStaticTests(unittest.TestCase):
         ):
             self.assertIn(token, self.pipe + self.store + self.headers)
         self.assertNotIn("JournalAuthorityOwner::open", self.pipe)
-        self.assertIn("JournalAuthorityOwner& owner", self.pipe)
-        self.assertLess(self.pipe.index("owner.ready()"), self.pipe.index("CreateNamedPipeW"))
+        self.assertIn("PipeServerBorrow&& borrow", self.pipe)
+        self.assertIn("borrow.checked_owner()", self.pipe)
+        self.assertNotIn("JournalAuthorityOwner& owner", self.pipe)
+        self.assertLess(self.pipe.index("owner->ready()"), self.pipe.index("CreateNamedPipeW"))
         self.assertNotIn("storage_directory", self.store)
         self.assertNotRegex(self.store, r"CreateFileW|DeleteFileW|MoveFileW")
 
@@ -390,7 +392,7 @@ class WindowsActionJournalHelperStaticTests(unittest.TestCase):
     def test_recovery_is_supervisor_owned_and_borrowed_before_pipe(self):
         self.assertNotIn("StartupCancellationContext", self.pipe)
         self.assertNotIn("JournalAuthorityOwner::open", self.pipe)
-        self.assertLess(self.pipe.index("owner.ready()"),
+        self.assertLess(self.pipe.index("owner->ready()"),
                         self.pipe.index("CreateNamedPipeW"))
 
     def test_exact_deadline_and_persisted_authority_enums_fail_closed(self):

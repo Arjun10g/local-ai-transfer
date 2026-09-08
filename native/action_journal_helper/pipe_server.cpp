@@ -713,7 +713,9 @@ bool monitored_request_cancelled(void* raw) noexcept {
 }  // namespace
 
 HelperStatus run_foreground_helper_from_inherited_stdin(
-    JournalAuthorityOwner& owner) noexcept {
+    ::lae::windows_supervisor::PipeServerBorrow&& borrow) noexcept {
+  JournalAuthorityOwner* owner = borrow.checked_owner();
+  if (owner == nullptr) return HelperStatus::kStorageUnavailable;
   BootstrapRecord bootstrap;
   BootstrapScope bootstrap_scope(bootstrap);
   try {
@@ -725,7 +727,7 @@ HelperStatus run_foreground_helper_from_inherited_stdin(
     if (!read_bootstrap(issuer.bootstrap_pipe.get(), bootstrap))
       return HelperStatus::kBootstrapInvalid;
     bootstrap_scope.locked = VirtualLock(&bootstrap, sizeof(bootstrap)) != FALSE;
-    if (!owner.ready() || owner.poisoned()) return HelperStatus::kStorageUnavailable;
+    if (!owner->ready() || owner->poisoned()) return HelperStatus::kStorageUnavailable;
     PipeSecurity security;
     if (!private_pipe_security(user.sid, security))
       return HelperStatus::kPipeSecurityFailed;
@@ -794,7 +796,7 @@ HelperStatus run_foreground_helper_from_inherited_stdin(
                                             &cancellation_monitor};
       const StorageIoControl request_io{
           cancellation, GetTickCount64() + kIoDeadlineMs, true};
-      const auto applied = owner.apply(request, request_io, result);
+      const auto applied = owner->apply(request, request_io, result);
       // Do not encode or return a result after the transport stopped during
       // the owner-locked store application.
       if (cancellation_monitor.cancellation_signaled() ||

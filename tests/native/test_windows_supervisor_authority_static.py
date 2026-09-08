@@ -13,6 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "native/windows_supervisor/authority.cpp"
+BORROW = ROOT / "native/windows_supervisor/borrow_ticket.hpp"
 HEADER = ROOT / "native/windows_supervisor/authority.hpp"
 CONTRACT = ROOT / "contracts/windows-supervisor/v1.0.0.json"
 
@@ -33,6 +34,8 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.cpp = SOURCE.read_text(encoding="utf-8")
+        cls.borrow = BORROW.read_text(encoding="utf-8")
+        cls.source = cls.cpp + "\n" + cls.borrow
         cls.hpp = HEADER.read_text(encoding="utf-8")
         cls.contract = strict_json(CONTRACT)
 
@@ -70,10 +73,10 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
 
     def test_borrowers_do_not_own_authority(self):
         for name in ("PipeServerBorrow", "ProcessLaunchAuthority"):
-            self.assertIn(f"struct {name}", self.cpp)
-        self.assertIn("class BorrowControlBlock", self.cpp)
-        self.assertIn("std::shared_ptr<BorrowControlBlock> control_", self.cpp)
-        self.assertNotIn("BorrowedOwnerHandle", self.cpp)
+            self.assertIn(f"struct {name}", self.source)
+        self.assertIn("class BorrowControlBlock", self.borrow)
+        self.assertIn("std::shared_ptr<BorrowControlBlock> control_", self.borrow)
+        self.assertNotIn("BorrowedOwnerHandle", self.source)
         process = self.cpp[self.cpp.index("struct ProcessLaunchAuthority"):
                            self.cpp.index("bool trust_gates_open")]
         self.assertIn("BorrowTicket owner", process)
@@ -98,14 +101,27 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
         self.assertEqual([shutdown.index(item) for item in order],
                          sorted(shutdown.index(item) for item in order))
         self.assertIn("No owner lock is held", self.cpp)
-        self.assertIn("std::condition_variable", self.cpp)
-        self.assertIn("std::atomic<std::uint32_t> state", self.cpp)
+        self.assertIn("std::condition_variable", self.borrow)
+        self.assertIn("std::atomic<std::uint32_t> state", self.borrow)
 
     def test_shutdown_timeout_is_finite_fail_stop(self):
-        self.assertIn("kShutdownWaitMs = 250", self.cpp)
+        self.assertIn("kShutdownWaitMs = 250", self.borrow)
         self.assertIn("wait_for", self.cpp)
         self.assertIn("if (!shutdown_ordered()) std::terminate()", self.cpp)
         self.assertIn("same-thread or timed-out drain", self.cpp)
+
+    def test_pipe_call_fence_closes_and_joins_before_ticket_release(self):
+        fence = self.cpp[self.cpp.index("struct PipeCallFence"):
+                         self.cpp.index("struct ChildRegistry")]
+        for token in ("closing.load", "compare_exchange_strong", "active.store(false",
+                      "changed.wait_for", "kShutdownWaitMs"):
+            self.assertIn(token, fence)
+        shutdown = self.cpp[self.cpp.index("bool shutdown_ordered"):
+                            self.cpp.index("SupervisorStartupHandoff startup")]
+        self.assertLess(shutdown.index("pipe_call.close_admission"),
+                        shutdown.index("pipe_call.wait_drained"))
+        self.assertLess(shutdown.index("pipe_call.wait_drained"),
+                        shutdown.index("pipe.stop"))
 
     def test_legacy_parallel_types_and_callbacks_are_removed(self):
         for pattern in (
@@ -113,7 +129,8 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
             r"\bDurableLoadResult\b", r"\bJournalOutcome\b",
             r"\bJournalRecord\b", r"\bDurableJournalAdapter\b",
             r"\bJournalAuthority\b", r"durable_journal_authorize",
-            r"recover\s*\(", r"begin\s*\(", r"dispatch_owned",
+            r"JournalAuthorityOwner::recover\s*\(",
+            r"JournalAuthorityOwner::begin\s*\(", r"dispatch_owned",
         ):
             self.assertIsNone(re.search(pattern, self.cpp), pattern)
 

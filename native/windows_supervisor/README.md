@@ -7,7 +7,9 @@ metadata only.
 
 Phase 2a establishes one co-located supervisor/helper ownership topology:
 `SupervisorState` owns the sole `JournalAuthorityOwner`; the pipe server and
-process transaction borrow that owner under an explicit lifetime proof. Startup
+process transaction borrow that owner under an explicit lifetime proof. The
+helper receives a move-only `PipeServerBorrow` ticket and the process path a
+move-only launch authority; neither accepts a raw owner. Startup
 requires an explicit canonical `StorageRequest` handoff, with no implicit
 storage path. Shutdown stops admission, drains process borrows and children,
 stops and releases the pipe borrow, drains the remaining tickets, destroys

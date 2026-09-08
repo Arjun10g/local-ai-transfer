@@ -15,6 +15,8 @@
 #include <cstdint>
 #include <string>
 
+#include "../windows_supervisor/borrow_ticket.hpp"
+
 namespace lae::action_journal_helper {
 
 class JournalAuthorityOwner;
@@ -63,10 +65,11 @@ struct BootstrapRecord {
 // Reads only from an inherited pipe installed as standard input. The function
 // never accepts bootstrap bytes from argv, environment, a file, or the pipe
 // client. It creates at most one named-pipe instance and then exits.
-// The helper borrows the supervisor-owned owner; it never constructs or owns
-// storage authority. The borrow must remain valid for the complete call.
+// The helper receives a move-only supervisor ticket; it never accepts a raw
+// owner or constructs/owns storage authority. The ticket must remain valid
+// for the complete call.
 HelperStatus run_foreground_helper_from_inherited_stdin(
-    JournalAuthorityOwner& owner) noexcept;
+    ::lae::windows_supervisor::PipeServerBorrow&& borrow) noexcept;
 const char* helper_status_name(HelperStatus status) noexcept;
 
 }  // namespace lae::action_journal_helper

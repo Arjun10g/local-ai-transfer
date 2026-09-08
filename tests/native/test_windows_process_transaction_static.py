@@ -15,6 +15,7 @@ from itertools import product
 
 ROOT = Path(__file__).resolve().parents[2]
 CPP = ROOT / "native/windows_supervisor/authority.cpp"
+BORROW = ROOT / "native/windows_supervisor/borrow_ticket.hpp"
 TRANSACTION = ROOT / "native/windows_supervisor/process_transaction.inc"
 OWNER = ROOT / "native/action_journal_helper/journal_authority_owner.hpp"
 PIPE_HPP = ROOT / "native/action_journal_helper/pipe_server.hpp"
@@ -93,17 +94,44 @@ class BorrowDomainModel:
         return True
 
 
+class PipeCallModel:
+    """Models helper join ordering without invoking a platform API."""
+
+    def __init__(self):
+        self.closing = False
+        self.active = False
+        self.ticket_in_state = True
+
+    def begin(self):
+        if self.closing or self.active:
+            return False
+        self.active = True
+        self.ticket_in_state = False
+        return True
+
+    def close(self):
+        self.closing = True
+
+    def end(self):
+        self.ticket_in_state = True
+        self.active = False
+
+    def stop_pipe(self):
+        return not self.active and self.ticket_in_state
+
+
 class WindowsProcessTransactionStaticTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.cpp = CPP.read_text(encoding="utf-8")
+        cls.borrow = BORROW.read_text(encoding="utf-8")
         cls.tx = TRANSACTION.read_text(encoding="utf-8")
         cls.owner = OWNER.read_text(encoding="utf-8")
         cls.pipe_hpp = PIPE_HPP.read_text(encoding="utf-8")
         cls.pipe_cpp = PIPE_CPP.read_text(encoding="utf-8")
         cls.helper_main = HELPER_MAIN.read_text(encoding="utf-8")
         cls.contract = strict_json(CONTRACT)
-        cls.source = cls.cpp + "\n" + cls.tx + "\n" + cls.owner
+        cls.source = cls.cpp + "\n" + cls.borrow + "\n" + cls.tx + "\n" + cls.owner
 
     def test_legacy_parallel_authority_surface_is_absent(self):
         banned = (
@@ -149,9 +177,10 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
         self.assertIn("ProcessLaunchAuthority(const ProcessLaunchAuthority&) = delete", region)
 
     def test_pipe_server_borrows_owner_and_standalone_helper_refuses(self):
-        self.assertIn("JournalAuthorityOwner& owner", self.pipe_hpp)
-        self.assertIn("JournalAuthorityOwner& owner", self.pipe_cpp)
-        self.assertIn("owner.apply", self.pipe_cpp)
+        self.assertIn("PipeServerBorrow&& borrow", self.pipe_hpp)
+        self.assertIn("PipeServerBorrow&& borrow", self.pipe_cpp)
+        self.assertIn("borrow.checked_owner()", self.pipe_cpp)
+        self.assertIn("owner->apply", self.pipe_cpp)
         self.assertNotIn("JournalAuthorityOwner::open", self.pipe_cpp)
         self.assertNotIn("StorageRequest", self.pipe_cpp)
         self.assertNotIn("run_foreground_helper_from_inherited_stdin()", self.helper_main)
@@ -177,9 +206,9 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
         positions = [shutdown.index(token) for token in order]
         self.assertEqual(positions, sorted(positions))
         self.assertIn("No owner lock is held", self.cpp)
-        self.assertIn("bool proven() const noexcept", self.cpp)
-        self.assertIn("std::shared_ptr<BorrowControlBlock> control_", self.cpp)
-        self.assertIn("std::condition_variable drained", self.cpp)
+        self.assertIn("bool proven() const noexcept", self.borrow)
+        self.assertIn("std::shared_ptr<BorrowControlBlock> control_", self.borrow)
+        self.assertIn("std::condition_variable drained", self.borrow)
 
     def test_startup_copy_and_open_failures_are_refusal_safe(self):
         handoff = self.cpp[self.cpp.index("struct SupervisorStartupHandoff"):
@@ -192,19 +221,53 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
             self.assertIn(token, opening)
 
     def test_pipe_and_process_retain_move_only_tickets(self):
-        pipe = self.cpp[self.cpp.index("struct PipeServerBorrow"):
-                       self.cpp.index("struct ChildRegistry")]
+        pipe = self.borrow[self.borrow.index("struct PipeServerBorrow"):]
         process = self.cpp[self.cpp.index("struct ProcessLaunchAuthority"):
                           self.cpp.index("bool trust_gates_open")]
         self.assertIn("BorrowTicket ticket", pipe)
         self.assertIn("ticket = std::move(value)", pipe)
         self.assertIn("~ProcessLaunchAuthority() noexcept = default", process)
-        self.assertIn("BorrowTicket(BorrowTicket&& other) noexcept", self.cpp)
-        self.assertIn("BorrowTicket(const BorrowTicket&) = delete", self.cpp)
+        self.assertIn("BorrowTicket(BorrowTicket&& other) noexcept", self.borrow)
+        self.assertIn("BorrowTicket(const BorrowTicket&) = delete", self.borrow)
+
+    def test_pipe_helper_requires_ticket_and_returns_before_shutdown(self):
+        self.assertIn("PipeServerBorrow&& borrow", self.pipe_hpp)
+        self.assertIn("JournalAuthorityOwner* owner = borrow.checked_owner()", self.pipe_cpp)
+        self.assertNotIn("run_foreground_helper_from_inherited_stdin(\n    JournalAuthorityOwner&", self.pipe_cpp)
+        call = self.cpp[self.cpp.index("run_pipe_helper"):
+                        self.cpp.index("bool shutdown_ordered")]
+        for token in ("PipeServerBorrow in_flight = std::move(pipe)",
+                      "std::move(in_flight)", "pipe = std::move(in_flight)",
+                      "pipe_call.end()"):
+            self.assertIn(token, call)
+        shutdown = self.cpp[self.cpp.index("bool shutdown_ordered"):
+                            self.cpp.index("SupervisorStartupHandoff startup")]
+        self.assertLess(shutdown.index("pipe_call.wait_drained"),
+                        shutdown.index("pipe.stop"))
+
+    def test_process_transaction_requires_move_only_authority(self):
+        signature = self.tx[self.tx.index("LaunchReceipt execute_process_transaction"):
+                            self.tx.index("{", self.tx.index("LaunchReceipt execute_process_transaction"))]
+        self.assertIn("ProcessLaunchAuthority&& authority", signature)
+        self.assertNotIn("SupervisorState&", signature)
+        self.assertNotIn("JournalAuthorityOwner", signature)
+        body = self.tx[self.tx.index("LaunchReceipt execute_process_transaction"):]
+        self.assertIn("if (!authority.owner.proven())", body)
+        self.assertLess(body.index("authority.owner.proven"),
+                        body.index("if (!kProcessLaunchAvailable"))
+
+    def test_pipe_call_model_never_releases_state_ticket_while_in_flight(self):
+        model = PipeCallModel()
+        self.assertTrue(model.begin())
+        model.close()
+        self.assertFalse(model.begin())
+        self.assertFalse(model.stop_pipe())
+        model.end()
+        self.assertTrue(model.stop_pipe())
 
     def test_borrow_domain_has_linearized_close_count_and_wake(self):
-        domain = self.cpp[self.cpp.index("class BorrowControlBlock"):
-                         self.cpp.index("class BorrowTicket")]
+        domain = self.borrow[self.borrow.index("class BorrowControlBlock"):
+                            self.borrow.index("class BorrowTicket")]
         for token in ("kClosing", "kPoisoned", "kMaxActiveBorrows", "compare_exchange_weak",
                       "kProcessMask", "notify_all", "wait_process_drained", "wait_all_drained"):
             self.assertIn(token, domain)
@@ -259,7 +322,8 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
     def test_hard_refusal_precedes_every_mutation_boundary(self):
         body = self.tx[self.tx.index("LaunchReceipt execute_process_transaction") :]
         refusal = body.index("if (!kProcessLaunchAvailable")
-        self.assertLess(refusal, body.index("return LaunchReceipt{};"))
+        refused_return = body.index("return LaunchReceipt{};", refusal)
+        self.assertLess(refusal, refused_return)
         self.assertNotIn("persist_dispatching", body[:refusal])
         self.assertNotIn("begin_external_dispatch", body[:refusal])
         for forbidden in ("CreateProcess", "ShellExecute", "system(", "popen("):
