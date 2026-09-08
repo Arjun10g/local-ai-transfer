@@ -291,6 +291,48 @@ class PreflightFixtureTests(unittest.TestCase):
             self.assertFalse(preflight._ancestors_stable(self.ledger, expected, issues))
         self.assertIn("ancestor_component_swap", issues)
 
+    def test_ancestor_link_count_change_is_rejected_after_read(self) -> None:
+        expected = preflight._check_ancestors(self.ledger, set())
+        original_lstat = preflight.os.lstat
+        calls = {"count": 0}
+
+        def relinked(path, *args, **kwargs):
+            result = original_lstat(path, *args, **kwargs)
+            calls["count"] += 1
+            if calls["count"] == 1:
+                values = list(result)
+                values[3] += 1  # st_nlink; other identity fields are stable.
+                return os.stat_result(values)
+            return result
+
+        issues: set[str] = set()
+        with mock.patch.object(preflight.os, "lstat", side_effect=relinked):
+            self.assertFalse(preflight._ancestors_stable(self.ledger, expected, issues))
+        self.assertIn("ancestor_component_swap", issues)
+
+    def test_parent_link_count_change_refuses_file_snapshot(self) -> None:
+        self.write_jsonl(self.ledger, [self.row()])
+        original_stat = preflight.os.stat
+        calls = {"count": 0}
+
+        def relinked(path, *args, **kwargs):
+            result = original_stat(path, *args, **kwargs)
+            calls["count"] += 1
+            if calls["count"] == 3 and Path(path) == self.runtime:
+                values = list(result)
+                values[3] += 1
+                return os.stat_result(values)
+            return result
+
+        issues: set[str] = set()
+        with mock.patch.object(preflight.os, "stat", side_effect=relinked):
+            capabilities = set(preflight.os.supports_dir_fd)
+            capabilities.add(preflight.os.stat)
+            with mock.patch.object(preflight.os, "supports_dir_fd", capabilities):
+                with self.assertRaises(preflight._EvidenceError):
+                    preflight._read_snapshot(self.ledger, limit=1000, issues=issues)
+        self.assertIn("evidence_mutated_during_read", issues)
+
     def test_owner_mismatch_is_only_a_sanitized_blocker(self) -> None:
         self.write_jsonl(self.ledger, [self.row()])
         self.display.write_text("", encoding="utf-8")
@@ -446,6 +488,61 @@ class PreflightFixtureTests(unittest.TestCase):
             report = preflight._parse_receipts(self.runtime, {}, issues)
         self.assertTrue(report["parse_refused"])
         self.assertIn("receipt_directory_changed", issues)
+
+    def test_receipt_root_and_parent_link_count_changes_refuse_whole_stream(self) -> None:
+        receipt = self.receipt(phase="p", instance="instance-i")
+        self.write_jsonl(self.runtime / "r.deletion-receipt.json", [receipt])
+
+        # The root descriptor's post-enumeration link count must match its
+        # pre-open anchor; a changed count means the directory generation is
+        # not a stable evidence snapshot.
+        original_fstat = preflight.os.fstat
+        calls = {"count": 0}
+
+        def relinked_root(fd):
+            result = original_fstat(fd)
+            calls["count"] += 1
+            if calls["count"] == 2:  # root post-enumeration fstat
+                values = list(result)
+                values[3] += 1
+                return os.stat_result(values)
+            return result
+
+        issues: set[str] = set()
+        with mock.patch.object(preflight.os, "fstat", side_effect=relinked_root):
+            report = preflight._parse_receipts(self.runtime, {}, issues)
+        self.assertTrue(report["parse_refused"])
+        self.assertIsNone(report["receipt_count"])
+        self.assertIn("evidence_mutated_during_read", issues)
+
+        # The receipt reader compares the parent directory's link count before
+        # and after each child read as well.  This is independent of the root
+        # generation check above and must also null the stream aggregate.
+        parent_fd = os.open(self.runtime, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        parent_before = os.fstat(parent_fd)
+        original_fstat = preflight.os.fstat
+        calls = {"count": 0}
+
+        def relinked_parent(fd):
+            result = original_fstat(fd)
+            calls["count"] += 1
+            if calls["count"] == 3:  # parent-after in _read_relative_snapshot
+                values = list(result)
+                values[3] += 1
+                return os.stat_result(values)
+            return result
+
+        try:
+            issues = set()
+            with mock.patch.object(preflight.os, "fstat", side_effect=relinked_parent):
+                with self.assertRaises(preflight._EvidenceError):
+                    preflight._read_relative_snapshot(
+                        parent_fd, parent_before, "r.deletion-receipt.json",
+                        limit=preflight.MAX_JSON_OBJECT_BYTES, issues=issues,
+                    )
+        finally:
+            os.close(parent_fd)
+        self.assertIn("evidence_mutated_during_read", issues)
 
     def test_file_preopen_lstat_swap_is_refused(self) -> None:
         self.write_jsonl(self.ledger, [self.row()])

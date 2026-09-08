@@ -247,7 +247,19 @@ def _absolute_path(path: Path) -> Path:
     return Path(os.path.abspath(os.fspath(path)))
 
 
-def _check_ancestors(path: Path, issues: set[str]) -> list[tuple[int, int, int, int]]:
+def _directory_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    """Return the identity fields relevant to a directory anchor.
+
+    Directory size is filesystem-specific and can change for reasons unrelated
+    to component replacement.  Link count, however, changes when directory
+    membership changes and is part of the trust boundary for an evidence
+    snapshot.
+    """
+    return (int(info.st_dev), int(info.st_ino), int(info.st_mode),
+            int(info.st_uid), int(info.st_nlink))
+
+
+def _check_ancestors(path: Path, issues: set[str]) -> list[tuple[int, int, int, int, int]]:
     # lstat every named ancestor, so a symlink cannot hide an alternate root.
     cursor = path.parent
     chain: list[Path] = []
@@ -256,7 +268,7 @@ def _check_ancestors(path: Path, issues: set[str]) -> list[tuple[int, int, int, 
         if cursor == cursor.parent:
             break
         cursor = cursor.parent
-    identities: list[tuple[int, int, int, int]] = []
+    identities: list[tuple[int, int, int, int, int]] = []
     for directory in reversed(chain):
         try:
             info = os.lstat(directory)
@@ -281,11 +293,11 @@ def _check_ancestors(path: Path, issues: set[str]) -> list[tuple[int, int, int, 
             # ancestor label is the authoritative refusal reason.
             _issue(issues, "parent_unsafe_owner")
             raise _EvidenceError("ancestor_unsafe_owner")
-        identities.append((int(info.st_dev), int(info.st_ino), int(info.st_mode), int(info.st_uid)))
+        identities.append(_directory_identity(info))
     return identities
 
 
-def _ancestors_stable(path: Path, expected: list[tuple[int, int, int, int]], issues: set[str]) -> bool:
+def _ancestors_stable(path: Path, expected: list[tuple[int, int, int, int, int]], issues: set[str]) -> bool:
     try:
         actual = _check_ancestors(path, issues)
     except _EvidenceError:
@@ -444,8 +456,7 @@ def _read_relative_snapshot(parent_fd: int, parent_before: os.stat_result, name:
                 raise _EvidenceError("receipt_byte_limit")
             if _file_identity(before) != _file_identity(after) or \
                     _file_identity(after) != _file_identity(current) or \
-                    (parent_before.st_dev, parent_before.st_ino, parent_before.st_mode, parent_before.st_uid) != \
-                    (parent_after.st_dev, parent_after.st_ino, parent_after.st_mode, parent_after.st_uid):
+                    _directory_identity(parent_before) != _directory_identity(parent_after):
                 _issue(issues, "evidence_mutated_during_read")
                 raise _EvidenceError("evidence_mutated_during_read")
             _require_private_directory(parent_after, issues, "deletion_root")
@@ -921,8 +932,7 @@ def _receipt_files(root: Path, issues: set[str]) -> tuple[int | None, os.stat_re
         _require_private_directory(anchored, issues, "deletion_root")
         entries = _enumerate_receipts(root_fd, issues)
         current = os.fstat(root_fd)
-        if (anchored.st_dev, anchored.st_ino, anchored.st_mode, anchored.st_uid) != \
-                (current.st_dev, current.st_ino, current.st_mode, current.st_uid):
+        if _directory_identity(anchored) != _directory_identity(current):
             _issue(issues, "evidence_mutated_during_read")
             raise _EvidenceError("evidence_mutated_during_read")
         if not _ancestors_stable(root / "placeholder", ancestors, issues):
