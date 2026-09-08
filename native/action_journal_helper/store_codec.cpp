@@ -374,7 +374,8 @@ bool event_json(const nlohmann::json& value, JournalEvent& result) {
       !value["action"].is_string() || !value["receipt_digest"].is_string() ||
       !identifier(value["receipt_digest"].get_ref<const std::string&>(), "", 64) ||
       !value["sequence"].is_number_unsigned() ||
-      value["sequence"].get<std::uint64_t>() > 31 || !value["state"].is_string())
+      value["sequence"].get<std::uint64_t>() >= kEventCellsPerBank ||
+      !value["state"].is_string())
     return false;
   const bool authorization_valid = value["authorization_kind"].is_null() ||
       (value["authorization_kind"].is_string() &&

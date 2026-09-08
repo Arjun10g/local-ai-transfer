@@ -52,7 +52,8 @@
     "max_read_chunks_per_response": 8,
     "max_response_bytes": 65536,
     "max_recovery_records": 1024,
-    "max_detail_events": 32
+    "max_detail_events": 16,
+    "max_events_per_operation": 16
   },
   "lost_ack": {
     "prepare": "one exact helper-idempotent prepare binding retry",

@@ -26,6 +26,9 @@ import {
   startupRecovery,
   transitionState,
 } from '../../host/agent/action-journal-protocol.mjs';
+import {
+  ACTION_JOURNAL_LIMITS as PATHNAME_JOURNAL_LIMITS,
+} from '../../host/agent/action-journal.mjs';
 
 const KEY = Buffer.from('000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f', 'hex');
 const NONCE = '00112233445566778899aabbccddeeff';
@@ -283,6 +286,23 @@ test('identifier, digest, enum, nonce, and finite error schemas are exact', () =
   assert.deepEqual(ACTION_JOURNAL_ERRORS, Object.keys(ACTION_JOURNAL_ERROR_RETRYABILITY));
   assert.deepEqual(protocolError('queue_full'), { code: 'queue_full', retryable: true });
   errorCode(() => protocolError('provider_said_something'), 'invalid_request');
+});
+
+test('sixteenth event and detail item are accepted while seventeenth is refused', () => {
+  assert.equal(ACTION_JOURNAL_LIMITS.max_events_per_operation, 16);
+  assert.equal(ACTION_JOURNAL_LIMITS.max_detail_events, 16);
+  const sixteenth = eventFor('reconciling', 15);
+  assert.match(journalEventDigest(sixteenth), /^[a-f0-9]{64}$/u);
+  assert.ok(encodeEnvelope(requestFor('detail', 0, 70, {
+    body: detailBodyAfter(sixteenth, 16),
+  }), KEY).byteLength > 0);
+  errorCode(() => journalEventDigest({ ...sixteenth, sequence: 16 }), 'invalid_request');
+  errorCode(() => encodeEnvelope(requestFor('detail', 0, 71, {
+    body: { after_event_digest: DIGEST.a, after_sequence: 16, limit: 16 },
+  }), KEY), 'invalid_request');
+  errorCode(() => encodeEnvelope(requestFor('detail', 0, 72, {
+    body: detailBodyAfter(sixteenth, 17),
+  }), KEY), 'invalid_request');
 });
 
 test('duplicate JSON keys are distinguished and noncanonical key order is rejected', () => {
@@ -813,6 +833,9 @@ test('deterministic cross-language frames match the checked-in synthetic vectors
 
 test('machine-readable contract stays exactly synchronized with protocol metadata', async () => {
   const contract = JSON.parse(await readFile(new URL('../../contracts/action-journal/v0.1.0.json', import.meta.url), 'utf8'));
+  const client = JSON.parse(await readFile(new URL('../../contracts/action-journal-client/v0.1.0.json', import.meta.url), 'utf8'));
+  const container = JSON.parse(await readFile(new URL('../../contracts/action-journal-container/v0.1.0.json', import.meta.url), 'utf8'));
+  const vectors = JSON.parse(await readFile(new URL('../../contracts/action-journal/v0.1.0-vectors.json', import.meta.url), 'utf8'));
   assert.equal(contract.schema_version, 'lae.action-journal-contract.v1');
   assert.equal(contract.production_available, false);
   assert.equal(contract.runtime_dependency_added, false);
@@ -823,6 +846,16 @@ test('machine-readable contract stays exactly synchronized with protocol metadat
   assert.deepEqual(contract.error_retryability, ACTION_JOURNAL_ERROR_RETRYABILITY);
   assert.equal(contract.limits.max_frame_bytes, ACTION_JOURNAL_LIMITS.max_frame_bytes);
   assert.equal(contract.limits.max_payload_bytes, ACTION_JOURNAL_LIMITS.max_payload_bytes);
+  assert.equal(contract.limits.max_events_per_operation, 16);
+  assert.equal(contract.limits.max_detail_events, 16);
+  assert.equal(PATHNAME_JOURNAL_LIMITS.max_events_per_operation, 16);
+  assert.equal(container.bank.event_cells, 16);
+  assert.equal(client.limits.max_detail_events, 16);
+  assert.equal(client.limits.max_events_per_operation, 16);
+  assert.deepEqual(vectors.limits, {
+    max_detail_events: 16,
+    max_events_per_operation: 16,
+  });
 });
 
 test('HMAC construction is independently reproducible from the published formula', () => {

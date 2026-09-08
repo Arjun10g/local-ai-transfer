@@ -319,11 +319,12 @@ bool validate_request_body(std::string_view method,
     std::uint64_t after = 0, limit = 0;
     const bool sequence_ok = body.contains("after_sequence") &&
         (body["after_sequence"].is_null() ||
-         unsigned_value(body["after_sequence"], 0, 31, after));
+         unsigned_value(body["after_sequence"], 0,
+                        kMaxEventsPerOperation - 1, after));
     return exact_keys(body, {"after_event_digest", "after_sequence", "limit"}) &&
         sequence_ok && nullable_digest(body["after_event_digest"]) &&
         (body["after_sequence"].is_null() == body["after_event_digest"].is_null()) &&
-        unsigned_value(body["limit"], 1, 32, limit);
+        unsigned_value(body["limit"], 1, kMaxDetailEvents, limit);
   }
   return false;
 }
@@ -391,7 +392,8 @@ bool safe_receipt(const nlohmann::json& value) {
       !value["receipt_digest"].is_string() ||
       !digest(value["receipt_digest"].get_ref<const std::string&>()) ||
       !value["sequence"].is_number_unsigned() ||
-      value["sequence"].get<std::uint64_t>() > 31 || !value["state"].is_string() ||
+      value["sequence"].get<std::uint64_t>() >= kMaxEventsPerOperation ||
+      !value["state"].is_string() ||
       !one_of(value["state"].get_ref<const std::string&>(),
               {"prepared", "authorized", "dispatching", "acknowledged",
                "reconciling", "completed", "cancelled", "failed_definitive",
@@ -458,13 +460,16 @@ bool safe_success(const DecodedRequest& request,
     return true;
   }
   if (request.method == "detail") {
+    std::uint64_t next_sequence = 0;
     if (result.operation_id != request.operation_id ||
         !exact_keys(result.body, {"events", "next_sequence", "predecessor",
                                  "receipt", "truncated"}) ||
-        !result.body["events"].is_array() || result.body["events"].size() > 32 ||
+        !result.body["events"].is_array() ||
+        result.body["events"].size() > kMaxDetailEvents ||
         !result.body["truncated"].is_boolean() ||
         !(result.body["next_sequence"].is_null() ||
-          result.body["next_sequence"].is_number_unsigned()) ||
+          unsigned_value(result.body["next_sequence"], 0,
+                         kMaxEventsPerOperation - 1, next_sequence)) ||
         !(result.body["predecessor"].is_null() ||
           safe_event(result.body["predecessor"])) ||
         !safe_receipt(result.body["receipt"]) ||

@@ -21,6 +21,9 @@ NATIVE = ROOT / "native" / "action_journal_helper"
 CONTRACT = ROOT / "contracts" / "action-journal-helper" / "v0.1.0.json"
 VECTOR = ROOT / "tests" / "native" / "fixtures" / "action_journal_helper" / "session-vector.json"
 PROTOCOL_VECTOR = ROOT / "contracts" / "action-journal" / "v0.1.0-vectors.json"
+PROTOCOL_CONTRACT = ROOT / "contracts" / "action-journal" / "v0.1.0.json"
+CLIENT_CONTRACT = ROOT / "contracts" / "action-journal-client" / "v0.1.0.json"
+CONTAINER_CONTRACT = ROOT / "contracts" / "action-journal-container" / "v0.1.0.json"
 MAX_SOURCE = 256 * 1024
 MAX_JSON = 128 * 1024
 
@@ -54,6 +57,9 @@ class WindowsActionJournalHelperStaticTests(unittest.TestCase):
         cls.contract = strict_json(CONTRACT)
         cls.vector = strict_json(VECTOR)
         cls.protocol_vector = strict_json(PROTOCOL_VECTOR)
+        cls.protocol_contract = strict_json(PROTOCOL_CONTRACT)
+        cls.client_contract = strict_json(CLIENT_CONTRACT)
+        cls.container_contract = strict_json(CONTAINER_CONTRACT)
         cls.main = source(NATIVE / "main.cpp")
         cls.pipe = source(NATIVE / "pipe_server.cpp")
         cls.protocol = source(NATIVE / "protocol_codec.cpp")
@@ -200,6 +206,51 @@ class WindowsActionJournalHelperStaticTests(unittest.TestCase):
         ):
             self.assertIn(token, self.protocol + self.headers)
         self.assertIn("SecureZeroMemory(key_.data()", self.protocol)
+
+    def test_event_cap_is_exactly_sixteen_across_every_declaring_layer(self):
+        self.assertEqual(self.protocol_contract["limits"]["max_events_per_operation"], 16)
+        self.assertEqual(self.protocol_contract["limits"]["max_detail_events"], 16)
+        self.assertEqual(self.protocol_vector["limits"], {
+            "max_detail_events": 16,
+            "max_events_per_operation": 16,
+        })
+        self.assertEqual(self.client_contract["limits"]["max_detail_events"], 16)
+        self.assertEqual(self.client_contract["limits"]["max_events_per_operation"], 16)
+        self.assertEqual(self.contract["storage"]["caps"]["events_per_operation"], 16)
+        self.assertEqual(self.contract["storage"]["caps"]["detail_page_events"], 16)
+        self.assertEqual(self.container_contract["bank"]["event_cells"], 16)
+
+        node_protocol = source(ROOT / "host" / "agent" / "action-journal-protocol.mjs")
+        node_pathname = source(ROOT / "host" / "agent" / "action-journal.mjs")
+        store_header = source(NATIVE / "store_codec.hpp")
+        protocol_header = source(NATIVE / "protocol_codec.hpp")
+        reference = source(ROOT / "tests" / "reference" / "action-journal-container-model.mjs")
+        for declaration in (
+            r"max_detail_events:\s*16",
+            r"max_events_per_operation:\s*16",
+        ):
+            self.assertRegex(node_protocol, declaration)
+        self.assertRegex(node_pathname, r"max_events_per_operation:\s*16")
+        self.assertIn("kMaxEventsPerOperation = 16", protocol_header)
+        self.assertIn("kMaxDetailEvents = 16", protocol_header)
+        self.assertIn("kEventCellsPerBank = kMaxEventsPerOperation", store_header)
+        self.assertIn("static_assert(kEventCellsPerBank == 16", store_header)
+        self.assertRegex(reference, r"event_cells_per_bank:\s*16")
+
+        self.assertIn("kMaxEventsPerOperation - 1, after", self.protocol)
+        self.assertIn("kMaxDetailEvents, limit", self.protocol)
+        self.assertIn(">= kMaxEventsPerOperation", self.protocol)
+        self.assertIn("> kMaxDetailEvents", self.protocol)
+        self.assertIn(">= kEventCellsPerBank", self.store)
+        for stale in (
+            r"max_detail_events:\s*32",
+            r"max_events_per_operation:\s*32",
+            r"unsigned_value\(body\[\"after_sequence\"\],\s*0,\s*31",
+            r"unsigned_value\(body\[\"limit\"\],\s*1,\s*32",
+            r"events\"\]\.size\(\)\s*>\s*32",
+            r"sequence\"\]\.get<std::uint64_t>\(\)\s*>\s*31",
+        ):
+            self.assertNotRegex(node_protocol + self.protocol + self.store, stale)
 
     def test_merged_health_hmac_vector_matches_cpp_formula(self):
         health = next(item for item in self.protocol_vector["vectors"] if item["name"] == "health_request")

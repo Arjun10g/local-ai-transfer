@@ -33,7 +33,9 @@ inline constexpr std::uint32_t kBankBytes = 16'384;
 inline constexpr std::uint32_t kBankBodyBytes = 15'360;
 inline constexpr std::uint32_t kBankMarkerBytes = 1'024;
 inline constexpr std::uint32_t kEventCellBytes = 896;
-inline constexpr std::uint32_t kEventCellsPerBank = 16;
+inline constexpr std::uint32_t kEventCellsPerBank = kMaxEventsPerOperation;
+static_assert(kEventCellsPerBank == 16,
+              "v0.1 fixed-container ABI has exactly sixteen event cells");
 inline constexpr std::uint32_t kMaxCanonicalEventBytes = 768;
 inline constexpr std::uint32_t kMaxActiveRecords = 256;
 inline constexpr std::uint32_t kMaxTerminalRecords = 768;
