@@ -80,8 +80,7 @@ class PreflightFixtureTests(unittest.TestCase):
     def report(self, rows: list[dict], *, receipts: list[dict] | None = None, incident_rows: list[dict] | None = None) -> dict:
         self.write_jsonl(self.ledger, rows)
         prefix = preflight._canonical_display_prefix()
-        self.assertIsNotNone(prefix)
-        self.display.write_bytes(prefix + (preflight._DISPLAY_HEADER + "\n" + preflight._DISPLAY_SEPARATOR + "\n").encode())
+        self.display.write_bytes((prefix or b"") + (preflight._DISPLAY_HEADER + "\n" + preflight._DISPLAY_SEPARATOR + "\n").encode())
         self.write_jsonl(self.incidents, incident_rows or [])
         for index, receipt in enumerate(receipts or []):
             self.write_receipt(self.runtime / f"r{index}.deletion-receipt.json", receipt)
@@ -161,7 +160,7 @@ class PreflightFixtureTests(unittest.TestCase):
 
     def test_orphan_absent_receipt_rounding_and_pending_are_explicit(self) -> None:
         receipt = self.receipt(phase="orphan", instance="orphan-instance", evidence="absent", amount="0.000071")
-        display = "| 2026 | phase-a | instance-a | gpu | $1 | x | deleted | $0.9999 | 0 |\n"
+        display = "| 2026-01-01 | phase-a | instance-a | gpu | $1.0000 | x | deleted | $0.9999 | 0.0 |\n"
         self.write_jsonl(self.ledger, [self.row("settled", "1.000000"), self.row("pending", "2.000000", instance="instance-b")])
         prefix = preflight._canonical_display_prefix()
         self.assertIsNotNone(prefix)
@@ -471,7 +470,7 @@ class PreflightFixtureTests(unittest.TestCase):
         self.display.write_bytes(prefix + (
             "| date | phase | instance id | gpu | $/hr | purpose | status | cost logged | idle min |\n"
             "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
-            "| 2026-01-01 | phase-a | instance-a | gpu | $1 | run | deleted | $1.000000 | 0 |\n").encode("utf-8"))
+            "| 2026-01-01 | phase-a | instance-a | gpu | $1.0000 | run | deleted | $1.0000 | 0.0 |\n").encode("utf-8"))
         self.write_jsonl(self.incidents, [{"phase_id": "phase-a", "incident": "x", "unexpected": True}])
         report = preflight.run_preflight(
             legacy_ledger=self.ledger, display_ledger=self.display,
@@ -510,7 +509,7 @@ class PreflightFixtureTests(unittest.TestCase):
         prefix = preflight._canonical_display_prefix()
         self.assertIsNotNone(prefix)
         framing = (preflight._DISPLAY_HEADER + "\n" + preflight._DISPLAY_SEPARATOR + "\n").encode()
-        row = b"| 2026-01-01 | phase-a | instance-a | gpu | $1 | run | deleted | $1.000000 | 0 |\n"
+        row = b"| 2026-01-01 | phase-a | instance-a | gpu | $1.0000 | run | deleted | $1.0000 | 0.0 |\n"
         variants = {
             "extra_preamble": prefix + b"\n" + framing + row,
             "header_whitespace": prefix + b" " + framing + row,
@@ -524,6 +523,45 @@ class PreflightFixtureTests(unittest.TestCase):
                 issues: set[str] = set()
                 result = preflight._parse_display(self.display, {("phase-a", "instance-a"): self.row()}, issues)
                 self.assertTrue(result["parse_refused"])
+
+    def test_display_row_cells_follow_canonical_producer_grammar(self) -> None:
+        prefix = preflight._canonical_display_prefix()
+        self.assertIsNotNone(prefix)
+        framing = (preflight._DISPLAY_HEADER + "\n" + preflight._DISPLAY_SEPARATOR + "\n").encode()
+        cells = ["2026-01-01", "phase-a", "instance-a", "gpu", "$1.0000", "run", "deleted", "$1.0000", "0.0"]
+        mutations = {
+            "date": (0, "2026-1-1"),
+            "gpu": (3, "☃"),
+            "hourly_scale": (4, "$1"),
+            "hourly_exponent": (4, "$1e2"),
+            "purpose_escape": (5, "run\\x"),
+            "status": (6, "unknown"),
+            "cost_scale": (7, "$1.000000"),
+            "cost_negative": (7, "$-1.0000"),
+            "idle_scale": (8, "0"),
+            "idle_negative": (8, "-1.0"),
+            "leading_cell_space": (0, " 2026-01-01"),
+        }
+        for label, (index, replacement) in mutations.items():
+            with self.subTest(label=label):
+                mutated = list(cells)
+                mutated[index] = replacement
+                self.display.write_bytes(prefix + framing + ("| " + " | ".join(mutated) + " |\n").encode())
+                self.display.chmod(0o600)
+                issues: set[str] = set()
+                result = preflight._parse_display(self.display, {("phase-a", "instance-a"): self.row()}, issues)
+                self.assertTrue(result["parse_refused"])
+
+    def test_display_prefix_requires_secure_bounded_snapshot(self) -> None:
+        for label in ("prefix_identity_changed", "parent_unsafe_permissions", "byte_limit"):
+            with self.subTest(label=label):
+                def refused(path, *, limit, issues, expected_mode, expected_parent_mode):
+                    issues.add(label)
+                    raise preflight._EvidenceError(label)
+                issues: set[str] = set()
+                with mock.patch.object(preflight, "_read_snapshot", side_effect=refused):
+                    self.assertIsNone(preflight._canonical_display_prefix(issues))
+                self.assertIn(label, issues)
 
 
 if __name__ == "__main__":

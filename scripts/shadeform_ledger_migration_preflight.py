@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from decimal import Decimal, InvalidOperation
+from datetime import date
 import json
 import os
 from pathlib import Path
@@ -299,7 +300,8 @@ def _require_private_directory(info: os.stat_result, issues: set[str], label: st
         raise _EvidenceError(f"{label}_unsafe_owner")
 
 
-def _read_snapshot(path: Path, *, limit: int, issues: set[str]) -> tuple[bytes, dict[str, Any]]:
+def _read_snapshot(path: Path, *, limit: int, issues: set[str], expected_mode: int = 0o600,
+                   expected_parent_mode: int = 0o700) -> tuple[bytes, dict[str, Any]]:
     try:
         _require_secure_capabilities(issues)
         path = _absolute_path(path)
@@ -314,7 +316,9 @@ def _read_snapshot(path: Path, *, limit: int, issues: set[str]) -> tuple[bytes, 
         except FileNotFoundError:
             pass
         before_parent = os.stat(parent, follow_symlinks=False)
-        _require_private_directory(before_parent, issues, "parent")
+        if stat.S_IMODE(before_parent.st_mode) != expected_parent_mode:
+            _issue(issues, "parent_unsafe_permissions")
+            raise _EvidenceError("parent_unsafe_permissions")
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         parent_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
         try:
@@ -334,7 +338,7 @@ def _read_snapshot(path: Path, *, limit: int, issues: set[str]) -> tuple[bytes, 
                 if before.st_nlink != 1:
                     _issue(issues, "hardlink_file")
                     raise _EvidenceError("hardlink_file")
-                if stat.S_IMODE(before.st_mode) != 0o600:
+                if stat.S_IMODE(before.st_mode) != expected_mode:
                     _issue(issues, "unsafe_permissions")
                     raise _EvidenceError("unsafe_permissions")
                 if hasattr(os, "geteuid") and int(before.st_uid) != os.geteuid():
@@ -360,14 +364,16 @@ def _read_snapshot(path: Path, *, limit: int, issues: set[str]) -> tuple[bytes, 
                 if stat.S_IMODE(after.st_mode) != stat.S_IMODE(before.st_mode) or int(after.st_uid) != int(before.st_uid):
                     _issue(issues, "evidence_mutated_during_read")
                     raise _EvidenceError("evidence_mutated_during_read")
-                _require_private_directory(current_parent, issues, "parent")
+                if stat.S_IMODE(current_parent.st_mode) != expected_parent_mode:
+                    _issue(issues, "parent_unsafe_permissions")
+                    raise _EvidenceError("parent_unsafe_permissions")
                 if not _ancestors_stable(path, ancestors, issues):
                     raise _EvidenceError("ancestor_component_swap")
                 if len(data) > limit:
                     _issue(issues, "byte_limit")
                     raise _EvidenceError("byte_limit")
                 mode = stat.S_IMODE(after.st_mode)
-                if mode != 0o600:
+                if mode != expected_mode:
                     _issue(issues, "unsafe_permissions")
                     raise _EvidenceError("unsafe_permissions")
                 if hasattr(os, "geteuid") and int(after.st_uid) != os.geteuid():
@@ -675,7 +681,7 @@ def _validate_canonical_receipt(value: dict[str, Any]) -> tuple[str, str, str]:
     return phase, instance, evidence
 
 
-def _canonical_display_prefix() -> bytes | None:
+def _canonical_display_prefix(issues: set[str] | None = None) -> bytes | None:
     """Return the repository's exact non-table display preamble.
 
     The checked-in display is the only canonical source for this historical
@@ -685,9 +691,13 @@ def _canonical_display_prefix() -> bytes | None:
     """
 
     source = Path(__file__).resolve().parents[1] / "experiments" / "LEDGER.md"
+    target_issues = issues if issues is not None else set()
     try:
-        data = source.read_bytes()
-    except OSError:
+        data, _ = _read_snapshot(
+            source, limit=MAX_FILE_BYTES, issues=target_issues, expected_mode=0o644,
+            expected_parent_mode=0o755,
+        )
+    except _EvidenceError:
         return None
     header = (_DISPLAY_HEADER + "\n").encode("utf-8")
     index = data.find(header)
@@ -697,6 +707,65 @@ def _canonical_display_prefix() -> bytes | None:
     if not prefix.endswith(b"\n\n") or len(prefix.splitlines()) != 6:
         return None
     return prefix
+
+
+_DISPLAY_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_DISPLAY_MONEY_RE = re.compile(r"\$[0-9]+\.[0-9]{4}")
+_DISPLAY_IDLE_RE = re.compile(r"[0-9]+\.[0-9]")
+_DISPLAY_FIELD_RE = re.compile(r"[\x20-\x7e]+")
+
+
+def _display_text(value: str, *, limit: int, allow_spaces: bool = True) -> bool:
+    if not 1 <= len(value) <= limit or "|" in value or "\\" in value:
+        return False
+    if _DISPLAY_FIELD_RE.fullmatch(value) is None:
+        return False
+    return allow_spaces or " " not in value
+
+
+def _display_money(value: str, *, positive: bool = False) -> Decimal:
+    if _DISPLAY_MONEY_RE.fullmatch(value) is None:
+        raise InvalidOperation
+    amount = _decimal(value[1:])
+    if positive and amount <= ZERO_USD:
+        raise InvalidOperation
+    return amount
+
+
+def _display_row(line: str) -> tuple[str, str, str, str, str, str, str, str, str]:
+    if not line.startswith("| ") or not line.endswith(" |"):
+        raise InvalidOperation
+    cells = line[2:-2].split(" | ")
+    if len(cells) != 9 or " | ".join(cells) != line[2:-2]:
+        raise InvalidOperation
+    if any(not cell or cell != cell.strip() for cell in cells):
+        raise InvalidOperation
+    date_text, phase, instance, gpu, hourly, purpose, status, cost, idle = cells
+    if _DISPLAY_DATE_RE.fullmatch(date_text) is None:
+        raise InvalidOperation
+    try:
+        parsed_date = date.fromisoformat(date_text)
+    except ValueError as exc:
+        raise InvalidOperation from exc
+    if not 2000 <= parsed_date.year <= 2100:
+        raise InvalidOperation
+    if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", phase) is None:
+        raise InvalidOperation
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{5,127}", instance) is None:
+        raise InvalidOperation
+    if not _display_text(gpu, limit=128):
+        raise InvalidOperation
+    _display_money(hourly, positive=True)
+    if not _display_text(purpose, limit=128):
+        raise InvalidOperation
+    if status not in {"created", "active", "pending", "deleted", "delete-failed",
+                      "deleted-key-cleanup-failed", "deleted-cost-bookkeeping-failed"}:
+        raise InvalidOperation
+    if cost != "pending":
+        _display_money(cost)
+    if _DISPLAY_IDLE_RE.fullmatch(idle) is None or _decimal(idle) > Decimal("1000000"):
+        raise InvalidOperation
+    return date_text, phase, instance, gpu, hourly, purpose, status, cost, idle
 
 
 def _parse_display(path: Path, groups: dict[tuple[str, str], dict[str, Any]], issues: set[str]) -> dict[str, Any]:
@@ -712,7 +781,7 @@ def _parse_display(path: Path, groups: dict[tuple[str, str], dict[str, Any]], is
     if not data:
         _issue(issues, "display_empty")
         return {"row_count": None, "rounding_mismatch_count": None, "malformed_count": None, "parse_refused": True}
-    prefix = _canonical_display_prefix()
+    prefix = _canonical_display_prefix(issues)
     framing = None if prefix is None else prefix + (_DISPLAY_HEADER + "\n" + _DISPLAY_SEPARATOR + "\n").encode("utf-8")
     if framing is None or not data.startswith(framing):
         _issue(issues, "display_schema_invalid")
@@ -739,26 +808,9 @@ def _parse_display(path: Path, groups: dict[tuple[str, str], dict[str, Any]], is
             _issue(issues, "display_blank_line")
             malformed += 1
             continue
-        if not line.startswith("|") or not line.endswith("|"):
-            _issue(issues, "display_non_table_content")
-            malformed += 1
-            continue
-        cells = [cell.strip() for cell in line[1:-1].split("|")]
-        if len(cells) != 9:
-            malformed += 1
-            _issue(issues, "display_malformed_row")
-            continue
         try:
-            if not cells[0] or not _safe_identity(cells[1]) or not _safe_identity(cells[2]):
-                raise InvalidOperation
-            if not cells[3] or not cells[4] or not cells[5] or cells[6] not in {"deleted", "pending", "created", "active", "delete-failed", "deleted-key-cleanup-failed", "deleted-cost-bookkeeping-failed"}:
-                raise InvalidOperation
-            cost = cells[7].strip()
-            if cost != "pending":
-                if not cost.startswith("$"):
-                    raise InvalidOperation
-                _decimal(cost[1:])
-            rows.append((cells[1], cells[2], cells[6], cost))
+            _, phase, instance, _, _, _, status, cost, _ = _display_row(line)
+            rows.append((phase, instance, status, cost))
         except (InvalidOperation, IndexError, TypeError):
             malformed += 1
             _issue(issues, "display_malformed_row")
@@ -777,16 +829,31 @@ def _parse_display(path: Path, groups: dict[tuple[str, str], dict[str, Any]], is
             _issue(issues, "display_orphan_row")
             continue
         if status == "pending":
-            if actual is not None:
+            if actual is not None or shown != "pending" or groups[(phase, instance)].get("status") != "pending":
                 _issue(issues, "display_status_mismatch")
                 malformed += 1
+            continue
+        legacy_status = groups[(phase, instance)].get("status")
+        if legacy_status == "pending" or (
+                legacy_status == "settled" and status not in {
+                    "deleted", "deleted-key-cleanup-failed", "deleted-cost-bookkeeping-failed"
+                }
+        ):
+            _issue(issues, "display_status_mismatch")
+            malformed += 1
+            continue
+        if legacy_status in {"created", "active", "delete-failed"} and status != legacy_status:
+            _issue(issues, "display_status_mismatch")
+            malformed += 1
             continue
         if actual is None:
             _issue(issues, "display_status_mismatch")
             malformed += 1
             continue
         try:
-            if _decimal(shown[1:]) != _decimal(actual):
+            displayed = _display_money(shown)
+            expected = _decimal(actual).quantize(Decimal("0.0001"))
+            if displayed != expected:
                 mismatch += 1
         except (InvalidOperation, TypeError):
             malformed += 1
