@@ -654,18 +654,43 @@ class PreflightFixtureTests(unittest.TestCase):
                 result = preflight._parse_display(self.display, {("phase-a", "instance-a"): self.row()}, issues)
                 self.assertTrue(result["parse_refused"])
 
-    def test_display_prefix_requires_secure_bounded_snapshot(self) -> None:
-        for label in ("prefix_identity_changed", "parent_unsafe_permissions", "byte_limit"):
+    def test_display_prefix_is_independent_of_reference_file(self) -> None:
+        """A missing or hostile repository reference cannot alter the schema."""
+        reference = self.root / "experiments" / "LEDGER.md"
+        reference.parent.mkdir()
+        expected = preflight._CANONICAL_DISPLAY_PREFIX
+        for label, payload in (
+            ("absent", None),
+            ("hostile_0600", b"not the producer schema\xff"),
+        ):
             with self.subTest(label=label):
-                def refused(path, *, limit, issues, expected_mode, expected_parent_mode):
-                    issues.add(label)
-                    raise preflight._EvidenceError(label)
-                issues: set[str] = set()
-                with mock.patch.object(preflight, "_read_snapshot", side_effect=refused):
-                    self.assertIsNone(preflight._canonical_display_prefix(issues))
-                self.assertIn(label, issues)
+                if payload is not None:
+                    reference.write_bytes(payload)
+                    reference.chmod(0o600)
+                else:
+                    self.assertFalse(reference.exists())
+                with mock.patch.object(
+                    preflight, "_read_snapshot", side_effect=AssertionError("reference read")
+                ) as read_snapshot:
+                    self.assertEqual(preflight._canonical_display_prefix(set()), expected)
+                read_snapshot.assert_not_called()
+                self.display.write_bytes(expected + preflight._DISPLAY_HEADER_BYTES
+                                         + preflight._DISPLAY_SEPARATOR_BYTES)
+                self.display.chmod(0o600)
+                self.assertFalse(
+                    preflight._parse_display(self.display, {}, set())["parse_refused"]
+                )
 
     def test_display_prefix_is_utf8_and_byte_pinned(self) -> None:
+        self.assertEqual(
+            preflight._CANONICAL_DISPLAY_PREFIX.count(b"\n"), 6,
+        )
+        self.assertEqual(
+            preflight._CANONICAL_DISPLAY_FRAMING,
+            preflight._CANONICAL_DISPLAY_PREFIX
+            + preflight._DISPLAY_HEADER_BYTES
+            + preflight._DISPLAY_SEPARATOR_BYTES,
+        )
         variants = {
             "invalid_utf8": b"\xff" + preflight._CANONICAL_DISPLAY_PREFIX,
             "impostor_preamble": preflight._CANONICAL_DISPLAY_PREFIX.replace(b"Sol", b"sol"),
@@ -674,10 +699,17 @@ class PreflightFixtureTests(unittest.TestCase):
         framing = (preflight._DISPLAY_HEADER + "\n" + preflight._DISPLAY_SEPARATOR + "\n").encode()
         for label, payload in variants.items():
             with self.subTest(label=label):
+                self.display.write_bytes(payload + framing)
+                self.display.chmod(0o600)
                 issues: set[str] = set()
-                with mock.patch.object(preflight, "_read_snapshot", return_value=(payload + framing, {})):
-                    self.assertIsNone(preflight._canonical_display_prefix(issues))
-                self.assertIn("prefix_invalid_utf8" if label == "invalid_utf8" else "prefix_schema_invalid", issues)
+                result = preflight._parse_display(
+                    self.display, {("phase-a", "instance-a"): self.row()}, issues
+                )
+                self.assertTrue(result["parse_refused"])
+                self.assertIn(
+                    "display_invalid_utf8" if label == "invalid_utf8" else "display_schema_invalid",
+                    issues,
+                )
 
     def test_receipt_directory_entry_cap_includes_unrelated_names(self) -> None:
         self.write_jsonl(self.ledger, [])
