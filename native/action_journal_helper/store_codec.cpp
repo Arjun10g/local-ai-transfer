@@ -1661,13 +1661,6 @@ bool process_binding_valid(const ProcessDispatchBinding& binding,
   return expected == process_operation_text(binding);
 }
 
-bool process_proof_id_matches(const std::array<std::uint8_t, 16>& expected,
-                              const ProcessExternalProof& proof) noexcept {
-  return proof.operation_id == expected &&
-      process_nonzero(proof.external_receipt_digest) &&
-      process_nonzero(proof.external_event_digest);
-}
-
 std::string process_transition_receipt(
     std::string_view operation, const JournalEvent& previous,
     const char* method, const char* state, std::string_view authorization,
@@ -1682,6 +1675,25 @@ std::string process_transition_receipt(
 }
 
 }  // namespace
+
+ProcessExternalProof::ProcessExternalProof(
+    const std::array<std::uint8_t, 16>& operation_id,
+    const std::array<std::uint8_t, 32>& external_receipt_digest,
+    const std::array<std::uint8_t, 32>& external_event_digest,
+    std::uint64_t dispatch_generation) noexcept
+    : operation_id_(operation_id),
+      external_receipt_digest_(external_receipt_digest),
+      external_event_digest_(external_event_digest),
+      dispatch_generation_(dispatch_generation) {}
+
+bool ProcessExternalProof::matches_operation(
+    const std::array<std::uint8_t, 16>& operation_id,
+    std::uint64_t dispatch_generation) const noexcept {
+  return operation_id_ == operation_id && dispatch_generation_ != 0 &&
+      dispatch_generation_ == dispatch_generation &&
+      process_nonzero(external_receipt_digest_) &&
+      process_nonzero(external_event_digest_);
+}
 
 ProcessDispatchLease::ProcessDispatchLease(
     JournalAuthorityOwner& owner, const ProcessDispatchBinding& binding,
@@ -1978,6 +1990,11 @@ ProcessDispatchLeaseStatus JournalAuthorityOwner::begin_external_dispatch(
     if (!lease.dispatching_persisted_ || lease.one_shot_used_ ||
         lease.external_started_)
       return ProcessDispatchLeaseStatus::kOneShotUsed;
+    if (dispatch_generation_ == UINT64_MAX) {
+      poisoned_.store(true, std::memory_order_release);
+      return ProcessDispatchLeaseStatus::kStorageFailure;
+    }
+    lease.dispatch_generation_ = ++dispatch_generation_;
     lease.external_started_ = true;
     return ProcessDispatchLeaseStatus::kOk;
   } catch (...) {
@@ -1989,12 +2006,14 @@ ProcessDispatchLeaseStatus JournalAuthorityOwner::begin_external_dispatch(
 ProcessDispatchLeaseStatus JournalAuthorityOwner::acknowledge_external(
     ProcessDispatchLease& lease, const ProcessExternalProof& proof,
     StorageIoControl io) noexcept {
-  if (!process_proof_id_matches(lease.binding_.operation_id, proof))
+  if (!proof.matches_operation(lease.binding_.operation_id,
+                              lease.dispatch_generation_))
     return ProcessDispatchLeaseStatus::kBindingMismatch;
   try {
     nlohmann::json body = {
-        {"provider_receipt_digest", process_hex(proof.external_receipt_digest)},
-        {"external_event_digest", process_hex(proof.external_event_digest)},
+        {"provider_receipt_digest", process_hex(proof.external_receipt_digest_)},
+        {"external_event_digest", process_hex(proof.external_event_digest_)},
+        {"dispatch_generation", proof.dispatch_generation_},
     };
     ProcessDispatchReadbackProof readback;
     const auto status = transition_lease(
@@ -2021,7 +2040,8 @@ ProcessDispatchLeaseStatus JournalAuthorityOwner::lookup_lost_ack(
   // A lost acknowledgement is meaningful only after this exact lease crossed
   // the external mutation barrier.  Rejecting before the authoritative
   // lookup keeps a caller-side ordering error non-mutating/non-poisoning.
-  if (!process_proof_id_matches(lease.binding_.operation_id, external_proof))
+  if (!external_proof.matches_operation(lease.binding_.operation_id,
+                                        lease.dispatch_generation_))
     return ProcessDispatchLeaseStatus::kBindingMismatch;
   ActiveBorrow borrow(*this);
   if (!borrow.acquired()) return ProcessDispatchLeaseStatus::kOwnerNotReady;
@@ -2070,9 +2090,10 @@ ProcessDispatchLeaseStatus JournalAuthorityOwner::lookup_lost_ack(
     // acknowledge mutation.
     const nlohmann::json body = {
         {"provider_receipt_digest",
-         process_hex(external_proof.external_receipt_digest)},
+         process_hex(external_proof.external_receipt_digest_)},
         {"external_event_digest",
-         process_hex(external_proof.external_event_digest)},
+         process_hex(external_proof.external_event_digest_)},
+        {"dispatch_generation", external_proof.dispatch_generation_},
     };
     const std::string expected_receipt = process_transition_receipt(
         lease.operation_text_, previous, "acknowledge", "acknowledged",
@@ -2088,8 +2109,8 @@ ProcessDispatchLeaseStatus JournalAuthorityOwner::lookup_lost_ack(
       return ProcessDispatchLeaseStatus::kReadbackMismatch;
     }
     lease.acknowledged_ = true;
-    lease.acknowledged_receipt_digest_ = external_proof.external_receipt_digest;
-    lease.acknowledged_event_digest_ = external_proof.external_event_digest;
+    lease.acknowledged_receipt_digest_ = external_proof.external_receipt_digest_;
+    lease.acknowledged_event_digest_ = external_proof.external_event_digest_;
     proof = recovered;
     return ProcessDispatchLeaseStatus::kOk;
   } catch (...) {
@@ -2125,12 +2146,14 @@ ProcessDispatchLeaseStatus ProcessDispatchLease::begin_reconciliation(
 
 ProcessDispatchLeaseStatus ProcessDispatchLease::complete_external(
     const ProcessExternalProof& proof, StorageIoControl io) noexcept {
-  if (owner_ == nullptr || !process_proof_id_matches(binding_.operation_id, proof))
+  if (owner_ == nullptr ||
+      !proof.matches_operation(binding_.operation_id, dispatch_generation_))
     return ProcessDispatchLeaseStatus::kBindingMismatch;
   try {
     nlohmann::json body = {
-        {"external_event_digest", process_hex(proof.external_event_digest)},
-        {"receipt_digest", process_hex(proof.external_receipt_digest)},
+        {"external_event_digest", process_hex(proof.external_event_digest_)},
+        {"receipt_digest", process_hex(proof.external_receipt_digest_)},
+        {"dispatch_generation", proof.dispatch_generation_},
         {"resolution", "completed"},
     };
     return owner_->transition_lease(*this, "complete", "completed", body, io,

@@ -286,8 +286,9 @@ class ProcessDispatchLeaseStaticTests(unittest.TestCase):
         self.assertIn("const ProcessExternalProof& external_proof", tail)
         self.assertIn("!lease.external_started_", tail)
         self.assertIn("lease.acknowledged_ = true", tail)
-        self.assertIn("lease.acknowledged_receipt_digest_ = external_proof.external_receipt_digest", tail)
-        self.assertIn("lease.acknowledged_event_digest_ = external_proof.external_event_digest", tail)
+        self.assertIn("lease.acknowledged_receipt_digest_ = external_proof.external_receipt_digest_", tail)
+        self.assertIn("lease.acknowledged_event_digest_ = external_proof.external_event_digest_", tail)
+        self.assertIn('"dispatch_generation", external_proof.dispatch_generation_', tail)
         self.assertIn("process_transition_receipt(", tail)
         self.assertIn("event.receipt_digest != expected_receipt", tail)
 
@@ -489,6 +490,58 @@ class ProcessDispatchLeaseStaticTests(unittest.TestCase):
         self.assertIn("ProcessDispatchLease(const ProcessDispatchLease&) = delete", self.owner)
         self.assertIn("ProcessDispatchLease(ProcessDispatchLease&&) = delete", self.owner)
         self.assertIn("~ProcessDispatchLease() noexcept", self.owner)
+
+    def test_external_proof_is_opaque_move_only_and_future_issuer_only(self):
+        start = self.owner.index("class ProcessExternalProof final")
+        public_end = self.owner.index(" private:", start)
+        public_region = self.owner[start:public_end]
+        private_end = self.owner.index("enum class ProcessDispatchLeaseStatus", start)
+        proof_region = self.owner[start:private_end]
+        self.assertIn("ProcessExternalProof(const ProcessExternalProof&) = delete", public_region)
+        self.assertIn("ProcessExternalProof(ProcessExternalProof&&) noexcept = default", public_region)
+        self.assertNotIn("std::array<std::uint8_t, 16> operation_id_", public_region)
+        self.assertNotIn("std::array<std::uint8_t, 32> external_receipt_digest_", public_region)
+        self.assertNotIn("std::array<std::uint8_t, 32> external_event_digest_", public_region)
+        self.assertNotIn("\n  ProcessExternalProof();", public_region)
+        self.assertNotIn("std::string", proof_region)
+        self.assertIn("friend class JournalAuthorityOwner", proof_region)
+        self.assertIn("friend class ProcessDispatchLease", proof_region)
+        self.assertIn("friend class TrustedProcessExternalProofIssuer", proof_region)
+        self.assertIn("ProcessExternalProof(\n      const std::array", proof_region)
+        self.assertIn("ProcessExternalProof::ProcessExternalProof(", self.store)
+        self.assertNotIn("ProcessExternalProof proof", self.store)
+        self.assertIn("dispatch_generation_ != 0", self.store)
+        self.assertIn("dispatch_generation_ == dispatch_generation", self.store)
+        external_contract = self.contract["external_proof"]
+        for key in ("opaque", "move_only", "requires_independent_windows_process_evidence"):
+            self.assertIs(external_contract[key], True)
+        for key in ("public_constructor", "public_fields", "public_test_factory",
+                    "slice1_issuer_defined", "slice1_genuine_success_path"):
+            self.assertIs(external_contract[key], False)
+        self.assertIn("TrustedProcessExternalProofIssuer", external_contract["minted_by"])
+
+    def test_mocked_external_proof_model_requires_internal_mint_token(self):
+        class MockProof:
+            __slots__ = ("_mint", "operation", "generation", "receipt", "event")
+
+            def __init__(self, mint, operation, generation, receipt, event):
+                if mint != "trusted-issuer-test-only":
+                    raise ValueError("proof mint refused")
+                self._mint = mint
+                self.operation = operation
+                self.generation = generation
+                self.receipt = receipt
+                self.event = event
+
+            def matches(self, operation, generation):
+                return self.operation == operation and self.generation == generation and bool(self.receipt) and bool(self.event)
+
+        with self.assertRaises(ValueError):
+            MockProof("caller", "act_" + "a" * 32, 1, "r", "e")
+        proof = MockProof("trusted-issuer-test-only", "act_" + "a" * 32, 1, "r", "e")
+        self.assertTrue(proof.matches("act_" + "a" * 32, 1))
+        self.assertFalse(proof.matches("act_" + "b" * 32, 1))
+        self.assertFalse(proof.matches("act_" + "a" * 32, 2))
 
     def test_no_secrets_raw_json_or_topology_activation(self):
         lease_region = self.owner[self.owner.index("class ProcessDispatchLease"):self.owner.index("class JournalAuthorityOwner final")]

@@ -40,6 +40,18 @@
     "failed_definitive": "lease_api_rejects_post_dispatch; provably_pre_dispatch_only",
     "abandonment_after_dispatch": "poison_owner_and_block"
   },
+  "external_proof": {
+    "opaque": true,
+    "move_only": true,
+    "public_constructor": false,
+    "public_fields": false,
+    "public_test_factory": false,
+    "minted_by": "TrustedProcessExternalProofIssuer (future slice 2 only)",
+    "requires_independent_windows_process_evidence": true,
+    "owner_generated_dispatch_generation": "bounded_nonwrapping",
+    "slice1_issuer_defined": false,
+    "slice1_genuine_success_path": false
+  },
   "lock_order": ["admission_cas", "owner_mutex", "store_internals"],
   "lifetime": {
     "registry_attachment": "terminal entries remain until lease destructor detaches",

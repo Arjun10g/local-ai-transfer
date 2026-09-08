@@ -67,10 +67,34 @@ struct ProcessDispatchReadbackProof final {
   std::array<std::uint8_t, 32> event_digest{};
 };
 
-struct ProcessExternalProof final {
-  std::array<std::uint8_t, 16> operation_id{};
-  std::array<std::uint8_t, 32> external_receipt_digest{};
-  std::array<std::uint8_t, 32> external_event_digest{};
+class ProcessExternalProof final {
+ public:
+  ~ProcessExternalProof() noexcept = default;
+  ProcessExternalProof(const ProcessExternalProof&) = delete;
+  ProcessExternalProof& operator=(const ProcessExternalProof&) = delete;
+  ProcessExternalProof(ProcessExternalProof&&) noexcept = default;
+  ProcessExternalProof& operator=(ProcessExternalProof&&) noexcept = default;
+
+  // The capability exposes only a provenance check; its operation, witness,
+  // and external evidence bytes remain inaccessible to callers.
+  bool matches_operation(
+      const std::array<std::uint8_t, 16>& operation_id,
+      std::uint64_t dispatch_generation) const noexcept;
+
+ private:
+  friend class JournalAuthorityOwner;
+  friend class ProcessDispatchLease;
+  friend class TrustedProcessExternalProofIssuer;
+  ProcessExternalProof(
+      const std::array<std::uint8_t, 16>& operation_id,
+      const std::array<std::uint8_t, 32>& external_receipt_digest,
+      const std::array<std::uint8_t, 32>& external_event_digest,
+      std::uint64_t dispatch_generation) noexcept;
+
+  std::array<std::uint8_t, 16> operation_id_{};
+  std::array<std::uint8_t, 32> external_receipt_digest_{};
+  std::array<std::uint8_t, 32> external_event_digest_{};
+  std::uint64_t dispatch_generation_ = 0;
 };
 
 enum class ProcessDispatchLeaseStatus : std::uint8_t {
@@ -91,6 +115,9 @@ enum class ProcessDispatchLeaseStatus : std::uint8_t {
 };
 
 class JournalAuthorityOwner;
+// Declared only as a narrow future slice-2 seam.  Slice 1 deliberately does
+// not define this issuer or provide a test/public minting factory.
+class TrustedProcessExternalProofIssuer;
 
 // A lease is a one-use, noncopyable capability for the owner-internal
 // dispatch barrier.  It has no process handle, protocol key, nonce, or JSON.
@@ -125,6 +152,7 @@ class ProcessDispatchLease final {
 
  private:
   friend class JournalAuthorityOwner;
+  friend class TrustedProcessExternalProofIssuer;
   ProcessDispatchLease(JournalAuthorityOwner& owner,
                        const ProcessDispatchBinding& binding,
                        std::string operation_text);
@@ -143,6 +171,7 @@ class ProcessDispatchLease final {
   // map insertion succeeds, so a throwing insertion cannot destroy a
   // candidate while re-entering the owner mutex.
   bool owner_attached_ = false;
+  std::uint64_t dispatch_generation_ = 0;
 };
 
 const char* process_dispatch_lease_status_name(
@@ -259,6 +288,9 @@ class JournalAuthorityOwner final {
   bool shutting_down_ = false;
   std::uint32_t recovery_count_ = 0;
   bool recovered_ = false;
+  // Monotonic owner-local provenance for the external mutation barrier. It is
+  // never caller supplied and exhaustion is a sticky refusal.
+  std::uint64_t dispatch_generation_ = 0;
   std::atomic_bool poisoned_{false};
   // Lease-table access is owner-mutex protected and deliberately bounded;
   // lease admission and ordinary mutation share the same lock ordering.

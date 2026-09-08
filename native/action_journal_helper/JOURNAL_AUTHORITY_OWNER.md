@@ -68,6 +68,17 @@ failure remains pre-dispatch-only. Reload, storage, and readback failures latch
 sticky poison, so the owner never returns to ready after an unproved authority
 failure.
 
+`ProcessExternalProof` is intentionally opaque and move-only: callers cannot
+construct, copy, inspect, or fabricate its operation, external evidence, or
+dispatch-generation fields. A narrow friend declaration names only the future
+co-located `TrustedProcessExternalProofIssuer`; slice 1 provides no issuer or
+test factory. The owner allocates a bounded non-wrapping dispatch generation at
+the external-dispatch admission point and requires that provenance in every
+acknowledge, lost-ACK recovery, and completion proof. Until slice 2 independently
+validates process/job/handle/creation/I/O evidence and mints this capability,
+all genuine external-proof success paths remain unavailable; no arbitrary
+receipt/event digests can authorize a transition.
+
 This phase deliberately does not expose a supervisor bridge, public storage
 factory, second client, CMake target, package path, host import, registry entry,
 or activation path. The helper and owner remain unavailable in production

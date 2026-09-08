@@ -48,3 +48,13 @@ Lock order is fixed: admission CAS, then owner mutex, then store internals.
 The owner mutex is never held across process, pipe, or external-provider
 waits. Durable store commits are bounded storage operations; the future
 supervisor owns all process/pipe waits outside this boundary.
+
+`ProcessExternalProof` is an opaque, move-only capability. It has no public
+constructor, fields, or test factory; only the future co-located
+`TrustedProcessExternalProofIssuer` in slice 2 may mint one after independently
+validating real Windows process/job/handle/creation/I/O evidence. The proof is
+bound to the owner-generated, non-wrapping dispatch generation as well as the
+operation and external receipt/event evidence. Slice 1 defines no issuer and
+therefore has no genuine external-proof success path until that trusted seam
+is implemented. Arbitrary caller digests cannot acknowledge, recover, or
+complete an operation.
