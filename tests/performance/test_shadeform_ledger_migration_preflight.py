@@ -588,6 +588,63 @@ class PreflightFixtureTests(unittest.TestCase):
         self.assertIsNone(report["receipt_count"])
         self.assertIn("receipt_count_or_directory_limit", issues)
 
+    def test_second_receipt_scan_refusals_null_all_dependent_values(self) -> None:
+        receipt = self.receipt(phase="phase-a", instance="instance-a")
+        self.write_receipt(self.runtime / "r.deletion-receipt.json", receipt)
+        groups = {("phase-a", "instance-a"): {"status": "settled", "actual_cost_usd": Decimal("1.000000")}}
+        original = preflight._enumerate_receipts
+        for reason in ("symlink_receipt", "receipt_count_or_directory_limit"):
+            with self.subTest(reason=reason):
+                calls = {"count": 0}
+
+                def second_scan(fd, issues):
+                    calls["count"] += 1
+                    if calls["count"] == 1:
+                        return original(fd, issues)
+                    raise preflight._EvidenceError(reason)
+
+                issues: set[str] = set()
+                with mock.patch.object(preflight, "_enumerate_receipts", side_effect=second_scan):
+                    report = preflight._parse_receipts(self.runtime, groups, issues)
+                self.assertTrue(report["parse_refused"])
+                for key in (
+                    "receipt_count", "deleted_count", "absent_count", "unmatched_count",
+                    "unmatched_absent_count", "unmatched_absent_actual_cost_usd",
+                    "duplicate_receipt_count", "malformed_count",
+                ):
+                    self.assertIsNone(report[key], key)
+                self.assertIn(reason, issues)
+
+    def test_second_receipt_scan_refusal_propagates_report_completeness(self) -> None:
+        receipt = self.receipt()
+        self.write_jsonl(self.ledger, [self.row()])
+        self.write_jsonl(self.incidents, [])
+        prefix = preflight._canonical_display_prefix()
+        self.assertIsNotNone(prefix)
+        self.display.write_bytes(prefix + (
+            preflight._DISPLAY_HEADER + "\n" + preflight._DISPLAY_SEPARATOR + "\n"
+            "| 2026-01-01 | phase-a | instance-a | gpu | $1.0000 | run | deleted | $1.0000 | 0.0 |\n"
+        ).encode())
+        self.write_receipt(self.runtime / "r.deletion-receipt.json", receipt)
+        original = preflight._enumerate_receipts
+        calls = {"count": 0}
+
+        def overflow_on_second(fd, issues):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return original(fd, issues)
+            raise preflight._EvidenceError("receipt_count_or_directory_limit")
+
+        with mock.patch.object(preflight, "_enumerate_receipts", side_effect=overflow_on_second):
+            report = preflight.run_preflight(
+                legacy_ledger=self.ledger, display_ledger=self.display,
+                deletion_root=self.runtime, incidents=self.incidents,
+            )
+        self.assertTrue(report["deletion_receipts"]["parse_refused"])
+        self.assertFalse(report["evidence_complete"])
+        self.assertFalse(report["cross_stream_reconciliation_available"])
+        self.assertIsNone(report["deletion_receipts"]["unmatched_absent_actual_cost_usd"])
+
 
 if __name__ == "__main__":
     unittest.main()

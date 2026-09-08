@@ -990,6 +990,15 @@ def _parse_receipts(root: Path, groups: dict[tuple[str, str], dict[str, Any]], i
             if _file_identity(root_before) != _file_identity(root_after):
                 _issue(issues, "evidence_mutated_during_read")
                 refused = True
+        except _EvidenceError as exc:
+            # Enumeration has a deliberately small refusal vocabulary.  Do
+            # not turn an unexpected programmer error into a sanitized ledger
+            # result, but do fail closed for bounded hostile-directory input.
+            reason = str(exc)
+            if reason not in {"symlink_receipt", "receipt_count_or_directory_limit"}:
+                raise
+            _issue(issues, reason)
+            refused = True
         except OSError:
             _issue(issues, "deletion_root_unavailable")
             refused = True
