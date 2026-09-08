@@ -310,6 +310,85 @@ class RemoteCanaryAndReceiptHardeningTests(unittest.TestCase):
                 self.runner._private_atomic_write(target, b'{"safe":true}\n')
             self.assertTrue(target.is_symlink())
 
+    def test_private_policy_walks_scoped_ancestors_and_rechecks_identity(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            root = Path(directory)
+            private = root / "private"
+            private.mkdir()
+            private.chmod(0o700)
+            target = private / "receipt.json"
+            self.runner._private_atomic_write(
+                target, b'{"safe":true}\n', trusted_root=root,
+            )
+            self.assertEqual(target.read_bytes(), b'{"safe":true}\n')
+
+            permissive = root / "permissive"
+            permissive.mkdir()
+            permissive.chmod(0o755)
+            with self.assertRaises(ValueError):
+                self.runner._private_atomic_write(
+                    permissive / "receipt.json", b'{"safe":true}\n',
+                    trusted_root=root,
+                )
+
+            linked = root / "linked"
+            linked.symlink_to(private, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                self.runner._private_atomic_write(
+                    linked / "receipt.json", b'{"safe":true}\n',
+                    trusted_root=root,
+                )
+
+            with mock.patch.object(self.runner.os, "getuid", return_value=os.getuid() + 1):
+                with self.assertRaises(ValueError):
+                    self.runner._private_atomic_write(
+                        private / "foreign.json", b'{"safe":true}\n',
+                        trusted_root=root,
+                    )
+
+            with mock.patch.object(self.runner, "_private_ancestors_stable", return_value=False):
+                with self.assertRaisesRegex(ValueError, "parent|ancestor"):
+                    self.runner._private_atomic_write(
+                        private / "swapped.json", b'{"safe":true}\n',
+                        trusted_root=root,
+                    )
+                self.assertFalse((private / "swapped.json").exists())
+
+    def test_bounded_receipt_read_rejects_hardlinks_and_missing_capability(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            root = Path(directory)
+            receipt = root / "receipt.json"
+            receipt.write_text('{"safe":true}\n', encoding="utf-8")
+            hardlink = root / "receipt-hardlink.json"
+            hardlink.hardlink_to(receipt)
+            with self.assertRaises(ValueError):
+                self.runner._bounded_json_file(hardlink)
+            original = self.runner.os.O_NOFOLLOW
+            del self.runner.os.O_NOFOLLOW
+            try:
+                with self.assertRaisesRegex(ValueError, "unavailable"):
+                    self.runner._bounded_json_file(receipt)
+            finally:
+                self.runner.os.O_NOFOLLOW = original
+
+    def test_salvage_rejects_symlinked_ancestor_before_process_call(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            root = Path(directory)
+            private = root / "private"
+            private.mkdir()
+            private.chmod(0o700)
+            linked = root / "linked"
+            linked.symlink_to(private, target_is_directory=True)
+            destination = linked / "artifacts"
+            info = {"phase_id": "canary", "instance_info": {"ssh_user": "u", "ip": "127.0.0.1"}}
+            with mock.patch.object(self.orchestrator, "_remote") as remote:
+                with self.assertRaises(ValueError):
+                    self.orchestrator._salvage(
+                        info, root / "id", root / "known", destination,
+                        ["receipt.json"],
+                    )
+            remote.assert_not_called()
+
     def test_malformed_tensor_receipt_is_finite_refusal_without_typeerror_or_file(self):
         class Reader:
             version = 3
@@ -360,7 +439,10 @@ class RemoteCanaryAndReceiptHardeningTests(unittest.TestCase):
                 kwargs["stderr"].write(b"HF_TOKEN=secret-material\n")
                 return type("Result", (), {"returncode": 0})()
             with mock.patch.object(self.runner.subprocess, "run", side_effect=fake_run):
-                result = self.runner.run_commands([command], root / "progress.json", receipt_path=receipt)
+                result = self.runner.run_commands(
+                    [command], root / "progress.json", receipt_path=receipt,
+                    trusted_root=root,
+                )
             self.assertEqual(result[0]["status"], "failed")
             self.assertEqual(result[0]["error_type"], "unsafe_output")
             self.assertNotIn("secret-material", receipt.read_text(encoding="utf-8"))

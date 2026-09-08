@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 ROOT = Path(__file__).resolve().parents[1]
+PRIVATE_OUTPUT_ROOT = ROOT
 DEFAULT_CONFIG = ROOT / "model" / "conversion" / "j1m-config.json"
 SOURCE_LOCK = ROOT / "model" / "source-lock" / "qwen35-9b.source-lock.json"
 TOKEN_ENV = "HF_TOKEN"
@@ -461,6 +462,101 @@ def _bounded_json_loads(raw: bytes | str) -> Any:
         raise ValueError("invalid or unbounded receipt JSON") from exc
 
 
+def _private_ancestor_snapshot(path: Path, trusted_root: Path | None = None,
+                               *, strict_permissions: bool = True) -> tuple[tuple[Path, os.stat_result], ...]:
+    """Validate a path beneath an explicitly scoped, link-free root.
+
+    The root is intentionally scoped by the caller; ancestors above it are
+    outside this policy. Every component from that root through the target
+    parent is checked with lstat, and the snapshot is rechecked before and
+    after operations that publish or consume a receipt.
+    """
+
+    if os.name != "posix" or not hasattr(os, "getuid"):
+        raise ValueError("private ancestor policy is unavailable")
+    if not path.is_absolute() or path != Path(os.path.abspath(path)):
+        raise ValueError("private path must be absolute and normalized")
+    root = trusted_root if trusted_root is not None else path.parent
+    if not root.is_absolute() or root != Path(os.path.abspath(root)):
+        raise ValueError("private trusted root must be absolute and normalized")
+    try:
+        relative_parent = path.parent.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("private path is outside its trusted root") from exc
+    components = [root]
+    ancestor = root
+    for part in relative_parent.parts:
+        ancestor = ancestor / part
+        components.append(ancestor)
+    snapshot: list[tuple[Path, os.stat_result]] = []
+    current_uid = os.getuid()
+    for index, component in enumerate(components):
+        try:
+            info = os.lstat(component)
+        except OSError as exc:
+            raise ValueError("private ancestor is unavailable") from exc
+        permissions = stat.S_IMODE(info.st_mode)
+        # The explicitly configured root is trusted as the policy boundary;
+        # it must not be writable by others, while every descendant in the
+        # private path must be fully owner-private for writes.
+        unsafe_permissions = (permissions & 0o022 if index == 0 else
+                              permissions & (0o077 if strict_permissions else 0o022))
+        if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or
+                info.st_uid != current_uid or info.st_nlink < 1 or
+                unsafe_permissions):
+            raise ValueError("private ancestor is unsafe")
+        snapshot.append((component, info))
+    return tuple(snapshot)
+
+
+def _private_ancestors_stable(snapshot: tuple[tuple[Path, os.stat_result], ...]) -> bool:
+    try:
+        for component, expected in snapshot:
+            current = os.lstat(component)
+            if (not stat.S_ISDIR(current.st_mode) or
+                    (current.st_dev, current.st_ino, current.st_uid,
+                     stat.S_IMODE(current.st_mode)) != (
+                    expected.st_dev, expected.st_ino, expected.st_uid,
+                    stat.S_IMODE(expected.st_mode))):
+                return False
+        return True
+    except OSError:
+        return False
+
+
+def _open_private_parent_descriptor(
+        path: Path, trusted_root: Path, *, ancestors: tuple[tuple[Path, os.stat_result], ...]
+) -> int:
+    """Open each private ancestor from the trusted root without path traversal."""
+
+    if (os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or
+            not hasattr(os, "supports_dir_fd") or os.open not in os.supports_dir_fd):
+        raise ValueError("private descriptor-safe path is unavailable")
+    try:
+        relative_parent = path.parent.relative_to(trusted_root)
+    except ValueError as exc:
+        raise ValueError("private path is outside its trusted root") from exc
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(trusted_root, flags)
+        for part in relative_parent.parts:
+            child = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        if not _private_ancestors_stable(ancestors):
+            raise ValueError("private ancestor changed")
+        return descriptor
+    except ValueError:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
+    except (OSError, RuntimeError):
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise ValueError("private descriptor-safe path is unavailable") from None
+
+
 def validate_persisted_output(value: object) -> str:
     """Reject credential-bearing output before it can reach a receipt."""
 
@@ -548,7 +644,7 @@ def validate_persisted_receipt(value: object) -> object:
     return value
 
 
-def _write_validated_json(path: Path, payload: object) -> None:
+def _write_validated_json(path: Path, payload: object, *, trusted_root: Path | None = None) -> None:
     """Validate a producer payload completely before creating its receipt."""
 
     validate_persisted_receipt(payload)
@@ -557,10 +653,13 @@ def _write_validated_json(path: Path, payload: object) -> None:
     except (TypeError, ValueError, RecursionError) as exc:
         raise ValueError("receipt serialization refused") from exc
     validate_persisted_output(serialized)
-    _private_atomic_write(path, serialized.encode("utf-8"))
+    _private_atomic_write(
+        path, serialized.encode("utf-8"),
+        trusted_root=trusted_root or PRIVATE_OUTPUT_ROOT,
+    )
 
 
-def _private_atomic_write(path: Path, payload: bytes) -> None:
+def _private_atomic_write(path: Path, payload: bytes, *, trusted_root: Path | None = None) -> None:
     """Publish bytes only through a pinned private parent descriptor.
 
     This deliberately refuses missing parents and platforms without the
@@ -581,17 +680,15 @@ def _private_atomic_write(path: Path, payload: bytes) -> None:
         raise ValueError("private descriptor-safe output is unavailable")
     if not all(function in os.supports_dir_fd for function in (os.open, os.stat, os.unlink)):
         raise ValueError("private descriptor-relative output is unavailable")
+    ancestors = _private_ancestor_snapshot(
+        path, trusted_root or PRIVATE_OUTPUT_ROOT,
+    )
+    parent = path.parent
     try:
-        parent = path.parent.resolve(strict=True)
-    except OSError as exc:
-        raise ValueError("private output parent is unavailable") from exc
-    path = parent / path.name
-    try:
-        parent_fd = os.open(
-            parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW |
-            getattr(os, "O_CLOEXEC", 0),
+        parent_fd = _open_private_parent_descriptor(
+            path, trusted_root or PRIVATE_OUTPUT_ROOT, ancestors=ancestors,
         )
-    except (OSError, RuntimeError) as exc:
+    except ValueError as exc:
         raise ValueError("private output parent is unavailable") from exc
     temporary_name = f".{path.name}.{secrets.token_hex(12)}.tmp"
     descriptor = -1
@@ -604,6 +701,8 @@ def _private_atomic_write(path: Path, payload: bytes) -> None:
                 (parent_stat.st_dev, parent_stat.st_ino) !=
                 (current_parent.st_dev, current_parent.st_ino)):
             raise ValueError("private output parent is unsafe")
+        if not _private_ancestors_stable(ancestors):
+            raise ValueError("private output ancestor changed")
         try:
             existing = os.open(
                 path.name, os.O_RDONLY | os.O_NOFOLLOW |
@@ -645,6 +744,8 @@ def _private_atomic_write(path: Path, payload: bytes) -> None:
         os.replace(temporary_name, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         published = True
         os.fsync(parent_fd)
+        if not _private_ancestors_stable(ancestors):
+            raise ValueError("private output ancestor changed")
         verify_fd = os.open(
             path.name, os.O_RDONLY | os.O_NOFOLLOW |
             getattr(os, "O_CLOEXEC", 0), dir_fd=parent_fd)
@@ -736,13 +837,50 @@ def _sha256(path: Path) -> str:
 
 def _bounded_json_file(path: Path, *, limit: int = _RECEIPT_MAX_BYTES) -> Any:
     """Read one receipt snapshot, rejecting oversize and duplicate keys."""
+    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
+        raise ValueError("descriptor-safe receipt read is unavailable")
+    ancestors = _private_ancestor_snapshot(
+        path, PRIVATE_OUTPUT_ROOT, strict_permissions=False,
+    )
+    parent_descriptor = -1
+    descriptor = -1
     try:
-        with path.open("rb") as stream:
-            raw = stream.read(limit + 1)
+        parent_descriptor = _open_private_parent_descriptor(
+            path, PRIVATE_OUTPUT_ROOT, ancestors=ancestors,
+        )
+        descriptor = os.open(
+            path.name, os.O_RDONLY | os.O_NOFOLLOW |
+            getattr(os, "O_CLOEXEC", 0), dir_fd=parent_descriptor,
+        )
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or
+                before.st_nlink != 1 or stat.S_IMODE(before.st_mode) & 0o022 or
+                before.st_size > limit):
+            raise ValueError("receipt is not a bounded private file")
+        chunks: list[bytes] = []
+        total = 0
+        while total <= limit:
+            chunk = os.read(descriptor, limit + 1 - total)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(descriptor)
+        current = os.stat(path, follow_symlinks=False)
+        if (len(raw) > limit or before.st_size != after.st_size or
+                after.st_size != len(raw) or
+                (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino) or
+                (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino) or
+                not _private_ancestors_stable(ancestors)):
+            raise ValueError("receipt changed during bounded read")
     except OSError:
         raise ValueError("receipt read refused") from None
-    if len(raw) > limit:
-        raise ValueError("receipt exceeds its bounded size")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
     payload = _bounded_json_loads(raw)
     validate_persisted_receipt(payload)
     return payload
@@ -1253,7 +1391,7 @@ def _bounded_command_tail(stream: Any) -> str:
     return value[-_COMMAND_LOG_TAIL_LIMIT:]
 
 
-def run_commands(commands: list[list[str]], progress_path: Path, *, cwd: Path | None = None, token_file: Path | None = None, receipt_path: Path | None = None) -> list[dict[str, Any]]:
+def run_commands(commands: list[list[str]], progress_path: Path, *, cwd: Path | None = None, token_file: Path | None = None, receipt_path: Path | None = None, trusted_root: Path | None = None) -> list[dict[str, Any]]:
     """Run an already-reviewed argv plan, recording progress before each stage."""
 
     for command in commands:
@@ -1262,10 +1400,12 @@ def run_commands(commands: list[list[str]], progress_path: Path, *, cwd: Path | 
         validate_persisted_argv(command)
     receipts = []
     all_stage_receipts = []
+    output_root = trusted_root or PRIVATE_OUTPUT_ROOT
     if receipt_path:
-        _private_atomic_write(receipt_path, b"[]\n")
+        _private_atomic_write(receipt_path, b"[]\n", trusted_root=output_root)
     for index, command in enumerate(commands):
-        write_progress(progress_path, f"stage-{index + 1}-starting", argv=command)
+        write_progress(progress_path, f"stage-{index + 1}-starting", argv=command,
+                       trusted_root=output_root)
         started_at = utc_now()
         try:
             # Never inherit dotenv/API credentials into child tools. The token
@@ -1297,8 +1437,11 @@ def run_commands(commands: list[list[str]], progress_path: Path, *, cwd: Path | 
                     all_stage_receipts.append(stage_receipt)
                     if receipt_path:
                         receipts.append(stage_receipt)
-                        _write_validated_json(receipt_path, receipts)
-                    write_progress(progress_path, f"stage-{index + 1}-failed", **{key: value for key, value in stage_receipt.items() if key != "stage"})
+                        _write_validated_json(receipt_path, receipts,
+                                              trusted_root=output_root)
+                    write_progress(progress_path, f"stage-{index + 1}-failed",
+                                   trusted_root=output_root,
+                                   **{key: value for key, value in stage_receipt.items() if key != "stage"})
                     break
             stage_receipt = {"stage": index + 1, "argv": command, "started_at_utc": started_at, "ended_at_utc": utc_now(), "exit_code": completed.returncode, "status": "completed" if completed.returncode == 0 else "failed"}
             if completed.returncode != 0:
@@ -1319,9 +1462,11 @@ def run_commands(commands: list[list[str]], progress_path: Path, *, cwd: Path | 
         if not administrative:
             receipts.append(stage_receipt)
             if receipt_path:
-                _write_validated_json(receipt_path, receipts)
+                _write_validated_json(receipt_path, receipts,
+                                      trusted_root=output_root)
         progress_details = {key: value for key, value in stage_receipt.items() if key != "stage"}
-        write_progress(progress_path, f"stage-{index + 1}-{stage_receipt['status']}", **progress_details)
+        write_progress(progress_path, f"stage-{index + 1}-{stage_receipt['status']}",
+                       trusted_root=output_root, **progress_details)
         if stage_receipt["status"] != "completed":
             break
     # Return administrative failures to the caller while keeping them out of
@@ -1350,7 +1495,7 @@ def build_plan(config: dict[str, Any], mode: str = "prove") -> dict[str, Any]:
     }
 
 
-def write_progress(path: Path, stage: str, **details: Any) -> None:
+def write_progress(path: Path, stage: str, *, trusted_root: Path | None = None, **details: Any) -> None:
     validate_persisted_output(stage)
     validate_persisted_receipt(details)
     payload = {"stage": stage, "written_at_utc": utc_now(), **details}
@@ -1360,7 +1505,8 @@ def write_progress(path: Path, stage: str, **details: Any) -> None:
     except (TypeError, ValueError, RecursionError) as exc:
         raise ValueError("progress serialization refused") from exc
     validate_persisted_output(serialized)
-    _private_atomic_write(path, serialized.encode("utf-8"))
+    _private_atomic_write(path, serialized.encode("utf-8"),
+                          trusted_root=trusted_root or PRIVATE_OUTPUT_ROOT)
 
 
 def main(argv: list[str] | None = None) -> int:

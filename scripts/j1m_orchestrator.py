@@ -80,14 +80,25 @@ def _bounded_bytes(path: Path, limit: int) -> bytes:
     """Read one bounded descriptor snapshot, rejecting replacement."""
     if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
         raise ValueError("descriptor-safe bounded read is unavailable")
+    ancestors = j1m_runner._private_ancestor_snapshot(
+        path, j1m_runner.PRIVATE_OUTPUT_ROOT, strict_permissions=False,
+    )
+    parent_descriptor = -1
+    descriptor = -1
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW |
-                             getattr(os, "O_CLOEXEC", 0))
+        parent_descriptor = j1m_runner._open_private_parent_descriptor(
+            path, j1m_runner.PRIVATE_OUTPUT_ROOT, ancestors=ancestors,
+        )
+        descriptor = os.open(
+            path.name, os.O_RDONLY | os.O_NOFOLLOW |
+            getattr(os, "O_CLOEXEC", 0), dir_fd=parent_descriptor,
+        )
     except OSError as exc:
         raise ValueError("receipt is unavailable") from exc
     try:
         before = os.fstat(descriptor)
-        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or
+                before.st_nlink != 1 or stat.S_IMODE(before.st_mode) & 0o022 or
                 before.st_size > limit):
             raise ValueError("receipt is not bounded regular data")
         chunks: list[bytes] = []
@@ -104,13 +115,17 @@ def _bounded_bytes(path: Path, limit: int) -> bytes:
         if (len(raw) > limit or before.st_size != after.st_size or
                 after.st_size != len(raw) or
                 (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino) or
-                (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino)):
+                (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino) or
+                not j1m_runner._private_ancestors_stable(ancestors)):
             raise ValueError("receipt changed during bounded read")
         return raw
     except OSError:
         raise ValueError("receipt read refused") from None
     finally:
-        os.close(descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
 
 
 def _decode_bounded_json(raw: bytes) -> Any:
@@ -876,12 +891,17 @@ def _salvage(
     """Attempt each allowlisted receipt independently; one missing file cannot stop cleanup."""
 
     try:
+        salvage_ancestors = j1m_runner._private_ancestor_snapshot(
+            destination, j1m_runner.PRIVATE_OUTPUT_ROOT,
+        )
         destination_stat = os.lstat(destination)
     except OSError:
         raise ValueError("salvage destination is unavailable") from None
     if (stat.S_ISLNK(destination_stat.st_mode) or not stat.S_ISDIR(destination_stat.st_mode) or
             destination_stat.st_uid != os.getuid() or stat.S_IMODE(destination_stat.st_mode) & 0o077):
         raise ValueError("salvage destination is not a private directory")
+    if not j1m_runner._private_ancestors_stable(salvage_ancestors):
+        raise ValueError("salvage destination changed")
     results = []
     for name in names:
         if deadline is not None and deadline - time.monotonic() - _DELETION_RESERVE_SECONDS <= 0.0:
