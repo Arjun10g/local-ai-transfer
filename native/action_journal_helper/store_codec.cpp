@@ -1,4 +1,5 @@
 #include "store_codec.hpp"
+#include "journal_authority_owner.hpp"
 
 #include <bcrypt.h>
 
@@ -6,6 +7,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -778,14 +780,14 @@ bool response_state(const JournalEvent& previous, const DecodedRequest& request,
 }  // namespace
 
 FixedContainerStore::FixedContainerStore(
-    action_journal_storage::JournalStorageLease&& lease,
+    action_journal_storage::JournalStorageLease& lease,
     const std::array<std::uint8_t, 32>& container_id) noexcept
-    : lease_(std::move(lease)), file_(lease_.retained_file_handle()),
+    : lease_(&lease), file_(lease.retained_file_handle()),
       container_id_(container_id) {}
 
 StoreStatus FixedContainerStore::reload(StorageIoControl io) {
   try {
-    if (!lease_.valid() || file_ == INVALID_HANDLE_VALUE)
+    if (lease_ == nullptr || !lease_->valid() || file_ == INVALID_HANDLE_VALUE)
       return StoreStatus::kReadFailed;
     if (io.stop_requested())
       return io.cancellation_requested() ? StoreStatus::kCancelled
@@ -802,9 +804,6 @@ StoreStatus FixedContainerStore::reload(StorageIoControl io) {
                               snapshot.size(), io);
     auto bounded_status = read_status(bounded);
     if (bounded_status != StoreStatus::kOk) {
-      if (bounded_status == StoreStatus::kIoTimeout ||
-          bounded_status == StoreStatus::kIoCancelFailed)
-        poisoned_ = true;
       return bounded_status;
     }
     for (std::uint32_t slot = 0; slot < kSlotCount; ++slot) {
@@ -950,7 +949,6 @@ StoreStatus FixedContainerStore::load_and_recover(
   if (io.stop_requested())
     return io.cancellation_requested() ? StoreStatus::kCancelled
                                        : StoreStatus::kIoTimeout;
-  recovery_count_ = recovery_count;
   return StoreStatus::kOk;
 }
 
@@ -1013,58 +1011,58 @@ StoreStatus FixedContainerStore::append(const std::string& operation,
   auto bounded = write_exact(file_, marker_offset(slot, bank), staging.data(),
                              staging.size(), commit_io);
   status = write_status(bounded);
-  if (status != StoreStatus::kOk) { poisoned_ = true; return status; }
+  if (status != StoreStatus::kOk) { return status; }
   bounded = flush_exact(file_, commit_io);
   status = bounded == BoundedIoStatus::kFailed
       ? StoreStatus::kFlushFailed : read_status(bounded);
-  if (status != StoreStatus::kOk) { poisoned_ = true; return status; }
+  if (status != StoreStatus::kOk) { return status; }
   bounded = read_exact(file_, marker_offset(slot, bank), marker_readback.data(),
                        marker_readback.size(), commit_io);
   status = read_status(bounded);
-  if (status != StoreStatus::kOk) { poisoned_ = true; return status; }
+  if (status != StoreStatus::kOk) { return status; }
   if (!equal_bytes(staging.data(), marker_readback.data(), staging.size()))
-    { poisoned_ = true; return StoreStatus::kReadbackFailed; }
+    { return StoreStatus::kReadbackFailed; }
   bounded = write_exact(file_, bank_offset(slot, bank), body.data(), body.size(),
                         commit_io);
   status = write_status(bounded);
-  if (status != StoreStatus::kOk) { poisoned_ = true; return status; }
+  if (status != StoreStatus::kOk) { return status; }
   bounded = flush_exact(file_, commit_io);
   status = bounded == BoundedIoStatus::kFailed
       ? StoreStatus::kFlushFailed : read_status(bounded);
-  if (status != StoreStatus::kOk) { poisoned_ = true; return status; }
+  if (status != StoreStatus::kOk) { return status; }
   bounded = read_exact(file_, bank_offset(slot, bank), body_readback.data(),
                        body_readback.size(), commit_io);
   status = read_status(bounded);
-  if (status != StoreStatus::kOk) { poisoned_ = true; return status; }
+  if (status != StoreStatus::kOk) { return status; }
   if (!equal_bytes(body.data(), body_readback.data(), body.size()))
-    { poisoned_ = true; return StoreStatus::kReadbackFailed; }
+    { return StoreStatus::kReadbackFailed; }
   bounded = write_exact(file_, marker_offset(slot, bank), committed_marker.data(),
                         committed_marker.size(), commit_io);
   status = write_status(bounded);
-  if (status != StoreStatus::kOk) { poisoned_ = true; return status; }
+  if (status != StoreStatus::kOk) { return status; }
   bounded = flush_exact(file_, commit_io);
   status = bounded == BoundedIoStatus::kFailed
       ? StoreStatus::kFlushFailed : read_status(bounded);
-  if (status != StoreStatus::kOk) { poisoned_ = true; return status; }
+  if (status != StoreStatus::kOk) { return status; }
   bounded = read_exact(file_, marker_offset(slot, bank), marker_readback.data(),
                        marker_readback.size(), commit_io);
   status = read_status(bounded);
-  if (status != StoreStatus::kOk) { poisoned_ = true; return status; }
+  if (status != StoreStatus::kOk) { return status; }
   if (!equal_bytes(committed_marker.data(), marker_readback.data(),
                    committed_marker.size()))
-    { poisoned_ = true; return StoreStatus::kReadbackFailed; }
+    { return StoreStatus::kReadbackFailed; }
   bounded = read_exact(file_, bank_offset(slot, bank), body_readback.data(),
                        body_readback.size(), commit_io);
   status = read_status(bounded);
-  if (status != StoreStatus::kOk) { poisoned_ = true; return status; }
+  if (status != StoreStatus::kOk) { return status; }
   if (!equal_bytes(body.data(), body_readback.data(), body.size()))
-    { poisoned_ = true; return StoreStatus::kReadbackFailed; }
+    { return StoreStatus::kReadbackFailed; }
   status = reload(commit_io);
-  if (status != StoreStatus::kOk) { poisoned_ = true; return status; }
+  if (status != StoreStatus::kOk) { return status; }
   const auto verified = records_.find(operation);
   if (verified == records_.end() || verified->second.generation != generation ||
       verified->second.events.back().canonical_json != event.canonical_json)
-    { poisoned_ = true; return StoreStatus::kReadbackFailed; }
+    { return StoreStatus::kReadbackFailed; }
   committed = true;
   commit_section_ = false;
   return StoreStatus::kOk;
@@ -1204,11 +1202,10 @@ StoreStatus FixedContainerStore::apply(const DecodedRequest& request,
                                        StorageIoControl io,
                                        EncodedResult& result) noexcept {
   try {
-    if (poisoned_) return StoreStatus::kInternal;
     if (request.method == "health") {
       result = {};
       result.body = {{"platform_available", false}, {"production_enabled", false},
-                     {"recovery_count", recovery_count_}, {"status", "unavailable"}};
+                     {"status", "unavailable"}};
       return StoreStatus::kOk;
     }
     if (request.method == "summary") return summary(request, io, result);
@@ -1243,6 +1240,306 @@ const char* store_status_name(StoreStatus status) noexcept {
     case StoreStatus::kIoCancelFailed: return "internal";
     case StoreStatus::kCommitNonCancellable: return "commit_non_cancellable";
     case StoreStatus::kInternal: return "internal";
+  }
+  return "internal";
+}
+
+JournalAuthorityOwner::JournalAuthorityOwner(
+    action_journal_storage::JournalStorageLease&& lease,
+    const std::array<std::uint8_t, 32>& container_id) noexcept
+    : lease_(std::move(lease)), store_(lease_, container_id) {}
+
+JournalAuthorityOwner::~JournalAuthorityOwner() noexcept {
+  // Normal helper scope destroys ProtocolSession/client/pipe locals before
+  // this owner.  Close admission first anyway, so direct test-only owners and
+  // exceptional paths cannot race a store call with lease destruction.
+  if (!begin_shutdown()) std::terminate();
+}
+
+AuthorityStatus JournalAuthorityOwner::map_open_status(
+    action_journal_storage::StorageStatus status) noexcept {
+  switch (status) {
+    case action_journal_storage::StorageStatus::kOkOpened:
+      return AuthorityStatus::kReady;
+    case action_journal_storage::StorageStatus::kContainerCorruptHeader:
+    case action_journal_storage::StorageStatus::kContainerUnformatted:
+    case action_journal_storage::StorageStatus::kIdentityMismatch:
+    case action_journal_storage::StorageStatus::kReopenIdentityMismatch:
+      return AuthorityStatus::kStorageCorrupt;
+    case action_journal_storage::StorageStatus::kIoFailed:
+    case action_journal_storage::StorageStatus::kGenesisIncomplete:
+      return AuthorityStatus::kRecoveryFailed;
+    default:
+      return AuthorityStatus::kStorageUnavailable;
+  }
+}
+
+AuthorityStatus JournalAuthorityOwner::map_recovery_status(
+    StoreStatus status) noexcept {
+  switch (status) {
+    case StoreStatus::kIoTimeout:
+      return AuthorityStatus::kIoTimeout;
+    case StoreStatus::kIoCancelFailed:
+      return AuthorityStatus::kIoCancelFailed;
+    case StoreStatus::kCorruptHeader:
+    case StoreStatus::kCorruptBank:
+    case StoreStatus::kConflictingAuthority:
+    case StoreStatus::kDuplicateOperation:
+      return AuthorityStatus::kStorageCorrupt;
+    default:
+      return AuthorityStatus::kRecoveryFailed;
+  }
+}
+
+void JournalAuthorityOwner::poison_for(StoreStatus status) noexcept {
+  switch (status) {
+    case StoreStatus::kReadFailed:
+    case StoreStatus::kWriteFailed:
+    case StoreStatus::kFlushFailed:
+    case StoreStatus::kReadbackFailed:
+    case StoreStatus::kHashFailed:
+    case StoreStatus::kIoTimeout:
+    case StoreStatus::kIoCancelFailed:
+    case StoreStatus::kCorruptHeader:
+    case StoreStatus::kCorruptBank:
+    case StoreStatus::kConflictingAuthority:
+    case StoreStatus::kDuplicateOperation:
+    case StoreStatus::kInternal:
+      poisoned_.store(true, std::memory_order_release);
+      return;
+    default:
+      return;
+  }
+}
+
+std::unique_ptr<JournalAuthorityOwner> JournalAuthorityOwner::open(
+    const action_journal_storage::StorageRequest& request,
+    const std::array<std::uint8_t, 32>& container_id,
+    StorageIoControl io,
+    AuthorityStatus& status,
+    action_journal_storage::StorageReceipt& receipt) noexcept {
+  status = AuthorityStatus::kInternal;
+  receipt = {};
+  if (io.stop_requested()) {
+    status = io.cancellation_requested() ? AuthorityStatus::kRecoveryFailed
+                                         : AuthorityStatus::kIoTimeout;
+    return nullptr;
+  }
+  action_journal_storage::JournalStorageLease lease;
+  const auto storage_status = action_journal_storage::acquire_storage(
+      request, lease, receipt);
+  if (storage_status != action_journal_storage::StorageStatus::kOkOpened) {
+    status = map_open_status(storage_status);
+    return nullptr;
+  }
+  try {
+    std::unique_ptr<JournalAuthorityOwner> owner(
+        new JournalAuthorityOwner(std::move(lease), container_id));
+    {
+      // Recovery is a store call too: serialize it under the same owner lock
+      // used after publication, while keeping all pipe/session I/O outside.
+      ActiveBorrow borrow(*owner);
+      if (!borrow.acquired()) {
+        status = AuthorityStatus::kInternal;
+        return nullptr;
+      }
+      const std::lock_guard<std::mutex> lock(owner->mutex_);
+      const auto recovery = owner->store_.load_and_recover(
+          io, owner->recovery_count_);
+      if (recovery != StoreStatus::kOk) {
+        owner->poison_for(recovery);
+        status = map_recovery_status(recovery);
+        return nullptr;
+      }
+      if (io.stop_requested()) {
+        status = io.cancellation_requested() ? AuthorityStatus::kRecoveryFailed
+                                             : AuthorityStatus::kIoTimeout;
+        return nullptr;
+      }
+      owner->recovered_ = true;
+    }
+    status = AuthorityStatus::kReady;
+    return owner;
+  } catch (const std::bad_alloc&) {
+    status = AuthorityStatus::kInternal;
+    return nullptr;
+  } catch (...) {
+    status = AuthorityStatus::kInternal;
+    return nullptr;
+  }
+}
+
+StoreStatus JournalAuthorityOwner::apply(const DecodedRequest& request,
+                                         StorageIoControl io,
+                                         EncodedResult& result) noexcept {
+  if (admission_closing() || poisoned_.load(std::memory_order_acquire))
+    return StoreStatus::kInternal;
+  // The CAS admission increment is the linearization point and occurs before
+  // any owner-mutex wait. Shutdown uses the same word and therefore cannot
+  // race a late increment after it has begun waiting for zero.
+  ActiveBorrow borrow(*this);
+  if (!borrow.acquired()) return StoreStatus::kInternal;
+  std::unique_lock<std::mutex> lock;
+  try {
+    if (admission_closing() || poisoned_.load(std::memory_order_acquire))
+      return StoreStatus::kInternal;
+    lock = std::unique_lock<std::mutex>(mutex_);
+    if (admission_closing() ||
+        shutting_down_ || !recovered_ ||
+        poisoned_.load(std::memory_order_acquire))
+      return StoreStatus::kInternal;
+    try {
+      const auto status = store_.apply(request, io, result);
+      poison_for(status);
+      if (status == StoreStatus::kOk && request.method == "health" &&
+          result.body.is_object()) {
+        result.body["recovery_count"] = recovery_count_;
+      }
+      // Shutdown may publish its admission bit while store I/O is in flight;
+      // never return a successful result after that linearization point.
+      if (admission_closing())
+        return StoreStatus::kInternal;
+      return status;
+    } catch (const std::bad_alloc&) {
+      poisoned_.store(true, std::memory_order_release);
+      return StoreStatus::kInternal;
+    } catch (...) {
+      // Keep the lock alive while latching poison.  The owner cannot be
+      // observed as healthy between the exception and this state transition.
+      poisoned_.store(true, std::memory_order_release);
+      return StoreStatus::kInternal;
+    }
+  } catch (...) {
+    // A lock acquisition failure cannot safely claim ownership of the store;
+    // atomically poison admission and return a finite fail-closed status
+    // rather than terminating noexcept.
+    poisoned_.store(true, std::memory_order_release);
+    return StoreStatus::kInternal;
+  }
+}
+
+bool JournalAuthorityOwner::try_acquire_borrow() noexcept {
+  std::uint64_t observed = admission_.load(std::memory_order_acquire);
+  for (;;) {
+    if ((observed & kAdmissionClosing) != 0) return false;
+    const auto count = observed & kAdmissionCountMask;
+    if ((observed & ~(kAdmissionClosing | kAdmissionCountMask)) != 0 ||
+        count >= kMaxActiveBorrows)
+      return false;
+    const auto desired = observed + UINT64_C(1);
+    if (admission_.compare_exchange_weak(
+            observed, desired, std::memory_order_acq_rel,
+            std::memory_order_acquire))
+      return true;
+  }
+}
+
+bool JournalAuthorityOwner::release_borrow() noexcept {
+  std::uint64_t observed = admission_.load(std::memory_order_acquire);
+  for (;;) {
+    const auto count = observed & kAdmissionCountMask;
+    if (count == 0 ||
+        (observed & ~(kAdmissionClosing | kAdmissionCountMask)) != 0)
+      return false;
+    const auto desired = (observed & ~kAdmissionCountMask) | (count - 1);
+    if (admission_.compare_exchange_weak(
+            observed, desired, std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+      if (count == 1)
+        WakeByAddressAll(reinterpret_cast<PVOID>(&admission_));
+      return true;
+    }
+  }
+}
+
+bool JournalAuthorityOwner::admission_closing() const noexcept {
+  return (admission_.load(std::memory_order_acquire) & kAdmissionClosing) != 0;
+}
+
+bool JournalAuthorityOwner::wait_for_borrowers() noexcept {
+  for (;;) {
+    const auto observed = admission_.load(std::memory_order_acquire);
+    if ((observed & kAdmissionCountMask) == 0) return true;
+    if ((observed & ~(kAdmissionClosing | kAdmissionCountMask)) != 0)
+      return false;
+    std::uint64_t expected = observed;
+    if (WaitOnAddress(reinterpret_cast<volatile VOID*>(&admission_), &expected,
+                      sizeof(expected), 1000))
+      continue;
+    const DWORD error = GetLastError();
+    if (error != ERROR_TIMEOUT) return false;
+  }
+}
+
+bool JournalAuthorityOwner::begin_shutdown() noexcept {
+  std::uint64_t observed = admission_.load(std::memory_order_acquire);
+  for (;;) {
+    if ((observed & ~(kAdmissionClosing | kAdmissionCountMask)) != 0)
+      return false;
+    if ((observed & kAdmissionClosing) != 0) break;
+    const auto desired = observed | kAdmissionClosing;
+    if (admission_.compare_exchange_weak(
+            observed, desired, std::memory_order_acq_rel,
+            std::memory_order_acquire))
+      break;
+  }
+  if (!wait_for_borrowers()) return false;
+  try {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    shutting_down_ = true;
+    return true;
+  } catch (...) {
+    // Admission is already closed atomically.  The caller must treat false as
+    // an unproven shutdown and retain the owner for fail-stop handling.
+    return false;
+  }
+}
+
+bool JournalAuthorityOwner::ready() const {
+  if (admission_closing() ||
+      poisoned_.load(std::memory_order_acquire))
+    return false;
+  try {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return !admission_closing() &&
+        !shutting_down_ && recovered_ &&
+        !poisoned_.load(std::memory_order_acquire);
+  } catch (...) {
+    return false;
+  }
+}
+
+bool JournalAuthorityOwner::poisoned() const {
+  return admission_closing() ||
+      poisoned_.load(std::memory_order_acquire);
+}
+
+std::uint32_t JournalAuthorityOwner::recovery_count() const {
+  if (admission_closing() ||
+      poisoned_.load(std::memory_order_acquire))
+    return UINT32_MAX;
+  try {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (admission_closing() ||
+        shutting_down_ || poisoned_.load(std::memory_order_acquire))
+      return UINT32_MAX;
+    return recovery_count_;
+  } catch (...) {
+    return UINT32_MAX;
+  }
+}
+
+const char* authority_status_name(AuthorityStatus status) noexcept {
+  switch (status) {
+    case AuthorityStatus::kReady: return "ready";
+    case AuthorityStatus::kStorageUnavailable: return "storage_unavailable";
+    case AuthorityStatus::kStorageCorrupt: return "storage_corrupt";
+    case AuthorityStatus::kRecoveryFailed: return "recovery_failed";
+    case AuthorityStatus::kIoTimeout: return "io_timeout";
+    case AuthorityStatus::kIoCancelFailed: return "io_cancel_failed";
+    case AuthorityStatus::kNotReady: return "not_ready";
+    case AuthorityStatus::kPoisoned: return "poisoned";
+    case AuthorityStatus::kInternal: return "internal";
   }
   return "internal";
 }

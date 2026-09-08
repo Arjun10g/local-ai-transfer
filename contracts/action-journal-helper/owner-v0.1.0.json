@@ -1,0 +1,71 @@
+{
+  "schema_version": "lae.action-journal-helper-owner.v0.1.0",
+  "$id": "lae://contracts/action-journal-helper/owner-v0.1.0",
+  "title": "Private ActionJournal helper authority owner",
+  "version": "0.1.0",
+  "status": "source_only_not_enabled",
+  "production_available": false,
+  "native_target_registered": false,
+  "node_integration_added": false,
+  "cmake_added": false,
+  "package_added": false,
+  "activation_permitted": false,
+  "construction": {
+    "factory": "JournalAuthorityOwner::open only",
+    "caller_storage_acquisition": false,
+    "caller_store_construction": false,
+    "returns_ready_only_after_recovery": true,
+    "failure": "typed status and null owner; named-pipe publication is forbidden"
+  },
+  "owned_state": [
+    "one retained JournalStorageLease",
+    "one FixedContainerStore borrowing that lease",
+    "recovered record/slot state",
+    "poison state",
+    "recovery count",
+    "one CAS-managed admission word with a closing bit and bounded active-borrow count (maximum 4096)",
+    "one-writer mutex"
+  ],
+  "borrowed_boundary": {
+    "pipe_server": "borrows one owner for decoded request application",
+    "pipe_io": "ProtocolSession and pipe reads/writes remain outside owner lock; a separate monitor owns duplicated transport handles and publishes only a latched atomic/event cancellation result",
+    "session_secrets": "HMAC key and nonce remain ProtocolSession-owned",
+    "supervisor_bridge": "absent in this phase"
+  },
+  "serialization": {
+    "writer_count": 1,
+    "lock_scope": "store application only; never pipe I/O",
+    "poison_on": [
+      "read failure",
+      "write/flush/readback failure",
+      "hash failure",
+      "unproven I/O cancellation",
+      "corrupt or conflicting recovered authority",
+      "unexpected internal failure"
+    ],
+    "caps": {
+      "slots": 1024,
+      "events_per_operation": 16,
+      "active": 256,
+      "terminal": 768
+    }
+  },
+  "lifecycle": {
+    "startup": "recover the complete fixed container before CreateNamedPipeW",
+    "shutdown": "close admission, wait the mutex-held store application, settle protocol/session and pipe, then owner destruction closes lease",
+    "shutdown_failure": "CAS admission remains closed; no reuse or new store call; WaitOnAddress failures other than timeout are unproven and destructor fail-stops",
+    "unknown_or_corrupt_state": "no owner and no published pipe",
+    "second_store_or_lease": "forbidden"
+  },
+  "receipts": {
+    "allowed": ["bounded authority status", "existing redacted EncodedResult"],
+    "forbidden": ["prompt", "response content", "arguments", "path", "key", "nonce", "free_form_error"]
+  },
+  "residual_gates": [
+    "independent source/security audit",
+    "remote Windows SDK compile and static analysis",
+    "authenticated supervisor journal bridge",
+    "helper transport and package integration",
+    "Windows crash/power-loss/target acceptance evidence"
+  ]
+}

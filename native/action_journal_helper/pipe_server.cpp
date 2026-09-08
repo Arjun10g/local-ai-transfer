@@ -3,15 +3,17 @@
 #include <aclapi.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <limits>
+#include <thread>
 #include <new>
 #include <utility>
 #include <vector>
 
 #include "../action_journal_storage/windows_storage.hpp"
 #include "protocol_codec.hpp"
-#include "store_codec.hpp"
+#include "journal_authority_owner.hpp"
 
 namespace lae::action_journal_helper {
 namespace {
@@ -602,6 +604,28 @@ bool recoverable_store_status(StoreStatus status) noexcept {
       status == StoreStatus::kCommitNonCancellable;
 }
 
+HelperStatus authority_status(AuthorityStatus status) noexcept {
+  switch (status) {
+    case AuthorityStatus::kStorageUnavailable:
+      return HelperStatus::kStorageUnavailable;
+    case AuthorityStatus::kStorageCorrupt:
+      return HelperStatus::kStorageCorrupt;
+    case AuthorityStatus::kIoTimeout:
+      return HelperStatus::kIoTimeout;
+    case AuthorityStatus::kIoCancelFailed:
+      return HelperStatus::kIoCancelFailed;
+    case AuthorityStatus::kRecoveryFailed:
+      return HelperStatus::kRecoveryFailed;
+    case AuthorityStatus::kReady:
+      return HelperStatus::kOk;
+    case AuthorityStatus::kNotReady:
+    case AuthorityStatus::kPoisoned:
+    case AuthorityStatus::kInternal:
+      return HelperStatus::kInternal;
+  }
+  return HelperStatus::kInternal;
+}
+
 struct RequestCancellationContext {
   HANDLE pipe = INVALID_HANDLE_VALUE;
   HANDLE client_process = INVALID_HANDLE_VALUE;
@@ -616,6 +640,97 @@ bool request_cancelled(void* raw) noexcept {
       unix_time_ms() >= context->deadline_at_ms) return true;
   DWORD available = 0;
   return !PeekNamedPipe(context->pipe, nullptr, 0, nullptr, &available, nullptr);
+}
+
+// Pipe/process probes run on this monitor thread, never from the owner lock.
+// The storage codec sees only the immutable event/atomic snapshot below.
+class RequestCancellationMonitor final {
+ public:
+  explicit RequestCancellationMonitor(std::uint64_t deadline_at_ms) noexcept
+      : deadline_at_ms_(deadline_at_ms) {}
+  ~RequestCancellationMonitor() noexcept {
+    stopping_.store(true, std::memory_order_release);
+    if (worker_.joinable()) worker_.join();
+    event_.reset();
+    pipe_.reset();
+    client_process_.reset();
+  }
+  RequestCancellationMonitor(const RequestCancellationMonitor&) = delete;
+  RequestCancellationMonitor& operator=(const RequestCancellationMonitor&) = delete;
+
+  bool start(HANDLE pipe, HANDLE client_process) noexcept {
+    if (pipe == nullptr || pipe == INVALID_HANDLE_VALUE ||
+        client_process == nullptr || client_process == INVALID_HANDLE_VALUE)
+      return false;
+    HANDLE pipe_copy = INVALID_HANDLE_VALUE;
+    HANDLE process_copy = INVALID_HANDLE_VALUE;
+    if (!DuplicateHandle(GetCurrentProcess(), pipe, GetCurrentProcess(),
+                         &pipe_copy, 0, FALSE, DUPLICATE_SAME_ACCESS))
+      return false;
+    if (!DuplicateHandle(GetCurrentProcess(), client_process,
+                         GetCurrentProcess(), &process_copy, 0, FALSE,
+                         DUPLICATE_SAME_ACCESS)) {
+      CloseHandle(pipe_copy);
+      return false;
+    }
+    pipe_.reset(pipe_copy);
+    client_process_.reset(process_copy);
+    event_.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    if (!event_) {
+      pipe_.reset();
+      client_process_.reset();
+      return false;
+    }
+    try {
+      worker_ = std::thread([this] { monitor(); });
+    } catch (...) {
+      event_.reset();
+      pipe_.reset();
+      client_process_.reset();
+      return false;
+    }
+    return true;
+  }
+
+  bool cancellation_signaled() const noexcept {
+    if (cancelled_.load(std::memory_order_acquire)) return true;
+    return event_ && WaitForSingleObject(event_.get(), 0) == WAIT_OBJECT_0;
+  }
+
+ private:
+  void signal() noexcept {
+    cancelled_.store(true, std::memory_order_release);
+    if (event_) SetEvent(event_.get());
+  }
+
+  void monitor() noexcept {
+    while (!stopping_.load(std::memory_order_acquire)) {
+      if (unix_time_ms() >= deadline_at_ms_ ||
+          WaitForSingleObject(client_process_.get(), 0) != WAIT_TIMEOUT) {
+        signal();
+        return;
+      }
+      DWORD available = 0;
+      if (!PeekNamedPipe(pipe_.get(), nullptr, 0, nullptr, &available, nullptr)) {
+        signal();
+        return;
+      }
+      Sleep(1);
+    }
+  }
+
+  std::uint64_t deadline_at_ms_ = 0;
+  UniqueHandle pipe_;
+  UniqueHandle client_process_;
+  UniqueHandle event_;
+  std::atomic_bool stopping_{false};
+  std::atomic_bool cancelled_{false};
+  std::thread worker_;
+};
+
+bool monitored_request_cancelled(void* raw) noexcept {
+  const auto* monitor = static_cast<const RequestCancellationMonitor*>(raw);
+  return monitor == nullptr || monitor->cancellation_signaled();
 }
 
 struct StartupCancellationContext {
@@ -650,24 +765,16 @@ HelperStatus run_foreground_helper_from_inherited_stdin() noexcept {
         bootstrap.expected_storage_volume_serial;
     storage_request.expected_identity.file_id = bootstrap.expected_storage_file_id;
     storage_request.expected_identity.container_id = bootstrap.expected_container_id;
-    action_journal_storage::JournalStorageLease storage_lease;
     action_journal_storage::StorageReceipt storage_receipt;
-    if (action_journal_storage::acquire_storage(
-            storage_request, storage_lease, storage_receipt) !=
-        action_journal_storage::StorageStatus::kOkOpened)
-      return HelperStatus::kStorageUnavailable;
-    FixedContainerStore store(std::move(storage_lease),
-                              bootstrap.expected_container_id);
-    std::uint32_t recovery_count = 0;
     StartupCancellationContext startup_context{issuer.process.get()};
     const StorageIoControl startup_io{
         CancellationProbe{startup_cancelled, &startup_context},
         GetTickCount64() + kIoDeadlineMs, true};
-    const auto recovery = store.load_and_recover(startup_io, recovery_count);
-    if (recovery == StoreStatus::kIoTimeout) return HelperStatus::kIoTimeout;
-    if (recovery == StoreStatus::kIoCancelFailed)
-      return HelperStatus::kIoCancelFailed;
-    if (recovery != StoreStatus::kOk) return HelperStatus::kRecoveryFailed;
+    AuthorityStatus owner_status = AuthorityStatus::kInternal;
+    auto owner = JournalAuthorityOwner::open(
+        storage_request, bootstrap.expected_container_id, startup_io,
+        owner_status, storage_receipt);
+    if (!owner) return authority_status(owner_status);
     PipeSecurity security;
     if (!private_pipe_security(user.sid, security))
       return HelperStatus::kPipeSecurityFailed;
@@ -724,11 +831,29 @@ HelperStatus run_foreground_helper_from_inherited_stdin() noexcept {
       EncodedResult result;
       RequestCancellationContext cancellation_context{
           pipe.get(), client.process.get(), request.deadline_at_ms};
-      const CancellationProbe cancellation{request_cancelled,
-                                            &cancellation_context};
+      // Probe the transport before admission. Once admitted, the monitor is
+      // the only cancellation callback visible to the owner/store: it polls
+      // pipe/process handles on its own thread and publishes an atomic/event
+      // result, so no pipe API executes while the owner mutex is held.
+      if (unix_time_ms() >= request.deadline_at_ms)
+        return HelperStatus::kDeadlineExpired;
+      if (request_cancelled(&cancellation_context))
+        return HelperStatus::kTransportClosed;
+      RequestCancellationMonitor cancellation_monitor(request.deadline_at_ms);
+      if (!cancellation_monitor.start(pipe.get(), client.process.get()))
+        return HelperStatus::kInternal;
+      const CancellationProbe cancellation{monitored_request_cancelled,
+                                            &cancellation_monitor};
       const StorageIoControl request_io{
           cancellation, GetTickCount64() + kIoDeadlineMs, true};
-      const auto applied = store.apply(request, request_io, result);
+      const auto applied = owner->apply(request, request_io, result);
+      // Do not encode or return a result after the transport stopped during
+      // the owner-locked store application.
+      if (cancellation_monitor.cancellation_signaled() ||
+          unix_time_ms() >= request.deadline_at_ms) {
+        return unix_time_ms() >= request.deadline_at_ms
+            ? HelperStatus::kDeadlineExpired : HelperStatus::kTransportClosed;
+      }
       if (applied != StoreStatus::kOk) {
         if (applied == StoreStatus::kIoTimeout) {
           DisconnectNamedPipe(pipe.get());

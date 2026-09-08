@@ -132,7 +132,7 @@ class WindowsActionJournalHelperStaticTests(unittest.TestCase):
         )
         self.assertLess(
             self.pipe.index("read_bootstrap(issuer.bootstrap_pipe.get(), bootstrap)"),
-            self.pipe.index("action_journal_storage::acquire_storage"),
+            self.pipe.index("JournalAuthorityOwner::open"),
         )
         authority = self.contract["bootstrap"]["issuer_authority"]
         self.assertIs(authority["production_gate"], False)
@@ -143,10 +143,11 @@ class WindowsActionJournalHelperStaticTests(unittest.TestCase):
             "OpenMode::kOpenExisting", "has_expected_identity = true",
             "expected_storage_volume_serial", "expected_storage_file_id",
             "expected_container_id", "JournalStorageLease&& lease",
-            "retained_file_handle()", "load_and_recover", "CreateNamedPipeW",
+            "retained_file_handle()", "load_and_recover", "JournalAuthorityOwner::open",
+            "CreateNamedPipeW",
         ):
             self.assertIn(token, self.pipe + self.store + self.headers)
-        self.assertLess(self.pipe.index("store.load_and_recover"), self.pipe.index("CreateNamedPipeW"))
+        self.assertLess(self.pipe.index("JournalAuthorityOwner::open"), self.pipe.index("CreateNamedPipeW"))
         self.assertNotIn("storage_directory", self.store)
         self.assertNotRegex(self.store, r"CreateFileW|DeleteFileW|MoveFileW")
 
@@ -254,8 +255,10 @@ class WindowsActionJournalHelperStaticTests(unittest.TestCase):
             positions.append(position)
             start = position + 1
         self.assertEqual(positions, sorted(positions))
-        self.assertGreaterEqual(self.store.count("poisoned_ = true"), 8)
-        self.assertIn("if (poisoned_) return StoreStatus::kInternal", self.store)
+        # Poisoning is an owner concern now; the store only returns the exact
+        # failure and the owner makes it sticky while holding its mutex.
+        self.assertNotIn("poisoned_ = true", self.store.split("const char* store_status_name", 1)[0])
+        self.assertNotIn("if (poisoned_) return StoreStatus::kInternal", self.store.split("const char* store_status_name", 1)[0])
         self.assertIn("commit_section_ = true", self.store)
 
     def test_all_storage_io_and_complete_scans_are_bounded_cancellable_or_poisoned(self):
@@ -265,7 +268,7 @@ class WindowsActionJournalHelperStaticTests(unittest.TestCase):
             "std::shared_ptr<SyncIoState>", "hard_deadline_tick_ms",
             "GetTickCount64() >= hard_deadline_tick_ms", "flush_exact",
             "StoreStatus::kIoTimeout", "StoreStatus::kIoCancelFailed",
-            "poisoned_ = true", "reload(StorageIoControl io)",
+            "reload(StorageIoControl io)",
         ):
             self.assertIn(token, self.store + self.headers)
         reload_body = self.store[
@@ -308,7 +311,7 @@ class WindowsActionJournalHelperStaticTests(unittest.TestCase):
         self.assertGreaterEqual(recovery.count("io.stop_requested()"), 5)
         self.assertLess(
             recovery.rindex("io.stop_requested()"),
-            recovery.index("recovery_count_ = recovery_count"),
+            recovery.index("return StoreStatus::kOk"),
         )
 
     def test_local_parsed_bootstrap_secrets_are_scope_wiped_on_all_returns(self):
@@ -337,11 +340,11 @@ class WindowsActionJournalHelperStaticTests(unittest.TestCase):
         for token in (
             "StartupCancellationContext", "startup_cancelled",
             "GetTickCount64() + kIoDeadlineMs", "StorageIoControl startup_io",
-            "store.load_and_recover(startup_io, recovery_count)",
+            "JournalAuthorityOwner::open",
         ):
             self.assertIn(token, self.pipe)
         self.assertLess(
-            self.pipe.index("store.load_and_recover(startup_io, recovery_count)"),
+            self.pipe.index("JournalAuthorityOwner::open"),
             self.pipe.index("CreateNamedPipeW"),
         )
         final_probe = self.pipe.index("if (startup_io.stop_requested())")
