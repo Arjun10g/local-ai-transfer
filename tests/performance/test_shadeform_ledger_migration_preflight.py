@@ -80,6 +80,17 @@ class PreflightFixtureTests(unittest.TestCase):
                 self.assertIn("legacy_settled_cost_invalid", report["path_safety"]["issues"])
         with self.assertRaises(InvalidOperation):
             preflight._decimal(Decimal("0.0000001"))
+        with self.assertRaises(InvalidOperation):
+            preflight._decimal(Decimal("0E+999"))
+
+    def test_huge_exponent_and_missing_secure_flags_are_sanitized(self) -> None:
+        with self.assertRaises(preflight._EvidenceError):
+            preflight._strict_object(b'{"amount":0e999999}')
+        issues: set[str] = set()
+        with mock.patch.object(preflight.os, "O_NOFOLLOW", None):
+            with self.assertRaises(preflight._EvidenceError):
+                preflight._read_snapshot(self.ledger, limit=100, issues=issues)
+        self.assertIn("secure_read_capability_unavailable", issues)
 
     def test_missing_identity_future_fields_partial_and_limits(self) -> None:
         row = self.row()
@@ -116,7 +127,7 @@ class PreflightFixtureTests(unittest.TestCase):
             deletion_root=self.runtime, incidents=self.incidents,
         )
         self.assertEqual(report["deletion_receipts"]["unmatched_absent_actual_cost_usd"], "$0.000071")
-        self.assertEqual(report["legacy_ledger"]["latest_stream_pending_group_count"], 1)
+        self.assertIsNone(report["legacy_ledger"]["latest_stream_pending_group_count"])
         self.assertIn("display_rounding_mismatch", report["path_safety"]["issues"])
 
     def test_duplicate_json_and_invalid_mode_are_refused(self) -> None:
@@ -158,6 +169,61 @@ class PreflightFixtureTests(unittest.TestCase):
         )
         self.assertIn("duplicate_incident", report["path_safety"]["issues"])
 
+    def test_receipt_overflow_and_root_swap_never_return_partial_counts(self) -> None:
+        receipt = {
+            "schema": "local_bmo.shadeform.deletion-receipt.v1", "phase_id": "p", "instance_id": "i",
+            "actual_cost_usd": "1.000000", "deletion": {"status": "deleted"}, "salvage": {},
+        }
+        self.write_jsonl(self.runtime / "a.deletion-receipt.json", [receipt])
+        self.write_jsonl(self.runtime / "b.deletion-receipt.json", [receipt])
+        with mock.patch.object(preflight, "MAX_RECEIPTS", 1):
+            report = preflight.run_preflight(
+                legacy_ledger=self.ledger, display_ledger=self.display,
+                deletion_root=self.runtime, incidents=self.incidents,
+            )
+        self.assertTrue(report["deletion_receipts"]["parse_refused"])
+        self.assertIsNone(report["deletion_receipts"]["receipt_count"])
+
+        original_fstat = preflight.os.fstat
+        calls = {"count": 0}
+        def swapped(fd):
+            result = original_fstat(fd)
+            calls["count"] += 1
+            if calls["count"] == 2:
+                values = list(result)
+                values[1] += 1
+                return os.stat_result(values)
+            return result
+        issues: set[str] = set()
+        with mock.patch.object(preflight.os, "fstat", side_effect=swapped):
+            report = preflight._parse_receipts(self.runtime, {}, issues)
+        self.assertTrue(report["parse_refused"])
+        self.assertIsNone(report["receipt_count"])
+        self.assertIn("evidence_mutated_during_read", issues)
+
+    def test_hardlink_created_after_open_is_rejected(self) -> None:
+        self.ledger.write_bytes(b"{}\n")
+        parent_fd = os.open(self.runtime, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        parent_stat = os.fstat(parent_fd)
+        original_fstat = preflight.os.fstat
+        calls = {"count": 0}
+        def linked(fd):
+            result = original_fstat(fd)
+            calls["count"] += 1
+            if calls["count"] == 2:
+                values = list(result)
+                values[3] = 2
+                return os.stat_result(values)
+            return result
+        issues: set[str] = set()
+        try:
+            with mock.patch.object(preflight.os, "fstat", side_effect=linked):
+                with self.assertRaises(preflight._EvidenceError):
+                    preflight._read_relative_snapshot(parent_fd, parent_stat, "cost-ledger.jsonl", limit=100, issues=issues)
+        finally:
+            os.close(parent_fd)
+        self.assertIn("evidence_mutated_during_read", issues)
+
     def test_owner_mismatch_is_only_a_sanitized_blocker(self) -> None:
         self.write_jsonl(self.ledger, [self.row()])
         self.display.write_text("", encoding="utf-8")
@@ -177,11 +243,14 @@ class PreflightFixtureTests(unittest.TestCase):
                 values[0] = stat.S_IFDIR | 0o755
                 return os.stat_result(values)
             return result
-        with mock.patch.object(preflight.os, "stat", side_effect=permissive_parent):
-            report = preflight.run_preflight(
-                legacy_ledger=self.ledger, display_ledger=self.display,
-                deletion_root=self.runtime, incidents=self.incidents,
-            )
+        with mock.patch.object(preflight.os, "stat", side_effect=permissive_parent) as stat_mock:
+            capabilities = set(preflight.os.supports_dir_fd)
+            capabilities.add(stat_mock)
+            with mock.patch.object(preflight.os, "supports_dir_fd", capabilities):
+                report = preflight.run_preflight(
+                    legacy_ledger=self.ledger, display_ledger=self.display,
+                    deletion_root=self.runtime, incidents=self.incidents,
+                )
         self.assertIn("parent_unsafe_permissions", report["path_safety"]["issues"])
 
     def test_symlink_hardlink_and_evidence_mutation_are_fail_closed(self) -> None:
@@ -213,10 +282,13 @@ class PreflightFixtureTests(unittest.TestCase):
         self.ledger.unlink()
         alias.unlink()
         self.ledger.write_bytes(b"{}\n")
-        with mock.patch.object(preflight.os, "stat", side_effect=changed):
-            issues = set()
-            with self.assertRaises(preflight._EvidenceError):
-                preflight._read_snapshot(self.ledger, limit=100, issues=issues)
+        with mock.patch.object(preflight.os, "stat", side_effect=changed) as stat_mock:
+            capabilities = set(preflight.os.supports_dir_fd)
+            capabilities.add(stat_mock)
+            with mock.patch.object(preflight.os, "supports_dir_fd", capabilities):
+                issues = set()
+                with self.assertRaises(preflight._EvidenceError):
+                    preflight._read_snapshot(self.ledger, limit=100, issues=issues)
         self.assertIn("evidence_mutated_during_read", issues)
 
 

@@ -26,6 +26,8 @@ MAX_JSON_OBJECT_BYTES = 65_536
 MAX_JSON_DEPTH = 32
 MAX_JSON_TOKEN_DIGITS = 64
 MAX_USD = Decimal("1000000000")
+MAX_RECEIPT_NAME_BYTES = 256
+MAX_RECEIPT_DIRECTORY_BYTES = 1_048_576
 USD_QUANTUM = Decimal("0.000001")
 ZERO_USD = Decimal("0")
 
@@ -38,13 +40,25 @@ def _issue(issues: set[str], label: str) -> None:
     issues.add(label)
 
 
+def _require_secure_capabilities(issues: set[str]) -> None:
+    required = (
+        isinstance(getattr(os, "O_NOFOLLOW", None), int), isinstance(getattr(os, "O_DIRECTORY", None), int),
+        callable(getattr(os, "geteuid", None)),
+        os.open in os.supports_dir_fd, os.stat in os.supports_dir_fd,
+        os.scandir in os.supports_fd,
+    )
+    if not all(required):
+        _issue(issues, "secure_read_capability_unavailable")
+        raise _EvidenceError("secure_read_capability_unavailable")
+
+
 def _decimal(value: Any) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float) or not isinstance(value, (int, Decimal, str)):
         raise InvalidOperation
     parsed = Decimal(str(value))
     if not parsed.is_finite() or parsed < ZERO_USD or parsed > MAX_USD:
         raise InvalidOperation
-    if parsed.as_tuple().exponent < -6:
+    if parsed.as_tuple().exponent < -6 or parsed.as_tuple().exponent > 6:
         raise InvalidOperation
     return parsed
 
@@ -184,6 +198,7 @@ def _require_private_directory(info: os.stat_result, issues: set[str], label: st
 
 def _read_snapshot(path: Path, *, limit: int, issues: set[str]) -> tuple[bytes, dict[str, Any]]:
     try:
+        _require_secure_capabilities(issues)
         path = _absolute_path(path)
         _check_ancestors(path, issues)
         parent = path.parent
@@ -256,6 +271,61 @@ def _read_snapshot(path: Path, *, limit: int, issues: set[str]) -> tuple[bytes, 
         raise _EvidenceError("evidence_unavailable") from exc
 
 
+def _read_relative_snapshot(parent_fd: int, parent_before: os.stat_result, name: str, *, limit: int,
+                             issues: set[str]) -> bytes:
+    """Read one receipt only through its already-open, private parent fd."""
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        try:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode):
+                _issue(issues, "receipt_not_regular_file")
+                raise _EvidenceError("receipt_not_regular_file")
+            if before.st_nlink != 1:
+                _issue(issues, "receipt_hardlink_file")
+                raise _EvidenceError("receipt_hardlink_file")
+            if stat.S_IMODE(before.st_mode) != 0o600:
+                _issue(issues, "receipt_unsafe_permissions")
+                raise _EvidenceError("receipt_unsafe_permissions")
+            if int(before.st_uid) != os.geteuid():
+                _issue(issues, "receipt_unsafe_owner")
+                raise _EvidenceError("receipt_unsafe_owner")
+            if before.st_size > limit:
+                _issue(issues, "receipt_byte_limit")
+                raise _EvidenceError("receipt_byte_limit")
+            chunks: list[bytes] = []
+            total = 0
+            while total <= limit:
+                chunk = os.read(descriptor, min(65_536, limit + 1 - total))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            after = os.fstat(descriptor)
+            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            parent_after = os.fstat(parent_fd)
+            if len(b"".join(chunks)) > limit:
+                _issue(issues, "receipt_byte_limit")
+                raise _EvidenceError("receipt_byte_limit")
+            if (before.st_dev, before.st_ino, before.st_mode, before.st_uid, before.st_nlink, before.st_size) != \
+                    (after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_nlink, after.st_size) or \
+                    (after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_nlink, after.st_size) != \
+                    (current.st_dev, current.st_ino, current.st_mode, current.st_uid, current.st_nlink, current.st_size) or \
+                    (parent_before.st_dev, parent_before.st_ino, parent_before.st_mode, parent_before.st_uid) != \
+                    (parent_after.st_dev, parent_after.st_ino, parent_after.st_mode, parent_after.st_uid):
+                _issue(issues, "evidence_mutated_during_read")
+                raise _EvidenceError("evidence_mutated_during_read")
+            _require_private_directory(parent_after, issues, "deletion_root")
+            return b"".join(chunks)
+        finally:
+            os.close(descriptor)
+    except _EvidenceError:
+        raise
+    except (OSError, ValueError, TypeError) as exc:
+        _issue(issues, "receipt_unavailable")
+        raise _EvidenceError("receipt_unavailable") from exc
+
+
 def _read_jsonl(path: Path, *, label: str, issues: set[str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     try:
         data, metadata = _read_snapshot(path, limit=MAX_FILE_BYTES, issues=issues)
@@ -267,11 +337,15 @@ def _read_jsonl(path: Path, *, label: str, issues: set[str]) -> tuple[list[dict[
     lines = data.splitlines()
     if len(lines) > MAX_JSONL_LINES:
         _issue(issues, f"{label}_line_limit")
-        return [], {**metadata, "line_count": len(lines)}
+        return [], {**metadata, "line_count": len(lines), "parse_refused": True}
     rows: list[dict[str, Any]] = []
     malformed = 0
     for line in lines:
-        if not line or len(line) > MAX_JSON_OBJECT_BYTES:
+        if len(line) > MAX_JSON_OBJECT_BYTES:
+            _issue(issues, f"{label}_json_object_limit")
+            malformed += 1
+            continue
+        if not line:
             malformed += 1
             continue
         try:
@@ -281,7 +355,8 @@ def _read_jsonl(path: Path, *, label: str, issues: set[str]) -> tuple[list[dict[
             _issue(issues, f"{label}_{str(exc)}")
     if malformed:
         _issue(issues, f"{label}_malformed_rows")
-    return rows, {**metadata, "line_count": len(lines), "malformed_count": malformed}
+        return [], {**metadata, "line_count": len(lines), "malformed_count": malformed, "parse_refused": True}
+    return rows, {**metadata, "line_count": len(lines), "malformed_count": malformed, "parse_refused": False}
 
 
 def _parse_legacy(path: Path, issues: set[str]) -> tuple[dict[str, Any], dict[tuple[str, str], dict[str, Any]]]:
@@ -340,13 +415,15 @@ def _parse_legacy(path: Path, issues: set[str]) -> tuple[dict[str, Any], dict[tu
     # The old stream has no v2 schema, binding, or durable nonce semantics.
     if rows:
         _issue(issues, "legacy_schema_or_owner_binding_missing")
-    refused = bool(metadata.get("parse_refused", False))
+    refused = bool(metadata.get("parse_refused", False)) or any(
+        issue.startswith("legacy_") or issue.startswith("duplicate_legacy") for issue in issues
+    )
     return {
-        "line_count": metadata.get("line_count", 0), "settled_row_count": settled,
-        "pending_row_count": pending, "exact_settled_cost_usd": None if refused else _money(total),
+        "line_count": metadata.get("line_count", 0), "settled_row_count": None if refused else settled,
+        "pending_row_count": None if refused else pending, "exact_settled_cost_usd": None if refused else _money(total),
         "latest_stream_pending_group_count": None if refused else sum(row.get("status") == "pending" for row in groups.values()),
-        "duplicate_row_count": duplicate_count, "legacy_owner_binding_absent_rows": identity_absent,
-        "legacy_settled_nonce_absent_rows": nonce_absent, "v2_parser_accepts": False,
+        "duplicate_row_count": None if refused else duplicate_count, "legacy_owner_binding_absent_rows": None if refused else identity_absent,
+        "legacy_settled_nonce_absent_rows": None if refused else nonce_absent, "v2_parser_accepts": False,
         "v2_rejection": "legacy_schema_or_owner_binding_missing",
         "malformed_count": metadata.get("malformed_count", 0),
         "parse_refused": bool(metadata.get("parse_refused", False)),
@@ -396,58 +473,68 @@ def _parse_display(path: Path, groups: dict[tuple[str, str], dict[str, Any]], is
         _issue(issues, "display_rounding_mismatch")
     if malformed:
         _issue(issues, "display_malformed_rows")
+    display_parse_errors = {"display_partial_line", "display_invalid_utf8", "display_malformed_row", "display_malformed_rows", "display_orphan_row"}
+    if malformed or display_parse_errors & issues:
+        return {"row_count": None, "rounding_mismatch_count": None, "malformed_count": None, "parse_refused": True}
     return {"row_count": len(rows), "rounding_mismatch_count": mismatch, "malformed_count": malformed, "parse_refused": False}
 
 
-def _receipt_files(root: Path, issues: set[str]) -> list[Path]:
-    root_fd = None
+def _receipt_files(root: Path, issues: set[str]) -> tuple[int | None, os.stat_result | None, list[str]]:
+    root_fd: int | None = None
     try:
+        _require_secure_capabilities(issues)
         root = _absolute_path(root)
         _check_ancestors(root / "placeholder", issues)
         info = os.lstat(root)
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             _issue(issues, "deletion_root_not_directory")
-            return []
-        root_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+            return None, None, []
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         anchored = os.fstat(root_fd)
         _require_private_directory(anchored, issues, "deletion_root")
-        entries = []
-        with os.scandir(root) as scan:
+        entries: list[str] = []
+        entry_bytes = 0
+        with os.scandir(root_fd) as scan:
             for entry in scan:
-                child = Path(entry.path)
                 child_info = entry.stat(follow_symlinks=False)
                 if stat.S_ISLNK(child_info.st_mode):
                     _issue(issues, "symlink_receipt")
-                    continue
+                    raise _EvidenceError("symlink_receipt")
                 if entry.name.endswith(".deletion-receipt.json"):
-                    entries.append(child)
+                    if len(entry.name.encode("utf-8")) > MAX_RECEIPT_NAME_BYTES:
+                        _issue(issues, "receipt_name_limit")
+                        raise _EvidenceError("receipt_name_limit")
+                    entry_bytes += len(entry.name.encode("utf-8"))
+                    if entry_bytes > MAX_RECEIPT_DIRECTORY_BYTES or len(entries) >= MAX_RECEIPTS:
+                        _issue(issues, "receipt_count_or_directory_limit")
+                        raise _EvidenceError("receipt_count_or_directory_limit")
+                    entries.append(entry.name)
         current = os.fstat(root_fd)
         if (anchored.st_dev, anchored.st_ino, anchored.st_mode, anchored.st_uid) != \
                 (current.st_dev, current.st_ino, current.st_mode, current.st_uid):
             _issue(issues, "evidence_mutated_during_read")
-            return []
-        if len(entries) > MAX_RECEIPTS:
-            _issue(issues, "receipt_count_limit")
-            return sorted(entries)[:MAX_RECEIPTS]
-        return sorted(entries)
+            raise _EvidenceError("evidence_mutated_during_read")
+        return root_fd, anchored, sorted(entries)
     except (OSError, _EvidenceError):
         _issue(issues, "deletion_root_unavailable")
-        return []
-    finally:
         if root_fd is not None:
             os.close(root_fd)
+        return None, None, []
 
 
 def _parse_receipts(root: Path, groups: dict[tuple[str, str], dict[str, Any]], issues: set[str]) -> dict[str, Any]:
-    receipts = _receipt_files(root, issues)
+    root_fd, root_before, receipts = _receipt_files(root, issues)
     refused = any(issue.startswith("deletion_root_") for issue in issues)
     matched: set[tuple[str, str]] = set()
     unmatched = absent_unmatched = deleted = absent = malformed = duplicate_count = 0
     seen_keys: set[tuple[str, str]] = set()
     absent_amount = ZERO_USD
-    for path in receipts:
+    if root_fd is None:
+        refused = True
+    for name in receipts:
         try:
-            row, _ = _read_snapshot(path, limit=MAX_JSON_OBJECT_BYTES, issues=issues)
+            assert root_fd is not None and root_before is not None
+            row = _read_relative_snapshot(root_fd, root_before, name, limit=MAX_JSON_OBJECT_BYTES, issues=issues)
             value = _strict_object(row)
             if value.get("schema") != "local_bmo.shadeform.deletion-receipt.v1":
                 raise _EvidenceError("receipt_schema_invalid")
@@ -471,6 +558,7 @@ def _parse_receipts(root: Path, groups: dict[tuple[str, str], dict[str, Any]], i
             if key in seen_keys:
                 duplicate_count += 1
                 _issue(issues, "duplicate_deletion_receipt")
+                refused = True
             seen_keys.add(key)
             if key not in groups:
                 unmatched += 1
@@ -482,13 +570,38 @@ def _parse_receipts(root: Path, groups: dict[tuple[str, str], dict[str, Any]], i
         except _EvidenceError as exc:
             malformed += 1
             _issue(issues, f"receipt_{str(exc)}")
+            refused = True
+    if root_fd is not None:
+        try:
+            root_after = os.fstat(root_fd)
+            if (root_before.st_dev, root_before.st_ino, root_before.st_mode, root_before.st_uid) != \
+                    (root_after.st_dev, root_after.st_ino, root_after.st_mode, root_after.st_uid):
+                _issue(issues, "evidence_mutated_during_read")
+                refused = True
+        except OSError:
+            _issue(issues, "deletion_root_unavailable")
+            refused = True
+        finally:
+            os.close(root_fd)
     if unmatched:
         _issue(issues, "orphan_deletion_receipt")
+    if refused:
+        receipt_count = deleted_count = absent_count = unmatched_count = unmatched_absent_count = duplicate_count = malformed_count = None
+        absent_value: str | None = None
+    else:
+        receipt_count = len(receipts)
+        deleted_count = deleted
+        absent_count = absent
+        unmatched_count = unmatched
+        unmatched_absent_count = absent_unmatched
+        duplicate_count = duplicate_count
+        malformed_count = malformed
+        absent_value = _money(absent_amount if absent_unmatched else ZERO_USD)
     return {
-        "receipt_count": len(receipts), "deleted_count": deleted, "absent_count": absent,
-        "unmatched_count": unmatched, "unmatched_absent_count": absent_unmatched,
-        "unmatched_absent_actual_cost_usd": None if refused else _money(absent_amount if absent_unmatched else ZERO_USD),
-        "duplicate_receipt_count": duplicate_count, "malformed_count": malformed,
+        "receipt_count": receipt_count, "deleted_count": deleted_count, "absent_count": absent_count,
+        "unmatched_count": unmatched_count, "unmatched_absent_count": unmatched_absent_count,
+        "unmatched_absent_actual_cost_usd": absent_value,
+        "duplicate_receipt_count": duplicate_count, "malformed_count": malformed_count,
         "parse_refused": refused,
     }
 
@@ -518,12 +631,17 @@ def _parse_incidents(path: Path, groups: dict[tuple[str, str], dict[str, Any]], 
         _issue(issues, "unmatched_teardown_incidents")
     if unmatched_other:
         _issue(issues, "unmatched_incidents")
+    refused = bool(metadata.get("parse_refused", False)) or any(
+        issue in {"incident_identity_invalid", "duplicate_incident"} for issue in issues
+    )
+    if refused:
+        unmatched_teardown = unmatched_other = duplicate_count = None
     return {
         "line_count": metadata.get("line_count", 0), "unmatched_teardown_incident_count": unmatched_teardown,
         "unmatched_non_teardown_incident_count": unmatched_other,
         "duplicate_incident_count": duplicate_count,
-        "malformed_count": metadata.get("malformed_count", 0),
-        "parse_refused": bool(metadata.get("parse_refused", False)),
+        "malformed_count": None if refused else metadata.get("malformed_count", 0),
+        "parse_refused": refused,
     }
 
 
