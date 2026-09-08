@@ -78,6 +78,7 @@ TEST_INVENTORY = {
     "tests/native/test_windows_supervisor_authority_static.py": "native_static",
     "tests/native/test_windows_readonly_fs_static.py": "native_static",
     "tests/performance/test_cost_ledger_genesis.py": "lifecycle",
+    "tests/performance/test_shadeform_ledger_migration_preflight.py": "lifecycle",
     "tests/performance/test_j1m_lifecycle.py": "lifecycle",
     "tests/performance/test_model_specs.py": "model_fixture",
     "tests/performance/test_probe_and_preflight.py": "lifecycle",
