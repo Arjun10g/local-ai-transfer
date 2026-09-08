@@ -113,6 +113,28 @@ class LeaseModel:
         if lease and lease["dispatching"] and not lease["terminal"]:
             self.poisoned = True
 
+    def post_precheck_failure(self, operation, code):
+        """Model an internal result after exact lease/authority prechecks."""
+        if operation not in self.registry:
+            return "mutation_conflict"
+        if code == "mutation_conflict":
+            self.poisoned = True
+            return "mutation_conflict"
+        if code in {"not_found", "invalid_transition", "authority_divergence",
+                    "storage_failure", "readback_failure"}:
+            self.poisoned = True
+            return "storage_failure"
+        return "invalid_state"
+
+    def allocation_failure(self, phase):
+        """Model any bounded allocation/hash/JSON failure at one lease phase."""
+        if phase not in {"constructor", "acquire", "persist_dispatching",
+                         "acknowledge", "begin_reconciliation", "complete",
+                         "mark_unknown", "proof_hash"}:
+            return "invalid_state"
+        self.poisoned = True
+        return "storage_failure"
+
     def mark_unknown(self, operation):
         lease = self.registry.get(operation)
         if lease is None or not lease["started"] or lease.get("state") not in {"dispatching", "acknowledged", "reconciling"}:
@@ -278,6 +300,87 @@ class ProcessDispatchLeaseStaticTests(unittest.TestCase):
         self.assertIn("poisoned_.store(true", self.store[lookup:])
         fail = self.store.index('std::strcmp(method, "fail_definitive")')
         self.assertIn("return ProcessDispatchLeaseStatus::kInvalidState", self.store[fail:])
+
+    def test_noexcept_boundaries_cover_all_lease_allocation_and_proof_paths(self):
+        # Constructors that copy strings/containers must let acquisition's
+        # catch boundary observe allocation failure; noexcept would terminate.
+        self.assertNotIn("std::string operation_text) noexcept", self.owner)
+        self.assertNotIn(
+            "const std::array<std::uint8_t, 32>& container_id) noexcept",
+            self.owner,
+        )
+        open_start = self.store.index("JournalAuthorityOwner::open")
+        self.assertLess(self.store.index("try {", open_start),
+                        self.store.index("receipt = {}", open_start))
+        self.assertLess(self.store.index("try {", open_start),
+                        self.store.index("acquire_storage(", open_start))
+        for marker in (
+            "JournalAuthorityOwner::persist_dispatching",
+            "JournalAuthorityOwner::acknowledge_external",
+            "ProcessDispatchLease::begin_reconciliation",
+            "ProcessDispatchLease::complete_external",
+            "ProcessDispatchLease::mark_unknown",
+        ):
+            start = self.store.index(marker)
+            body = self.store.index("nlohmann::json body", start)
+            self.assertLess(self.store.index("try {", start), body, marker)
+            self.assertIn("catch (...)", self.store[body:body + 1600], marker)
+            self.assertIn("poisoned_.store(true", self.store[body:body + 1600], marker)
+        transition = self.store.index("JournalAuthorityOwner::transition_lease")
+        self.assertIn("process_transition_receipt(", self.store[transition:])
+        self.assertIn("catch (...)", self.store[transition:])
+        acquire = self.store.index("JournalAuthorityOwner::acquire_process_dispatch_lease")
+        self.assertIn("new (std::nothrow) ProcessDispatchLease", self.store[acquire:])
+        self.assertIn("catch (...)", self.store[acquire:])
+
+    def test_post_precheck_failures_poison_and_do_not_leave_ready_owner(self):
+        caller = LeaseModel()
+        self.assertEqual(caller.acquire("act_" + "4" * 32, binding=False), "binding_mismatch")
+        self.assertFalse(caller.poisoned)
+        self.assertEqual(caller.acquire("act_" + "5" * 32), "ok")
+        model = LeaseModel()
+        operation = "act_" + "1" * 32
+        self.assertEqual(model.acquire(operation), "ok")
+        for code, expected in (
+            ("not_found", "storage_failure"),
+            ("invalid_transition", "storage_failure"),
+            ("mutation_conflict", "mutation_conflict"),
+            ("authority_divergence", "storage_failure"),
+            ("storage_failure", "storage_failure"),
+            ("readback_failure", "storage_failure"),
+        ):
+            trial = LeaseModel()
+            self.assertEqual(trial.acquire(operation), "ok")
+            self.assertEqual(trial.post_precheck_failure(operation, code), expected)
+            self.assertTrue(trial.poisoned, code)
+            self.assertEqual(trial.acquire("act_" + "2" * 32), "unknown_manual_blocked", code)
+        transition = self.store.index("JournalAuthorityOwner::transition_lease")
+        missing = self.store.index("current == store_.records_.end()", transition)
+        self.assertIn("poisoned_.store(true", self.store[missing:missing + 420])
+        invalid = self.store.index("if (!current_state_valid)", missing)
+        self.assertIn("poisoned_.store(true", self.store[invalid:invalid + 360])
+        mutation = self.store.index("if (status != StoreStatus::kOk", transition)
+        mutation_end = self.store.index("return status ==", mutation)
+        mutation_region = self.store[mutation:mutation_end]
+        self.assertIn("poisoned_.store(true", mutation_region)
+        self.assertNotIn("status != StoreStatus::kInvalidTransition", mutation_region)
+        self.assertNotIn("status != StoreStatus::kNotFound", mutation_region)
+
+    def test_exception_injection_model_is_finite_and_sticky_for_each_lease_phase(self):
+        for phase in ("constructor", "acquire", "persist_dispatching",
+                      "acknowledge", "begin_reconciliation", "complete",
+                      "mark_unknown", "proof_hash"):
+            model = LeaseModel()
+            self.assertEqual(model.allocation_failure(phase), "storage_failure", phase)
+            self.assertTrue(model.poisoned, phase)
+            self.assertEqual(model.acquire("act_" + "3" * 32), "unknown_manual_blocked", phase)
+        transition = self.store.index("JournalAuthorityOwner::transition_lease")
+        receipt = self.store.index(
+            "const std::string expected_receipt = process_transition_receipt(",
+            transition,
+        )
+        self.assertLess(self.store.index("try {", transition), receipt)
+        self.assertIn("catch (...)", self.store[receipt:])
 
     def test_registry_bounded_and_lease_noncopyable(self):
         model = LeaseModel()

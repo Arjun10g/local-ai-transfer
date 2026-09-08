@@ -47,7 +47,8 @@
     "registry_insertion": "candidate attaches only after potentially-throwing insertion succeeds"
   },
   "poison": {
-    "reload_storage_readback_failure": "sticky; owner cannot return ready or retry authority"
+    "reload_storage_readback_failure": "sticky; owner cannot return ready or retry authority",
+    "post_precheck_mutation_failure": "kNotFound, kInvalidTransition, mutation conflict, authority divergence, storage, and readback failures are sticky; caller binding/proof mismatch before exact prechecks is non-poisoning"
   },
   "wait_rule": "owner_mutex_never_held_over_process_pipe_or_provider_wait",
   "forbidden_lease_state": ["hmac_key", "session_nonce", "raw_json", "process_handle"],

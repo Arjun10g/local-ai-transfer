@@ -126,7 +126,7 @@ class ProcessDispatchLease final {
   friend class JournalAuthorityOwner;
   ProcessDispatchLease(JournalAuthorityOwner& owner,
                        const ProcessDispatchBinding& binding,
-                       std::string operation_text) noexcept;
+                       std::string operation_text);
 
   JournalAuthorityOwner* owner_ = nullptr;
   ProcessDispatchBinding binding_{};
@@ -205,7 +205,7 @@ class JournalAuthorityOwner final {
   };
 
   JournalAuthorityOwner(action_journal_storage::JournalStorageLease&& lease,
-                        const std::array<std::uint8_t, 32>& container_id) noexcept;
+                        const std::array<std::uint8_t, 32>& container_id);
 
   static AuthorityStatus map_open_status(
       action_journal_storage::StorageStatus status) noexcept;

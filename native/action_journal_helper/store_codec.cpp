@@ -1322,20 +1322,20 @@ std::unique_ptr<JournalAuthorityOwner> JournalAuthorityOwner::open(
     AuthorityStatus& status,
     action_journal_storage::StorageReceipt& receipt) noexcept {
   status = AuthorityStatus::kInternal;
-  receipt = {};
-  if (io.stop_requested()) {
-    status = io.cancellation_requested() ? AuthorityStatus::kRecoveryFailed
-                                         : AuthorityStatus::kIoTimeout;
-    return nullptr;
-  }
-  action_journal_storage::JournalStorageLease lease;
-  const auto storage_status = action_journal_storage::acquire_storage(
-      request, lease, receipt);
-  if (storage_status != action_journal_storage::StorageStatus::kOkOpened) {
-    status = map_open_status(storage_status);
-    return nullptr;
-  }
   try {
+    receipt = {};
+    if (io.stop_requested()) {
+      status = io.cancellation_requested() ? AuthorityStatus::kRecoveryFailed
+                                           : AuthorityStatus::kIoTimeout;
+      return nullptr;
+    }
+    action_journal_storage::JournalStorageLease lease;
+    const auto storage_status = action_journal_storage::acquire_storage(
+        request, lease, receipt);
+    if (storage_status != action_journal_storage::StorageStatus::kOkOpened) {
+      status = map_open_status(storage_status);
+      return nullptr;
+    }
     std::unique_ptr<JournalAuthorityOwner> owner(
         new JournalAuthorityOwner(std::move(lease), container_id));
     {
@@ -1685,7 +1685,7 @@ std::string process_transition_receipt(
 
 ProcessDispatchLease::ProcessDispatchLease(
     JournalAuthorityOwner& owner, const ProcessDispatchBinding& binding,
-    std::string operation_text) noexcept
+    std::string operation_text)
     : owner_(&owner), binding_(binding), operation_text_(std::move(operation_text)) {}
 
 ProcessDispatchLease::~ProcessDispatchLease() noexcept {
@@ -1821,8 +1821,13 @@ ProcessDispatchLeaseStatus JournalAuthorityOwner::transition_lease(
         std::strcmp(method, "mark_unknown") != 0)
       return ProcessDispatchLeaseStatus::kUnknownManualBlocked;
     const auto current = store_.records_.find(lease.operation_text_);
-    if (current == store_.records_.end() || current->second.events.empty())
+    if (current == store_.records_.end() || current->second.events.empty()) {
+      // The lease was registered and the authority reloaded successfully;
+      // disappearance now proves an authority divergence, not a caller
+      // binding error. Keep the owner poisoned rather than allowing retry.
+      poisoned_.store(true, std::memory_order_release);
       return ProcessDispatchLeaseStatus::kInvalidState;
+    }
     const std::string& current_state = current->second.events.back().state;
     const bool current_state_valid =
         (std::strcmp(method, "dispatch") == 0 && current_state == "authorized") ||
@@ -1833,7 +1838,12 @@ ProcessDispatchLeaseStatus JournalAuthorityOwner::transition_lease(
         (std::strcmp(method, "mark_unknown") == 0 &&
          (current_state == "dispatching" || current_state == "acknowledged" ||
           current_state == "reconciling"));
-    if (!current_state_valid) return ProcessDispatchLeaseStatus::kInvalidState;
+    if (!current_state_valid) {
+      // A post-precheck tip mismatch is authority divergence. It is not the
+      // caller's proof mismatch and therefore cannot leave a ready owner.
+      poisoned_.store(true, std::memory_order_release);
+      return ProcessDispatchLeaseStatus::kInvalidState;
+    }
     const std::string authorization = current->second.events.back().authorization_kind;
     std::string resolution;
     if (std::strcmp(method, "acknowledge") == 0)
@@ -1856,10 +1866,10 @@ ProcessDispatchLeaseStatus JournalAuthorityOwner::transition_lease(
     EncodedResult result;
     const StoreStatus status = store_.mutation(request, io, result);
     if (status != StoreStatus::kOk || result.state != expected_state) {
-      if (status != StoreStatus::kInvalidTransition &&
-          status != StoreStatus::kNotFound &&
-          status != StoreStatus::kMutationConflict)
-        poisoned_.store(true, std::memory_order_release);
+      // After exact registration, reload, tip, and proof prechecks, every
+      // failed mutation result is an authority/storage divergence. In
+      // particular, kNotFound and kInvalidTransition are not retryable.
+      poisoned_.store(true, std::memory_order_release);
       return status == StoreStatus::kMutationConflict
           ? ProcessDispatchLeaseStatus::kMutationConflict
           : ProcessDispatchLeaseStatus::kStorageFailure;
@@ -1928,9 +1938,15 @@ ProcessDispatchLeaseStatus JournalAuthorityOwner::persist_dispatching(
     ProcessDispatchReadbackProof& proof) noexcept {
   // transition_lease publishes lease.dispatching_persisted_ = true while
   // holding owner_mutex, before this method returns to the caller.
-  const auto status = transition_lease(
-      lease, "dispatch", "dispatching", nlohmann::json::object(), io, &proof);
-  return status;
+  try {
+    const auto status = transition_lease(
+        lease, "dispatch", "dispatching", nlohmann::json::object(), io,
+        &proof);
+    return status;
+  } catch (...) {
+    poisoned_.store(true, std::memory_order_release);
+    return ProcessDispatchLeaseStatus::kStorageFailure;
+  }
 }
 
 ProcessDispatchLeaseStatus ProcessDispatchLease::persist_dispatching(
@@ -1975,15 +1991,20 @@ ProcessDispatchLeaseStatus JournalAuthorityOwner::acknowledge_external(
     StorageIoControl io) noexcept {
   if (!process_proof_id_matches(lease.binding_.operation_id, proof))
     return ProcessDispatchLeaseStatus::kBindingMismatch;
-  nlohmann::json body = {
-      {"provider_receipt_digest", process_hex(proof.external_receipt_digest)},
-      {"external_event_digest", process_hex(proof.external_event_digest)},
-  };
-  ProcessDispatchReadbackProof readback;
-  const auto status = transition_lease(
-      lease, "acknowledge", "acknowledged", body, io, &readback);
-  if (status != ProcessDispatchLeaseStatus::kOk) return status;
-  return ProcessDispatchLeaseStatus::kOk;
+  try {
+    nlohmann::json body = {
+        {"provider_receipt_digest", process_hex(proof.external_receipt_digest)},
+        {"external_event_digest", process_hex(proof.external_event_digest)},
+    };
+    ProcessDispatchReadbackProof readback;
+    const auto status = transition_lease(
+        lease, "acknowledge", "acknowledged", body, io, &readback);
+    if (status != ProcessDispatchLeaseStatus::kOk) return status;
+    return ProcessDispatchLeaseStatus::kOk;
+  } catch (...) {
+    poisoned_.store(true, std::memory_order_release);
+    return ProcessDispatchLeaseStatus::kStorageFailure;
+  }
 }
 
 ProcessDispatchLeaseStatus ProcessDispatchLease::acknowledge_external(
@@ -2048,32 +2069,48 @@ ProcessDispatchLeaseStatus ProcessDispatchLease::begin_reconciliation(
        reason != "transport_closed" && reason != "startup_recovery" &&
        reason != "postcondition_pending"))
     return ProcessDispatchLeaseStatus::kInvalidState;
-  nlohmann::json body = {{"reason", std::string(reason)}};
-  return owner_->transition_lease(*this, "begin_reconciliation", "reconciling",
-                                  body, io, nullptr);
+  try {
+    nlohmann::json body = {{"reason", std::string(reason)}};
+    return owner_->transition_lease(*this, "begin_reconciliation", "reconciling",
+                                    body, io, nullptr);
+  } catch (...) {
+    owner_->poisoned_.store(true, std::memory_order_release);
+    return ProcessDispatchLeaseStatus::kStorageFailure;
+  }
 }
 
 ProcessDispatchLeaseStatus ProcessDispatchLease::complete_external(
     const ProcessExternalProof& proof, StorageIoControl io) noexcept {
   if (owner_ == nullptr || !process_proof_id_matches(binding_.operation_id, proof))
     return ProcessDispatchLeaseStatus::kBindingMismatch;
-  nlohmann::json body = {
-      {"external_event_digest", process_hex(proof.external_event_digest)},
-      {"receipt_digest", process_hex(proof.external_receipt_digest)},
-      {"resolution", "completed"},
-  };
-  return owner_->transition_lease(*this, "complete", "completed", body, io, nullptr);
+  try {
+    nlohmann::json body = {
+        {"external_event_digest", process_hex(proof.external_event_digest)},
+        {"receipt_digest", process_hex(proof.external_receipt_digest)},
+        {"resolution", "completed"},
+    };
+    return owner_->transition_lease(*this, "complete", "completed", body, io,
+                                    nullptr);
+  } catch (...) {
+    owner_->poisoned_.store(true, std::memory_order_release);
+    return ProcessDispatchLeaseStatus::kStorageFailure;
+  }
 }
 
 ProcessDispatchLeaseStatus ProcessDispatchLease::mark_unknown(
     StorageIoControl io) noexcept {
   if (owner_ == nullptr)
     return ProcessDispatchLeaseStatus::kInvalidState;
-  nlohmann::json body = {{"resolution", "dispatch_ambiguous"}};
-  const auto status = owner_->transition_lease(
-      *this, "mark_unknown", "unknown_manual", body, io, nullptr);
-  return status == ProcessDispatchLeaseStatus::kOk
-      ? ProcessDispatchLeaseStatus::kAmbiguousNoReplay : status;
+  try {
+    nlohmann::json body = {{"resolution", "dispatch_ambiguous"}};
+    const auto status = owner_->transition_lease(
+        *this, "mark_unknown", "unknown_manual", body, io, nullptr);
+    return status == ProcessDispatchLeaseStatus::kOk
+        ? ProcessDispatchLeaseStatus::kAmbiguousNoReplay : status;
+  } catch (...) {
+    owner_->poisoned_.store(true, std::memory_order_release);
+    return ProcessDispatchLeaseStatus::kStorageFailure;
+  }
 }
 
 void JournalAuthorityOwner::release_process_dispatch_lease(

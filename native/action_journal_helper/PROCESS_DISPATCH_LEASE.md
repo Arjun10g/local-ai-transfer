@@ -28,6 +28,17 @@ dispatch poisons the owner and blocks further work. Any `unknown_manual`
 record globally blocks new prepare, lease, and dispatch work until explicit
 resolution.
 
+All public lease methods return a finite status even when bounded string, JSON,
+hash, map, or storage work reports an exception. The lease constructor is
+intentionally potentially-throwing and is called only inside the exception
+boundary of acquisition. Once a lease has passed its exact registration,
+reload, tip, and caller-proof checks, `kNotFound`, `kInvalidTransition`,
+mutation conflicts, authority divergence, storage failures, and readback
+failures poison the owner; they are never a ready retry. Caller binding or
+external-proof mismatches detected before those checks remain non-poisoning
+rejections. The shared legacy `fail_definitive` parser path is not callable
+through this lease API: definitive failure is enforced as pre-dispatch-only.
+
 Lock order is fixed: admission CAS, then owner mutex, then store internals.
 The owner mutex is never held across process, pipe, or external-provider
 waits. Durable store commits are bounded storage operations; the future
