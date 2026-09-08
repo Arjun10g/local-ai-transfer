@@ -50,6 +50,10 @@ USD_QUANTUM = Decimal("0.000001")
 ZERO_USD = Decimal("0")
 _DISPLAY_HEADER = "| date | phase | instance id | gpu | $/hr | purpose | status | cost logged | idle min |"
 _DISPLAY_SEPARATOR = "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+# These bytes are the producer contract for the exact six-line preamble.  The
+# migration preflight must not discover its schema by reading the evidence file
+# or any repository template: a missing, replaced, or hostile reference file
+# cannot change the accepted framing.
 _CANONICAL_DISPLAY_PREFIX = (
     "# Shadeform cost ledger\n\n"
     "This append-only ledger is empty until Sol approves a provider action. Every\n"
@@ -58,6 +62,9 @@ _CANONICAL_DISPLAY_PREFIX = (
 ).encode("utf-8")
 _DISPLAY_HEADER_BYTES = (_DISPLAY_HEADER + "\n").encode("utf-8")
 _DISPLAY_SEPARATOR_BYTES = (_DISPLAY_SEPARATOR + "\n").encode("utf-8")
+_CANONICAL_DISPLAY_FRAMING = (
+    _CANONICAL_DISPLAY_PREFIX + _DISPLAY_HEADER_BYTES + _DISPLAY_SEPARATOR_BYTES
+)
 _RECEIPT_KEYS = {
     "schema", "phase_id", "instance_id", "owner", "status", "deletion", "salvage",
     "actual_cost_usd", "attempt_reservation_settled", "owned_record_persisted",
@@ -713,32 +720,14 @@ def _validate_canonical_receipt(value: dict[str, Any]) -> tuple[str, str, str]:
 
 
 def _canonical_display_prefix(issues: set[str] | None = None) -> bytes | None:
-    """Return the repository's exact non-table display preamble.
+    """Return the immutable producer-approved six-line display preamble.
 
-    The checked-in display is the only canonical source for this historical
-    Markdown framing.  It is read only to obtain the fixed prefix; an absent
-    or malformed source disables display reconciliation rather than accepting
-    a caller-provided approximation.
+    ``issues`` is retained for the narrow compatibility API, but this lookup
+    performs no filesystem access.  The caller's display evidence remains
+    subject to ``_read_snapshot`` and the exact byte/row checks in
+    ``_parse_display``.
     """
 
-    source = Path(__file__).resolve().parents[1] / "experiments" / "LEDGER.md"
-    target_issues = issues if issues is not None else set()
-    try:
-        data, _ = _read_snapshot(
-            source, limit=MAX_FILE_BYTES, issues=target_issues, expected_mode=0o644,
-            expected_parent_mode=0o755,
-        )
-    except _EvidenceError:
-        return None
-    try:
-        data.decode("utf-8")
-    except UnicodeDecodeError:
-        _issue(target_issues, "prefix_invalid_utf8")
-        return None
-    framing = _CANONICAL_DISPLAY_PREFIX + _DISPLAY_HEADER_BYTES + _DISPLAY_SEPARATOR_BYTES
-    if not data.startswith(framing):
-        _issue(target_issues, "prefix_schema_invalid")
-        return None
     return _CANONICAL_DISPLAY_PREFIX
 
 
@@ -814,14 +803,12 @@ def _parse_display(path: Path, groups: dict[tuple[str, str], dict[str, Any]], is
     if not data:
         _issue(issues, "display_empty")
         return {"row_count": None, "rounding_mismatch_count": None, "malformed_count": None, "parse_refused": True}
-    prefix = _canonical_display_prefix(issues)
-    framing = None if prefix is None else prefix + (_DISPLAY_HEADER + "\n" + _DISPLAY_SEPARATOR + "\n").encode("utf-8")
-    if framing is None or not data.startswith(framing):
+    if not data.startswith(_CANONICAL_DISPLAY_FRAMING):
         _issue(issues, "display_schema_invalid")
         return {"row_count": None, "rounding_mismatch_count": None, "malformed_count": None, "parse_refused": True}
     if not data.endswith(b"\n"):
         _issue(issues, "display_partial_line")
-    body = data[len(framing):]
+    body = data[len(_CANONICAL_DISPLAY_FRAMING):]
     if not body and groups:
         _issue(issues, "display_incomplete_against_ledger")
 
