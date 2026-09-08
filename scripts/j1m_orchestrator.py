@@ -41,6 +41,12 @@ _MAX_OUTPUT_RESERVE_TOKENS = 256
 # require the exact catalog supplied by the fixture.
 _MAX_EVAL_TOOLS = 33
 _DELETION_RESERVE_SECONDS = 660.0
+# A pathname passed to SCP cannot remain bound to the validated directory
+# across an untrusted remote transfer.  The descriptor-safe transport needed
+# to close that TOCTOU window is not part of this source-only slice, so
+# external salvage is a deliberate refusal rather than a validate-twice
+# approximation.
+_EXTERNAL_SALVAGE_TRANSPORT_AVAILABLE = False
 # This is source-controlled acceptance data, not a value supplied by a run
 # configuration.  The config repeats it for operator visibility/parity checks,
 # but a caller cannot turn an arbitrary manifest plus a self-authored lock into
@@ -888,7 +894,7 @@ def _salvage(
     deadline: float | None = None,
     q4_expected_gib: float = 6.0,
 ) -> list[dict[str, Any]]:
-    """Attempt each allowlisted receipt independently; one missing file cannot stop cleanup."""
+    """Refuse pathname-based external salvage until a bound transport exists."""
 
     try:
         salvage_ancestors = j1m_runner._private_ancestor_snapshot(
@@ -902,32 +908,9 @@ def _salvage(
         raise ValueError("salvage destination is not a private directory")
     if not j1m_runner._private_ancestors_stable(salvage_ancestors):
         raise ValueError("salvage destination changed")
-    results = []
-    for name in names:
-        if deadline is not None and deadline - time.monotonic() - _DELETION_RESERVE_SECONDS <= 0.0:
-            results.append({"name": name, "status": "salvage_failed", "error_code": "salvage_deadline_reserve"})
-            continue
-        try:
-            sf._preflight(info["phase_id"])
-            command = sf.scp_base(info["instance_info"], identity, known_hosts) + [
-                f"{info['instance_info']['ssh_user']}@{info['instance_info']['ip']}:/scratch/j1m/artifacts/{name}", str(destination / name),
-            ]
-            # Receipts are small, but the sole deployable Q4 artifact is not.
-            # Give its transfer a size-aware floor while still honoring the
-            # provider deadline and retaining a cleanup reserve.
-            timeout = max(120.0, float(q4_expected_gib) * 60.0) if name.endswith("Q4_K_M.gguf") else 30.0
-            if deadline is not None:
-                remaining = deadline - time.monotonic() - _DELETION_RESERVE_SECONDS
-                if remaining <= 0.0:
-                    results.append({"name": name, "status": "salvage_failed", "error_code": "salvage_deadline_reserve"})
-                    continue
-                timeout = min(timeout, remaining)
-            receipt = _remote(command, timeout=timeout)
-        except Exception as exc:
-            receipt = {"status": "salvage_failed", "error_type": "salvage_failed"}
-        receipt["name"] = name
-        results.append(receipt)
-    return results
+    # Do not retain a dormant SCP implementation here: even a future caller
+    # must not be able to pass an unbound destination pathname to a process.
+    raise ValueError("external salvage transport is unavailable in this source slice")
 
 
 def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, artifact_destination: Path, mode: str = "prove", model_artifact: Path | None = None, model_manifest: Path | None = None) -> dict[str, Any]:

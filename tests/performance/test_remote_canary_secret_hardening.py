@@ -389,6 +389,38 @@ class RemoteCanaryAndReceiptHardeningTests(unittest.TestCase):
                     )
             remote.assert_not_called()
 
+    def test_salvage_refuses_after_destination_swap_without_transport_use(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            root = Path(directory)
+            destination = root / "artifacts"
+            destination.mkdir()
+            destination.chmod(0o700)
+            moved = root / "moved-artifacts"
+            info = {"phase_id": "canary", "instance_info": {"ssh_user": "u", "ip": "127.0.0.1"}}
+
+            def swap_after_validation(_snapshot):
+                destination.rename(moved)
+                destination.symlink_to(moved, target_is_directory=True)
+                return True
+
+            with mock.patch.object(
+                    self.orchestrator.j1m_runner, "_private_ancestors_stable",
+                    side_effect=swap_after_validation), \
+                    mock.patch.object(self.orchestrator, "_remote") as remote, \
+                    mock.patch.object(self.orchestrator.sf, "scp_base") as scp_base:
+                with self.assertRaisesRegex(ValueError, "transport is unavailable"):
+                    self.orchestrator._salvage(
+                        info, root / "id", root / "known", destination,
+                        ["receipt.json"],
+                    )
+            remote.assert_not_called()
+            scp_base.assert_not_called()
+
+    def test_canary_plan_keeps_salvage_obligation_while_transport_is_refused(self):
+        self.assertFalse(self.orchestrator._EXTERNAL_SALVAGE_TRANSPORT_AVAILABLE)
+        plan = self.runner.build_plan(self.config, "canary")
+        self.assertTrue(plan["mode_policy"]["salvage_required"])
+
     def test_malformed_tensor_receipt_is_finite_refusal_without_typeerror_or_file(self):
         class Reader:
             version = 3

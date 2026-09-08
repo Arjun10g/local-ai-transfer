@@ -20,9 +20,12 @@ The J1M command planner exposes a `canary` mode for source-only review. It
 contains only bounded toolchain and CUDA prerequisite probes and has no model,
 source checkout, conversion, quantization, compiler/build, or evaluation
 command. Its receipt allowlist is limited to the two probe receipts; salvage
-and exact teardown remain mandatory lifecycle obligations. The mode is
-plan-only until the existing remote gates and explicit approval/ledger path are
-extended.
+and exact teardown remain mandatory lifecycle obligations. External receipt
+salvage is deliberately refused in this source-only slice because a pathname
+cannot stay bound to the validated destination across an SCP transfer; a
+descriptor-safe, platform-specific transport is required before it can be
+enabled. The mode is plan-only until the existing remote gates and explicit
+approval/ledger path are extended.
 
 Persisted argv and output receipts reject credential-like values before write.
 Private token/SSH key file paths remain usable as handles, but token contents,
