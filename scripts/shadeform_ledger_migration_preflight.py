@@ -23,6 +23,9 @@ MAX_FILE_BYTES = 1_048_576
 MAX_JSONL_LINES = 4096
 MAX_RECEIPTS = 4096
 MAX_JSON_OBJECT_BYTES = 65_536
+MAX_JSON_DEPTH = 32
+MAX_JSON_TOKEN_DIGITS = 64
+MAX_USD = Decimal("1000000000")
 USD_QUANTUM = Decimal("0.000001")
 ZERO_USD = Decimal("0")
 
@@ -36,12 +39,14 @@ def _issue(issues: set[str], label: str) -> None:
 
 
 def _decimal(value: Any) -> Decimal:
-    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal, str)):
+    if isinstance(value, bool) or isinstance(value, float) or not isinstance(value, (int, Decimal, str)):
         raise InvalidOperation
     parsed = Decimal(str(value))
-    if not parsed.is_finite() or parsed < ZERO_USD:
+    if not parsed.is_finite() or parsed < ZERO_USD or parsed > MAX_USD:
         raise InvalidOperation
-    return parsed.quantize(USD_QUANTUM)
+    if parsed.as_tuple().exponent < -6:
+        raise InvalidOperation
+    return parsed
 
 
 def _money(value: Decimal) -> str:
@@ -49,7 +54,44 @@ def _money(value: Decimal) -> str:
 
 
 def _strict_object(data: bytes) -> dict[str, Any]:
+    if len(data) > MAX_JSON_OBJECT_BYTES:
+        raise _EvidenceError("json_object_limit")
+    depth = 0
+    digits = 0
+    string_bytes = 0
+    in_string = escaped = False
+    for character in data:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == 92:
+                escaped = True
+            elif character == 34:
+                in_string = False
+            else:
+                string_bytes += 1
+                if string_bytes > MAX_JSON_OBJECT_BYTES // 4:
+                    raise _EvidenceError("json_string_limit")
+            continue
+        if character == 34:
+            in_string = True
+            string_bytes = 0
+        elif character in (123, 91):
+            depth += 1
+            if depth > MAX_JSON_DEPTH:
+                raise _EvidenceError("json_depth_limit")
+        elif character in (125, 93):
+            depth -= 1
+        elif 48 <= character <= 57:
+            digits += 1
+            if digits > MAX_JSON_TOKEN_DIGITS:
+                raise _EvidenceError("json_number_limit")
+    if in_string or depth != 0:
+        raise _EvidenceError("invalid_json")
+
     def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        if len(items) > 1024:
+            raise _EvidenceError("json_container_limit")
         result: dict[str, Any] = {}
         for key, value in items:
             if key in result:
@@ -58,12 +100,28 @@ def _strict_object(data: bytes) -> dict[str, Any]:
         return result
 
     try:
+        def bounded_number(value: str) -> int:
+            if len(value.lstrip("-")) > MAX_JSON_TOKEN_DIGITS:
+                raise _EvidenceError("json_number_limit")
+            return int(value)
+
+        def bounded_decimal(value: str) -> Decimal:
+            if len(value.lstrip("-")) > MAX_JSON_TOKEN_DIGITS:
+                raise _EvidenceError("json_number_limit")
+            parsed = Decimal(value)
+            if not parsed.is_finite():
+                raise _EvidenceError("nonfinite_number")
+            if abs(parsed.adjusted()) > MAX_JSON_TOKEN_DIGITS:
+                raise _EvidenceError("json_number_limit")
+            return parsed
+
         value = json.loads(
             data.decode("utf-8"), object_pairs_hook=pairs,
-            parse_float=Decimal, parse_int=int,
+            parse_float=bounded_decimal, parse_int=bounded_number,
             parse_constant=lambda _: (_ for _ in ()).throw(_EvidenceError("nonfinite_number")),
         )
-    except (UnicodeError, json.JSONDecodeError, InvalidOperation) as exc:
+    except (UnicodeError, json.JSONDecodeError, InvalidOperation, RecursionError,
+            OverflowError, ValueError, TypeError) as exc:
         raise _EvidenceError("invalid_json") from exc
     if not isinstance(value, dict):
         raise _EvidenceError("json_not_object")
@@ -112,6 +170,18 @@ def _check_ancestors(path: Path, issues: set[str]) -> None:
             raise _EvidenceError("parent_not_directory")
 
 
+def _require_private_directory(info: os.stat_result, issues: set[str], label: str) -> None:
+    if not stat.S_ISDIR(info.st_mode):
+        _issue(issues, f"{label}_not_directory")
+        raise _EvidenceError(f"{label}_not_directory")
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        _issue(issues, f"{label}_unsafe_permissions")
+        raise _EvidenceError(f"{label}_unsafe_permissions")
+    if hasattr(os, "geteuid") and int(info.st_uid) != os.geteuid():
+        _issue(issues, f"{label}_unsafe_owner")
+        raise _EvidenceError(f"{label}_unsafe_owner")
+
+
 def _read_snapshot(path: Path, *, limit: int, issues: set[str]) -> tuple[bytes, dict[str, Any]]:
     try:
         path = _absolute_path(path)
@@ -124,6 +194,7 @@ def _read_snapshot(path: Path, *, limit: int, issues: set[str]) -> tuple[bytes, 
         except FileNotFoundError:
             pass
         before_parent = os.stat(parent, follow_symlinks=False)
+        _require_private_directory(before_parent, issues, "parent")
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         parent_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
         try:
@@ -136,6 +207,12 @@ def _read_snapshot(path: Path, *, limit: int, issues: set[str]) -> tuple[bytes, 
                 if before.st_nlink != 1:
                     _issue(issues, "hardlink_file")
                     raise _EvidenceError("hardlink_file")
+                if stat.S_IMODE(before.st_mode) != 0o600:
+                    _issue(issues, "unsafe_permissions")
+                    raise _EvidenceError("unsafe_permissions")
+                if hasattr(os, "geteuid") and int(before.st_uid) != os.geteuid():
+                    _issue(issues, "unsafe_owner")
+                    raise _EvidenceError("unsafe_owner")
                 if before.st_size > limit:
                     _issue(issues, "byte_limit")
                     raise _EvidenceError("byte_limit")
@@ -153,14 +230,20 @@ def _read_snapshot(path: Path, *, limit: int, issues: set[str]) -> tuple[bytes, 
                         before_parent.st_dev != current_parent.st_dev or before_parent.st_ino != current_parent.st_ino:
                     _issue(issues, "evidence_mutated_during_read")
                     raise _EvidenceError("evidence_mutated_during_read")
+                if stat.S_IMODE(after.st_mode) != stat.S_IMODE(before.st_mode) or int(after.st_uid) != int(before.st_uid):
+                    _issue(issues, "evidence_mutated_during_read")
+                    raise _EvidenceError("evidence_mutated_during_read")
+                _require_private_directory(current_parent, issues, "parent")
                 if len(data) > limit:
                     _issue(issues, "byte_limit")
                     raise _EvidenceError("byte_limit")
                 mode = stat.S_IMODE(after.st_mode)
-                if mode & 0o077:
+                if mode != 0o600:
                     _issue(issues, "unsafe_permissions")
+                    raise _EvidenceError("unsafe_permissions")
                 if hasattr(os, "geteuid") and int(after.st_uid) != os.geteuid():
                     _issue(issues, "unsafe_owner")
+                    raise _EvidenceError("unsafe_owner")
                 return data, {"private_permissions": not bool(mode & 0o077), "hardlink": after.st_nlink != 1}
             finally:
                 os.close(descriptor)
@@ -177,7 +260,7 @@ def _read_jsonl(path: Path, *, label: str, issues: set[str]) -> tuple[list[dict[
     try:
         data, metadata = _read_snapshot(path, limit=MAX_FILE_BYTES, issues=issues)
     except _EvidenceError:
-        return [], {"line_count": 0, "private_permissions": False}
+        return [], {"line_count": 0, "private_permissions": False, "parse_refused": True}
     if not data or not data.endswith(b"\n"):
         _issue(issues, f"{label}_partial_line")
         return [], {**metadata, "line_count": 0}
@@ -218,6 +301,7 @@ def _parse_legacy(path: Path, issues: set[str]) -> tuple[dict[str, Any], dict[tu
         signature = _canonical_signature(row)
         if signature in signatures:
             duplicate_count += 1
+            _issue(issues, "duplicate_legacy_row")
         signatures.add(signature)
         if set(row) - allowed:
             _issue(issues, "legacy_future_or_unknown_fields")
@@ -256,14 +340,16 @@ def _parse_legacy(path: Path, issues: set[str]) -> tuple[dict[str, Any], dict[tu
     # The old stream has no v2 schema, binding, or durable nonce semantics.
     if rows:
         _issue(issues, "legacy_schema_or_owner_binding_missing")
+    refused = bool(metadata.get("parse_refused", False))
     return {
         "line_count": metadata.get("line_count", 0), "settled_row_count": settled,
-        "pending_row_count": pending, "exact_settled_cost_usd": _money(total),
-        "latest_stream_pending_group_count": sum(row.get("status") == "pending" for row in groups.values()),
+        "pending_row_count": pending, "exact_settled_cost_usd": None if refused else _money(total),
+        "latest_stream_pending_group_count": None if refused else sum(row.get("status") == "pending" for row in groups.values()),
         "duplicate_row_count": duplicate_count, "legacy_owner_binding_absent_rows": identity_absent,
         "legacy_settled_nonce_absent_rows": nonce_absent, "v2_parser_accepts": False,
         "v2_rejection": "legacy_schema_or_owner_binding_missing",
         "malformed_count": metadata.get("malformed_count", 0),
+        "parse_refused": bool(metadata.get("parse_refused", False)),
     }, groups
 
 
@@ -271,19 +357,25 @@ def _parse_display(path: Path, groups: dict[tuple[str, str], dict[str, Any]], is
     try:
         data, metadata = _read_snapshot(path, limit=MAX_FILE_BYTES, issues=issues)
     except _EvidenceError:
-        return {"row_count": 0, "rounding_mismatch_count": 0, "malformed_count": 0}
+        return {"row_count": 0, "rounding_mismatch_count": 0, "malformed_count": 0, "parse_refused": True}
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         _issue(issues, "display_invalid_utf8")
-        return {"row_count": 0, "rounding_mismatch_count": 0, "malformed_count": 1}
+        return {"row_count": 0, "rounding_mismatch_count": 0, "malformed_count": 1, "parse_refused": False}
+    if data and not data.endswith(b"\n"):
+        _issue(issues, "display_partial_line")
     rows = []
     malformed = 0
     for line in text.splitlines():
         if not line.lstrip().startswith("|"):
             continue
         cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if len(cells) != 9 or cells[0] in {"date", "---"} or set(cells[0]) <= {"-", ":"}:
+        if cells[0] in {"date", "---"} or set(cells[0]) <= {"-", ":"}:
+            continue
+        if len(cells) != 9:
+            malformed += 1
+            _issue(issues, "display_malformed_row")
             continue
         try:
             rows.append((cells[1], cells[2], Decimal(cells[7].replace("$", ""))))
@@ -304,10 +396,11 @@ def _parse_display(path: Path, groups: dict[tuple[str, str], dict[str, Any]], is
         _issue(issues, "display_rounding_mismatch")
     if malformed:
         _issue(issues, "display_malformed_rows")
-    return {"row_count": len(rows), "rounding_mismatch_count": mismatch, "malformed_count": malformed}
+    return {"row_count": len(rows), "rounding_mismatch_count": mismatch, "malformed_count": malformed, "parse_refused": False}
 
 
 def _receipt_files(root: Path, issues: set[str]) -> list[Path]:
+    root_fd = None
     try:
         root = _absolute_path(root)
         _check_ancestors(root / "placeholder", issues)
@@ -315,8 +408,9 @@ def _receipt_files(root: Path, issues: set[str]) -> list[Path]:
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             _issue(issues, "deletion_root_not_directory")
             return []
-        if hasattr(os, "geteuid") and int(info.st_uid) != os.geteuid():
-            _issue(issues, "unsafe_owner")
+        root_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        anchored = os.fstat(root_fd)
+        _require_private_directory(anchored, issues, "deletion_root")
         entries = []
         with os.scandir(root) as scan:
             for entry in scan:
@@ -327,6 +421,11 @@ def _receipt_files(root: Path, issues: set[str]) -> list[Path]:
                     continue
                 if entry.name.endswith(".deletion-receipt.json"):
                     entries.append(child)
+        current = os.fstat(root_fd)
+        if (anchored.st_dev, anchored.st_ino, anchored.st_mode, anchored.st_uid) != \
+                (current.st_dev, current.st_ino, current.st_mode, current.st_uid):
+            _issue(issues, "evidence_mutated_during_read")
+            return []
         if len(entries) > MAX_RECEIPTS:
             _issue(issues, "receipt_count_limit")
             return sorted(entries)[:MAX_RECEIPTS]
@@ -334,10 +433,14 @@ def _receipt_files(root: Path, issues: set[str]) -> list[Path]:
     except (OSError, _EvidenceError):
         _issue(issues, "deletion_root_unavailable")
         return []
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
 
 
 def _parse_receipts(root: Path, groups: dict[tuple[str, str], dict[str, Any]], issues: set[str]) -> dict[str, Any]:
     receipts = _receipt_files(root, issues)
+    refused = any(issue.startswith("deletion_root_") for issue in issues)
     matched: set[tuple[str, str]] = set()
     unmatched = absent_unmatched = deleted = absent = malformed = duplicate_count = 0
     seen_keys: set[tuple[str, str]] = set()
@@ -384,17 +487,28 @@ def _parse_receipts(root: Path, groups: dict[tuple[str, str], dict[str, Any]], i
     return {
         "receipt_count": len(receipts), "deleted_count": deleted, "absent_count": absent,
         "unmatched_count": unmatched, "unmatched_absent_count": absent_unmatched,
-        "unmatched_absent_actual_cost_usd": _money(absent_amount if absent_unmatched else ZERO_USD),
+        "unmatched_absent_actual_cost_usd": None if refused else _money(absent_amount if absent_unmatched else ZERO_USD),
         "duplicate_receipt_count": duplicate_count, "malformed_count": malformed,
+        "parse_refused": refused,
     }
 
 
 def _parse_incidents(path: Path, groups: dict[tuple[str, str], dict[str, Any]], issues: set[str]) -> dict[str, Any]:
     rows, metadata = _read_jsonl(path, label="incidents", issues=issues)
-    unmatched_teardown = unmatched_other = 0
+    unmatched_teardown = unmatched_other = duplicate_count = 0
+    signatures: set[str] = set()
     for row in rows:
         incident = row.get("incident")
-        key = (row.get("phase_id"), row.get("instance_id"))
+        signature = _canonical_signature(row)
+        if signature in signatures:
+            duplicate_count += 1
+            _issue(issues, "duplicate_incident")
+        signatures.add(signature)
+        phase, instance = row.get("phase_id"), row.get("instance_id")
+        if not isinstance(incident, str) or not isinstance(phase, str) or not isinstance(instance, str):
+            _issue(issues, "incident_identity_invalid")
+            continue
+        key = (phase, instance)
         if key not in groups:
             if incident == "post-instance-teardown-unconfirmed":
                 unmatched_teardown += 1
@@ -407,7 +521,9 @@ def _parse_incidents(path: Path, groups: dict[tuple[str, str], dict[str, Any]], 
     return {
         "line_count": metadata.get("line_count", 0), "unmatched_teardown_incident_count": unmatched_teardown,
         "unmatched_non_teardown_incident_count": unmatched_other,
+        "duplicate_incident_count": duplicate_count,
         "malformed_count": metadata.get("malformed_count", 0),
+        "parse_refused": bool(metadata.get("parse_refused", False)),
     }
 
 

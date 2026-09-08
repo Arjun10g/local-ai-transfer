@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import importlib
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 import unittest
 from unittest import mock
@@ -16,6 +17,7 @@ from scripts import shadeform_ledger_migration_preflight as preflight
 
 class PreflightFixtureTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.old_umask = os.umask(0o077)
         self.directory = tempfile.TemporaryDirectory(prefix="ledger-preflight-", dir=Path.cwd())
         self.root = Path(self.directory.name)
         self.runtime = self.root / "runtime"
@@ -26,6 +28,7 @@ class PreflightFixtureTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.directory.cleanup()
+        os.umask(self.old_umask)
 
     def write_jsonl(self, path: Path, rows: list[dict], *, final_newline: bool = True) -> None:
         payload = "\n".join(json.dumps(row, sort_keys=True, separators=(",", ":"), default=str) for row in rows)
@@ -69,6 +72,14 @@ class PreflightFixtureTests(unittest.TestCase):
         ])
         self.assertIn("duplicate_or_changing_pending", report["path_safety"]["issues"])
         self.assertIn("settled_rewrite", report["path_safety"]["issues"])
+
+    def test_decimal_scale_tiny_and_huge_values_never_round(self) -> None:
+        for value in ("0.0000001", "1e-100", "1000000001"):
+            with self.subTest(value=value):
+                report = self.report([self.row("settled", value)])
+                self.assertIn("legacy_settled_cost_invalid", report["path_safety"]["issues"])
+        with self.assertRaises(InvalidOperation):
+            preflight._decimal(Decimal("0.0000001"))
 
     def test_missing_identity_future_fields_partial_and_limits(self) -> None:
         row = self.row()
@@ -123,6 +134,30 @@ class PreflightFixtureTests(unittest.TestCase):
                 deletion_root=self.runtime, incidents=self.incidents, mode="audit",
             )
 
+    def test_bounded_json_scalar_schema_and_duplicate_evidence(self) -> None:
+        huge = {"phase_id": "p", "instance_id": "i", "status": "settled", "actual_cost_usd": int("9" * 65)}
+        deep = "{" + "\"x\":[" * 33 + "0" + "]" * 33 + "}\n"
+        self.ledger.write_text(json.dumps(huge) + "\n" + deep, encoding="utf-8")
+        self.display.write_text("| malformed | row |\n", encoding="utf-8")
+        self.write_jsonl(self.incidents, [{"phase_id": ["not-scalar"], "instance_id": "i", "incident": "x"}])
+        report = preflight.run_preflight(
+            legacy_ledger=self.ledger, display_ledger=self.display,
+            deletion_root=self.runtime, incidents=self.incidents,
+        )
+        issues = report["path_safety"]["issues"]
+        self.assertIn("legacy_json_number_limit", issues)
+        self.assertIn("legacy_json_depth_limit", issues)
+        self.assertIn("display_malformed_row", issues)
+        self.assertIn("incident_identity_invalid", issues)
+
+        duplicate = {"phase_id": "p", "instance_id": "i", "incident": "x"}
+        self.write_jsonl(self.incidents, [duplicate, duplicate])
+        report = preflight.run_preflight(
+            legacy_ledger=self.ledger, display_ledger=self.display,
+            deletion_root=self.runtime, incidents=self.incidents,
+        )
+        self.assertIn("duplicate_incident", report["path_safety"]["issues"])
+
     def test_owner_mismatch_is_only_a_sanitized_blocker(self) -> None:
         self.write_jsonl(self.ledger, [self.row()])
         self.display.write_text("", encoding="utf-8")
@@ -132,7 +167,22 @@ class PreflightFixtureTests(unittest.TestCase):
                 legacy_ledger=self.ledger, display_ledger=self.display,
                 deletion_root=self.runtime, incidents=self.incidents,
             )
-        self.assertIn("unsafe_owner", report["path_safety"]["issues"])
+        self.assertIn("parent_unsafe_owner", report["path_safety"]["issues"])
+
+        actual_stat = preflight.os.stat
+        def permissive_parent(path, *args, **kwargs):
+            result = actual_stat(path, *args, **kwargs)
+            if Path(path) == self.runtime:
+                values = list(result)
+                values[0] = stat.S_IFDIR | 0o755
+                return os.stat_result(values)
+            return result
+        with mock.patch.object(preflight.os, "stat", side_effect=permissive_parent):
+            report = preflight.run_preflight(
+                legacy_ledger=self.ledger, display_ledger=self.display,
+                deletion_root=self.runtime, incidents=self.incidents,
+            )
+        self.assertIn("parent_unsafe_permissions", report["path_safety"]["issues"])
 
     def test_symlink_hardlink_and_evidence_mutation_are_fail_closed(self) -> None:
         outside = self.root / "outside"
