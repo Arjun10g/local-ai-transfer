@@ -82,6 +82,9 @@ MAX_EVAL_OUTPUT = 256 * 1024
 FIXTURE_MAX_BYTES = 256 * 1024
 MAX_RECEIPT_BYTES = 64 * 1024
 MAX_METADATA_BYTES = 256 * 1024
+# Bounded evaluator capacity for the current production profile. Exact
+# membership and ordering remain part of the fixture identity.
+MAX_EVAL_TOOLS = 33
 MAX_EVAL_CASES = 64
 MAX_OUTPUT_RESERVE_TOKENS = 256
 EVAL_TOTAL_TIMEOUT = 480.0
@@ -637,7 +640,7 @@ def _engine_launch_argv(args: argparse.Namespace, token_file: Path, backend: str
 
 
 def _fixture_contract(path: Path, *, deadline: float | None = None) -> dict[str, Any]:
-    """Read only the bounded fixture contract; never echo its prompts."""
+    """Read the bounded contract; max_cases caps actual cases, never pads them."""
 
     try:
         raw = _read_bounded(path, FIXTURE_MAX_BYTES, deadline=deadline, error_code="evaluator_fixture_unreadable")
@@ -663,8 +666,9 @@ def _fixture_contract(path: Path, *, deadline: float | None = None) -> dict[str,
     context_tokens = limits.get("context_tokens") if isinstance(limits, dict) else None
     output_reserve_tokens = limits.get("max_output_tokens") if isinstance(limits, dict) else None
     tool_names = [tool.get("function", {}).get("name") if isinstance(tool, dict) and isinstance(tool.get("function"), dict) else None for tool in tools]
-    if (isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= MAX_EVAL_CASES or len(cases) != count or
-            not isinstance(tools, list) or not 1 <= len(tools) <= 32 or isinstance(context_tokens, bool) or not isinstance(context_tokens, int) or not 1 <= context_tokens <= 16384 or
+    case_count = len(cases) if isinstance(cases, list) else 0
+    if (isinstance(count, bool) or not isinstance(count, int) or not 1 <= case_count <= count <= MAX_EVAL_CASES or
+            not isinstance(tools, list) or not 1 <= len(tools) <= MAX_EVAL_TOOLS or isinstance(context_tokens, bool) or not isinstance(context_tokens, int) or not 1 <= context_tokens <= 16384 or
             isinstance(output_reserve_tokens, bool) or not isinstance(output_reserve_tokens, int) or not 1 <= output_reserve_tokens <= 256 or output_reserve_tokens >= context_tokens or
             isinstance(limits.get("temperature"), bool) or not isinstance(limits.get("temperature"), (int, float)) or not math.isfinite(limits.get("temperature")) or not 0 <= limits["temperature"] <= 2 or
             any(not isinstance(name, str) or not TOOL_NAME.fullmatch(name) for name in tool_names) or len(set(tool_names)) != len(tool_names)):
@@ -687,10 +691,10 @@ def _fixture_contract(path: Path, *, deadline: float | None = None) -> dict[str,
         "limits": dict(limits),
         "tool_names": list(tool_names),
         "tool_count": len(tools),
-        "case_count": count,
+        "case_count": case_count,
         "category_counts": dict(sorted(category_counts.items())),
     }
-    return {"case_count": count, "categories": categories, "category_counts": category_counts,
+    return {"case_count": case_count, "categories": categories, "category_counts": category_counts,
             "fixture_identity": fixture_identity,
             "tool_count": len(tools), "context_tokens": context_tokens,
             "output_reserve_tokens": output_reserve_tokens}

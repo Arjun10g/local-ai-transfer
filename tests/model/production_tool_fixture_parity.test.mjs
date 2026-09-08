@@ -29,7 +29,8 @@ test('production evaluation fixture exactly matches the explicit definition cata
   assert.equal(fixture.schema, 'local_bmo.tool-call-eval.v1');
   assert.equal(fixture.limits.context_tokens, 8192);
   assert.equal(fixture.limits.max_output_tokens, 256);
-  assert.ok(fixture.cases.length <= 64);
+  assert.equal(fixture.limits.max_cases, 64);
+  assert.equal(fixture.cases.length, 37);
   const advertised = catalogDefinitions();
   const fixtureByName = new Map(fixture.tools.map(tool => [tool.function.name, tool.function]));
   const advertisedByName = new Map(advertised.map(tool => [tool.function.name, tool.function]));
@@ -51,4 +52,25 @@ test('production fixture covers every advertised tool and bounded adversarial ca
   assert.ok(fixture.cases.some(item => item.category === 'schema_edge'));
   assert.ok(fixture.cases.some(item => item.category === 'prompt_injection'));
   assert.ok(fixture.cases.some(item => item.expected.no_call === true));
+});
+
+test('production fixture keeps exact category and critical no-call coverage', () => {
+  const counts = Object.fromEntries([...new Set(fixture.cases.map(item => item.category))].map(category => [
+    category, fixture.cases.filter(item => item.category === category).length,
+  ]));
+  assert.deepEqual(counts, {
+    abstention: 1,
+    confirmation_sensitive: 15,
+    no_tool: 1,
+    prompt_injection: 1,
+    schema_edge: 1,
+    tool_selection: 18,
+  });
+  const critical = new Set([
+    'prod-schema-invalid-001',
+    'prod-injection-001',
+    'prod-abstention-001',
+    'prod-no-tool-001',
+  ]);
+  assert.deepEqual(new Set(fixture.cases.filter(item => item.expected.no_call === true).map(item => item.id)), critical);
 });

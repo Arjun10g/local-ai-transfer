@@ -48,7 +48,9 @@ QUALITY_CODES = frozenset({
 FIXTURE_MAX_BYTES = 256 * 1024
 MAX_MESSAGE_CHARS = 4096
 MAX_MESSAGES_PER_CASE = 8
-MAX_TOOLS = 32
+# Capacity for the current production profile (33 definitions); fixture
+# identity remains responsible for exact catalog membership and ordering.
+MAX_TOOLS = 33
 MAX_EVAL_CASES = 64
 MAX_TOOL_SCHEMA_BYTES = 16384
 # Production registry schemas include bounded oneOf/not branches (notably
@@ -303,6 +305,8 @@ def validate_fixture(fixture: Any) -> dict[str, Any]:
         functions[name] = tool["function"]
         if len(json.dumps(tool, separators=(",", ":")).encode("utf-8")) > MAX_TOOL_SCHEMA_BYTES:
             raise ValueError("fixture_tool_schema_unbounded")
+    # max_cases is an upper bound; the evaluator and receipt report the actual
+    # number of cases supplied by the fixture.
     cases = fixture["cases"]
     if not isinstance(cases, list) or not 1 <= len(cases) <= limits["max_cases"]:
         raise ValueError("fixture_cases_invalid")
