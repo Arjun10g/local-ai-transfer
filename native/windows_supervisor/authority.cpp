@@ -54,21 +54,37 @@ struct ProcessTransactionFence final {
 };
 
 struct PipeCallFence final {
+  static constexpr std::uint32_t kClosing = 1u << 31;
+  static constexpr std::uint32_t kActiveMask = 1u;
+
   bool begin() noexcept {
-    if (closing.load(std::memory_order_acquire)) return false;
-    bool expected = false;
-    return active.compare_exchange_strong(expected, true,
-                                          std::memory_order_acq_rel,
-                                          std::memory_order_acquire);
+    std::uint32_t current = state.load(std::memory_order_acquire);
+    for (;;) {
+      if ((current & kClosing) != 0 || (current & kActiveMask) != 0)
+        return false;
+      if (state.compare_exchange_weak(current, current + 1u,
+                                      std::memory_order_acq_rel,
+                                      std::memory_order_acquire)) return true;
+    }
   }
 
   void close_admission() noexcept {
-    closing.store(true, std::memory_order_release);
+    state.fetch_or(kClosing, std::memory_order_acq_rel);
     changed.notify_all();
   }
 
   void end() noexcept {
-    active.store(false, std::memory_order_release);
+    std::uint32_t current = state.load(std::memory_order_acquire);
+    for (;;) {
+      if ((current & kActiveMask) == 0) {
+        state.fetch_or(kClosing, std::memory_order_acq_rel);
+        changed.notify_all();
+        return;
+      }
+      if (state.compare_exchange_weak(current, current - 1u,
+                                      std::memory_order_acq_rel,
+                                      std::memory_order_acquire)) break;
+    }
     changed.notify_all();
   }
 
@@ -76,14 +92,14 @@ struct PipeCallFence final {
     try {
       std::unique_lock<std::mutex> lock(wait_mutex);
       return changed.wait_for(lock, std::chrono::milliseconds(kShutdownWaitMs),
-                              [&] { return !active.load(std::memory_order_acquire); });
+                              [&] { return (state.load(std::memory_order_acquire) &
+                                             kActiveMask) == 0; });
     } catch (...) {
       return false;
     }
   }
 
-  std::atomic_bool closing{false};
-  std::atomic_bool active{false};
+  std::atomic<std::uint32_t> state{0};
   std::mutex wait_mutex;
   std::condition_variable changed;
 };
@@ -101,9 +117,10 @@ struct LeaseRegistry final {
   bool bounded() const noexcept { return leases.size() <= kMaxLeases; }
 };
 
-// Sole process-lifetime owner.  Shutdown closes admission, fences and drains
-// process borrows/children, stops the pipe, destroys leases, and releases the
-// owner last.  No owner lock is held across a wait in this seam.
+// Sole process-lifetime owner. Shutdown joins the helper before releasing the
+// long-lived pipe ticket, then closes owner admission, drains borrows/children,
+// destroys leases, and releases the owner last. No owner lock is held across a
+// wait in this seam.
 struct SupervisorState final {
   explicit SupervisorState(const SupervisorStartupHandoff& handoff)
       : startup(handoff), borrow_domain(std::make_shared<BorrowControlBlock>()) {}
@@ -148,15 +165,22 @@ struct SupervisorState final {
   }
 
   action_journal_helper::HelperStatus run_pipe_helper() noexcept {
-    // Move the ticket to a call-local handoff.  Shutdown closes this fence
-    // and waits for the call to return before releasing the state ticket.
+    // First admit the helper call in one atomic fence word. Then acquire a
+    // fresh call-local ticket; the long-lived state ticket is never moved or
+    // released while the helper can use its owner.
     if (!pipe_call.begin())
       return action_journal_helper::HelperStatus::kStorageUnavailable;
-    PipeServerBorrow in_flight = std::move(pipe);
-    const auto result =
-        action_journal_helper::run_foreground_helper_from_inherited_stdin(
-            std::move(in_flight));
-    pipe = std::move(in_flight);
+    action_journal_helper::HelperStatus result =
+        action_journal_helper::HelperStatus::kStorageUnavailable;
+    {
+      BorrowTicket ticket = borrow(BorrowKind::kPipe);
+      if (ticket.proven()) {
+        PipeServerBorrow call_borrow;
+        call_borrow.attach(std::move(ticket));
+        result = action_journal_helper::run_foreground_helper_from_inherited_stdin(
+            std::move(call_borrow));
+      }
+    }
     pipe_call.end();
     return result;
   }
@@ -168,23 +192,22 @@ struct SupervisorState final {
             expected, true, std::memory_order_acq_rel,
             std::memory_order_acquire))
       return false;
-    process_fence.stop_admission();
-    borrow_domain->close_admission();
     pipe_call.close_admission();
-    process_fence.drain();
-    children.drain();
-    // Process tickets must be gone before stopping the pipe.  The pipe owns
-    // its own ticket, so it is released next and the final wait drains every
-    // remaining ticket before leases or the owner can be destroyed.
-    if (!borrow_domain->wait_process_drained()) {
-      borrow_domain->poison();
-      return false;
-    }
     if (!pipe_call.wait_drained()) {
       borrow_domain->poison();
       return false;
     }
     pipe.stop();
+    process_fence.stop_admission();
+    borrow_domain->close_admission();
+    process_fence.drain();
+    children.drain();
+    // The helper call is joined before releasing the long-lived pipe ticket;
+    // only then can owner admission close and process tickets drain.
+    if (!borrow_domain->wait_process_drained()) {
+      borrow_domain->poison();
+      return false;
+    }
     if (!borrow_domain->wait_all_drained()) {
       borrow_domain->poison();
       return false;
@@ -226,7 +249,31 @@ struct ProcessLaunchAuthority final {
   ~ProcessLaunchAuthority() noexcept = default;
   ProcessLaunchAuthority(const ProcessLaunchAuthority&) = delete;
   ProcessLaunchAuthority& operator=(const ProcessLaunchAuthority&) = delete;
+  ProcessLaunchAuthority(ProcessLaunchAuthority&& other) noexcept
+      : owner(std::move(other.owner)) {
+    consumed.store(other.consumed.exchange(true, std::memory_order_acq_rel),
+                   std::memory_order_release);
+  }
+  ProcessLaunchAuthority& operator=(ProcessLaunchAuthority&& other) noexcept {
+    if (this != &other) {
+      owner = std::move(other.owner);
+      consumed.store(other.consumed.exchange(true, std::memory_order_acq_rel),
+                     std::memory_order_release);
+    }
+    return *this;
+  }
+  bool proven() const noexcept {
+    return !consumed.load(std::memory_order_acquire) && owner.proven();
+  }
+  bool consume() noexcept {
+    bool expected = false;
+    if (!consumed.compare_exchange_strong(expected, true,
+                                          std::memory_order_acq_rel,
+                                          std::memory_order_acquire)) return false;
+    return owner.proven();
+  }
   BorrowTicket owner;
+  std::atomic_bool consumed{false};
 };
 
 bool trust_gates_open() noexcept {

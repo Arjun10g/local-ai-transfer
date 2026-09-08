@@ -120,6 +120,52 @@ class PipeCallModel:
         return not self.active and self.ticket_in_state
 
 
+class PipeCallWordModel:
+    """Exact observe/close/CAS interleaving for the one-word fence."""
+
+    CLOSING = 1 << 31
+    ACTIVE = 1
+
+    def __init__(self):
+        self.word = 0
+
+    def observe_open(self):
+        return self.word
+
+    def close(self):
+        self.word |= self.CLOSING
+
+    def late_cas_acquire(self, observed):
+        if self.word != observed or self.word & self.CLOSING or self.word & self.ACTIVE:
+            return False
+        self.word = observed | self.ACTIVE
+        return True
+
+    def release(self):
+        self.word &= ~self.ACTIVE
+
+
+class ProcessAuthorityModel:
+    """Reference move/consume semantics for the process call authority."""
+
+    def __init__(self, ticket=True):
+        self.ticket = ticket
+        self.used = False
+
+    def move(self):
+        moved = ProcessAuthorityModel(self.ticket)
+        moved.used = self.used
+        self.ticket = False
+        self.used = True
+        return moved
+
+    def consume(self):
+        if self.used or not self.ticket:
+            return False
+        self.used = True
+        return True
+
+
 class WindowsProcessTransactionStaticTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -199,8 +245,9 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
         shutdown = self.cpp[self.cpp.index("bool shutdown_ordered"):
                             self.cpp.index("SupervisorStartupHandoff startup")]
         order = (
+            "pipe_call.close_admission", "pipe_call.wait_drained", "pipe.stop",
             "stop_admission", "process_fence.drain", "children.drain",
-            "wait_process_drained", "pipe.stop", "wait_all_drained", "leases.clear",
+            "wait_process_drained", "wait_all_drained", "leases.clear",
             "journal_owner.reset",
         )
         positions = [shutdown.index(token) for token in order]
@@ -236,9 +283,9 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
         self.assertNotIn("run_foreground_helper_from_inherited_stdin(\n    JournalAuthorityOwner&", self.pipe_cpp)
         call = self.cpp[self.cpp.index("run_pipe_helper"):
                         self.cpp.index("bool shutdown_ordered")]
-        for token in ("PipeServerBorrow in_flight = std::move(pipe)",
-                      "std::move(in_flight)", "pipe = std::move(in_flight)",
-                      "pipe_call.end()"):
+        for token in ("BorrowTicket ticket = borrow(BorrowKind::kPipe)",
+                      "call_borrow.attach(std::move(ticket))",
+                      "std::move(call_borrow)", "pipe_call.end()"):
             self.assertIn(token, call)
         shutdown = self.cpp[self.cpp.index("bool shutdown_ordered"):
                             self.cpp.index("SupervisorStartupHandoff startup")]
@@ -248,13 +295,24 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
     def test_process_transaction_requires_move_only_authority(self):
         signature = self.tx[self.tx.index("LaunchReceipt execute_process_transaction"):
                             self.tx.index("{", self.tx.index("LaunchReceipt execute_process_transaction"))]
-        self.assertIn("ProcessLaunchAuthority&& authority", signature)
+        self.assertIn("ProcessLaunchAuthority authority", signature)
         self.assertNotIn("SupervisorState&", signature)
         self.assertNotIn("JournalAuthorityOwner", signature)
         body = self.tx[self.tx.index("LaunchReceipt execute_process_transaction"):]
-        self.assertIn("if (!authority.owner.proven())", body)
-        self.assertLess(body.index("authority.owner.proven"),
+        self.assertIn("if (!authority.consume())", body)
+        self.assertLess(body.index("authority.consume"),
                         body.index("if (!kProcessLaunchAvailable"))
+
+    def test_process_authority_is_move_only_and_one_use(self):
+        authority = self.cpp[self.cpp.index("struct ProcessLaunchAuthority"):
+                             self.cpp.index("bool trust_gates_open")]
+        for token in ("ProcessLaunchAuthority(ProcessLaunchAuthority&& other) noexcept",
+                      "operator=(ProcessLaunchAuthority&& other) noexcept",
+                      "consumed.exchange(true", "consumed.compare_exchange_strong",
+                      "bool proven() const noexcept", "bool consume() noexcept"):
+            self.assertIn(token, authority)
+        self.assertIn("std::atomic_bool consumed{false}", authority)
+        self.assertNotIn("ProcessLaunchAuthority(ProcessLaunchAuthority const&", authority)
 
     def test_pipe_call_model_never_releases_state_ticket_while_in_flight(self):
         model = PipeCallModel()
@@ -264,6 +322,22 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
         self.assertFalse(model.stop_pipe())
         model.end()
         self.assertTrue(model.stop_pipe())
+
+    def test_pipe_call_word_rejects_late_cas_after_shutdown_close(self):
+        model = PipeCallWordModel()
+        observed_open = model.observe_open()
+        model.close()
+        self.assertFalse(model.late_cas_acquire(observed_open))
+        self.assertEqual(model.word & model.CLOSING, model.CLOSING)
+        model.release()
+        self.assertEqual(model.word & model.ACTIVE, 0)
+
+    def test_process_authority_model_rejects_source_reuse_and_second_consume(self):
+        source = ProcessAuthorityModel()
+        moved = source.move()
+        self.assertFalse(source.consume())
+        self.assertTrue(moved.consume())
+        self.assertFalse(moved.consume())
 
     def test_borrow_domain_has_linearized_close_count_and_wake(self):
         domain = self.borrow[self.borrow.index("class BorrowControlBlock"):

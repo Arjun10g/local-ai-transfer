@@ -94,8 +94,9 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
         shutdown = self.cpp[self.cpp.index("bool shutdown_ordered"):
                             self.cpp.index("SupervisorStartupHandoff startup")]
         order = [
+            "pipe_call.close_admission", "pipe_call.wait_drained", "pipe.stop",
             "stop_admission", "process_fence.drain", "children.drain",
-            "wait_process_drained", "pipe.stop", "wait_all_drained", "leases.clear",
+            "wait_process_drained", "wait_all_drained", "leases.clear",
             "journal_owner.reset",
         ]
         self.assertEqual([shutdown.index(item) for item in order],
@@ -113,8 +114,8 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
     def test_pipe_call_fence_closes_and_joins_before_ticket_release(self):
         fence = self.cpp[self.cpp.index("struct PipeCallFence"):
                          self.cpp.index("struct ChildRegistry")]
-        for token in ("closing.load", "compare_exchange_strong", "active.store(false",
-                      "changed.wait_for", "kShutdownWaitMs"):
+        for token in ("kClosing", "kActiveMask", "state.load", "compare_exchange_weak",
+                      "state.fetch_or", "changed.wait_for", "kShutdownWaitMs"):
             self.assertIn(token, fence)
         shutdown = self.cpp[self.cpp.index("bool shutdown_ordered"):
                             self.cpp.index("SupervisorStartupHandoff startup")]

@@ -9,11 +9,12 @@ Phase 2a establishes one co-located supervisor/helper ownership topology:
 `SupervisorState` owns the sole `JournalAuthorityOwner`; the pipe server and
 process transaction borrow that owner under an explicit lifetime proof. The
 helper receives a move-only `PipeServerBorrow` ticket and the process path a
-move-only launch authority; neither accepts a raw owner. Startup
+move-only, one-use launch authority; neither accepts a raw owner. Startup
 requires an explicit canonical `StorageRequest` handoff, with no implicit
-storage path. Shutdown stops admission, drains process borrows and children,
-stops and releases the pipe borrow, drains the remaining tickets, destroys
-leases, and releases the owner last. The bounded shared control word makes
+storage path. Shutdown closes pipe-call admission and joins the helper, stops
+and releases the long-lived pipe borrow, then stops process admission, drains
+process borrows and children, drains remaining tickets, destroys leases, and
+releases the owner last. The bounded shared control word makes
 close/acquire linearizable; a same-thread or timed-out drain is a finite
 fail-stop/refusal rather than a deadlock. No owner lock is held across waits.
 

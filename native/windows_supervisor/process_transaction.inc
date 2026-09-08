@@ -37,12 +37,12 @@ struct LaunchReceipt final {
 // The accepted lease has no proof issuer and external-proof authority is
 // false.  Refusal is before persist_dispatching/begin_external_dispatch and
 // before any process creation or other irreversible mutation.
-LaunchReceipt execute_process_transaction(ProcessLaunchAuthority&& authority,
+LaunchReceipt execute_process_transaction(ProcessLaunchAuthority authority,
                                           const LaunchPlan& plan) noexcept {
-  // The move-only authority retains its borrow ticket for the entire call,
-  // including this inert refusal path. No SupervisorState/raw-owner entry
-  // point exists for a future enablement to bypass that proof.
-  if (!authority.owner.proven()) return LaunchReceipt{};
+  // The by-value move-only authority is consumed exactly once and retains its
+  // borrow ticket for the entire call, including this inert refusal path. No
+  // SupervisorState/raw-owner entry point exists for a future bypass.
+  if (!authority.consume()) return LaunchReceipt{};
   (void)plan;
   if (!kProcessLaunchAvailable || !kSupervisorOwnedProcessTransactionAccepted)
     return LaunchReceipt{};

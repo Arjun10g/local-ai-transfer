@@ -23,9 +23,10 @@
     "process_dispatch": "ProcessDispatchLease APIs only",
     "operation_identity": "exact 16-byte array, never integer or hash coercion",
     "shutdown_order": [
-      "stop admission",
+      "close pipe-call admission and join helper",
+      "stop pipe and release its long-lived borrow ticket",
+      "stop process admission",
       "drain process fence/children/process borrows",
-      "stop pipe and release its borrow ticket",
       "drain remaining borrow tickets",
       "destroy leases",
       "destroy JournalAuthorityOwner"
