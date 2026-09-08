@@ -71,30 +71,41 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
     def test_borrowers_do_not_own_authority(self):
         for name in ("PipeServerBorrow", "ProcessLaunchAuthority"):
             self.assertIn(f"struct {name}", self.cpp)
+        self.assertIn("class BorrowControlBlock", self.cpp)
+        self.assertIn("std::shared_ptr<BorrowControlBlock> control_", self.cpp)
+        self.assertNotIn("BorrowedOwnerHandle", self.cpp)
         process = self.cpp[self.cpp.index("struct ProcessLaunchAuthority"):
                            self.cpp.index("bool trust_gates_open")]
-        self.assertIn("BorrowedOwnerHandle owner", process)
+        self.assertIn("BorrowTicket owner", process)
+        self.assertNotIn("SupervisorState* supervisor", process)
         self.assertNotRegex(process, r"JournalAuthorityOwner\s+\w+")
         self.assertNotRegex(process, r"unique_ptr<.*Journal")
         self.assertNotIn("JournalAuthority", process)
         self.assertIn("ProcessLaunchAuthority(const ProcessLaunchAuthority&) = delete", process)
 
     def test_borrow_lifetime_and_shutdown_order(self):
-        borrow = self.cpp[self.cpp.index("BorrowedOwnerHandle borrow_for_process"):
-                          self.cpp.index("void shutdown_ordered")]
-        self.assertIn("admission_open", borrow)
-        self.assertIn("process_fence.admission_stopped", borrow)
-        self.assertIn("return BorrowedOwnerHandle{journal_owner.get(), this}", borrow)
-        shutdown = self.cpp[self.cpp.index("void shutdown_ordered"):
+        borrow = self.cpp[self.cpp.index("BorrowTicket borrow_for_process"):
+                          self.cpp.index("bool shutdown_ordered")]
+        self.assertIn("return borrow(BorrowKind::kProcess)", borrow)
+        self.assertIn("try_acquire", self.cpp)
+        shutdown = self.cpp[self.cpp.index("bool shutdown_ordered"):
                             self.cpp.index("SupervisorStartupHandoff startup")]
         order = [
             "stop_admission", "process_fence.drain", "children.drain",
-            "process_borrow.release", "pipe.stop", "leases.clear",
+            "wait_process_drained", "pipe.stop", "wait_all_drained", "leases.clear",
             "journal_owner.reset",
         ]
         self.assertEqual([shutdown.index(item) for item in order],
                          sorted(shutdown.index(item) for item in order))
         self.assertIn("No owner lock is held", self.cpp)
+        self.assertIn("std::condition_variable", self.cpp)
+        self.assertIn("std::atomic<std::uint32_t> state", self.cpp)
+
+    def test_shutdown_timeout_is_finite_fail_stop(self):
+        self.assertIn("kShutdownWaitMs = 250", self.cpp)
+        self.assertIn("wait_for", self.cpp)
+        self.assertIn("if (!shutdown_ordered()) std::terminate()", self.cpp)
+        self.assertIn("same-thread or timed-out drain", self.cpp)
 
     def test_legacy_parallel_types_and_callbacks_are_removed(self):
         for pattern in (

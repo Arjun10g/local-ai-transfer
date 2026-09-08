@@ -10,6 +10,7 @@ import json
 import re
 import unittest
 from pathlib import Path
+from itertools import product
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -52,6 +53,44 @@ class Phase2aModel:
         self.persist_calls += 1
         self.external_calls += 1
         return "ok"
+
+
+class BorrowDomainModel:
+    """Reference model for the combined admission/count control word."""
+
+    CLOSING = 1 << 30
+    POISONED = 1 << 31
+    MAX = 4096
+
+    def __init__(self):
+        self.active = 0
+        self.process = 0
+        self.closing = False
+        self.poisoned = False
+
+    def acquire(self, kind):
+        if self.closing or self.poisoned or self.active >= self.MAX:
+            self.poisoned = True
+            return False
+        if kind == "process" and self.process >= self.MAX:
+            self.poisoned = True
+            return False
+        self.active += 1
+        if kind == "process":
+            self.process += 1
+        return True
+
+    def close(self):
+        self.closing = True
+
+    def release(self, kind):
+        if self.active == 0 or (kind == "process" and self.process == 0):
+            self.poisoned = True
+            return False
+        self.active -= 1
+        if kind == "process":
+            self.process -= 1
+        return True
 
 
 class WindowsProcessTransactionStaticTests(unittest.TestCase):
@@ -101,8 +140,10 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
     def test_process_launch_authority_is_borrow_only(self):
         region = self.cpp[self.cpp.index("struct ProcessLaunchAuthority"):
                           self.cpp.index("bool trust_gates_open")]
-        self.assertIn("BorrowedOwnerHandle owner", region)
-        self.assertIn("SupervisorState* supervisor", region)
+        self.assertIn("BorrowTicket owner", region)
+        self.assertNotIn("SupervisorState* supervisor", region)
+        self.assertIn(": owner(state.borrow_for_process())", region)
+        self.assertNotIn("BorrowedOwnerHandle", self.cpp)
         for token in ("JournalAuthority", "DurableJournalAdapter", "JournalRecord"):
             self.assertNotIn(token, region)
         self.assertIn("ProcessLaunchAuthority(const ProcessLaunchAuthority&) = delete", region)
@@ -126,17 +167,94 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
         self.assertNotIn("StorageRequest{}", self.source)
 
     def test_shutdown_order_is_explicit_and_borrow_safe(self):
-        shutdown = self.cpp[self.cpp.index("void shutdown_ordered"):
+        shutdown = self.cpp[self.cpp.index("bool shutdown_ordered"):
                             self.cpp.index("SupervisorStartupHandoff startup")]
         order = (
             "stop_admission", "process_fence.drain", "children.drain",
-            "process_borrow.release", "pipe.stop", "leases.clear",
+            "wait_process_drained", "pipe.stop", "wait_all_drained", "leases.clear",
             "journal_owner.reset",
         )
         positions = [shutdown.index(token) for token in order]
         self.assertEqual(positions, sorted(positions))
         self.assertIn("No owner lock is held", self.cpp)
         self.assertIn("bool proven() const noexcept", self.cpp)
+        self.assertIn("std::shared_ptr<BorrowControlBlock> control_", self.cpp)
+        self.assertIn("std::condition_variable drained", self.cpp)
+
+    def test_startup_copy_and_open_failures_are_refusal_safe(self):
+        handoff = self.cpp[self.cpp.index("struct SupervisorStartupHandoff"):
+                           self.cpp.index("struct ProcessTransactionFence")]
+        self.assertNotIn(") noexcept", handoff)
+        self.assertRegex(self.cpp, r"explicit SupervisorState\(const SupervisorStartupHandoff& handoff\)\n")
+        opening = self.cpp[self.cpp.index("static std::unique_ptr<SupervisorState> open"):
+                           self.cpp.index("BorrowTicket borrow_for_process")]
+        for token in ("try {", "std::bad_alloc", "std::system_error", "catch (...)", "return nullptr;"):
+            self.assertIn(token, opening)
+
+    def test_pipe_and_process_retain_move_only_tickets(self):
+        pipe = self.cpp[self.cpp.index("struct PipeServerBorrow"):
+                       self.cpp.index("struct ChildRegistry")]
+        process = self.cpp[self.cpp.index("struct ProcessLaunchAuthority"):
+                          self.cpp.index("bool trust_gates_open")]
+        self.assertIn("BorrowTicket ticket", pipe)
+        self.assertIn("ticket = std::move(value)", pipe)
+        self.assertIn("~ProcessLaunchAuthority() noexcept = default", process)
+        self.assertIn("BorrowTicket(BorrowTicket&& other) noexcept", self.cpp)
+        self.assertIn("BorrowTicket(const BorrowTicket&) = delete", self.cpp)
+
+    def test_borrow_domain_has_linearized_close_count_and_wake(self):
+        domain = self.cpp[self.cpp.index("class BorrowControlBlock"):
+                         self.cpp.index("class BorrowTicket")]
+        for token in ("kClosing", "kPoisoned", "kMaxActiveBorrows", "compare_exchange_weak",
+                      "kProcessMask", "notify_all", "wait_process_drained", "wait_all_drained"):
+            self.assertIn(token, domain)
+        self.assertIn("active >= kMaxActiveBorrows", domain)
+        self.assertIn("active == 0", domain)
+
+    def test_borrow_domain_model_rejects_late_and_overflow_acquisition(self):
+        model = BorrowDomainModel()
+        self.assertTrue(model.acquire("pipe"))
+        self.assertTrue(model.acquire("process"))
+        model.close()
+        self.assertFalse(model.acquire("process"))
+        self.assertEqual((model.active, model.process), (2, 1))
+        self.assertTrue(model.release("process"))
+        self.assertTrue(model.release("pipe"))
+        self.assertEqual((model.active, model.process), (0, 0))
+        full = BorrowDomainModel()
+        full.active = full.MAX
+        self.assertFalse(full.acquire("pipe"))
+        self.assertTrue(full.release("pipe"))
+        self.assertTrue(full.poisoned)
+
+    def test_borrow_domain_model_interleavings_preserve_counts(self):
+        for events in product(("pipe_acquire", "process_acquire", "close",
+                               "pipe_release", "process_release"), repeat=5):
+            model = BorrowDomainModel()
+            held_pipe = held_process = 0
+            for event in events:
+                if event == "close":
+                    model.close()
+                    self.assertEqual(model.active, held_pipe + held_process)
+                    self.assertEqual(model.process, held_process)
+                    continue
+                kind, action = event.rsplit("_", 1)
+                if action == "acquire":
+                    accepted = model.acquire(kind)
+                    if accepted:
+                        if kind == "pipe": held_pipe += 1
+                        else: held_process += 1
+                elif action == "release":
+                    if (kind == "pipe" and not held_pipe) or (kind == "process" and not held_process):
+                        continue
+                    accepted = model.release(kind)
+                    if accepted:
+                        if kind == "pipe" and held_pipe: held_pipe -= 1
+                        elif kind == "process" and held_process: held_process -= 1
+                self.assertEqual(model.active, held_pipe + held_process)
+                self.assertEqual(model.process, held_process)
+                self.assertLessEqual(model.active, model.MAX)
+                self.assertLessEqual(model.process, model.MAX)
 
     def test_hard_refusal_precedes_every_mutation_boundary(self):
         body = self.tx[self.tx.index("LaunchReceipt execute_process_transaction") :]

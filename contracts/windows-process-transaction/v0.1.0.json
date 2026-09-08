@@ -24,8 +24,9 @@
     "operation_identity": "exact 16-byte array, never integer or hash coercion",
     "shutdown_order": [
       "stop admission",
-      "drain process fence/children/borrows",
-      "stop pipe",
+      "drain process fence/children/process borrows",
+      "stop pipe and release its borrow ticket",
+      "drain remaining borrow tickets",
       "destroy leases",
       "destroy JournalAuthorityOwner"
     ]

@@ -10,8 +10,10 @@ Phase 2a establishes one co-located supervisor/helper ownership topology:
 process transaction borrow that owner under an explicit lifetime proof. Startup
 requires an explicit canonical `StorageRequest` handoff, with no implicit
 storage path. Shutdown stops admission, drains process borrows and children,
-stops the pipe, destroys leases, and releases the owner last. No owner lock is
-held across waits.
+stops and releases the pipe borrow, drains the remaining tickets, destroys
+leases, and releases the owner last. The bounded shared control word makes
+close/acquire linearizable; a same-thread or timed-out drain is a finite
+fail-stop/refusal rather than a deadlock. No owner lock is held across waits.
 
 All process-path identities are complete sixteen-byte arrays. Lease binding is
 the complete typed binding from the owner helper, including request/call refs,
