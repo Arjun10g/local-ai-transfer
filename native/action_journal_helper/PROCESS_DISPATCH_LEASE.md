@@ -50,11 +50,10 @@ waits. Durable store commits are bounded storage operations; the future
 supervisor owns all process/pipe waits outside this boundary.
 
 `ProcessExternalProof` is an opaque, move-only capability. It has no public
-constructor, fields, or test factory; only the future co-located
-`TrustedProcessExternalProofIssuer` in slice 2 may mint one after independently
-validating real Windows process/job/handle/creation/I/O evidence. The proof is
-bound to the owner-generated, non-wrapping dispatch generation as well as the
-operation and external receipt/event evidence. Slice 1 defines no issuer and
-therefore has no genuine external-proof success path until that trusted seam
-is implemented. Arbitrary caller digests cannot acknowledge, recover, or
-complete an operation.
+constructor, fields, factory, or slice-1 mint path. Slice 2 requires a
+separately reviewed interface change that independently validates real Windows
+process/job/handle/creation/I/O evidence before minting this capability. The
+proof is bound to the owner-generated, non-wrapping dispatch generation as well
+as the operation and external receipt/event evidence. Until that interface is
+implemented, slice 1 has no genuine external-proof success path. Arbitrary
+caller digests cannot acknowledge, recover, or complete an operation.

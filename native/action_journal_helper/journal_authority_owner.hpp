@@ -84,7 +84,6 @@ class ProcessExternalProof final {
  private:
   friend class JournalAuthorityOwner;
   friend class ProcessDispatchLease;
-  friend class TrustedProcessExternalProofIssuer;
   ProcessExternalProof(
       const std::array<std::uint8_t, 16>& operation_id,
       const std::array<std::uint8_t, 32>& external_receipt_digest,
@@ -115,9 +114,6 @@ enum class ProcessDispatchLeaseStatus : std::uint8_t {
 };
 
 class JournalAuthorityOwner;
-// Declared only as a narrow future slice-2 seam.  Slice 1 deliberately does
-// not define this issuer or provide a test/public minting factory.
-class TrustedProcessExternalProofIssuer;
 
 // A lease is a one-use, noncopyable capability for the owner-internal
 // dispatch barrier.  It has no process handle, protocol key, nonce, or JSON.
@@ -152,7 +148,6 @@ class ProcessDispatchLease final {
 
  private:
   friend class JournalAuthorityOwner;
-  friend class TrustedProcessExternalProofIssuer;
   ProcessDispatchLease(JournalAuthorityOwner& owner,
                        const ProcessDispatchBinding& binding,
                        std::string operation_text);

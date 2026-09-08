@@ -70,14 +70,14 @@ failure.
 
 `ProcessExternalProof` is intentionally opaque and move-only: callers cannot
 construct, copy, inspect, or fabricate its operation, external evidence, or
-dispatch-generation fields. A narrow friend declaration names only the future
-co-located `TrustedProcessExternalProofIssuer`; slice 1 provides no issuer or
-test factory. The owner allocates a bounded non-wrapping dispatch generation at
-the external-dispatch admission point and requires that provenance in every
-acknowledge, lost-ACK recovery, and completion proof. Until slice 2 independently
-validates process/job/handle/creation/I/O evidence and mints this capability,
-all genuine external-proof success paths remain unavailable; no arbitrary
-receipt/event digests can authorize a transition.
+dispatch-generation fields. Its constructor is private and slice 1 provides
+no factory or mint path. Slice 2 requires a separately reviewed interface that
+independently validates process/job/handle/creation/I/O evidence before
+minting this capability. The owner allocates a bounded non-wrapping dispatch
+generation at the external-dispatch admission point and requires that
+provenance in every acknowledge, lost-ACK recovery, and completion proof.
+Until that interface exists, all genuine external-proof success paths remain
+unavailable; no arbitrary receipt/event digests can authorize a transition.
 
 This phase deliberately does not expose a supervisor bridge, public storage
 factory, second client, CMake target, package path, host import, registry entry,

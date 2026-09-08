@@ -46,10 +46,10 @@
     "public_constructor": false,
     "public_fields": false,
     "public_test_factory": false,
-    "minted_by": "TrustedProcessExternalProofIssuer (future slice 2 only)",
+    "minting": "unavailable until a separately reviewed slice-2 OS-evidence interface exists",
     "requires_independent_windows_process_evidence": true,
     "owner_generated_dispatch_generation": "bounded_nonwrapping",
-    "slice1_issuer_defined": false,
+    "slice1_mint_path": false,
     "slice1_genuine_success_path": false
   },
   "lock_order": ["admission_cas", "owner_mutex", "store_internals"],
