@@ -33,6 +33,8 @@ MAX_IDENTITY_BYTES = 256
 MAX_JSON_ELEMENTS = 1024
 USD_QUANTUM = Decimal("0.000001")
 ZERO_USD = Decimal("0")
+_DISPLAY_HEADER = "| date | phase | instance id | gpu | $/hr | purpose | status | cost logged | idle min |"
+_DISPLAY_SEPARATOR = "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
 
 
 class _EvidenceError(Exception):
@@ -229,6 +231,18 @@ def _check_ancestors(path: Path, issues: set[str]) -> list[tuple[int, int, int, 
         if not stat.S_ISDIR(info.st_mode):
             _issue(issues, "parent_not_directory")
             raise _EvidenceError("parent_not_directory")
+        # Ancestors are part of the evidence trust boundary.  System-owned
+        # non-writable anchors (for example / on a normal Unix checkout) are
+        # acceptable, but a foreign writable component is not.
+        if stat.S_IMODE(info.st_mode) & (stat.S_IWGRP | stat.S_IWOTH):
+            _issue(issues, "ancestor_unsafe_permissions")
+            raise _EvidenceError("ancestor_unsafe_permissions")
+        if hasattr(os, "geteuid") and int(info.st_uid) not in (os.geteuid(), 0):
+            _issue(issues, "ancestor_unsafe_owner")
+            # Keep the legacy parent label as a compatibility diagnostic; the
+            # ancestor label is the authoritative refusal reason.
+            _issue(issues, "parent_unsafe_owner")
+            raise _EvidenceError("ancestor_unsafe_owner")
         identities.append((int(info.st_dev), int(info.st_ino), int(info.st_mode), int(info.st_uid)))
     return identities
 
@@ -262,8 +276,10 @@ def _read_snapshot(path: Path, *, limit: int, issues: set[str]) -> tuple[bytes, 
         path = _absolute_path(path)
         ancestors = _check_ancestors(path, issues)
         parent = path.parent
+        preopen_info: os.stat_result | None = None
         try:
-            if stat.S_ISLNK(os.lstat(path).st_mode):
+            preopen_info = os.lstat(path)
+            if stat.S_ISLNK(preopen_info.st_mode):
                 _issue(issues, "symlink_path")
                 raise _EvidenceError("symlink_path")
         except FileNotFoundError:
@@ -273,9 +289,16 @@ def _read_snapshot(path: Path, *, limit: int, issues: set[str]) -> tuple[bytes, 
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         parent_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
         try:
+            parent_opened = os.fstat(parent_fd)
+            if _file_identity(before_parent) != _file_identity(parent_opened):
+                _issue(issues, "evidence_mutated_during_read")
+                raise _EvidenceError("evidence_mutated_during_read")
             descriptor = os.open(path.name, flags, dir_fd=parent_fd)
             try:
                 before = os.fstat(descriptor)
+                if preopen_info is None or _file_identity(preopen_info) != _file_identity(before):
+                    _issue(issues, "evidence_mutated_during_read")
+                    raise _EvidenceError("evidence_mutated_during_read")
                 if not stat.S_ISREG(before.st_mode):
                     _issue(issues, "not_regular_file")
                     raise _EvidenceError("not_regular_file")
@@ -300,9 +323,9 @@ def _read_snapshot(path: Path, *, limit: int, issues: set[str]) -> tuple[bytes, 
                 after = os.fstat(descriptor)
                 current_parent = os.stat(parent, follow_symlinks=False)
                 current = os.stat(path, follow_symlinks=False)
-                if (before.st_dev, before.st_ino, before.st_size) != (after.st_dev, after.st_ino, after.st_size) or \
-                        (after.st_dev, after.st_ino, after.st_size) != (current.st_dev, current.st_ino, current.st_size) or \
-                        before_parent.st_dev != current_parent.st_dev or before_parent.st_ino != current_parent.st_ino:
+                if _file_identity(before) != _file_identity(after) or \
+                        _file_identity(after) != _file_identity(current) or \
+                        _file_identity(before_parent) != _file_identity(current_parent):
                     _issue(issues, "evidence_mutated_during_read")
                     raise _EvidenceError("evidence_mutated_during_read")
                 if stat.S_IMODE(after.st_mode) != stat.S_IMODE(before.st_mode) or int(after.st_uid) != int(before.st_uid):
@@ -333,13 +356,20 @@ def _read_snapshot(path: Path, *, limit: int, issues: set[str]) -> tuple[bytes, 
         raise _EvidenceError("evidence_unavailable") from exc
 
 
+def _file_identity(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (int(info.st_dev), int(info.st_ino), int(info.st_mode), int(info.st_uid), int(info.st_nlink), int(info.st_size))
+
+
 def _read_relative_snapshot(parent_fd: int, parent_before: os.stat_result, name: str, *, limit: int,
-                             issues: set[str]) -> bytes:
+                             issues: set[str], expected: tuple[int, int, int, int, int, int] | None = None) -> bytes:
     """Read one receipt only through its already-open, private parent fd."""
     try:
         descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
         try:
             before = os.fstat(descriptor)
+            if expected is not None and _file_identity(before) != expected:
+                _issue(issues, "receipt_identity_changed_before_read")
+                raise _EvidenceError("receipt_identity_changed_before_read")
             if not stat.S_ISREG(before.st_mode):
                 _issue(issues, "receipt_not_regular_file")
                 raise _EvidenceError("receipt_not_regular_file")
@@ -369,10 +399,8 @@ def _read_relative_snapshot(parent_fd: int, parent_before: os.stat_result, name:
             if len(b"".join(chunks)) > limit:
                 _issue(issues, "receipt_byte_limit")
                 raise _EvidenceError("receipt_byte_limit")
-            if (before.st_dev, before.st_ino, before.st_mode, before.st_uid, before.st_nlink, before.st_size) != \
-                    (after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_nlink, after.st_size) or \
-                    (after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_nlink, after.st_size) != \
-                    (current.st_dev, current.st_ino, current.st_mode, current.st_uid, current.st_nlink, current.st_size) or \
+            if _file_identity(before) != _file_identity(after) or \
+                    _file_identity(after) != _file_identity(current) or \
                     (parent_before.st_dev, parent_before.st_ino, parent_before.st_mode, parent_before.st_uid) != \
                     (parent_after.st_dev, parent_after.st_ino, parent_after.st_mode, parent_after.st_uid):
                 _issue(issues, "evidence_mutated_during_read")
@@ -393,9 +421,12 @@ def _read_jsonl(path: Path, *, label: str, issues: set[str]) -> tuple[list[dict[
         data, metadata = _read_snapshot(path, limit=MAX_FILE_BYTES, issues=issues)
     except _EvidenceError:
         return [], {"line_count": 0, "private_permissions": False, "parse_refused": True}
-    if not data or not data.endswith(b"\n"):
+    if not data:
+        _issue(issues, f"{label}_empty")
+        return [], {**metadata, "line_count": 0, "parse_refused": True}
+    if not data.endswith(b"\n"):
         _issue(issues, f"{label}_partial_line")
-        return [], {**metadata, "line_count": 0}
+        return [], {**metadata, "line_count": 0, "parse_refused": True}
     lines = data.splitlines()
     if len(lines) > MAX_JSONL_LINES:
         _issue(issues, f"{label}_line_limit")
@@ -409,9 +440,14 @@ def _read_jsonl(path: Path, *, label: str, issues: set[str]) -> tuple[list[dict[
             continue
         if not line:
             malformed += 1
+            _issue(issues, f"{label}_blank_line")
             continue
         try:
+            line.decode("utf-8")
             rows.append(_strict_object(line))
+        except UnicodeDecodeError:
+            malformed += 1
+            _issue(issues, f"{label}_invalid_utf8")
         except _EvidenceError as exc:
             malformed += 1
             _issue(issues, f"{label}_{str(exc)}")
@@ -488,7 +524,7 @@ def _parse_legacy(path: Path, issues: set[str]) -> tuple[dict[str, Any], dict[tu
         "legacy_settled_nonce_absent_rows": None if refused else nonce_absent, "v2_parser_accepts": False,
         "v2_rejection": "legacy_schema_or_owner_binding_missing",
         "malformed_count": metadata.get("malformed_count", 0),
-        "parse_refused": bool(metadata.get("parse_refused", False)),
+        "parse_refused": refused,
     }, groups
 
 
@@ -496,52 +532,122 @@ def _parse_display(path: Path, groups: dict[tuple[str, str], dict[str, Any]], is
     try:
         data, metadata = _read_snapshot(path, limit=MAX_FILE_BYTES, issues=issues)
     except _EvidenceError:
-        return {"row_count": 0, "rounding_mismatch_count": 0, "malformed_count": 0, "parse_refused": True}
+        return {"row_count": None, "rounding_mismatch_count": None, "malformed_count": None, "parse_refused": True}
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         _issue(issues, "display_invalid_utf8")
-        return {"row_count": 0, "rounding_mismatch_count": 0, "malformed_count": 1, "parse_refused": False}
-    if data and not data.endswith(b"\n"):
+        return {"row_count": None, "rounding_mismatch_count": None, "malformed_count": None, "parse_refused": True}
+    if not data:
+        _issue(issues, "display_empty")
+        return {"row_count": None, "rounding_mismatch_count": None, "malformed_count": None, "parse_refused": True}
+    if not data.endswith(b"\n"):
         _issue(issues, "display_partial_line")
-    rows = []
+    lines = text.splitlines()
+    header_indexes = [index for index, line in enumerate(lines) if line.strip() == _DISPLAY_HEADER]
+    if len(header_indexes) != 1:
+        _issue(issues, "display_schema_invalid")
+        header_index = -2
+        parse_start = 0
+    else:
+        header_index = header_indexes[0]
+        parse_start = header_index + 2
+    if header_index >= 0 and (header_index + 1 >= len(lines) or lines[header_index + 1].strip() != _DISPLAY_SEPARATOR):
+        _issue(issues, "display_columns_invalid")
+        parse_start = header_index + 1
+
+    rows: list[tuple[str, str, str, str]] = []
     malformed = 0
-    for line in text.splitlines():
+    for line in lines[parse_start:]:
+        if line.strip() in {_DISPLAY_HEADER, _DISPLAY_SEPARATOR}:
+            continue
+        if not line.strip():
+            _issue(issues, "display_blank_line")
+            malformed += 1
+            continue
         if not line.lstrip().startswith("|"):
+            _issue(issues, "display_non_table_content")
+            malformed += 1
             continue
         cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if cells[0] in {"date", "---"} or set(cells[0]) <= {"-", ":"}:
-            continue
         if len(cells) != 9:
             malformed += 1
             _issue(issues, "display_malformed_row")
             continue
         try:
-            rows.append((cells[1], cells[2], Decimal(cells[7].replace("$", ""))))
-        except (InvalidOperation, IndexError):
+            if not cells[0] or not _safe_identity(cells[1]) or not _safe_identity(cells[2]):
+                raise InvalidOperation
+            if not cells[3] or not cells[4] or not cells[5] or cells[6] not in {"deleted", "pending", "created", "active", "delete-failed", "deleted-key-cleanup-failed", "deleted-cost-bookkeeping-failed"}:
+                raise InvalidOperation
+            cost = cells[7].strip()
+            if cost != "pending":
+                if not cost.startswith("$"):
+                    raise InvalidOperation
+                _decimal(cost[1:])
+            rows.append((cells[1], cells[2], cells[6], cost))
+        except (InvalidOperation, IndexError, TypeError):
             malformed += 1
+            _issue(issues, "display_malformed_row")
+
+    display_keys = {(phase, instance) for phase, instance, _, _ in rows}
+    if len(display_keys) != len(rows):
+        _issue(issues, "duplicate_display_row")
+        malformed += 1
+    if display_keys != set(groups):
+        _issue(issues, "display_incomplete_against_ledger")
+        malformed += 1
     mismatch = 0
-    for phase, instance, shown in rows:
+    for phase, instance, status, shown in rows:
         actual = groups.get((phase, instance), {}).get("actual_cost_usd")
-        if actual is None:
+        if (phase, instance) not in groups:
             _issue(issues, "display_orphan_row")
             continue
-        try:
-            if _decimal(shown) != _decimal(actual):
-                mismatch += 1
-        except InvalidOperation:
+        if status == "pending":
+            if actual is not None:
+                _issue(issues, "display_status_mismatch")
+                malformed += 1
+            continue
+        if actual is None:
+            _issue(issues, "display_status_mismatch")
             malformed += 1
+            continue
+        try:
+            if _decimal(shown[1:]) != _decimal(actual):
+                mismatch += 1
+        except (InvalidOperation, TypeError):
+            malformed += 1
+            _issue(issues, "display_cost_invalid")
     if mismatch:
         _issue(issues, "display_rounding_mismatch")
     if malformed:
         _issue(issues, "display_malformed_rows")
-    display_parse_errors = {"display_partial_line", "display_invalid_utf8", "display_malformed_row", "display_malformed_rows", "display_orphan_row"}
+    display_parse_errors = {"display_partial_line", "display_invalid_utf8", "display_empty", "display_schema_invalid", "display_columns_invalid", "display_blank_line", "display_non_table_content", "display_malformed_row", "display_malformed_rows", "display_orphan_row", "display_incomplete_against_ledger", "duplicate_display_row", "display_status_mismatch", "display_cost_invalid"}
     if mismatch or malformed or display_parse_errors & issues:
         return {"row_count": None, "rounding_mismatch_count": None, "malformed_count": None, "parse_refused": True}
     return {"row_count": len(rows), "rounding_mismatch_count": mismatch, "malformed_count": malformed, "parse_refused": False}
 
 
-def _receipt_files(root: Path, issues: set[str]) -> tuple[int | None, os.stat_result | None, list[str]]:
+def _enumerate_receipts(root_fd: int, issues: set[str]) -> dict[str, tuple[int, int, int, int, int, int]]:
+    entries: dict[str, tuple[int, int, int, int, int, int]] = {}
+    entry_bytes = 0
+    with os.scandir(root_fd) as scan:
+        for entry in scan:
+            child_info = entry.stat(follow_symlinks=False)
+            if stat.S_ISLNK(child_info.st_mode):
+                _issue(issues, "symlink_receipt")
+                raise _EvidenceError("symlink_receipt")
+            if not entry.name.endswith(".deletion-receipt.json"):
+                continue
+            name_bytes = len(entry.name.encode("utf-8"))
+            entry_bytes += name_bytes
+            if name_bytes > MAX_RECEIPT_NAME_BYTES or entry_bytes > MAX_RECEIPT_DIRECTORY_BYTES or len(entries) >= MAX_RECEIPTS:
+                _issue(issues, "receipt_count_or_directory_limit")
+                raise _EvidenceError("receipt_count_or_directory_limit")
+            entries[entry.name] = _file_identity(child_info)
+    return entries
+
+
+def _receipt_files(root: Path, issues: set[str]) -> tuple[int | None, os.stat_result | None, list[tuple[str, tuple[int, int, int, int, int, int]]]]:
     root_fd: int | None = None
     try:
         _require_secure_capabilities(issues)
@@ -553,24 +659,11 @@ def _receipt_files(root: Path, issues: set[str]) -> tuple[int | None, os.stat_re
             return None, None, []
         root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         anchored = os.fstat(root_fd)
+        if _file_identity(info) != _file_identity(anchored):
+            _issue(issues, "evidence_mutated_during_read")
+            raise _EvidenceError("evidence_mutated_during_read")
         _require_private_directory(anchored, issues, "deletion_root")
-        entries: list[str] = []
-        entry_bytes = 0
-        with os.scandir(root_fd) as scan:
-            for entry in scan:
-                child_info = entry.stat(follow_symlinks=False)
-                if stat.S_ISLNK(child_info.st_mode):
-                    _issue(issues, "symlink_receipt")
-                    raise _EvidenceError("symlink_receipt")
-                if entry.name.endswith(".deletion-receipt.json"):
-                    if len(entry.name.encode("utf-8")) > MAX_RECEIPT_NAME_BYTES:
-                        _issue(issues, "receipt_name_limit")
-                        raise _EvidenceError("receipt_name_limit")
-                    entry_bytes += len(entry.name.encode("utf-8"))
-                    if entry_bytes > MAX_RECEIPT_DIRECTORY_BYTES or len(entries) >= MAX_RECEIPTS:
-                        _issue(issues, "receipt_count_or_directory_limit")
-                        raise _EvidenceError("receipt_count_or_directory_limit")
-                    entries.append(entry.name)
+        entries = _enumerate_receipts(root_fd, issues)
         current = os.fstat(root_fd)
         if (anchored.st_dev, anchored.st_ino, anchored.st_mode, anchored.st_uid) != \
                 (current.st_dev, current.st_ino, current.st_mode, current.st_uid):
@@ -578,7 +671,7 @@ def _receipt_files(root: Path, issues: set[str]) -> tuple[int | None, os.stat_re
             raise _EvidenceError("evidence_mutated_during_read")
         if not _ancestors_stable(root / "placeholder", ancestors, issues):
             raise _EvidenceError("ancestor_component_swap")
-        return root_fd, anchored, sorted(entries)
+        return root_fd, anchored, sorted(entries.items())
     except (OSError, _EvidenceError):
         _issue(issues, "deletion_root_unavailable")
         if root_fd is not None:
@@ -595,10 +688,13 @@ def _parse_receipts(root: Path, groups: dict[tuple[str, str], dict[str, Any]], i
     absent_amount = ZERO_USD
     if root_fd is None:
         refused = True
-    for name in receipts:
+    for name, expected_identity in receipts:
         try:
             assert root_fd is not None and root_before is not None
-            row = _read_relative_snapshot(root_fd, root_before, name, limit=MAX_JSON_OBJECT_BYTES, issues=issues)
+            row = _read_relative_snapshot(
+                root_fd, root_before, name, limit=MAX_JSON_OBJECT_BYTES,
+                issues=issues, expected=expected_identity,
+            )
             value = _strict_object(row)
             if value.get("schema") != "local_bmo.shadeform.deletion-receipt.v1":
                 raise _EvidenceError("receipt_schema_invalid")
@@ -639,9 +735,16 @@ def _parse_receipts(root: Path, groups: dict[tuple[str, str], dict[str, Any]], i
             refused = True
     if root_fd is not None:
         try:
+            # A second bounded directory-fd enumeration is the generation
+            # check: additions, removals, and replacements invalidate the
+            # entire receipt stream rather than leaving partial totals.
+            second = _enumerate_receipts(root_fd, issues)
+            first = dict(receipts)
+            if second != first:
+                _issue(issues, "receipt_directory_changed")
+                refused = True
             root_after = os.fstat(root_fd)
-            if (root_before.st_dev, root_before.st_ino, root_before.st_mode, root_before.st_uid) != \
-                    (root_after.st_dev, root_after.st_ino, root_after.st_mode, root_after.st_uid):
+            if _file_identity(root_before) != _file_identity(root_after):
                 _issue(issues, "evidence_mutated_during_read")
                 refused = True
         except OSError:
@@ -675,9 +778,17 @@ def _parse_receipts(root: Path, groups: dict[tuple[str, str], dict[str, Any]], i
 
 def _parse_incidents(path: Path, groups: dict[tuple[str, str], dict[str, Any]], issues: set[str]) -> dict[str, Any]:
     rows, metadata = _read_jsonl(path, label="incidents", issues=issues)
+    required = {"phase_id", "incident"}
+    allowed = required | {
+        "instance_id", "nonce", "ownership_nonce", "ssh_key_id", "ssh_key_name",
+        "ssh_public_key_sha256", "error_type", "retry_required",
+    }
     unmatched_teardown = unmatched_other = duplicate_count = 0
     signatures: set[str] = set()
     for row in rows:
+        if set(row) - allowed or not required.issubset(row):
+            _issue(issues, "incident_schema_invalid")
+            continue
         incident = row.get("incident")
         signature = _canonical_signature(row)
         if signature in signatures:
@@ -685,11 +796,17 @@ def _parse_incidents(path: Path, groups: dict[tuple[str, str], dict[str, Any]], 
             _issue(issues, "duplicate_incident")
         signatures.add(signature)
         phase, instance = row.get("phase_id"), row.get("instance_id")
-        if not _safe_identity(incident) or not _safe_identity(phase) or not _safe_identity(instance):
+        identity_values = (incident, phase) + ((instance,) if instance is not None else ())
+        if not all(_safe_identity(value) for value in identity_values):
             _issue(issues, "incident_identity_invalid")
             continue
+        for field in ("nonce", "ownership_nonce", "ssh_key_id", "ssh_key_name", "ssh_public_key_sha256", "error_type"):
+            if field in row and not _safe_identity(row[field]):
+                _issue(issues, "incident_scalar_invalid")
+        if "retry_required" in row and not isinstance(row["retry_required"], bool):
+            _issue(issues, "incident_scalar_invalid")
         key = (phase, instance)
-        if key not in groups:
+        if instance is not None and key not in groups:
             if incident == "post-instance-teardown-unconfirmed":
                 unmatched_teardown += 1
             else:
@@ -699,7 +816,7 @@ def _parse_incidents(path: Path, groups: dict[tuple[str, str], dict[str, Any]], 
     if unmatched_other:
         _issue(issues, "unmatched_incidents")
     refused = bool(metadata.get("parse_refused", False)) or any(
-        issue in {"incident_identity_invalid", "duplicate_incident"} for issue in issues
+        issue in {"incident_identity_invalid", "incident_scalar_invalid", "incident_schema_invalid", "duplicate_incident"} for issue in issues
     ) or bool(unmatched_teardown or unmatched_other)
     if refused:
         unmatched_teardown = unmatched_other = duplicate_count = None

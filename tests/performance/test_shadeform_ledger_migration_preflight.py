@@ -323,6 +323,134 @@ class PreflightFixtureTests(unittest.TestCase):
                     preflight._read_snapshot(self.ledger, limit=100, issues=issues)
         self.assertIn("evidence_mutated_during_read", issues)
 
+    def test_empty_partial_invalid_utf8_and_non_table_evidence_refuse(self) -> None:
+        self.ledger.write_bytes(b"")
+        self.display.write_bytes(b"not a ledger table\n")
+        self.incidents.write_bytes(b"\xff\n")
+        report = preflight.run_preflight(
+            legacy_ledger=self.ledger, display_ledger=self.display,
+            deletion_root=self.runtime, incidents=self.incidents,
+        )
+        issues = report["path_safety"]["issues"]
+        self.assertIn("legacy_empty", issues)
+        self.assertIn("display_schema_invalid", issues)
+        self.assertIn("incidents_invalid_utf8", issues)
+        self.assertFalse(report["evidence_complete"])
+        self.assertFalse(report["cross_stream_reconciliation_available"])
+
+    def test_every_scoped_ancestor_rejects_world_writable(self) -> None:
+        self.root.chmod(0o777)
+        self.write_jsonl(self.ledger, [self.row()])
+        self.display.write_text("not a table\n", encoding="utf-8")
+        self.incidents.write_bytes(b"{}\n")
+        report = preflight.run_preflight(
+            legacy_ledger=self.ledger, display_ledger=self.display,
+            deletion_root=self.runtime, incidents=self.incidents,
+        )
+        self.assertIn("ancestor_unsafe_permissions", report["path_safety"]["issues"])
+        self.assertFalse(report["evidence_complete"])
+
+    def test_receipt_preopen_identity_and_generation_changes_refuse_whole_stream(self) -> None:
+        receipt = {
+            "schema": "local_bmo.shadeform.deletion-receipt.v1", "phase_id": "p", "instance_id": "i",
+            "actual_cost_usd": "1.000000", "deletion": {"status": "deleted"}, "salvage": {},
+        }
+        self.write_jsonl(self.runtime / "r.deletion-receipt.json", [receipt])
+        original_enumerate = preflight._enumerate_receipts
+        fd_for_first = os.open(self.runtime, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            first = original_enumerate(fd_for_first, set())
+        finally:
+            os.close(fd_for_first)
+        # A bounded re-enumeration that loses the entry is a directory
+        # generation change, not permission to retain the first total.
+        calls = {"count": 0}
+        def changing(fd, issues):
+            calls["count"] += 1
+            return first if calls["count"] == 1 else {}
+        issues: set[str] = set()
+        with mock.patch.object(preflight, "_enumerate_receipts", side_effect=changing):
+            report = preflight._parse_receipts(self.runtime, {}, issues)
+        self.assertTrue(report["parse_refused"])
+        self.assertIsNone(report["receipt_count"])
+        self.assertIn("receipt_directory_changed", issues)
+
+        # The root pre-open lstat identity is bound to the opened descriptor.
+        original_fstat = preflight.os.fstat
+        calls = {"count": 0}
+        def changed_root(fd):
+            result = original_fstat(fd)
+            calls["count"] += 1
+            if calls["count"] == 1:
+                values = list(result)
+                values[1] += 1
+                return os.stat_result(values)
+            return result
+        with mock.patch.object(preflight.os, "fstat", side_effect=changed_root):
+            issues = set()
+            report = preflight._parse_receipts(self.runtime, {}, issues)
+        self.assertTrue(report["parse_refused"])
+        self.assertIn("evidence_mutated_during_read", issues)
+
+        # A replacement between the directory snapshot and fd-relative open
+        # must not be interpreted as the originally enumerated receipt.
+        original_enumerate = preflight._enumerate_receipts
+        fd_for_first = os.open(self.runtime, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            first = original_enumerate(fd_for_first, set())
+        finally:
+            os.close(fd_for_first)
+        replacement = dict(first)
+        key = next(iter(replacement))
+        identity = list(replacement[key])
+        identity[1] += 1
+        replacement[key] = tuple(identity)
+        calls = {"count": 0}
+        def replaced(fd, issues):
+            calls["count"] += 1
+            return first if calls["count"] == 1 else replacement
+        issues = set()
+        with mock.patch.object(preflight, "_enumerate_receipts", side_effect=replaced):
+            report = preflight._parse_receipts(self.runtime, {}, issues)
+        self.assertTrue(report["parse_refused"])
+        self.assertIn("receipt_directory_changed", issues)
+
+    def test_file_preopen_lstat_swap_is_refused(self) -> None:
+        self.write_jsonl(self.ledger, [self.row()])
+        original_lstat = preflight.os.lstat
+        def swapped(path, *args, **kwargs):
+            result = original_lstat(path, *args, **kwargs)
+            if Path(path) == self.ledger:
+                values = list(result)
+                values[1] += 1
+                return os.stat_result(values)
+            return result
+        issues: set[str] = set()
+        with mock.patch.object(preflight.os, "lstat", side_effect=swapped):
+            with self.assertRaises(preflight._EvidenceError):
+                preflight._read_snapshot(self.ledger, limit=100, issues=issues)
+        self.assertIn("evidence_mutated_during_read", issues)
+
+    def test_incident_schema_and_display_completeness_refuse(self) -> None:
+        self.write_jsonl(self.ledger, [self.row(), self.row(instance="instance-b")])
+        self.display.write_text(
+            "| date | phase | instance id | gpu | $/hr | purpose | status | cost logged | idle min |\n"
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+            "| 2026-01-01 | phase-a | instance-a | gpu | $1 | run | deleted | $1.000000 | 0 |\n",
+            encoding="utf-8",
+        )
+        self.write_jsonl(self.incidents, [{"phase_id": "phase-a", "incident": "x", "unexpected": True}])
+        report = preflight.run_preflight(
+            legacy_ledger=self.ledger, display_ledger=self.display,
+            deletion_root=self.runtime, incidents=self.incidents,
+        )
+        issues = report["path_safety"]["issues"]
+        self.assertIn("display_incomplete_against_ledger", issues)
+        self.assertIn("incident_schema_invalid", issues)
+        self.assertTrue(report["display_ledger"]["parse_refused"])
+        self.assertTrue(report["incidents"]["parse_refused"])
+        self.assertFalse(report["evidence_complete"])
+
 
 if __name__ == "__main__":
     unittest.main()
