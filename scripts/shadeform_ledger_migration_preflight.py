@@ -17,6 +17,8 @@ import sys
 import re
 from typing import Any
 
+from scripts import shadeform_teardown as _teardown
+
 
 SCHEMA = "local_bmo.shadeform.cost-ledger-migration-preflight.v1"
 ADJUDICATION_SCHEMA = "local_bmo.shadeform.cost-ledger-adjudication-input.v1"
@@ -35,6 +37,33 @@ USD_QUANTUM = Decimal("0.000001")
 ZERO_USD = Decimal("0")
 _DISPLAY_HEADER = "| date | phase | instance id | gpu | $/hr | purpose | status | cost logged | idle min |"
 _DISPLAY_SEPARATOR = "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+_RECEIPT_KEYS = {
+    "schema", "phase_id", "instance_id", "owner", "status", "deletion", "salvage",
+    "actual_cost_usd", "attempt_reservation_settled", "owned_record_persisted",
+    "key_cleanup_pending", "key_cleanup_completed", "key_cleanup_deferred",
+    "retry_required", "cost_bookkeeping_error_type", "attempt_reservation_error_type",
+    "record_bookkeeping_error_type", "deletion_receipt_error_type",
+    "ssh_key_cleanup_error_type", "clear_bookkeeping_error_type",
+}
+_OWNER_KEYS = {
+    "phase_id", "instance_id", "instance_name", "ownership_nonce", "ssh_key_id",
+    "ssh_key_name", "ssh_key_fingerprint", "cloud", "region", "instance_type", "gpu",
+    "gpu_count", "vram_gb", "os_image", "hourly_usd", "created_at_utc",
+    "provider_delete_deadline_utc",
+}
+_DELETION_KEYS = {"success", "evidence", "confirmed_at_utc", "reconciled_from_deletion_intent", "error_type"}
+_SALVAGE_KEYS = {"status", "name", "size_bytes", "error_type"}
+_RECEIPT_STATUSES = {
+    "delete-failed", "recovery-pending", "deleted-cost-bookkeeping-failed",
+    "deleted-key-cleanup-failed", "complete",
+}
+_RECEIPT_ERROR_FIELDS = {
+    "cost_bookkeeping_error_type", "attempt_reservation_error_type",
+    "record_bookkeeping_error_type", "deletion_receipt_error_type",
+    "ssh_key_cleanup_error_type", "clear_bookkeeping_error_type",
+}
+_RECEIPT_SUCCESS_EVIDENCE = {"deleted", "provider-confirmed", "intent-reconciled"}
+_RECEIPT_ABSENT_EVIDENCE = {"absent", "provider-404"}
 
 
 class _EvidenceError(Exception):
@@ -528,6 +557,148 @@ def _parse_legacy(path: Path, issues: set[str]) -> tuple[dict[str, Any], dict[tu
     }, groups
 
 
+def _validate_canonical_receipt(value: dict[str, Any]) -> tuple[str, str, str]:
+    """Validate the exact bytes emitted by ``_canonical_deletion_receipt``.
+
+    The producer intentionally supplies defaults while constructing a receipt;
+    a historical evidence reader must not do that.  Exact key sets and scalar
+    shapes are checked first, then the producer validator is used as a
+    round-trip oracle so this audit cannot drift from the live receipt schema.
+    """
+
+    if set(value) != _RECEIPT_KEYS:
+        raise _EvidenceError("receipt_schema_invalid")
+    phase = value.get("phase_id")
+    instance = value.get("instance_id")
+    if not _safe_identity(phase) or not _safe_identity(instance):
+        raise _EvidenceError("identity_invalid")
+    if value.get("schema") != _teardown.DELETION_RECEIPT_SCHEMA:
+        raise _EvidenceError("schema_invalid")
+    if value.get("status") not in _RECEIPT_STATUSES:
+        raise _EvidenceError("status_invalid")
+
+    owner = value.get("owner")
+    if not isinstance(owner, dict) or set(owner) != _OWNER_KEYS:
+        raise _EvidenceError("owner_schema_invalid")
+    if owner.get("phase_id") != phase or owner.get("instance_id") != instance:
+        raise _EvidenceError("owner_binding_invalid")
+    # Owner profile fields are immutable scalar bindings, never containers.
+    for field in _OWNER_KEYS - {"gpu_count", "vram_gb", "hourly_usd"}:
+        if not isinstance(owner.get(field), str) or not owner[field] or not owner[field].isascii():
+            raise _EvidenceError("owner_scalar_invalid")
+    if isinstance(owner.get("gpu_count"), bool) or not isinstance(owner.get("gpu_count"), int) or not 1 <= owner["gpu_count"] <= 16:
+        raise _EvidenceError("owner_scalar_invalid")
+    if isinstance(owner.get("vram_gb"), bool) or not isinstance(owner.get("vram_gb"), int) or not 1 <= owner["vram_gb"] <= 4096:
+        raise _EvidenceError("owner_scalar_invalid")
+    if isinstance(owner.get("hourly_usd"), bool) or not isinstance(owner.get("hourly_usd"), (int, Decimal)):
+        raise _EvidenceError("owner_scalar_invalid")
+    if owner["hourly_usd"] <= 0:
+        raise _EvidenceError("owner_scalar_invalid")
+    try:
+        _decimal(owner["hourly_usd"])
+    except InvalidOperation as exc:
+        raise _EvidenceError("owner_cost_invalid") from exc
+
+    deletion = value.get("deletion")
+    if not isinstance(deletion, dict) or set(deletion) != _DELETION_KEYS:
+        raise _EvidenceError("deletion_schema_invalid")
+    if not isinstance(deletion["success"], bool) or not isinstance(deletion["reconciled_from_deletion_intent"], bool):
+        raise _EvidenceError("deletion_scalar_invalid")
+    if not isinstance(deletion["evidence"], str) or deletion["evidence"] not in {
+        "unconfirmed", "intent-reconciled", "provider-404", "deleted", "absent", "provider-confirmed",
+    }:
+        raise _EvidenceError("deletion_status_invalid")
+    if deletion["confirmed_at_utc"] is not None and not isinstance(deletion["confirmed_at_utc"], str):
+        raise _EvidenceError("deletion_confirmation_invalid")
+    if deletion["error_type"] is not None and not isinstance(deletion["error_type"], str):
+        raise _EvidenceError("deletion_error_invalid")
+
+    salvage = value.get("salvage")
+    if not isinstance(salvage, dict) or set(salvage) != _SALVAGE_KEYS:
+        raise _EvidenceError("salvage_schema_invalid")
+    if salvage.get("status") not in {"nothing_available", "not_available", "salvaged", "salvage_failed"}:
+        raise _EvidenceError("salvage_status_invalid")
+    if salvage["name"] is not None and not isinstance(salvage["name"], str):
+        raise _EvidenceError("salvage_scalar_invalid")
+    if salvage["size_bytes"] is not None and (
+        isinstance(salvage["size_bytes"], bool) or not isinstance(salvage["size_bytes"], int)
+    ):
+        raise _EvidenceError("salvage_scalar_invalid")
+    if salvage["error_type"] is not None and not isinstance(salvage["error_type"], str):
+        raise _EvidenceError("salvage_error_invalid")
+    for field in ("attempt_reservation_settled", "owned_record_persisted", "key_cleanup_pending",
+                  "key_cleanup_completed", "key_cleanup_deferred", "retry_required"):
+        if not isinstance(value[field], bool):
+            raise _EvidenceError("receipt_boolean_invalid")
+    for field in _RECEIPT_ERROR_FIELDS:
+        if value[field] is not None and not isinstance(value[field], str):
+            raise _EvidenceError("receipt_error_invalid")
+    if value["actual_cost_usd"] is None:
+        raise _EvidenceError("cost_missing")
+
+    try:
+        # ``json.loads`` deliberately keeps decimal JSON numbers as Decimal;
+        # the producer's in-memory OwnedResource validator expects its hourly
+        # field as a native float.  Convert only that compatibility field for
+        # validation, while retaining exact Decimal equality for the receipt.
+        producer_value = dict(value)
+        producer_owner = dict(owner)
+        producer_owner["hourly_usd"] = float(owner["hourly_usd"])
+        producer_value["owner"] = producer_owner
+        producer_value["actual_cost_usd"] = float(value["actual_cost_usd"])
+        canonical = _teardown._canonical_deletion_receipt(phase, producer_value)
+    except (KeyError, TypeError, ValueError, InvalidOperation, OverflowError) as exc:
+        raise _EvidenceError("receipt_noncanonical") from exc
+
+    def equivalent(left: Any, right: Any) -> bool:
+        if isinstance(left, (int, float, Decimal)) and not isinstance(left, bool) and \
+                isinstance(right, (int, float, Decimal)) and not isinstance(right, bool):
+            try:
+                return Decimal(str(left)) == Decimal(str(right))
+            except (InvalidOperation, ValueError):
+                return False
+        if isinstance(left, dict) and isinstance(right, dict):
+            return set(left) == set(right) and all(equivalent(left[key], right[key]) for key in left)
+        if isinstance(left, list) and isinstance(right, list):
+            return len(left) == len(right) and all(equivalent(a, b) for a, b in zip(left, right))
+        return left == right
+
+    if not equivalent(canonical, value):
+        raise _EvidenceError("receipt_noncanonical")
+    evidence = deletion["evidence"]
+    if deletion["success"] is not True or evidence not in (_RECEIPT_SUCCESS_EVIDENCE | _RECEIPT_ABSENT_EVIDENCE):
+        raise _EvidenceError("receipt_outcome_unresolved")
+    try:
+        _decimal(value["actual_cost_usd"])
+    except InvalidOperation as exc:
+        raise _EvidenceError("receipt_cost_invalid") from exc
+    return phase, instance, evidence
+
+
+def _canonical_display_prefix() -> bytes | None:
+    """Return the repository's exact non-table display preamble.
+
+    The checked-in display is the only canonical source for this historical
+    Markdown framing.  It is read only to obtain the fixed prefix; an absent
+    or malformed source disables display reconciliation rather than accepting
+    a caller-provided approximation.
+    """
+
+    source = Path(__file__).resolve().parents[1] / "experiments" / "LEDGER.md"
+    try:
+        data = source.read_bytes()
+    except OSError:
+        return None
+    header = (_DISPLAY_HEADER + "\n").encode("utf-8")
+    index = data.find(header)
+    if index <= 0 or data.find(header, index + 1) >= 0:
+        return None
+    prefix = data[:index]
+    if not prefix.endswith(b"\n\n") or len(prefix.splitlines()) != 6:
+        return None
+    return prefix
+
+
 def _parse_display(path: Path, groups: dict[tuple[str, str], dict[str, Any]], issues: set[str]) -> dict[str, Any]:
     try:
         data, metadata = _read_snapshot(path, limit=MAX_FILE_BYTES, issues=issues)
@@ -541,35 +712,38 @@ def _parse_display(path: Path, groups: dict[tuple[str, str], dict[str, Any]], is
     if not data:
         _issue(issues, "display_empty")
         return {"row_count": None, "rounding_mismatch_count": None, "malformed_count": None, "parse_refused": True}
+    prefix = _canonical_display_prefix()
+    framing = None if prefix is None else prefix + (_DISPLAY_HEADER + "\n" + _DISPLAY_SEPARATOR + "\n").encode("utf-8")
+    if framing is None or not data.startswith(framing):
+        _issue(issues, "display_schema_invalid")
+        return {"row_count": None, "rounding_mismatch_count": None, "malformed_count": None, "parse_refused": True}
     if not data.endswith(b"\n"):
         _issue(issues, "display_partial_line")
-    lines = text.splitlines()
-    header_indexes = [index for index, line in enumerate(lines) if line.strip() == _DISPLAY_HEADER]
-    if len(header_indexes) != 1:
-        _issue(issues, "display_schema_invalid")
-        header_index = -2
-        parse_start = 0
-    else:
-        header_index = header_indexes[0]
-        parse_start = header_index + 2
-    if header_index >= 0 and (header_index + 1 >= len(lines) or lines[header_index + 1].strip() != _DISPLAY_SEPARATOR):
-        _issue(issues, "display_columns_invalid")
-        parse_start = header_index + 1
+    body = data[len(framing):]
+    if not body and groups:
+        _issue(issues, "display_incomplete_against_ledger")
 
     rows: list[tuple[str, str, str, str]] = []
     malformed = 0
-    for line in lines[parse_start:]:
-        if line.strip() in {_DISPLAY_HEADER, _DISPLAY_SEPARATOR}:
+    for raw_line in body.splitlines(keepends=True):
+        if not raw_line.endswith(b"\n") or raw_line.endswith(b"\r\n"):
+            _issue(issues, "display_partial_line")
+            malformed += 1
             continue
-        if not line.strip():
+        line = raw_line[:-1].decode("utf-8")
+        if line in {_DISPLAY_HEADER, _DISPLAY_SEPARATOR}:
+            _issue(issues, "display_duplicate_framing")
+            malformed += 1
+            continue
+        if not line:
             _issue(issues, "display_blank_line")
             malformed += 1
             continue
-        if not line.lstrip().startswith("|"):
+        if not line.startswith("|") or not line.endswith("|"):
             _issue(issues, "display_non_table_content")
             malformed += 1
             continue
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        cells = [cell.strip() for cell in line[1:-1].split("|")]
         if len(cells) != 9:
             malformed += 1
             _issue(issues, "display_malformed_row")
@@ -621,7 +795,7 @@ def _parse_display(path: Path, groups: dict[tuple[str, str], dict[str, Any]], is
         _issue(issues, "display_rounding_mismatch")
     if malformed:
         _issue(issues, "display_malformed_rows")
-    display_parse_errors = {"display_partial_line", "display_invalid_utf8", "display_empty", "display_schema_invalid", "display_columns_invalid", "display_blank_line", "display_non_table_content", "display_malformed_row", "display_malformed_rows", "display_orphan_row", "display_incomplete_against_ledger", "duplicate_display_row", "display_status_mismatch", "display_cost_invalid"}
+    display_parse_errors = {"display_partial_line", "display_invalid_utf8", "display_empty", "display_schema_invalid", "display_columns_invalid", "display_blank_line", "display_non_table_content", "display_malformed_row", "display_malformed_rows", "display_orphan_row", "display_incomplete_against_ledger", "duplicate_display_row", "display_status_mismatch", "display_cost_invalid", "display_duplicate_framing"}
     if mismatch or malformed or display_parse_errors & issues:
         return {"row_count": None, "rounding_mismatch_count": None, "malformed_count": None, "parse_refused": True}
     return {"row_count": len(rows), "rounding_mismatch_count": mismatch, "malformed_count": malformed, "parse_refused": False}
@@ -696,26 +870,13 @@ def _parse_receipts(root: Path, groups: dict[tuple[str, str], dict[str, Any]], i
                 issues=issues, expected=expected_identity,
             )
             value = _strict_object(row)
-            if value.get("schema") != "local_bmo.shadeform.deletion-receipt.v1":
-                raise _EvidenceError("receipt_schema_invalid")
-            phase, instance = value.get("phase_id"), value.get("instance_id")
-            deletion = value.get("deletion")
-            if not _safe_identity(phase) or not _safe_identity(instance) or not isinstance(deletion, dict):
-                raise _EvidenceError("receipt_identity_invalid")
-            status = deletion.get("status")
+            phase, instance, evidence = _validate_canonical_receipt(value)
+            status = "absent" if evidence in _RECEIPT_ABSENT_EVIDENCE else "deleted"
+            amount = _decimal(value["actual_cost_usd"])
             if status == "deleted":
                 deleted += 1
-            elif status == "absent":
-                absent += 1
-                try:
-                    amount = _decimal(value.get("actual_cost_usd", 0))
-                except InvalidOperation:
-                    _issue(issues, "receipt_cost_invalid")
-                    amount = ZERO_USD
-                    refused = True
-                refused = True
             else:
-                raise _EvidenceError("receipt_status_invalid")
+                absent += 1
             key = (phase, instance)
             if key in seen_keys:
                 duplicate_count += 1

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
+import copy
 import importlib
 import json
 import os
@@ -34,17 +35,56 @@ class PreflightFixtureTests(unittest.TestCase):
         payload = "\n".join(json.dumps(row, sort_keys=True, separators=(",", ":"), default=str) for row in rows)
         path.write_text(payload + ("\n" if final_newline else ""), encoding="utf-8")
 
+    def write_receipt(self, path: Path, receipt: dict) -> None:
+        encoded = json.dumps(receipt, sort_keys=True, separators=(",", ":"), default=str)
+        actual = receipt.get("actual_cost_usd")
+        if isinstance(actual, Decimal):
+            encoded = encoded.replace('"actual_cost_usd":"' + str(actual) + '"', '"actual_cost_usd":' + str(actual), 1)
+        path.write_text(encoded + "\n", encoding="utf-8")
+
     def row(self, status: str = "settled", amount: str = "1.000000", *, phase: str = "phase-a", instance: str = "instance-a") -> dict:
         row = {"phase_id": phase, "instance_id": instance, "status": status, "ownership_nonce": "n"}
         row["actual_cost_usd" if status == "settled" else "estimated_cost_usd"] = Decimal(amount)
         return row
 
+    def receipt(self, *, phase: str = "phase-a", instance: str = "instance-a", evidence: str = "deleted", amount: str = "1.000000") -> dict:
+        return {
+            "schema": "local_bmo.shadeform.deletion-receipt.v1",
+            "phase_id": phase,
+            "instance_id": instance,
+            "owner": {
+                "phase_id": phase, "instance_id": instance, "instance_name": instance,
+                "ownership_nonce": "a" * 32, "ssh_key_id": "key-aa", "ssh_key_name": "key-aa",
+                "ssh_key_fingerprint": "A" * 43, "cloud": "cloud", "region": "region",
+                "instance_type": "gpu-type", "gpu": "gpu", "gpu_count": 1, "vram_gb": 80,
+                "os_image": "ubuntu", "hourly_usd": 1.0,
+                "created_at_utc": "2026-01-01T00:00:00+00:00",
+                "provider_delete_deadline_utc": "2026-01-01T02:00:00+00:00",
+            },
+            "status": "complete",
+            "deletion": {
+                "success": True, "evidence": evidence,
+                "confirmed_at_utc": "2026-01-01T01:00:00+00:00",
+                "reconciled_from_deletion_intent": evidence == "intent-reconciled", "error_type": None,
+            },
+            "salvage": {"status": "not_available", "name": None, "size_bytes": None, "error_type": None},
+            "actual_cost_usd": Decimal(amount),
+            "attempt_reservation_settled": True, "owned_record_persisted": True,
+            "key_cleanup_pending": False, "key_cleanup_completed": True, "key_cleanup_deferred": False,
+            "retry_required": False,
+            "cost_bookkeeping_error_type": None, "attempt_reservation_error_type": None,
+            "record_bookkeeping_error_type": None, "deletion_receipt_error_type": None,
+            "ssh_key_cleanup_error_type": None, "clear_bookkeeping_error_type": None,
+        }
+
     def report(self, rows: list[dict], *, receipts: list[dict] | None = None, incident_rows: list[dict] | None = None) -> dict:
         self.write_jsonl(self.ledger, rows)
-        self.display.write_text("| date | phase | instance | gpu | hourly | purpose | status | cost | idle |\n", encoding="utf-8")
+        prefix = preflight._canonical_display_prefix()
+        self.assertIsNotNone(prefix)
+        self.display.write_bytes(prefix + (preflight._DISPLAY_HEADER + "\n" + preflight._DISPLAY_SEPARATOR + "\n").encode())
         self.write_jsonl(self.incidents, incident_rows or [])
         for index, receipt in enumerate(receipts or []):
-            self.write_jsonl(self.runtime / f"r{index}.deletion-receipt.json", [receipt])
+            self.write_receipt(self.runtime / f"r{index}.deletion-receipt.json", receipt)
         return preflight.run_preflight(
             legacy_ledger=self.ledger, display_ledger=self.display,
             deletion_root=self.runtime, incidents=self.incidents,
@@ -120,17 +160,14 @@ class PreflightFixtureTests(unittest.TestCase):
         self.assertIn("byte_limit", report["path_safety"]["issues"])
 
     def test_orphan_absent_receipt_rounding_and_pending_are_explicit(self) -> None:
-        receipt = {
-            "schema": "local_bmo.shadeform.deletion-receipt.v1",
-            "phase_id": "orphan", "instance_id": "orphan-instance",
-            "actual_cost_usd": Decimal("0.000071"),
-            "deletion": {"status": "absent"}, "salvage": {"status": "nothing_available"},
-        }
+        receipt = self.receipt(phase="orphan", instance="orphan-instance", evidence="absent", amount="0.000071")
         display = "| 2026 | phase-a | instance-a | gpu | $1 | x | deleted | $0.9999 | 0 |\n"
         self.write_jsonl(self.ledger, [self.row("settled", "1.000000"), self.row("pending", "2.000000", instance="instance-b")])
-        self.display.write_text(display, encoding="utf-8")
+        prefix = preflight._canonical_display_prefix()
+        self.assertIsNotNone(prefix)
+        self.display.write_bytes(prefix + (preflight._DISPLAY_HEADER + "\n" + preflight._DISPLAY_SEPARATOR + "\n").encode() + display.encode("utf-8"))
         self.write_jsonl(self.incidents, [])
-        self.write_jsonl(self.runtime / "orphan.deletion-receipt.json", [receipt])
+        self.write_receipt(self.runtime / "orphan.deletion-receipt.json", receipt)
         report = preflight.run_preflight(
             legacy_ledger=self.ledger, display_ledger=self.display,
             deletion_root=self.runtime, incidents=self.incidents,
@@ -158,7 +195,9 @@ class PreflightFixtureTests(unittest.TestCase):
         huge = {"phase_id": "p", "instance_id": "i", "status": "settled", "actual_cost_usd": int("9" * 65)}
         deep = "{" + "\"x\":[" * 33 + "0" + "]" * 33 + "}\n"
         self.ledger.write_text(json.dumps(huge) + "\n" + deep, encoding="utf-8")
-        self.display.write_text("| malformed | row |\n", encoding="utf-8")
+        prefix = preflight._canonical_display_prefix()
+        self.assertIsNotNone(prefix)
+        self.display.write_bytes(prefix + (preflight._DISPLAY_HEADER + "\n" + preflight._DISPLAY_SEPARATOR + "\n").encode() + b"| malformed | row |\n")
         self.write_jsonl(self.incidents, [{"phase_id": ["not-scalar"], "instance_id": "i", "incident": "x"}])
         report = preflight.run_preflight(
             legacy_ledger=self.ledger, display_ledger=self.display,
@@ -185,10 +224,7 @@ class PreflightFixtureTests(unittest.TestCase):
             preflight._strict_object((b'{"a":"' + b"x" * 20_000 + b'"}\n'))
 
     def test_receipt_overflow_and_root_swap_never_return_partial_counts(self) -> None:
-        receipt = {
-            "schema": "local_bmo.shadeform.deletion-receipt.v1", "phase_id": "p", "instance_id": "i",
-            "actual_cost_usd": "1.000000", "deletion": {"status": "deleted"}, "salvage": {},
-        }
+        receipt = self.receipt(phase="p", instance="instance-i")
         self.write_jsonl(self.runtime / "a.deletion-receipt.json", [receipt])
         self.write_jsonl(self.runtime / "b.deletion-receipt.json", [receipt])
         with mock.patch.object(preflight, "MAX_RECEIPTS", 1):
@@ -351,10 +387,7 @@ class PreflightFixtureTests(unittest.TestCase):
         self.assertFalse(report["evidence_complete"])
 
     def test_receipt_preopen_identity_and_generation_changes_refuse_whole_stream(self) -> None:
-        receipt = {
-            "schema": "local_bmo.shadeform.deletion-receipt.v1", "phase_id": "p", "instance_id": "i",
-            "actual_cost_usd": "1.000000", "deletion": {"status": "deleted"}, "salvage": {},
-        }
+        receipt = self.receipt(phase="p", instance="instance-i")
         self.write_jsonl(self.runtime / "r.deletion-receipt.json", [receipt])
         original_enumerate = preflight._enumerate_receipts
         fd_for_first = os.open(self.runtime, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -433,12 +466,12 @@ class PreflightFixtureTests(unittest.TestCase):
 
     def test_incident_schema_and_display_completeness_refuse(self) -> None:
         self.write_jsonl(self.ledger, [self.row(), self.row(instance="instance-b")])
-        self.display.write_text(
+        prefix = preflight._canonical_display_prefix()
+        self.assertIsNotNone(prefix)
+        self.display.write_bytes(prefix + (
             "| date | phase | instance id | gpu | $/hr | purpose | status | cost logged | idle min |\n"
             "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
-            "| 2026-01-01 | phase-a | instance-a | gpu | $1 | run | deleted | $1.000000 | 0 |\n",
-            encoding="utf-8",
-        )
+            "| 2026-01-01 | phase-a | instance-a | gpu | $1 | run | deleted | $1.000000 | 0 |\n").encode("utf-8"))
         self.write_jsonl(self.incidents, [{"phase_id": "phase-a", "incident": "x", "unexpected": True}])
         report = preflight.run_preflight(
             legacy_ledger=self.ledger, display_ledger=self.display,
@@ -450,6 +483,47 @@ class PreflightFixtureTests(unittest.TestCase):
         self.assertTrue(report["display_ledger"]["parse_refused"])
         self.assertTrue(report["incidents"]["parse_refused"])
         self.assertFalse(report["evidence_complete"])
+
+    def test_receipt_requires_exact_canonical_shape_before_defaults(self) -> None:
+        baseline = self.receipt()
+        mutations = {
+            "minimal": {"schema": baseline["schema"]},
+            "unknown_top_level": {**baseline, "future": True},
+            "unknown_owner": {**baseline, "owner": {**baseline["owner"], "future": True}},
+            "unknown_deletion": {**baseline, "deletion": {**baseline["deletion"], "future": True}},
+            "unknown_salvage": {**baseline, "salvage": {**baseline["salvage"], "future": True}},
+            "missing_owner": {key: value for key, value in baseline.items() if key != "owner"},
+            "missing_status": {key: value for key, value in baseline.items() if key != "status"},
+            "missing_salvage": {key: value for key, value in baseline.items() if key != "salvage"},
+            "missing_cost": {**baseline, "actual_cost_usd": None},
+            "missing_absent_cost": {**self.receipt(evidence="absent"), "actual_cost_usd": None},
+            "missing_confirmation": {**baseline, "deletion": {**baseline["deletion"], "confirmed_at_utc": None}},
+            "malformed_nested": {**baseline, "deletion": {**baseline["deletion"], "success": "yes"}},
+            "malformed_bool": {**baseline, "retry_required": "false"},
+            "malformed_error": {**baseline, "deletion": {**baseline["deletion"], "error_type": {"kind": "x"}}},
+        }
+        for label, value in mutations.items():
+            with self.subTest(label=label), self.assertRaises(preflight._EvidenceError):
+                preflight._validate_canonical_receipt(copy.deepcopy(value))
+
+    def test_display_framing_is_byte_exact_and_contiguous(self) -> None:
+        prefix = preflight._canonical_display_prefix()
+        self.assertIsNotNone(prefix)
+        framing = (preflight._DISPLAY_HEADER + "\n" + preflight._DISPLAY_SEPARATOR + "\n").encode()
+        row = b"| 2026-01-01 | phase-a | instance-a | gpu | $1 | run | deleted | $1.000000 | 0 |\n"
+        variants = {
+            "extra_preamble": prefix + b"\n" + framing + row,
+            "header_whitespace": prefix + b" " + framing + row,
+            "duplicate_separator": prefix + framing + preflight._DISPLAY_SEPARATOR.encode() + b"\n" + row,
+            "trailing_garbage": prefix + framing + row + b"trailing\n",
+        }
+        for label, payload in variants.items():
+            with self.subTest(label=label):
+                self.display.write_bytes(payload)
+                self.display.chmod(0o600)
+                issues: set[str] = set()
+                result = preflight._parse_display(self.display, {("phase-a", "instance-a"): self.row()}, issues)
+                self.assertTrue(result["parse_refused"])
 
 
 if __name__ == "__main__":
