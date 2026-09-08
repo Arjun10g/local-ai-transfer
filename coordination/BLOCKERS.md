@@ -1,5 +1,30 @@
 # Blockers
 
+## Current governance reconciliation — 2026-09-08
+
+- Exact source baseline is `main@2ad3006d684a8b36bfb4f4827855165d470cb877`.
+  Accepted source merges are owner authority `7128278`, event cap `12e722a`,
+  current 33-tool/37-case evaluation profile `b13deb5` with `max_cases=64`
+  ceiling semantics, ledger preflight `83cffab` plus display-prefix fix
+  `089d05d`, and phase-2a single-owner topology `2ad3006` from `03885df`.
+- Remote execution remains false; only two no-model canary probes are allowed.
+  The lease has no proof issuer or success/runtime wiring. External salvage is
+  unavailable, and legacy lifecycle is non-green. Read-only ledger preflight is
+  source-merged by `83cffab` (candidate `b777b54`) and independently audited,
+  but `SAFE_TO_MIGRATE_NOW=NO`: current legacy evidence is parse-refused/
+  unavailable under unsafe permissions, while orphan receipts and unmatched
+  incidents require adjudication. No genesis, spend authorization, or
+  provider execution is implied. Bookkeeping is not spend authorization.
+- Phase-2a single-owner topology is merged at `2ad3006` from `03885df`; two
+  independent audits and post-merge source integration passed. Legacy parallel
+  journal types are removed and tracked tickets/exact IDs are present, but the
+  proof issuer, process mutation, product activation, and compile/live/target
+  evidence remain absent. Phase-2b is design-only/in progress.
+- Historical evaluation figures 13/32 and 28/32/11/34 are retained as
+  separate historical evidence, not current acceptance. Credentials require
+  source-side rotation/revocation. Release/full access remains `BLOCKED` /
+  `NOT_READY`; no compile/live/provider/model/target claim is made.
+
 ## B-001 — Exact target receipt incomplete
 
 - Fact: operator-supplied partial facts identify a Dell Intel Core Ultra 7 vPro Enterprise-class platform, one integrated `Intel Graphics` adapter with no discrete GPU, display driver `32.0.101.8247`, 32 GB DDR5-class memory reported at 5600 MT/s, and motherboard `039NNG` revision `A00`. No redacted `hardware-receipt.json`, exact CPU SKU, GPU PNP/device ID, usable/shared GPU memory, Windows build, Vulkan capability, or measured available-memory topology is present.

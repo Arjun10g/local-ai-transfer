@@ -1,6 +1,34 @@
 # Status Packet
 
-## Current governance snapshot — 2026-09-05
+## Current governance snapshot — 2026-09-08
+
+- Exact baseline is `main@2ad3006d684a8b36bfb4f4827855165d470cb877`; production
+  ActionJournal authority/transport remains unavailable and overall state is
+  `NOT_READY`.
+- Owner authority `7128278` and event-cap alignment `12e722a` are source-merged;
+  the event cap is 16, not the historical 32 declaration. The inert dispatch
+  lease `5bef3cd` is also merged but has no proof issuer, process mutation,
+  product activation, or success/runtime wiring. These are not compile/live/
+  production/target evidence. Ledger preflight and prefix fix are merged at
+  `83cffab` and `089d05d`, with 31/31 postmerge integration.
+- Remote execution remains false; its inert hardening `a9d2388` allows only two
+  no-model canary probes, with no fall-through/direct execution. External
+  salvage is unavailable. Read-only ledger preflight is source-merged by
+  `83cffab` (candidate `b777b54`) and independently audited, but
+  `SAFE_TO_MIGRATE_NOW=NO`: current evidence is parse-refused/unavailable
+  under unsafe permissions, and orphan receipts/unmatched incidents require
+  adjudication. No genesis, spend authorization, or provider execution is
+  supplied. Credentials require rotation/revocation. No gate advances.
+- Phase-2a is merged at `2ad3006` from `03885df`; two independent audits and
+  postmerge source integration passed. Legacy parallel journal types are
+  removed, but proof issuer, process mutation, product activation, and
+  compile/live/target evidence remain absent. Phase-2b is design-only/in
+  progress. Postmerge scoped evidence is 250/250 targeted Python, 4/4 parity,
+  32/32 evaluator, and QA 53/53 blocked; counts are not combined.
+
+## HISTORICAL / SUPERSEDED governance snapshot — 2026-09-05
+
+> Historical interval snapshot; superseded by the 2026-09-08 block above.
 
 - Authoritative source baseline:
   `main@fa5aa38c806ba98d269ce304325e178416584bbe`.

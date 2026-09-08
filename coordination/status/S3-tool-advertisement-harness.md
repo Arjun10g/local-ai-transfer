@@ -1,5 +1,24 @@
 # Status Packet
 
+## Historical-status banner — superseded 2026-09-08
+
+This packet predates the current `main@2ad3006` truth refresh. Its 28-tool
+catalogue and interval claims are historical. The current evaluation fixture
+identity is 33 tools and 37 cases with `max_cases=64` ceiling semantics; this
+does not authorize runtime advertisement, live provider use, compile, or target
+execution. Remote execution remains false and release/full access remains
+`BLOCKED` / `NOT_READY`. Read-only ledger preflight is source-merged by
+`83cffab` (candidate `b777b54`) and independently audited, but
+`SAFE_TO_MIGRATE_NOW=NO`; unsafe legacy evidence, orphan receipts, and
+unmatched incidents remain adjudication blockers. No genesis, spend
+authorization, or provider execution is supplied. Prefix fix `089d05d` and
+31/31 postmerge integration are source facts, but evidence remains
+parse-refused/unavailable under unsafe permissions. Phase-2a single-owner
+topology is merged at `2ad3006` from `03885df` with two independent audits and
+postmerge integration passed; proof issuer, process mutation, product
+activation, and compile/live/target evidence remain absent. Phase-2b is
+design-only/in progress.
+
 - **Session:** S3
 - **Required model:** GPT-5.6 Luna
 - **Role:** Agent/Tools — production capability advertisement and mocked vertical controller evidence

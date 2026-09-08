@@ -7,6 +7,13 @@ not a release or live-readiness approval. `PENDING_INDEPENDENT_AUDIT` and
 retains a historical task without making it current authority;
 `BLOCKED_BELOW_GATE` records evidence that failed or cannot satisfy its gate.
 
+Current claims are reconciled to exact `main@2ad3006d684a8b36bfb4f4827855165d470cb877`.
+The current evaluation profile identity is 33 tools/37 cases with
+`max_cases=64` ceiling semantics. Historical 13/32 and 28/32/11/34 results
+remain separate. Remote execution is false; only two no-model canary probes
+are permitted. No claim below authorizes compile, live provider, production, or
+target execution; bookkeeping is not spend authorization.
+
 | Task | Owner | Branch | State | Dependencies | Review owner | Evidence |
 |---|---|---|---|---|---|---|
 | SOL-001 | S0 | `main` | IN_PROGRESS | none | S4 | `coordination/` |
@@ -16,7 +23,7 @@ retains a historical task without making it current authority;
 | GOV-TRUTH-001 | S3 | `main` (merged from `luna/governance-truth-final`) | MERGED_SOURCE_PENDING_GATE | `main@3746421`, SOL-003 | S0, S4 | corrected source `ff900b7`, merge `2491f45`; docs-only authoritative governance refresh; no gate or readiness change |
 | GOV-TRUTH-002 | Luna docs | `main` (merged from `luna/current-truth-refresh-post-native`) | MERGED_SOURCE_PENDING_GATE | `main@2ec9c44`, SOL-003 | S0, S4 | claim `98ec6c8`, implementation `3eda442`, handoff `03a21bc`, merge `e10b58a`; docs-only reconciliation; no source, configuration, availability, or gate change |
 | GOV-TRUTH-003 | Luna docs | `main` (merged from `luna/governance-supervisor-clipboard-truth`) | MERGED_SOURCE_PENDING_GATE | `main@0622713`, SOL-003 | S0, S4 | claim `9d8f940`, source `50f6dcf`, merge `4d6a854`; docs-only current-truth refresh; no source, configuration, availability, phase, or release-gate change |
-| GOV-TRUTH-004 | Luna docs | `luna/current-truth-fa5` | READY_FOR_REVIEW | `main@fa5aa38`, SOL-003 | S0, S4 | claim `6cc662f`, source-truth refresh `51ed7f7`; docs-only reconciliation of merged journal client, process transaction, hardware diagnostic, and expanded default-off compile harness; no source, configuration, availability, phase, or release-gate change |
+| GOV-TRUTH-004 | Luna docs | `luna/current-truth-fa5` | SUPERSEDED_SOURCE_HISTORY | `main@fa5aa38`, SOL-003 | S0, S4 | claim `6cc662f`, source-truth refresh `51ed7f7`; historical docs-only reconciliation; SUPERSEDED_SOURCE_HISTORY by later current-truth refreshes |
 | RUN-001 | S1 | `luna/runtime` | CLAIMED | SOL-002 | S0, S3, S4 | pending |
 | RUN-002 | S1 | `luna/runtime` | CLAIMED | RUN-001 | S0, S3, S4 | pending |
 | MODEL-001 | S2 | `luna/model-performance` | CLAIMED | SOL-002 | S0, S1, S4 | pending |
@@ -53,7 +60,7 @@ retains a historical task without making it current authority;
 | TOOL-039 | S1 | `main` (merged from `luna/native-journal-helper-transport-slice-4-final-repair`) | MERGED_SOURCE_PENDING_GATE | TOOL-032, TOOL-034, TOOL-035, TOOL-037, B-005-SOURCE | S0, S3, S4 | source `e7c5f19`, repairs through `6482918`, merge `645f348`; inert helper/store-codec and authenticated-pipe contracts only; no CMake, production import, package, activation, compile, or target evidence; production/target `NO` |
 | TOOL-040 | S1 | `main` (merged from `luna/windows-native-clipboard-final-ambiguity-v2`) | MERGED_SOURCE_PENDING_GATE | TOOL-016, TOOL-032, TOOL-039, B-005-SOURCE | S0, S3, S4 | repair `04d6860`, audited handoff `393189f`, merge `0622713`; 26/26 focused static/reference plus 2/2 exact inventory checks; inert, unlinked, uncompiled, all activation gates false, production/target `NO` |
 | TOOL-041 | S3 | `main` (merged from `luna/native-action-journal-client-repair-v2`) | MERGED_SOURCE_PENDING_GATE | TOOL-032, TOOL-034, TOOL-039, B-005-SOURCE | S0, S1, S4 | accepted test-only client `dc29ced`, merge `4b8e737`; 29/29 client plus 26/26 protocol checks; literal-false production availability, no production transport/import, unlinked/uncompiled, production/target `NO` |
-| TOOL-042 | S1 | `luna/action-journal-event-cap-alignment` | READY_FOR_REVIEW | TOOL-032, TOOL-034, TOOL-035 | S0, S3, S4 | claim `27cb2d2`, source `8a4e841`; inactive v0.1 protocol/client/helper declarations now match the authoritative 16-event pathname/store/container limit; ICR + ADR preserve the protocol/HMAC/on-disk identity and transition semantics; 57 focused checks plus JSON/syntax/diff green; production/target gates unchanged and independent audit required |
+| TOOL-042 | S1 | `main` (merged from `luna/action-journal-event-cap-alignment`) | MERGED_SOURCE_PENDING_GATE | TOOL-032, TOOL-034, TOOL-035 | S0, S3, S4 | source `8a4e841`, merge `12e722a`; inactive v0.1 declarations match the authoritative 16-event limit; ICR + ADR preserve protocol/HMAC/on-disk identity; production/compile/target gates unchanged |
 | QA-001 | S4 | `luna/qa-release` | CLAIMED | SOL-001 | S0 | pending |
 | QA-SAFE-RUNNER | S4 | `main` (merged from `luna/qa-safe-runner`) | MERGED_SOURCE_PENDING_GATE | QA-001, SOL-003 | S0 | repair `4c0aa29`, inventory port `ff02b0a`, audited tip `7072940`, merge `d704b816`; plan-only classification and publication hardening are source-merged; unsafe lanes remain `SKIP`/`UNPROVEN` and release remains `BLOCKED` |
 | SEC-001 | S4 | `luna/qa-release` | CLAIMED | QA-001, SOL-003 | S0 | pending |
@@ -71,3 +78,10 @@ retains a historical task without making it current authority;
 | BUILD-WIN-INERT-002 | S1 | `main` (merged from `luna/windows-inert-compile-harness-final-repair`) | MERGED_SOURCE_PENDING_GATE | TOOL-038, PERF-021, TOOL-034, TOOL-035, TOOL-037, REL-WINVERIFY-SOURCE | S0, S4 | source `b1b0aa9`, audited handoff `eecac9e`, merge `9f20fae`; repaired API-to-system-library declarations with 115/115 focused static/reference/inventory checks; default OFF with no product/package/install/activation or compile evidence; production/target `NO` |
 | BUILD-WIN-INERT-003 | S1 | `main` (merged from `luna/windows-inert-compile-harness-expanded`) | MERGED_SOURCE_PENDING_GATE | BUILD-WIN-INERT-002, B-005-SOURCE, TOOL-040 | S0, S4 | implementation `f5e30ba`, audited handoff `c9ae88d`, merge `fa5aa38`; single default-OFF Windows/MSVC graph covers exactly six accepted inert static targets with 13/13 scoped plus 2/2 inventory checks; no configure/build/activation, `SAFE_TO_COMPILE=UNKNOWN/NO`, production/target `NO` |
 | QA-020 | S4 + operator | `luna/windows-acceptance` | READY_FOR_REVIEW | REL-010, PERF-019 | S0 | `0c477f6`; exact Dell/Intel/Vulkan receipt, CPU/candidate/portable lifecycle harness, consented live-check plan, 11 focused static/gate tests; target execution remains unproven |
+
+| ACTION-JOURNAL-OWNER | S1 | `main` | MERGED_SOURCE_PENDING_GATE | TOOL-032, TOOL-035 | S0, S4 | owner authority source merge `7128278`; single-owner boundary only, no production transport/import, compile, live, or target evidence |
+| MODEL-EVAL-PROFILE-CURRENT | S2 | `main` | MERGED_SOURCE_PENDING_GATE | MODEL-006, MODEL-007 | S0, S4 | profile merge `b13deb5`; current fixture identity is 33 tools/37 cases and `max_cases=64` ceiling; no new model run or acceptance claim |
+| PROCESS-DISPATCH-LEASE | S1 | `main` | MERGED_SOURCE_PENDING_GATE | B-005-SOURCE | S0, S4 | inert unmintable lease merge `5bef3cd`; no proof issuer, success/runtime wiring, compile, production, or target evidence |
+| QA-REMOTE-CANARY-INERT | S3 | `main` | MERGED_SOURCE_PENDING_GATE | QA-REMOTE-001, QA-REMOTE-002 | S0, S4 | inert remote hardening merge `a9d2388`; exactly two no-model probes, no fall-through/direct execution; remote execution remains false |
+| LEDGER-MIGRATION-PREFLIGHT | S2 | `main` (merged from `luna/ledger-migration-preflight-mainline-v2`) | MERGED_SOURCE_PENDING_GATE | SOL-003, B-006 | S0, S4 | read-only preflight source `b777b54`, display-prefix fix `310fd1d`, merge `83cffab` plus `089d05d`; post-merge 31/31 source integration checks passed, but `SAFE_TO_MIGRATE_NOW=NO`, current evidence is parse-refused/unavailable, orphan receipts/unmatched incidents require adjudication, and no genesis/spend-authority/provider claim is permitted |
+| SUPERVISOR-TOPOLOGY-PHASE2A | S1 | `main` (merged from `luna/design-a-supervisor-single-owner-v1`) | MERGED_SOURCE_PENDING_GATE | B-005-SOURCE, SOL-003 | S0, S4 | source `03885df`, merge `2ad3006`; two independent audits and post-merge source integration passed; legacy parallel journal removed, tracked tickets and exact IDs present, but proof issuer/process mutation/product activation and compile/live/target evidence remain absent; phase-2b is design-only/in progress |

@@ -2,13 +2,13 @@
 
 ## ICR-TOOL-042 — ActionJournal event-cap alignment
 
-- **Status:** approved for source correction by the explicit S0 assignment;
-  independent review is still required before merge.
+- **Status:** source-corrected and merged at `12e722a`; independent review and
+  formal gate approval remain required for promotion.
 - **Affected interface:** source-only `lae.action-journal.v0.1.0` protocol limit
   declarations and validators, its synthetic fixture metadata, the inert client
   contract, and the inert native helper codec.
-- **Decision:** retain version `0.1.0` and correct the advertised 32-event range
-  to exactly 16 events (sequences 0–15 and detail page limit 16), recorded by
+- **Decision:** retain version `0.1.0` and correct the stale advertised 32-event
+  range to exactly 16 events (sequences 0–15 and detail page limit 16), recorded by
   [ADR-0003](adrs/ADR-0003-action-journal-event-cap.md).
 - **Compatibility:** the fixed-container ABI has always contained exactly 16
   event cells and both authoritative stores already refuse a 17th event. No

@@ -1,5 +1,33 @@
 # Model Decision Record — Qwen3.5-9B Q4_K_M
 
+## Current governance truth — 2026-09-08
+
+- Source baseline is exact `main@2ad3006d684a8b36bfb4f4827855165d470cb877`.
+- The current production evaluation fixture/profile is 33 tools and 37 cases;
+  `max_cases=64` is a ceiling, not a request to trim. Historical 13/32 and
+  28/32/11/34 profile/results remain separate and are not current acceptance.
+- The inert unmintable dispatch lease and inert remote-canary hardening are
+  source-merged (`5bef3cd`, `a9d2388`) but have no proof issuer, process
+  mutation, product activation, success/runtime wiring, live execution, or
+  production authority. Remote execution is false;
+  the canary is limited to two no-model probes.
+- External salvage is unavailable and legacy lifecycle is non-green. Read-only
+  ledger preflight and its canonical-prefix fix are source-merged (`83cffab`,
+  `089d05d`) with 31/31 postmerge integration, but `SAFE_TO_MIGRATE_NOW` remains
+  `NO`: current legacy evidence is parse-refused/unavailable under unsafe
+  permissions, and orphan receipts/unmatched incidents require adjudication.
+  No genesis, spend authorization, or provider execution is supplied. Phase-2a
+  single-owner topology is merged at `2ad3006` from `03885df`; two independent
+  audits and postmerge source integration passed, with legacy parallel journal
+  types removed and exact IDs/tracked tickets retained. Phase-2b is design-only/
+  in progress, not source-accepted. Postmerge scoped evidence is 250/250
+  targeted Python, 4/4 parity, 32/32 evaluator, and QA 53/53 blocked; counts
+  are not summed with unrelated or overlapping evidence. Bookkeeping is not
+  spend authorization. Credentials require source-side rotation/revocation.
+- The model-family/quantization decision below remains accepted only as a
+  technical choice. No compile, model-load, provider, Windows-target, target,
+  or production acceptance is claimed; release/full access remains blocked.
+
 ## Decision
 
 The MVP will use exactly one deployable language-model artifact:
@@ -49,7 +77,7 @@ A further model change requires a Sol-approved ADR and restarts:
 
 Workers may not quietly use Qwen3.5-4B, a 2-bit quant, a fine-tune, a distilled derivative, Gemma 4, Qwen3.8, or a cloud endpoint to make a failing gate pass.
 
-### Current acceptance evidence
+### Historical acceptance evidence (pre-profile synchronization)
 
 The strongest recorded general remote tool evaluation is 27/34, below its
 gate. A separate production-profile run is 13/32 with 19 failures and failed

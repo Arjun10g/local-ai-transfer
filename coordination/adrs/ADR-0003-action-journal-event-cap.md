@@ -1,6 +1,7 @@
 # ADR-0003 — ActionJournal event-cap alignment
 
-- **Status:** Accepted for source correction; independent review required
+- **Status:** Source-corrected and merged at `12e722a`; independent review and
+  formal gate approval required
 - **Date:** 2026-09-05
 - **Decision owner:** S0 Sol
 - **Implementation owner:** S1 Runtime
@@ -49,4 +50,6 @@ event encoding, and transition graph remain unchanged.
 ## Approval
 
 - Sol: accepted through the explicit TOOL-042 implementation assignment.
-- Independent source audit: required before merge.
+- Source merge: `12e722a` on `main`.
+- Independent source audit and formal gate decision: still required before any
+  production or target use.

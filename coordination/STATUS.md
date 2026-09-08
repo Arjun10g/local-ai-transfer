@@ -1,5 +1,47 @@
 # Program Status
 
+## Current governance snapshot — 2026-09-08
+
+- Authoritative source baseline: `main@2ad3006d684a8b36bfb4f4827855165d470cb877`.
+- Overall release/full-access state remains `BLOCKED` / `NOT_READY`. No compile,
+  live-provider, model-load, Windows-target, production, or target evidence is
+  claimed by this documentation refresh.
+- Accepted source merges, each independently scoped: owner authority
+  `7128278`; ActionJournal event-cap alignment `12e722a`; production evaluation
+  profile `b13deb5` (current fixture identity: 33 tools, 37 cases,
+  `max_cases=64` as a ceiling, never a trimming instruction); ledger preflight
+  `83cffab` with display-prefix fix `089d05d`; and phase-2a single-owner
+  topology `2ad3006` from `03885df`. These source facts do not add runtime
+  wiring or gate approval.
+- Historical evaluation identities remain historical and are not combined:
+  13/32 and 28/32/11/34 are prior profiles/results, not current acceptance.
+  Remote execution remains false; the canary is limited to two no-model probes
+  with no fall-through or direct execution.
+- Production ActionJournal authority/transport remains unavailable. The lease
+  boundary has no proof issuer and no success/runtime wiring. External salvage
+  is unavailable and legacy lifecycle is non-green. Ledger preflight source
+  integration passed its bounded post-merge 31/31 checks, but
+  `SAFE_TO_MIGRATE_NOW` remains `NO`: current legacy evidence is
+  parse-refused/unavailable, with no spend authorization or genesis; orphan
+  receipts and unmatched incidents require adjudication. Bookkeeping is not
+  spend authorization. Source-side credential rotation/revocation remains
+  required.
+- Phase-2a single-owner topology is source-merged by `2ad3006` from `03885df`;
+  two independent audits and post-merge source integration passed. Legacy
+  parallel journal types are removed, tracked tickets and exact IDs are
+  present, but the proof issuer, process mutation, product activation, and
+  compile/live/target evidence remain absent. Phase-2b is design-only and in
+  progress, not source-accepted.
+- Post-merge evidence is scoped separately: 250/250 targeted Python checks,
+  4/4 parity checks, 32/32 evaluator checks, and QA inventory 53/53; QA remains
+  blocked. These counts are not combined with unrelated or overlapping evidence.
+- Missing hardware receipt/device identity, approved artifact custody, native
+  compile evidence, provider/account approval, and target acceptance remain
+  release gates.
+
+The older status bullets below are retained as historical interval evidence and
+are superseded wherever they state a pre-`a9d2388` current baseline.
+
 - Overall release/full-access state: `BLOCKED` / `NOT_READY`
 - Authoritative source baseline: `main@fa5aa38c806ba98d269ce304325e178416584bbe`
 - Working source-hardening stream: Phase 6
