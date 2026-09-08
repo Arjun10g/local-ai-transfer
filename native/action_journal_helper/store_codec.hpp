@@ -60,6 +60,8 @@ enum class StoreStatus : std::uint8_t {
   kIoTimeout,
   kIoCancelFailed,
   kCommitNonCancellable,
+  kMutationConflict,
+  kUnknownManualBlocked,
   kInternal,
 };
 

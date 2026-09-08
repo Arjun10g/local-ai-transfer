@@ -1,0 +1,73 @@
+{
+  "schema_version": "lae.action-journal-helper.process-dispatch-lease.v0.1.0",
+  "$id": "lae://contracts/action-journal-helper/process-dispatch-lease-v0.1.0",
+  "title": "Private process dispatch lease",
+  "version": "0.1.0",
+  "status": "source_only_not_enabled",
+  "production_available": false,
+  "native_target_registered": false,
+  "node_integration_added": false,
+  "cmake_added": false,
+  "package_added": false,
+  "activation_permitted": false,
+  "operation_id": {
+    "representation": "std::array<uint8_t,16>",
+    "text_prefix": "act_",
+    "hex_digits": 32,
+    "coerce_to_uint64": false
+  },
+  "binding": [
+    "operation_id", "request_ref", "call_ref", "tool", "risk",
+    "side_effect", "args_digest", "preview_digest", "operation_digest",
+    "authorization_kind", "authorized_sequence", "authorized_receipt_digest",
+    "authorized_event_digest"
+  ],
+  "acquisition": {
+    "reload_read_only": true,
+    "required_tip_state": "authorized",
+    "required_tip_sequence": 1,
+    "exact_binding": true,
+    "global_unknown_manual_block": true,
+    "max_live_leases": 8
+  },
+  "barrier": {
+    "durable_order": ["authorized", "dispatching", "exact_readback", "external_dispatch"],
+    "external_dispatch_admission": ["active_borrow", "owner_mutex", "closing_poison_unknown_checks", "publish_capability"],
+    "lost_ack": "exact_read_only_lookup_with_caller_external_proof_binding_no_retry",
+    "success_path": ["dispatching", "reconciling", "completed"],
+    "ambiguous_path": "unknown_manual_no_replay",
+    "completion_proof": "exact_acknowledged_external_receipt_and_event_proof_plus_journal_readback",
+    "failed_definitive": "lease_api_rejects_post_dispatch; provably_pre_dispatch_only",
+    "abandonment_after_dispatch": "poison_owner_and_block"
+  },
+  "external_proof": {
+    "opaque": true,
+    "move_only": true,
+    "public_constructor": false,
+    "public_fields": false,
+    "public_test_factory": false,
+    "minting": "unavailable until a separately reviewed slice-2 OS-evidence interface exists",
+    "requires_independent_windows_process_evidence": true,
+    "owner_generated_dispatch_generation": "bounded_nonwrapping",
+    "slice1_mint_path": false,
+    "slice1_genuine_success_path": false
+  },
+  "lock_order": ["admission_cas", "owner_mutex", "store_internals"],
+  "lifetime": {
+    "registry_attachment": "terminal entries remain until lease destructor detaches",
+    "owner_destruction_with_live_lease": "unproven destruction fail-stops before store/lease teardown",
+    "registry_insertion": "candidate attaches only after potentially-throwing insertion succeeds"
+  },
+  "poison": {
+    "reload_storage_readback_failure": "sticky; owner cannot return ready or retry authority",
+    "post_precheck_mutation_failure": "kNotFound, kInvalidTransition, mutation conflict, authority divergence, storage, and readback failures are sticky; caller binding/proof mismatch before exact prechecks is non-poisoning"
+  },
+  "wait_rule": "owner_mutex_never_held_over_process_pipe_or_provider_wait",
+  "forbidden_lease_state": ["hmac_key", "session_nonce", "raw_json", "process_handle"],
+  "topology": {
+    "supervisor_wired": false,
+    "controller_wired": false,
+    "cmake_wired": false,
+    "product_runtime_wired": false
+  }
+}

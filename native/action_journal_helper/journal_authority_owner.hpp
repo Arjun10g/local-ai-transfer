@@ -18,8 +18,11 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <map>
 #include <mutex>
 #include <memory>
+#include <string>
+#include <string_view>
 
 #include "store_codec.hpp"
 
@@ -37,8 +40,141 @@ enum class AuthorityStatus : std::uint8_t {
   kInternal,
 };
 
+// Typed, source-only binding for one process side-effect.  The operation id
+// is deliberately the complete sixteen-byte value behind `act_` and is never
+// represented as a uint64_t.  Digests are fixed-size bytes so callers cannot
+// smuggle JSON, credentials, protocol keys, or session nonces into a lease.
+struct ProcessDispatchBinding final {
+  std::array<std::uint8_t, 16> operation_id{};
+  std::array<std::uint8_t, 32> request_ref{};
+  std::array<std::uint8_t, 32> call_ref{};
+  std::string tool;
+  std::string risk;
+  std::string side_effect;
+  std::array<std::uint8_t, 32> args_digest{};
+  std::array<std::uint8_t, 32> preview_digest{};
+  std::array<std::uint8_t, 32> operation_digest{};
+  std::string authorization_kind;
+  std::uint32_t authorized_sequence = 0;
+  std::array<std::uint8_t, 32> authorized_receipt_digest{};
+  std::array<std::uint8_t, 32> authorized_event_digest{};
+};
+
+struct ProcessDispatchReadbackProof final {
+  std::array<std::uint8_t, 16> operation_id{};
+  std::uint32_t sequence = 0;
+  std::array<std::uint8_t, 32> receipt_digest{};
+  std::array<std::uint8_t, 32> event_digest{};
+};
+
+class ProcessExternalProof final {
+ public:
+  ~ProcessExternalProof() noexcept = default;
+  ProcessExternalProof(const ProcessExternalProof&) = delete;
+  ProcessExternalProof& operator=(const ProcessExternalProof&) = delete;
+  ProcessExternalProof(ProcessExternalProof&&) noexcept = default;
+  ProcessExternalProof& operator=(ProcessExternalProof&&) noexcept = default;
+
+  // The capability exposes only a provenance check; its operation, witness,
+  // and external evidence bytes remain inaccessible to callers.
+  bool matches_operation(
+      const std::array<std::uint8_t, 16>& operation_id,
+      std::uint64_t dispatch_generation) const noexcept;
+
+ private:
+  friend class JournalAuthorityOwner;
+  friend class ProcessDispatchLease;
+  ProcessExternalProof(
+      const std::array<std::uint8_t, 16>& operation_id,
+      const std::array<std::uint8_t, 32>& external_receipt_digest,
+      const std::array<std::uint8_t, 32>& external_event_digest,
+      std::uint64_t dispatch_generation) noexcept;
+
+  std::array<std::uint8_t, 16> operation_id_{};
+  std::array<std::uint8_t, 32> external_receipt_digest_{};
+  std::array<std::uint8_t, 32> external_event_digest_{};
+  std::uint64_t dispatch_generation_ = 0;
+};
+
+enum class ProcessDispatchLeaseStatus : std::uint8_t {
+  kOk,
+  kOwnerNotReady,
+  kBindingMismatch,
+  kUnknownManualBlocked,
+  kLeaseLimit,
+  kAlreadyLeased,
+  kMutationConflict,
+  kInvalidState,
+  kReadbackMismatch,
+  kStorageFailure,
+  kOneShotUsed,
+  kLostAcknowledgement,
+  kAmbiguousNoReplay,
+  kAbandonedPoisoned,
+};
+
+class JournalAuthorityOwner;
+
+// A lease is a one-use, noncopyable capability for the owner-internal
+// dispatch barrier.  It has no process handle, protocol key, nonce, or JSON.
+// The owner must outlive a lease.  Destruction after dispatch poisons the
+// owner because an unobserved external mutation is ambiguous and cannot be
+// replayed.
+class ProcessDispatchLease final {
+ public:
+  ~ProcessDispatchLease() noexcept;
+  ProcessDispatchLease(const ProcessDispatchLease&) = delete;
+  ProcessDispatchLease& operator=(const ProcessDispatchLease&) = delete;
+  ProcessDispatchLease(ProcessDispatchLease&&) = delete;
+  ProcessDispatchLease& operator=(ProcessDispatchLease&&) = delete;
+
+  ProcessDispatchLeaseStatus persist_dispatching(
+      StorageIoControl io, ProcessDispatchReadbackProof& proof) noexcept;
+  // Opens the OS-mutation barrier only after persist_dispatching supplied an
+  // exact durable readback proof. This source slice still exposes no OS API.
+  ProcessDispatchLeaseStatus begin_external_dispatch() noexcept;
+  ProcessDispatchLeaseStatus acknowledge_external(
+      const ProcessExternalProof& proof, StorageIoControl io) noexcept;
+  ProcessDispatchLeaseStatus lookup_lost_ack(
+      const ProcessExternalProof& proof, StorageIoControl io,
+      ProcessDispatchReadbackProof& readback) noexcept;
+  ProcessDispatchLeaseStatus begin_reconciliation(
+      std::string_view reason, StorageIoControl io) noexcept;
+  ProcessDispatchLeaseStatus complete_external(
+      const ProcessExternalProof& proof, StorageIoControl io) noexcept;
+  ProcessDispatchLeaseStatus mark_unknown(StorageIoControl io) noexcept;
+  bool dispatching_persisted() const noexcept { return dispatching_persisted_; }
+  bool external_dispatch_started() const noexcept { return external_started_; }
+
+ private:
+  friend class JournalAuthorityOwner;
+  ProcessDispatchLease(JournalAuthorityOwner& owner,
+                       const ProcessDispatchBinding& binding,
+                       std::string operation_text);
+
+  JournalAuthorityOwner* owner_ = nullptr;
+  ProcessDispatchBinding binding_{};
+  std::string operation_text_;
+  bool dispatching_persisted_ = false;
+  bool external_started_ = false;
+  bool acknowledged_ = false;
+  std::array<std::uint8_t, 32> acknowledged_receipt_digest_{};
+  std::array<std::uint8_t, 32> acknowledged_event_digest_{};
+  bool terminal_ = false;
+  bool one_shot_used_ = false;
+  // The owner table owns this attachment bit.  It is set only after the
+  // map insertion succeeds, so a throwing insertion cannot destroy a
+  // candidate while re-entering the owner mutex.
+  bool owner_attached_ = false;
+  std::uint64_t dispatch_generation_ = 0;
+};
+
+const char* process_dispatch_lease_status_name(
+    ProcessDispatchLeaseStatus status) noexcept;
+
 class JournalAuthorityOwner final {
  public:
+  friend class ProcessDispatchLease;
   // This is the sole construction path.  It acquires one storage lease,
   // constructs one store borrowing that lease, and completes recovery before
   // returning a non-null owner.  A failed open returns no owner and no caller
@@ -62,6 +198,12 @@ class JournalAuthorityOwner final {
   StoreStatus apply(const DecodedRequest& request,
                     StorageIoControl io,
                     EncodedResult& result) noexcept;
+
+  // Sole owner/store-internal process-dispatch API. Acquisition performs a
+  // read-only reload and demands an exact authorized sequence-one tip.
+  ProcessDispatchLeaseStatus acquire_process_dispatch_lease(
+      const ProcessDispatchBinding& binding, StorageIoControl io,
+      std::unique_ptr<ProcessDispatchLease>& lease) noexcept;
   // Closes admission and waits for the current owner-locked application to
   // settle.  Closing and the bounded borrower count are one CAS-managed word:
   // no caller can be admitted after shutdown's linearization point, and
@@ -88,7 +230,7 @@ class JournalAuthorityOwner final {
   };
 
   JournalAuthorityOwner(action_journal_storage::JournalStorageLease&& lease,
-                        const std::array<std::uint8_t, 32>& container_id) noexcept;
+                        const std::array<std::uint8_t, 32>& container_id);
 
   static AuthorityStatus map_open_status(
       action_journal_storage::StorageStatus status) noexcept;
@@ -98,6 +240,27 @@ class JournalAuthorityOwner final {
   bool release_borrow() noexcept;
   bool admission_closing() const noexcept;
   bool wait_for_borrowers() noexcept;
+  StoreStatus mutation_preflight_locked(const DecodedRequest& request,
+                                        StorageIoControl io) noexcept;
+  bool unknown_manual_present_locked() const noexcept;
+  bool lease_conflict_locked(const DecodedRequest& request) const noexcept;
+  void release_process_dispatch_lease(ProcessDispatchLease& lease) noexcept;
+  ProcessDispatchLeaseStatus persist_dispatching(
+      ProcessDispatchLease& lease, StorageIoControl io,
+      ProcessDispatchReadbackProof& proof) noexcept;
+  ProcessDispatchLeaseStatus acknowledge_external(
+      ProcessDispatchLease& lease, const ProcessExternalProof& proof,
+      StorageIoControl io) noexcept;
+  ProcessDispatchLeaseStatus lookup_lost_ack(
+      ProcessDispatchLease& lease, const ProcessExternalProof& external_proof,
+      StorageIoControl io,
+      ProcessDispatchReadbackProof& proof) noexcept;
+  ProcessDispatchLeaseStatus transition_lease(
+      ProcessDispatchLease& lease, const char* method,
+      const char* state, const nlohmann::json& body,
+      StorageIoControl io, ProcessDispatchReadbackProof* proof) noexcept;
+  ProcessDispatchLeaseStatus begin_external_dispatch(
+      ProcessDispatchLease& lease) noexcept;
 
   // Bit 63 closes admission.  The lower 32 bits are the borrower count;
   // bits 32..62 are reserved and must stay zero.  A single aligned word is
@@ -121,7 +284,14 @@ class JournalAuthorityOwner final {
   bool shutting_down_ = false;
   std::uint32_t recovery_count_ = 0;
   bool recovered_ = false;
+  // Monotonic owner-local provenance for the external mutation barrier. It is
+  // never caller supplied and exhaustion is a sticky refusal.
+  std::uint64_t dispatch_generation_ = 0;
   std::atomic_bool poisoned_{false};
+  // Lease-table access is owner-mutex protected and deliberately bounded;
+  // lease admission and ordinary mutation share the same lock ordering.
+  static constexpr std::size_t kMaxLeasedProcessDispatches = 8;
+  std::map<std::string, ProcessDispatchLease*> leased_operations_;
 };
 
 const char* authority_status_name(AuthorityStatus status) noexcept;

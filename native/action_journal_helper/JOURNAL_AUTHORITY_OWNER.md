@@ -41,6 +41,44 @@ startup state returns a finite status and publishes no pipe. Severe storage or
 I/O failures poison the owner and prevent subsequent mutation. The existing
 bounded canonical protocol and redacted response surface are unchanged.
 
+The private process-dispatch lease uses the same admission CAS and owner mutex
+ordering (`admission_cas -> owner_mutex -> store_internals`).
+`begin_external_dispatch` is itself an admitted, mutex-protected owner
+operation: it checks closing, shutdown, poison, and the global
+`unknown_manual` fence before publishing the external-mutation capability. No
+owner mutex is held across a process, pipe, or provider wait. A lease is
+noncopyable and one-use; terminal entries remain in the bounded owner registry
+until the lease destructor detaches them. Thus an owner destructor cannot
+destroy an owner while any lease object can still call back; failure to prove
+an empty registry fail-stops before store/lease teardown.
+
+Every dispatch transition reloads and then verifies the exact resulting event
+state, action, authorization, receipt digest, and event digest. Completion
+also requires the exact external receipt/event proof previously acknowledged;
+an arbitrary nonzero proof is insufficient. Lost acknowledgement is a
+read-only lookup only after the lease crossed `begin_external_dispatch`: the
+caller supplies the external proof, which is bound to the canonical
+acknowledged receipt digest and retained in the lease without appending an
+acknowledge event. Recovery never retries dispatch or acknowledge; a
+mismatched proof or divergent readback poisons the owner. `mark_unknown` is
+valid from dispatching, acknowledged, or reconciling and is terminal no-replay. The
+lease surface has no definitive-failure operation: the shared parser's
+reconciling recovery branch cannot be reached through this API; definitive
+failure remains pre-dispatch-only. Reload, storage, and readback failures latch
+sticky poison, so the owner never returns to ready after an unproved authority
+failure.
+
+`ProcessExternalProof` is intentionally opaque and move-only: callers cannot
+construct, copy, inspect, or fabricate its operation, external evidence, or
+dispatch-generation fields. Its constructor is private and slice 1 provides
+no factory or mint path. Slice 2 requires a separately reviewed interface that
+independently validates process/job/handle/creation/I/O evidence before
+minting this capability. The owner allocates a bounded non-wrapping dispatch
+generation at the external-dispatch admission point and requires that
+provenance in every acknowledge, lost-ACK recovery, and completion proof.
+Until that interface exists, all genuine external-proof success paths remain
+unavailable; no arbitrary receipt/event digests can authorize a transition.
+
 This phase deliberately does not expose a supervisor bridge, public storage
 factory, second client, CMake target, package path, host import, registry entry,
 or activation path. The helper and owner remain unavailable in production
