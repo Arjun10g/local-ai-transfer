@@ -13,3 +13,18 @@ hash the text-only reference/Q8/Q4_K_M outputs before an artifact is accepted.
 The production manifest schema is strict and rejects placeholders, unknown fields,
 wrong architecture/profile, missing hashes, and missing approval receipts. A
 generated manifest is an output of J1M and is not checked in with model bytes.
+
+## No-model remote canary
+
+The J1M command planner exposes a `canary` mode for source-only review. It
+contains only bounded toolchain and CUDA prerequisite probes and has no model,
+source checkout, conversion, quantization, compiler/build, or evaluation
+command. Its receipt allowlist is limited to the two probe receipts; salvage
+and exact teardown remain mandatory lifecycle obligations. The mode is
+plan-only until the existing remote gates and explicit approval/ledger path are
+extended.
+
+Persisted argv and output receipts reject credential-like values before write.
+Private token/SSH key file paths remain usable as handles, but token contents,
+bearer/auth headers, URL query credentials, assignment-form secrets, and
+`HF_TOKEN` values are never recorded.

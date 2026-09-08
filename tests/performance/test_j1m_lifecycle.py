@@ -453,7 +453,7 @@ class J1MConfigTests(unittest.TestCase):
             self.assertEqual(persisted[0]["status"], "launch_failed")
 
     def test_hf_token_is_injected_only_into_download_stage(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             token_file = root / "token.env"
             token_file.write_text("HF_TOKEN=token-not-logged\n", encoding="utf-8")

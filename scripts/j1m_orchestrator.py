@@ -15,6 +15,7 @@ import math
 import os
 import re
 import signal
+import stat
 import subprocess
 import tempfile
 import time
@@ -68,55 +69,76 @@ class OperatorCancelled(Exception):
 
 
 def _redacted_output_tail(value: object) -> str:
-    """Return bounded command evidence without allowing credential-shaped text."""
+    """Return bounded command evidence, rejecting credential-shaped text."""
 
-    text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value or "")
-    text = re.sub(r"(?i)(api[_-]?key|token|password|secret)(\s*[=:]\s*)\S+", r"\1\2<redacted>", text)
+    text = value.decode("utf-8", errors="strict") if isinstance(value, bytes) else str(value or "")
+    j1m_runner.validate_persisted_output(text)
     return text[-_STDERR_TAIL_LIMIT:]
 
 
 def _bounded_bytes(path: Path, limit: int) -> bytes:
     """Read one bounded descriptor snapshot, rejecting replacement."""
-    with path.open("rb") as stream:
-        before = os.fstat(stream.fileno())
-        if before.st_size > limit:
-            raise ValueError("receipt exceeds bound")
-        raw = stream.read(limit + 1)
-        after = os.fstat(stream.fileno())
-        current = path.stat()
-        if (len(raw) > limit or before.st_size != after.st_size or after.st_size != len(raw) or
+    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
+        raise ValueError("descriptor-safe bounded read is unavailable")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW |
+                             getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        raise ValueError("receipt is unavailable") from exc
+    try:
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or
+                before.st_size > limit):
+            raise ValueError("receipt is not bounded regular data")
+        chunks: list[bytes] = []
+        total = 0
+        while total <= limit:
+            chunk = os.read(descriptor, limit + 1 - total)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(descriptor)
+        current = os.stat(path, follow_symlinks=False)
+        if (len(raw) > limit or before.st_size != after.st_size or
+                after.st_size != len(raw) or
                 (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino) or
                 (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino)):
             raise ValueError("receipt changed during bounded read")
         return raw
+    finally:
+        os.close(descriptor)
 
 
 def _decode_bounded_json(raw: bytes) -> Any:
     """Decode bounded JSON without duplicate keys."""
-    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError("receipt contains duplicate key")
-            result[key] = value
-        return result
-
-    return json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicates)
+    return j1m_runner._bounded_json_loads(raw)
 
 
 def _bounded_json(path: Path, limit: int) -> Any:
     """Decode a small receipt without duplicate keys or unbounded reads."""
 
-    return _decode_bounded_json(_bounded_bytes(path, limit))
+    payload = _decode_bounded_json(_bounded_bytes(path, limit))
+    j1m_runner.validate_persisted_receipt(payload)
+    return payload
 
 
 def _persist_lifecycle(phase_id: str, lifecycle: dict[str, Any]) -> None:
     """Durably retain bounded local failure/progress evidence before teardown."""
 
+    if not isinstance(lifecycle, dict):
+        raise ValueError("lifecycle receipt is invalid")
+    record = {"schema": "local_bmo.j1m.lifecycle-receipt.v1", **lifecycle}
+    j1m_runner.validate_persisted_receipt(record)
     path = sf.runtime_ledger_path(phase_id).with_name(f"{phase_id}.lifecycle-receipt.json")
-    payload = (json.dumps({"schema": "local_bmo.j1m.lifecycle-receipt.v1", **lifecycle}, sort_keys=True) + "\n").encode("utf-8")
+    try:
+        payload = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ValueError("lifecycle receipt serialization refused") from exc
     if len(payload) > MAX_RECEIPT_BYTES:
         raise ValueError("lifecycle receipt exceeds bound")
+    j1m_runner.validate_persisted_output(payload)
     sf.private_durable_atomic_write(path, payload, label="J1M lifecycle receipt")
 
 
@@ -175,11 +197,24 @@ def _tool_eval_contract() -> dict[str, Any]:
 
 
 def _remote(command: list[str], *, timeout: float) -> dict[str, Any]:
+    j1m_runner.validate_persisted_argv(command)
     try:
         result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        return {"status": "transport_timeout", "exit_code": None, "error_type": type(exc).__name__, "stderr_tail": _redacted_output_tail(exc.stderr)}
-    receipt = {"status": "completed" if result.returncode == 0 else "failed", "exit_code": result.returncode, "stderr_tail": _redacted_output_tail(result.stderr)}
+        try:
+            stderr_tail = _redacted_output_tail(exc.stderr)
+        except (ValueError, UnicodeError):
+            stderr_tail = "<redacted>"
+        return {"status": "transport_timeout", "exit_code": None, "error_type": "transport_timeout", "stderr_tail": stderr_tail}
+    except OSError:
+        return {"status": "transport_os", "exit_code": None, "error_type": "transport_os", "stderr_tail": "<redacted>"}
+    try:
+        stderr_tail = _redacted_output_tail(result.stderr)
+    except (ValueError, UnicodeError):
+        # Preserve only a finite diagnostic; the credential-bearing output is
+        # rejected and never enters the receipt.
+        stderr_tail = "<redacted>"
+    receipt = {"status": "completed" if result.returncode == 0 else "failed", "exit_code": result.returncode, "stderr_tail": stderr_tail}
     if result.returncode != 0:
         receipt["error_type"] = "remote_exit"
         # Never retain provider/model prompt or response material from a
@@ -204,7 +239,15 @@ def _remote_job_command(mode: str, remote_root: str, required_scratch_gib: int) 
         ]
     if mode == "build":
         return ["python3", runner, "--run", "--config", config]
+    if mode == "canary":
+        raise ValueError("canary commands are supplied by the no-model probe plan")
     raise ValueError(f"unsupported J1M mode: {mode}")
+
+
+def _canary_remote_commands(config: dict[str, Any], remote_root: str) -> list[list[str]]:
+    """Expose the pure no-model remote probe plan for review/tests."""
+
+    return j1m_runner.canary_command_plan(config, remote_root)
 
 
 def _verify_eval_artifact(path: Path | None, manifest_path: Path, config: dict[str, Any], *, expected_manifest_sha256: str | None = None) -> dict[str, Any]:
@@ -227,14 +270,8 @@ def _verify_eval_artifact(path: Path | None, manifest_path: Path, config: dict[s
         trusted_digest = expected_manifest_sha256
     if not isinstance(trusted_digest, str) or len(trusted_digest) != 64 or set(trusted_digest) - set("0123456789abcdef") or manifest_digest != trusted_digest:
         raise ValueError("eval manifest trust anchor mismatch")
-    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError("eval model manifest contains duplicate key")
-            result[key] = value
-        return result
-    manifest = json.loads(manifest_bytes.decode("utf-8"), object_pairs_hook=reject_duplicates)
+    manifest = j1m_runner._bounded_json_loads(manifest_bytes)
+    j1m_runner.validate_persisted_receipt(manifest)
     if not isinstance(manifest, dict) or manifest.get("schema_version") != "1.1.0":
         raise ValueError("eval model manifest is invalid")
     source = manifest.get("source")
@@ -859,13 +896,18 @@ def _salvage(
                 timeout = min(timeout, remaining)
             receipt = _remote(command, timeout=timeout)
         except Exception as exc:
-            receipt = {"status": "salvage_failed", "error_type": type(exc).__name__}
+            receipt = {"status": "salvage_failed", "error_type": "salvage_failed"}
         receipt["name"] = name
         results.append(receipt)
     return results
 
 
 def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, artifact_destination: Path, mode: str = "prove", model_artifact: Path | None = None, model_manifest: Path | None = None) -> dict[str, Any]:
+    if mode == "canary":
+        # The canary is intentionally plan-only in this source slice.  Its
+        # two read-only probes may become executable only after the existing
+        # Sol/review/ledger lifecycle gates are explicitly extended.
+        raise sf.ShadeformError("no-model remote canary execution remains gated; use the pure plan")
     # Phase-only deletion artifacts predate nonce/owner-bound evidence and
     # cannot safely authorize a new paid run. Check them before config/env
     # loading, candidate access, key generation, reservation, or provider POSTs.
@@ -1030,7 +1072,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     lifecycle["ssh_key_reconciliation"] = {
                         "status": "unresolved",
                         "retry_required": True,
-                        "error_type": type(reconcile_exc).__name__,
+                        "error_type": "ssh_key_reconciliation_failed",
                     }
                     try:
                         sf.append_incident({
@@ -1039,7 +1081,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                             "nonce": nonce,
                             "ssh_key_name": f"j1m-{nonce}",
                             "ssh_public_key_sha256": hashlib.sha256(public_key.encode("utf-8")).hexdigest(),
-                            "error_type": type(reconcile_exc).__name__,
+                            "error_type": "ssh_key_reconciliation_failed",
                         })
                     except Exception:
                         pass
@@ -1077,7 +1119,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     "ssh_key_id": key_id,
                     "ssh_key_name": f"j1m-{nonce}",
                     "ssh_public_key_sha256": hashlib.sha256(public_key.encode("utf-8")).hexdigest(),
-                    "error_type": type(exc).__name__,
+                    "error_type": "remote_stage_failed",
                 }
                 if sf.is_ambiguous_transport(exc):
                     ambiguous_create = True
@@ -1220,9 +1262,9 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             if instance_id is None and not ambiguous_create and not key_ambiguity_unresolved:
                 settle_attempt_after_cleanup = True
             lifecycle["status"] = lifecycle.get("status") if lifecycle.get("status") not in {None, "starting", "active"} else "failed"
-            lifecycle["failure"] = {"error_type": type(exc).__name__}
+            lifecycle["failure"] = {"error_type": "lifecycle_failed"}
             lifecycle["failed_stage"] = lifecycle.get("stage", "unknown")
-            _progress(progress_path, "failed", phase_id=phase_id, failed_stage=lifecycle["failed_stage"], error_type=type(exc).__name__)
+            _progress(progress_path, "failed", phase_id=phase_id, failed_stage=lifecycle["failed_stage"], error_type="lifecycle_failed")
             raise
         finally:
             try:
@@ -1248,7 +1290,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             except Exception as exc:
                 # Even an unexpected salvage/setup failure must leave the
                 # exact deletion and key cleanup paths reachable.
-                lifecycle["salvage"] = [{"status": "salvage_failed", "error_type": type(exc).__name__}]
+                lifecycle["salvage"] = [{"status": "salvage_failed", "error_type": "salvage_failed"}]
             if mode == "prove" and lifecycle.get("job", {}).get("status") == "completed" and not any(item.get("name") == "proving-receipt.json" and item.get("status") == "completed" for item in lifecycle["salvage"]):
                 lifecycle["receipt_error"] = "proving receipt was not salvaged before teardown"
             if mode == "eval":
@@ -1268,7 +1310,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                         try:
                             lifecycle["preflight_receipt"] = _verify_startup_preflight_receipt(artifact_destination / "startup-preflight-receipt.json", eval_artifact)
                         except Exception as exc:
-                            lifecycle["receipt_error"] = type(exc).__name__
+                            lifecycle["receipt_error"] = "receipt_verification_failed"
                     if lifecycle.get("preflight_receipt", {}).get("status") != "verified":
                         lifecycle["receipt_error"] = lifecycle.get("receipt_error", "startup preflight did not verify")
                 saved_receipt = next((item for item in lifecycle["salvage"] if item.get("name") == "eval-receipt.json" and item.get("status") == "completed"), None)
@@ -1278,7 +1320,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     try:
                         lifecycle["eval_receipt"] = _verify_eval_receipt(artifact_destination / "eval-receipt.json", eval_artifact)
                     except Exception as exc:
-                        lifecycle["receipt_error"] = type(exc).__name__
+                        lifecycle["receipt_error"] = "receipt_verification_failed"
                 if (lifecycle.get("receipt_error") or lifecycle.get("eval_artifact_receipt", {}).get("status") != "verified" or
                         lifecycle.get("eval_receipt", {}).get("status") != "verified"):
                     lifecycle["status"] = "failed"
@@ -1303,7 +1345,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                         lifecycle["deletion"] = {
                             "status": "delete-failed",
                             "retry_required": True,
-                            "error_type": type(exc).__name__,
+                            "error_type": "artifact_salvage_failed",
                         }
                         lifecycle["status"] = "failed"
                         try:
@@ -1313,7 +1355,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                                 "instance_id": instance_id,
                                 "ssh_key_id": key_id,
                                 "nonce": nonce,
-                                "error_type": type(exc).__name__,
+                                "error_type": "artifact_salvage_failed",
                             })
                         except Exception:
                             pass
@@ -1330,7 +1372,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     except Exception as exc:
                         lifecycle["deletion"] = {
                             "status": "delete-failed", "retry_required": True,
-                            "error_type": type(exc).__name__,
+                            "error_type": "artifact_salvage_failed",
                         }
                         cleanup_failure = RuntimeError("exact recovered teardown was not confirmed")
                         lifecycle["status"] = "failed"
@@ -1350,13 +1392,13 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                         except Exception as receipt_exc:
                             attempt_cleanup_receipt_ok = False
                             cleanup_failure = RuntimeError("attempt settlement receipt was not confirmed")
-                            lifecycle["attempt_reservation_receipt_error_type"] = type(receipt_exc).__name__
+                            lifecycle["attempt_reservation_receipt_error_type"] = "reservation_receipt_failed"
                     except Exception as exc:
-                        lifecycle["attempt_reservation_error_type"] = type(exc).__name__
+                        lifecycle["attempt_reservation_error_type"] = "reservation_settlement_failed"
                         lifecycle["attempt_reservation_retry_required"] = True
                         cleanup_failure = RuntimeError("attempt reservation settlement was not confirmed")
                         try:
-                            sf.append_incident({"phase_id": phase_id, "incident": "attempt-reservation-settlement-failed", "nonce": nonce, "error_type": type(exc).__name__})
+                            sf.append_incident({"phase_id": phase_id, "incident": "attempt-reservation-settlement-failed", "nonce": nonce, "error_type": "reservation_settlement_failed"})
                         except Exception:
                             pass
                 if not settle_attempt_after_cleanup or (attempt_settled_during_cleanup and attempt_cleanup_receipt_ok):
@@ -1373,9 +1415,9 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                         if lifecycle["key_cleanup"].get("status") != "confirmed":
                             raise RuntimeError("exact SSH key deletion lacks durable confirmation")
                     except Exception as exc:
-                        lifecycle["key_cleanup"] = {"status": "failed", "error_type": type(exc).__name__}
+                        lifecycle["key_cleanup"] = {"status": "failed", "error_type": "key_cleanup_failed"}
                         try:
-                            sf.append_incident({"phase_id": phase_id, "incident": "create-key-delete-failed", "ssh_key_id": key_id, "nonce": nonce, "error_type": type(exc).__name__})
+                            sf.append_incident({"phase_id": phase_id, "incident": "create-key-delete-failed", "ssh_key_id": key_id, "nonce": nonce, "error_type": "key_cleanup_failed"})
                         except Exception:
                             pass
             # Keep the watchdog alive through salvage and exact instance
@@ -1389,7 +1431,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     sf.append_cost_event({"instance_id": attempt_id, "phase_id": phase_id, "ownership_nonce": nonce, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
                 except Exception as exc:
                     try:
-                        sf.append_incident({"phase_id": phase_id, "incident": "attempt-reservation-settlement-failed", "nonce": nonce, "error_type": type(exc).__name__})
+                        sf.append_incident({"phase_id": phase_id, "incident": "attempt-reservation-settlement-failed", "nonce": nonce, "error_type": "reservation_settlement_failed"})
                     except Exception:
                         pass
             try:
@@ -1411,7 +1453,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--phase-id", default="j1m-proving-run")
     parser.add_argument("--run-id", default="J1M")
     parser.add_argument("--artifact-destination", type=Path, default=ROOT / "artifacts" / "qwen35-9b")
-    parser.add_argument("--mode", choices=("prove", "build", "eval"), default="prove")
+    parser.add_argument("--mode", choices=("prove", "build", "eval", "canary"), default="prove")
     parser.add_argument("--model-artifact", type=Path, help="refused for eval; the Q4 artifact is always built remotely")
     parser.add_argument("--model-manifest", type=Path, help="approved manifest; defaults to the checked-in Q4 acceptance manifest")
     parser.add_argument("--execute", action="store_true")
@@ -1428,6 +1470,14 @@ def main(argv: list[str] | None = None) -> int:
         plan["execution_backend"] = "cuda"
         plan["cuda_architecture"] = 80
         plan["gpu_layers"] = 99
+    elif args.mode == "canary":
+        plan["commands"] = _canary_remote_commands(config, "/scratch/j1m-canary")
+        plan["artifact"] = "no model; bounded toolchain and CUDA prerequisite probes only"
+        plan["no_model"] = True
+        plan["probe_only"] = True
+        plan["salvage_required"] = True
+        plan["teardown_required"] = True
+        plan["execution_status"] = "disabled_pending_existing_remote_gates_and_explicit_approval"
     if not args.execute:
         plan["orchestrator"] = "dry-run; no provider API mutation"
         print(json.dumps(plan, indent=2, sort_keys=True))
@@ -1438,5 +1488,17 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _safe_cli(argv: list[str] | None = None) -> int:
+    """Expose only a finite refusal code when invoked as a subprocess."""
+
+    try:
+        return main(argv)
+    except SystemExit:
+        raise
+    except Exception:
+        print(json.dumps({"status": "refused", "error_code": "input_rejected"}, sort_keys=True))
+        return 2
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_safe_cli())
