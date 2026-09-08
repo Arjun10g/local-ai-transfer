@@ -38,6 +38,14 @@ USD_QUANTUM = Decimal("0.000001")
 ZERO_USD = Decimal("0")
 _DISPLAY_HEADER = "| date | phase | instance id | gpu | $/hr | purpose | status | cost logged | idle min |"
 _DISPLAY_SEPARATOR = "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+_CANONICAL_DISPLAY_PREFIX = (
+    "# Shadeform cost ledger\n\n"
+    "This append-only ledger is empty until Sol approves a provider action. Every\n"
+    "row must identify one phase-owned resource and must be settled only after exact\n"
+    "deletion. A `pending` cost blocks all subsequent provisioning.\n\n"
+).encode("utf-8")
+_DISPLAY_HEADER_BYTES = (_DISPLAY_HEADER + "\n").encode("utf-8")
+_DISPLAY_SEPARATOR_BYTES = (_DISPLAY_SEPARATOR + "\n").encode("utf-8")
 _RECEIPT_KEYS = {
     "schema", "phase_id", "instance_id", "owner", "status", "deletion", "salvage",
     "actual_cost_usd", "attempt_reservation_settled", "owned_record_persisted",
@@ -699,14 +707,16 @@ def _canonical_display_prefix(issues: set[str] | None = None) -> bytes | None:
         )
     except _EvidenceError:
         return None
-    header = (_DISPLAY_HEADER + "\n").encode("utf-8")
-    index = data.find(header)
-    if index <= 0 or data.find(header, index + 1) >= 0:
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        _issue(target_issues, "prefix_invalid_utf8")
         return None
-    prefix = data[:index]
-    if not prefix.endswith(b"\n\n") or len(prefix.splitlines()) != 6:
+    framing = _CANONICAL_DISPLAY_PREFIX + _DISPLAY_HEADER_BYTES + _DISPLAY_SEPARATOR_BYTES
+    if not data.startswith(framing):
+        _issue(target_issues, "prefix_schema_invalid")
         return None
-    return prefix
+    return _CANONICAL_DISPLAY_PREFIX
 
 
 _DISPLAY_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
@@ -871,8 +881,14 @@ def _parse_display(path: Path, groups: dict[tuple[str, str], dict[str, Any]], is
 def _enumerate_receipts(root_fd: int, issues: set[str]) -> dict[str, tuple[int, int, int, int, int, int]]:
     entries: dict[str, tuple[int, int, int, int, int, int]] = {}
     entry_bytes = 0
+    examined = 0
     with os.scandir(root_fd) as scan:
         for entry in scan:
+            examined += 1
+            entry_bytes += len(entry.name.encode("utf-8"))
+            if examined > MAX_RECEIPTS or entry_bytes > MAX_RECEIPT_DIRECTORY_BYTES:
+                _issue(issues, "receipt_count_or_directory_limit")
+                raise _EvidenceError("receipt_count_or_directory_limit")
             child_info = entry.stat(follow_symlinks=False)
             if stat.S_ISLNK(child_info.st_mode):
                 _issue(issues, "symlink_receipt")
@@ -880,8 +896,7 @@ def _enumerate_receipts(root_fd: int, issues: set[str]) -> dict[str, tuple[int, 
             if not entry.name.endswith(".deletion-receipt.json"):
                 continue
             name_bytes = len(entry.name.encode("utf-8"))
-            entry_bytes += name_bytes
-            if name_bytes > MAX_RECEIPT_NAME_BYTES or entry_bytes > MAX_RECEIPT_DIRECTORY_BYTES or len(entries) >= MAX_RECEIPTS:
+            if name_bytes > MAX_RECEIPT_NAME_BYTES or len(entries) >= MAX_RECEIPTS:
                 _issue(issues, "receipt_count_or_directory_limit")
                 raise _EvidenceError("receipt_count_or_directory_limit")
             entries[entry.name] = _file_identity(child_info)

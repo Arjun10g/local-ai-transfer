@@ -563,6 +563,31 @@ class PreflightFixtureTests(unittest.TestCase):
                     self.assertIsNone(preflight._canonical_display_prefix(issues))
                 self.assertIn(label, issues)
 
+    def test_display_prefix_is_utf8_and_byte_pinned(self) -> None:
+        variants = {
+            "invalid_utf8": b"\xff" + preflight._CANONICAL_DISPLAY_PREFIX,
+            "impostor_preamble": preflight._CANONICAL_DISPLAY_PREFIX.replace(b"Sol", b"sol"),
+            "extra_preamble_bytes": b"x" + preflight._CANONICAL_DISPLAY_PREFIX,
+        }
+        framing = (preflight._DISPLAY_HEADER + "\n" + preflight._DISPLAY_SEPARATOR + "\n").encode()
+        for label, payload in variants.items():
+            with self.subTest(label=label):
+                issues: set[str] = set()
+                with mock.patch.object(preflight, "_read_snapshot", return_value=(payload + framing, {})):
+                    self.assertIsNone(preflight._canonical_display_prefix(issues))
+                self.assertIn("prefix_invalid_utf8" if label == "invalid_utf8" else "prefix_schema_invalid", issues)
+
+    def test_receipt_directory_entry_cap_includes_unrelated_names(self) -> None:
+        self.write_jsonl(self.ledger, [])
+        self.write_jsonl(self.incidents, [])
+        (self.runtime / "unrelated.txt").write_text("x\n", encoding="utf-8")
+        issues: set[str] = set()
+        with mock.patch.object(preflight, "MAX_RECEIPTS", 2):
+            report = preflight._parse_receipts(self.runtime, {}, issues)
+        self.assertTrue(report["parse_refused"])
+        self.assertIsNone(report["receipt_count"])
+        self.assertIn("receipt_count_or_directory_limit", issues)
+
 
 if __name__ == "__main__":
     unittest.main()
