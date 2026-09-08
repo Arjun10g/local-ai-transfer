@@ -129,7 +129,7 @@ class WindowsActionJournalOwnerStaticTests(unittest.TestCase):
         self.assertEqual(self.store.count("action_journal_storage::acquire_storage"), 1)
         self.assertNotIn("action_journal_storage::acquire_storage", self.pipe)
         self.assertNotIn("FixedContainerStore store", self.pipe)
-        self.assertIn("JournalAuthorityOwner::open", self.pipe)
+        self.assertNotIn("JournalAuthorityOwner::open", self.pipe)
         self.assertIn("owner->apply(request, request_io, result)", self.pipe)
         self.assertEqual(self.store.count("store_(lease_, container_id)"), 1)
         self.assertEqual(self.store.count("FixedContainerStore::FixedContainerStore("), 1)
@@ -180,13 +180,10 @@ class WindowsActionJournalOwnerStaticTests(unittest.TestCase):
         self.assertLess(self.store.index("owner->recovered_ = true"), self.store.index("return owner", ready))
 
     def test_pipe_publication_is_after_owner_open_and_final_startup_probe(self):
-        opened = self.pipe.index("JournalAuthorityOwner::open")
-        failed = self.pipe.index("if (!owner) return authority_status(owner_status)", opened)
-        final_probe = self.pipe.index("if (startup_io.stop_requested())", failed)
-        create_pipe = self.pipe.index("CreateNamedPipeW", final_probe)
-        self.assertLess(opened, failed)
-        self.assertLess(failed, final_probe)
-        self.assertLess(final_probe, create_pipe)
+        self.assertNotIn("JournalAuthorityOwner::open", self.pipe)
+        opened = self.pipe.index("owner->ready()")
+        create_pipe = self.pipe.index("CreateNamedPipeW", opened)
+        self.assertLess(opened, create_pipe)
         self.assertNotIn("store.load_and_recover", self.pipe)
 
     def test_owner_serializes_only_store_application_and_poison_is_sticky(self):
@@ -320,7 +317,7 @@ class WindowsActionJournalOwnerStaticTests(unittest.TestCase):
         self.assertGreater(post, apply_at)
         monitor = self.pipe[
             self.pipe.index("bool monitored_request_cancelled"):
-            self.pipe.index("struct StartupCancellationContext")
+            self.pipe.index("}  // namespace\n\nHelperStatus run_foreground_helper")
         ]
         self.assertNotIn("PeekNamedPipe", monitor)
         self.assertIn("std::atomic_bool", self.pipe)

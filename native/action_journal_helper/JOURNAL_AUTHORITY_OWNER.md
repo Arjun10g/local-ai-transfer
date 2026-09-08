@@ -1,12 +1,13 @@
-# Private JournalAuthorityOwner — phase 1
+# Private JournalAuthorityOwner — phase 1 / supervisor phase 2a
 
-This source-only slice gives the foreground helper one process-lifetime
-authority owner. `JournalAuthorityOwner::open` is the only construction path:
+This source-only slice gives the co-located supervisor/helper one
+process-lifetime authority owner. `SupervisorState` is the sole process
+owner, and `JournalAuthorityOwner::open` is the only construction path:
 it acquires one validated `JournalStorageLease`, constructs one
 `FixedContainerStore` that borrows that lease, and performs the complete
 recovery scan before returning a ready owner.
 
-The pipe server receives a borrowed owner. It does not acquire storage,
+The pipe server receives a move-only `PipeServerBorrow` ticket. It does not acquire storage,
 construct a store, or select a pathname authority. The owner mutex serializes
 decoded store applications only; protocol HMAC/nonce handling and all named
 pipe reads/writes remain outside that lock. The owner and store are destroyed
@@ -79,8 +80,8 @@ provenance in every acknowledge, lost-ACK recovery, and completion proof.
 Until that interface exists, all genuine external-proof success paths remain
 unavailable; no arbitrary receipt/event digests can authorize a transition.
 
-This phase deliberately does not expose a supervisor bridge, public storage
-factory, second client, CMake target, package path, host import, registry entry,
-or activation path. The helper and owner remain unavailable in production
-until authenticated bootstrap, compile, transport, crash, and target evidence
-are separately accepted.
+The phase-2a source topology provides only a borrowed supervisor bridge; it
+does not expose a public storage factory, second client, package path, host
+import, registry entry, or activation path. The helper and owner remain
+unavailable in production until authenticated bootstrap, compile, transport,
+crash, and target evidence are separately accepted.

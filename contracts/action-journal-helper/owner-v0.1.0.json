@@ -27,7 +27,7 @@
     "one-writer mutex"
   ],
   "borrowed_boundary": {
-    "pipe_server": "borrows one owner for decoded request application",
+    "pipe_server": "accepts only a move-only PipeServerBorrow ticket; checked owner access is valid for the complete call",
     "pipe_io": "ProtocolSession and pipe reads/writes remain outside owner lock; a separate monitor owns duplicated transport handles and publishes only a latched atomic/event cancellation result",
     "session_secrets": "HMAC key and nonce remain ProtocolSession-owned",
     "supervisor_bridge": "absent in this phase"

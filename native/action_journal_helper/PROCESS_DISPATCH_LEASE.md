@@ -1,8 +1,9 @@
 # ProcessDispatchLease — phase 2 slice 1
 
-This is a private, source-only API on `JournalAuthorityOwner`. It is not
-included by the product CMake graph, supervisor, controller, launcher, host,
-or package. All production gates remain literal `false`.
+This is a private, source-only API on `JournalAuthorityOwner`. It is not in the
+product CMake graph, controller, launcher, host, or package. The phase-2a
+supervisor source may borrow the owner, but all production gates remain literal
+`false`.
 
 `acquire_process_dispatch_lease` first reloads the fixed container under the
 owner lock and accepts only a complete exact binding whose record tip is the

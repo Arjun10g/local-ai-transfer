@@ -1,796 +1,437 @@
-"""Static/model checks for the inert supervisor-owned process transaction.
+"""Static/model checks for the inert phase-2a process seam.
 
-These tests do not compile native code or invoke Windows, process, journal,
-network, provider, browser, or model APIs.
+No compiler, Windows API, process, provider, network, credential, or model
+runtime is invoked.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import unittest
-from dataclasses import dataclass
 from pathlib import Path
+from itertools import product
 
 
 ROOT = Path(__file__).resolve().parents[2]
 CPP = ROOT / "native/windows_supervisor/authority.cpp"
-HPP = ROOT / "native/windows_supervisor/authority.hpp"
+BORROW = ROOT / "native/windows_supervisor/borrow_ticket.hpp"
 TRANSACTION = ROOT / "native/windows_supervisor/process_transaction.inc"
+OWNER = ROOT / "native/action_journal_helper/journal_authority_owner.hpp"
+PIPE_HPP = ROOT / "native/action_journal_helper/pipe_server.hpp"
+PIPE_CPP = ROOT / "native/action_journal_helper/pipe_server.cpp"
+HELPER_MAIN = ROOT / "native/action_journal_helper/main.cpp"
 CONTRACT = ROOT / "contracts/windows-process-transaction/v0.1.0.json"
 
 
 def strict_json(path: Path) -> dict:
-    raw = path.read_bytes()
-    if len(raw) > 64 * 1024:
-        raise ValueError("oversized contract")
-
     def pairs(items):
-        result = {}
+        out = {}
         for key, value in items:
-            if key in result:
+            if key in out:
                 raise ValueError("duplicate key")
-            result[key] = value
-        return result
+            out[key] = value
+        return out
 
-    value = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs)
+    value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=pairs)
     if not isinstance(value, dict):
-        raise ValueError("contract must be object")
+        raise ValueError("object required")
     return value
 
 
-@dataclass
-class ModelResult:
-    status: str
-    create_calls: int
-    terminal_durable: bool
-    job_empty: bool
-    poisoned: bool
-
-
-class TransactionModel:
-    """Small failure-boundary oracle; it is not production persistence."""
+class Phase2aModel:
+    """A tiny refusal oracle; it is not production execution."""
 
     def __init__(self):
+        self.create_calls = 0
+        self.persist_calls = 0
+        self.external_calls = 0
+
+    def execute(self, gates: bool, proof_issuer: bool):
+        if not gates or not proof_issuer:
+            return "unavailable"
+        self.create_calls += 1
+        self.persist_calls += 1
+        self.external_calls += 1
+        return "ok"
+
+
+class BorrowDomainModel:
+    """Reference model for the combined admission/count control word."""
+
+    CLOSING = 1 << 30
+    POISONED = 1 << 31
+    MAX = 4096
+
+    def __init__(self):
+        self.active = 0
+        self.process = 0
+        self.closing = False
+        self.poisoned = False
+
+    def acquire(self, kind):
+        if self.closing or self.poisoned or self.active >= self.MAX:
+            self.poisoned = True
+            return False
+        if kind == "process" and self.process >= self.MAX:
+            self.poisoned = True
+            return False
+        self.active += 1
+        if kind == "process":
+            self.process += 1
+        return True
+
+    def close(self):
+        self.closing = True
+
+    def release(self, kind):
+        if self.active == 0 or (kind == "process" and self.process == 0):
+            self.poisoned = True
+            return False
+        self.active -= 1
+        if kind == "process":
+            self.process -= 1
+        return True
+
+
+class PipeCallModel:
+    """Models helper join ordering without invoking a platform API."""
+
+    def __init__(self):
+        self.closing = False
         self.active = False
-        self.used_nonces: set[str] = set()
+        self.ticket_in_state = True
 
-    def run(self, fault: str | None = None, nonce: str = "n1") -> ModelResult:
-        if self.active or nonce in self.used_nonces:
-            return ModelResult("refused", 0, False, True, self.active)
+    def begin(self):
+        if self.closing or self.active:
+            return False
         self.active = True
-        create_calls = 0
-        terminal = False
-        empty = True
-        poisoned = False
-        try:
-            if fault in {"gate", "shape", "identity", "token", "pipes"}:
-                return ModelResult("pre_dispatch", 0, False, True, False)
-            self.used_nonces.add(nonce)
-            if fault == "start_persist":
-                return ModelResult("unknown_manual", 0, False, True, False)
-            if fault == "post_start_recheck":
-                return ModelResult("terminal_failure", 0, True, True, False)
-            create_calls = 1
-            if fault == "create_return":
-                return ModelResult("unknown_manual", 1, False, True, False)
-            empty = False
-            if fault in {"membership", "registry", "pre_resume", "monitor", "drain"}:
-                poisoned = True
-                empty = fault != "drain"
-                return ModelResult(
-                    "terminal_failure" if empty else "unknown_manual",
-                    create_calls,
-                    empty,
-                    empty,
-                    poisoned,
-                )
-            empty = True
-            if fault == "terminal_persist":
-                return ModelResult("unknown_manual", create_calls, False, True, False)
-            terminal = True
-            return ModelResult("ok", create_calls, terminal, empty, False)
-        finally:
-            self.active = False
+        self.ticket_in_state = False
+        return True
+
+    def close(self):
+        self.closing = True
+
+    def end(self):
+        self.ticket_in_state = True
+        self.active = False
+
+    def stop_pipe(self):
+        return not self.active and self.ticket_in_state
 
 
-@dataclass
-class IoSettlement:
-    returned: bool
-    settled: bool
-    cancellation_issued: bool
-    fail_stop: bool
+class PipeCallWordModel:
+    """Exact observe/close/CAS interleaving for the one-word fence."""
 
-
-def model_overlapped_read(path: str) -> IoSettlement:
-    if path == "sync_success":
-        return IoSettlement(True, True, False, False)
-    if path in {"sync_terminal_error", "not_started"}:
-        return IoSettlement(False, True, False, False)
-    if path == "pending_success":
-        return IoSettlement(True, True, False, False)
-    if path in {
-        "pending_terminal_error", "deadline", "cancel", "wait_error",
-        "cancel_api_error_then_terminal",
-    }:
-        return IoSettlement(False, True, path != "pending_terminal_error", False)
-    if path in {"pending_never_signals", "get_still_incomplete"}:
-        return IoSettlement(False, False, True, True)
-    raise AssertionError("unknown fixture path")
-
-
-@dataclass
-class ShutdownSettlement:
-    cancellation_signalled: bool
-    authority_retained: bool
-    job_closed: bool
-
-
-def model_shutdown(lock_acquired: bool, reap_proved: bool) -> ShutdownSettlement:
-    # Signal always precedes lock acquisition. A timeout or ambiguous reap
-    # retains every authority object; only full proof permits close.
-    if not lock_acquired or not reap_proved:
-        return ShutdownSettlement(True, True, False)
-    return ShutdownSettlement(True, False, True)
-
-
-@dataclass
-class ReceiptProjection:
-    status: str
-    journal_bound: bool
-    job_reaped: bool
-
-
-def project_receipt(journal_status: str, callback_status: str,
-                    journal_bound: bool, job_reaped: bool) -> ReceiptProjection:
-    concrete_failures = {
-        "pre_dispatch_failure", "cancelled", "deadline", "output_limit",
-        "exit_failure", "terminal_failure",
-    }
-    if journal_status == "terminal_success":
-        status = "ok" if journal_bound and job_reaped and callback_status == "ok" \
-            else "dispatched_unknown"
-    elif journal_status == "terminal_failure":
-        if not journal_bound or not job_reaped:
-            status = "dispatched_unknown"
-        else:
-            status = callback_status if callback_status in concrete_failures \
-                else "terminal_failure"
-    elif journal_status == "pre_dispatch_failure":
-        status = "pre_dispatch_failure"
-    else:
-        status = "dispatched_unknown"
-    return ReceiptProjection(status, journal_bound, job_reaped)
-
-
-@dataclass
-class ContextDestruction:
-    freed: bool
-    retained: bool
-    fail_stop: bool
-
-
-def model_context_destruction(worker_started: bool,
-                              join_proved: bool) -> ContextDestruction:
-    if not worker_started or join_proved:
-        return ContextDestruction(True, False, False)
-    return ContextDestruction(False, True, True)
-
-
-def model_active_checkpoint(shutting_down: bool,
-                            cancellation_signalled: bool) -> bool:
-    return not shutting_down and not cancellation_signalled
-
-
-class MutationFenceModel:
-    """Linearization oracle for shutdown versus mutation/finalization."""
+    CLOSING = 1 << 31
+    ACTIVE = 1
 
     def __init__(self):
-        self.shutting_down = False
-        self.mutations = 0
-        self.successes = 0
-        self.hash_updates = 0
-        self.drain_bytes = 0
-        self.cleanup_mutations = 0
-        self.root_termination_issued = False
+        self.word = 0
 
-    def shutdown_wins(self, event_signal_succeeds: bool = True) -> None:
-        # The atomic publication and signal attempt share the shutdown fence.
-        self.shutting_down = True
-        _ = event_signal_succeeds
+    def observe_open(self):
+        return self.word
 
-    def mutation_wins(self) -> bool:
-        if self.shutting_down:
+    def close(self):
+        self.word |= self.CLOSING
+
+    def late_cas_acquire(self, observed):
+        if self.word != observed or self.word & self.CLOSING or self.word & self.ACTIVE:
             return False
-        self.mutations += 1
+        self.word = observed | self.ACTIVE
         return True
 
-    def terminal_wins(self) -> bool:
-        if self.shutting_down:
+    def release(self):
+        self.word &= ~self.ACTIVE
+
+
+class ProcessAuthorityModel:
+    """Reference move/consume semantics for the process call authority."""
+
+    def __init__(self, ticket=True):
+        self.ticket = ticket
+        self.used = False
+
+    def move(self):
+        moved = ProcessAuthorityModel(self.ticket)
+        moved.used = self.used
+        self.ticket = False
+        self.used = True
+        return moved
+
+    def consume(self):
+        if self.used or not self.ticket:
             return False
-        self.successes += 1
-        return True
-
-    def precheck(self) -> bool:
-        return not self.shutting_down
-
-    def consume_hash(self) -> bool:
-        if self.shutting_down:
-            return False
-        self.hash_updates += 1
-        return True
-
-    def append_drain(self, count: int) -> bool:
-        if self.shutting_down:
-            return False
-        self.drain_bytes += count
-        return True
-
-    def cleanup_root_once(self) -> bool:
-        # Cleanup is permitted after shutdown, but its mutation is serialized
-        # and idempotent under the same fence.
-        if self.root_termination_issued:
-            return True
-        self.root_termination_issued = True
-        self.cleanup_mutations += 1
+        self.used = True
         return True
 
 
 class WindowsProcessTransactionStaticTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.cpp = CPP.read_bytes().decode("utf-8")
-        cls.hpp = HPP.read_bytes().decode("utf-8")
-        cls.tx = TRANSACTION.read_bytes().decode("utf-8")
+        cls.cpp = CPP.read_text(encoding="utf-8")
+        cls.borrow = BORROW.read_text(encoding="utf-8")
+        cls.tx = TRANSACTION.read_text(encoding="utf-8")
+        cls.owner = OWNER.read_text(encoding="utf-8")
+        cls.pipe_hpp = PIPE_HPP.read_text(encoding="utf-8")
+        cls.pipe_cpp = PIPE_CPP.read_text(encoding="utf-8")
+        cls.helper_main = HELPER_MAIN.read_text(encoding="utf-8")
         cls.contract = strict_json(CONTRACT)
+        cls.source = cls.cpp + "\n" + cls.borrow + "\n" + cls.tx + "\n" + cls.owner
 
-    def test_contract_is_closed_and_explicitly_inert(self):
-        self.assertEqual(
-            set(self.contract),
-            {
-                "schema", "status", "availability", "authority",
-                "capability_binding", "launch", "journal", "containment",
-                "limits", "receipt", "unresolved_activation_blockers",
-            },
+    def test_legacy_parallel_authority_surface_is_absent(self):
+        banned = (
+            r"\bJournalState\b", r"\bDispatchStatus\b",
+            r"\bDurableLoadResult\b", r"\bJournalOutcome\b",
+            r"\bJournalRecord\b", r"\bDurableJournalAdapter\b",
+            r"\bJournalAuthority\b", r"durable_journal_authorize",
+            r"consume_capability", r"recover_owned", r"begin_next_operation",
         )
-        self.assertEqual(
-            self.contract["schema"],
-            "lae.windows-process-transaction.contract.v0.1.0",
+        for pattern in banned:
+            self.assertIsNone(re.search(pattern, self.source), pattern)
+
+    def test_process_ids_are_exact_arrays_not_integer_ids(self):
+        self.assertIn("using ProcessIdentity = std::array<std::uint8_t, 16>", self.tx)
+        for field in ("request_identity", "session_identity", "stable_identity"):
+            self.assertRegex(self.tx, rf"ProcessIdentity {field}")
+        self.assertNotRegex(self.tx, r"uint64_t\s+(request|operation|session|stable)_?id")
+        self.assertNotIn("std::hash", self.tx)
+        self.assertIn("std::map<OperationIdentity, ChildSlot>", self.cpp)
+
+    def test_binding_is_complete_and_dispatch_lease_only(self):
+        for token in (
+            "ProcessDispatchBinding", "request_ref", "call_ref", "tool",
+            "risk", "side_effect", "args_digest", "preview_digest",
+            "operation_digest", "authorization_kind", "authorized_sequence",
+            "authorized_receipt_digest", "authorized_event_digest",
+            "ProcessDispatchLease",
+        ):
+            self.assertIn(token, self.source)
+        self.assertNotIn("dispatch_owned", self.source)
+        self.assertNotIn("JournalPersist", self.source)
+        self.assertNotIn("DispatchOperation", self.source)
+
+    def test_process_launch_authority_is_borrow_only(self):
+        region = self.cpp[self.cpp.index("struct ProcessLaunchAuthority"):
+                          self.cpp.index("bool trust_gates_open")]
+        self.assertIn("BorrowTicket owner", region)
+        self.assertNotIn("SupervisorState* supervisor", region)
+        self.assertIn(": owner(state.borrow_for_process())", region)
+        self.assertNotIn("BorrowedOwnerHandle", self.cpp)
+        for token in ("JournalAuthority", "DurableJournalAdapter", "JournalRecord"):
+            self.assertNotIn(token, region)
+        self.assertIn("ProcessLaunchAuthority(const ProcessLaunchAuthority&) = delete", region)
+
+    def test_pipe_server_borrows_owner_and_standalone_helper_refuses(self):
+        self.assertIn("PipeServerBorrow&& borrow", self.pipe_hpp)
+        self.assertIn("PipeServerBorrow&& borrow", self.pipe_cpp)
+        self.assertIn("borrow.checked_owner()", self.pipe_cpp)
+        self.assertIn("owner->apply", self.pipe_cpp)
+        self.assertNotIn("JournalAuthorityOwner::open", self.pipe_cpp)
+        self.assertNotIn("StorageRequest", self.pipe_cpp)
+        self.assertNotIn("run_foreground_helper_from_inherited_stdin()", self.helper_main)
+        self.assertIn("return 70", self.helper_main)
+
+    def test_explicit_startup_and_sole_owner(self):
+        self.assertIn("SupervisorStartupHandoff(", self.cpp)
+        self.assertIn("StorageRequest request", self.cpp)
+        self.assertIn("explicit SupervisorState(const SupervisorStartupHandoff&", self.cpp)
+        self.assertEqual(self.cpp.count("unique_ptr<JournalAuthorityOwner>"), 1)
+        self.assertIn("static std::unique_ptr<SupervisorState> open(", self.cpp)
+        self.assertIn("return nullptr;", self.cpp[self.cpp.index("static std::unique_ptr<SupervisorState> open"):])
+        self.assertNotIn("StorageRequest{}", self.source)
+
+    def test_shutdown_order_is_explicit_and_borrow_safe(self):
+        shutdown = self.cpp[self.cpp.index("bool shutdown_ordered"):
+                            self.cpp.index("SupervisorStartupHandoff startup")]
+        order = (
+            "pipe_call.close_admission", "pipe_call.wait_drained", "pipe.stop",
+            "stop_admission", "process_fence.drain", "children.drain",
+            "wait_process_drained", "wait_all_drained", "leases.clear",
+            "journal_owner.reset",
         )
+        positions = [shutdown.index(token) for token in order]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("No owner lock is held", self.cpp)
+        self.assertIn("bool proven() const noexcept", self.borrow)
+        self.assertIn("std::shared_ptr<BorrowControlBlock> control_", self.borrow)
+        self.assertIn("std::condition_variable drained", self.borrow)
+
+    def test_startup_copy_and_open_failures_are_refusal_safe(self):
+        handoff = self.cpp[self.cpp.index("struct SupervisorStartupHandoff"):
+                           self.cpp.index("struct ProcessTransactionFence")]
+        self.assertNotIn(") noexcept", handoff)
+        self.assertRegex(self.cpp, r"explicit SupervisorState\(const SupervisorStartupHandoff& handoff\)\n")
+        opening = self.cpp[self.cpp.index("static std::unique_ptr<SupervisorState> open"):
+                           self.cpp.index("BorrowTicket borrow_for_process")]
+        for token in ("try {", "std::bad_alloc", "std::system_error", "catch (...)", "return nullptr;"):
+            self.assertIn(token, opening)
+
+    def test_pipe_and_process_retain_move_only_tickets(self):
+        pipe = self.borrow[self.borrow.index("struct PipeServerBorrow"):]
+        process = self.cpp[self.cpp.index("struct ProcessLaunchAuthority"):
+                          self.cpp.index("bool trust_gates_open")]
+        self.assertIn("BorrowTicket ticket", pipe)
+        self.assertIn("ticket = std::move(value)", pipe)
+        self.assertIn("~ProcessLaunchAuthority() noexcept = default", process)
+        self.assertIn("BorrowTicket(BorrowTicket&& other) noexcept", self.borrow)
+        self.assertIn("BorrowTicket(const BorrowTicket&) = delete", self.borrow)
+
+    def test_pipe_helper_requires_ticket_and_returns_before_shutdown(self):
+        self.assertIn("PipeServerBorrow&& borrow", self.pipe_hpp)
+        self.assertIn("JournalAuthorityOwner* owner = borrow.checked_owner()", self.pipe_cpp)
+        self.assertNotIn("run_foreground_helper_from_inherited_stdin(\n    JournalAuthorityOwner&", self.pipe_cpp)
+        call = self.cpp[self.cpp.index("run_pipe_helper"):
+                        self.cpp.index("bool shutdown_ordered")]
+        for token in ("BorrowTicket ticket = borrow(BorrowKind::kPipe)",
+                      "call_borrow.attach(std::move(ticket))",
+                      "std::move(call_borrow)", "pipe_call.end()"):
+            self.assertIn(token, call)
+        shutdown = self.cpp[self.cpp.index("bool shutdown_ordered"):
+                            self.cpp.index("SupervisorStartupHandoff startup")]
+        self.assertLess(shutdown.index("pipe_call.wait_drained"),
+                        shutdown.index("pipe.stop"))
+
+    def test_process_transaction_requires_move_only_authority(self):
+        signature = self.tx[self.tx.index("LaunchReceipt execute_process_transaction"):
+                            self.tx.index("{", self.tx.index("LaunchReceipt execute_process_transaction"))]
+        self.assertIn("ProcessLaunchAuthority authority", signature)
+        self.assertNotIn("SupervisorState&", signature)
+        self.assertNotIn("JournalAuthorityOwner", signature)
+        body = self.tx[self.tx.index("LaunchReceipt execute_process_transaction"):]
+        self.assertIn("if (!authority.consume())", body)
+        self.assertLess(body.index("authority.consume"),
+                        body.index("if (!kProcessLaunchAvailable"))
+
+    def test_process_authority_is_move_only_and_one_use(self):
+        authority = self.cpp[self.cpp.index("struct ProcessLaunchAuthority"):
+                             self.cpp.index("bool trust_gates_open")]
+        for token in ("ProcessLaunchAuthority(ProcessLaunchAuthority&& other) noexcept",
+                      "operator=(ProcessLaunchAuthority&& other) noexcept",
+                      "consumed.exchange(true", "consumed.compare_exchange_strong",
+                      "bool proven() const noexcept", "bool consume() noexcept"):
+            self.assertIn(token, authority)
+        self.assertIn("std::atomic_bool consumed{false}", authority)
+        self.assertNotIn("ProcessLaunchAuthority(ProcessLaunchAuthority const&", authority)
+
+    def test_pipe_call_model_never_releases_state_ticket_while_in_flight(self):
+        model = PipeCallModel()
+        self.assertTrue(model.begin())
+        model.close()
+        self.assertFalse(model.begin())
+        self.assertFalse(model.stop_pipe())
+        model.end()
+        self.assertTrue(model.stop_pipe())
+
+    def test_pipe_call_word_rejects_late_cas_after_shutdown_close(self):
+        model = PipeCallWordModel()
+        observed_open = model.observe_open()
+        model.close()
+        self.assertFalse(model.late_cas_acquire(observed_open))
+        self.assertEqual(model.word & model.CLOSING, model.CLOSING)
+        model.release()
+        self.assertEqual(model.word & model.ACTIVE, 0)
+
+    def test_process_authority_model_rejects_source_reuse_and_second_consume(self):
+        source = ProcessAuthorityModel()
+        moved = source.move()
+        self.assertFalse(source.consume())
+        self.assertTrue(moved.consume())
+        self.assertFalse(moved.consume())
+
+    def test_borrow_domain_has_linearized_close_count_and_wake(self):
+        domain = self.borrow[self.borrow.index("class BorrowControlBlock"):
+                            self.borrow.index("class BorrowTicket")]
+        for token in ("kClosing", "kPoisoned", "kMaxActiveBorrows", "compare_exchange_weak",
+                      "kProcessMask", "notify_all", "wait_process_drained", "wait_all_drained"):
+            self.assertIn(token, domain)
+        self.assertIn("active >= kMaxActiveBorrows", domain)
+        self.assertIn("active == 0", domain)
+
+    def test_borrow_domain_model_rejects_late_and_overflow_acquisition(self):
+        model = BorrowDomainModel()
+        self.assertTrue(model.acquire("pipe"))
+        self.assertTrue(model.acquire("process"))
+        model.close()
+        self.assertFalse(model.acquire("process"))
+        self.assertEqual((model.active, model.process), (2, 1))
+        self.assertTrue(model.release("process"))
+        self.assertTrue(model.release("pipe"))
+        self.assertEqual((model.active, model.process), (0, 0))
+        full = BorrowDomainModel()
+        full.active = full.MAX
+        self.assertFalse(full.acquire("pipe"))
+        self.assertTrue(full.release("pipe"))
+        self.assertTrue(full.poisoned)
+
+    def test_borrow_domain_model_interleavings_preserve_counts(self):
+        for events in product(("pipe_acquire", "process_acquire", "close",
+                               "pipe_release", "process_release"), repeat=5):
+            model = BorrowDomainModel()
+            held_pipe = held_process = 0
+            for event in events:
+                if event == "close":
+                    model.close()
+                    self.assertEqual(model.active, held_pipe + held_process)
+                    self.assertEqual(model.process, held_process)
+                    continue
+                kind, action = event.rsplit("_", 1)
+                if action == "acquire":
+                    accepted = model.acquire(kind)
+                    if accepted:
+                        if kind == "pipe": held_pipe += 1
+                        else: held_process += 1
+                elif action == "release":
+                    if (kind == "pipe" and not held_pipe) or (kind == "process" and not held_process):
+                        continue
+                    accepted = model.release(kind)
+                    if accepted:
+                        if kind == "pipe" and held_pipe: held_pipe -= 1
+                        elif kind == "process" and held_process: held_process -= 1
+                self.assertEqual(model.active, held_pipe + held_process)
+                self.assertEqual(model.process, held_process)
+                self.assertLessEqual(model.active, model.MAX)
+                self.assertLessEqual(model.process, model.MAX)
+
+    def test_hard_refusal_precedes_every_mutation_boundary(self):
+        body = self.tx[self.tx.index("LaunchReceipt execute_process_transaction") :]
+        refusal = body.index("if (!kProcessLaunchAvailable")
+        refused_return = body.index("return LaunchReceipt{};", refusal)
+        self.assertLess(refusal, refused_return)
+        self.assertNotIn("persist_dispatching", body[:refusal])
+        self.assertNotIn("begin_external_dispatch", body[:refusal])
+        for forbidden in ("CreateProcess", "ShellExecute", "system(", "popen("):
+            self.assertNotIn(forbidden, self.source)
+
+    def test_model_cannot_reach_canary_execution_when_gate_is_false(self):
+        model = Phase2aModel()
+        result = model.execute(False, False)
+        self.assertEqual(result, "unavailable")
+        self.assertEqual(model.create_calls, 0)
+        self.assertEqual(model.persist_calls, 0)
+        self.assertEqual(model.external_calls, 0)
+
+    def test_contract_is_closed_and_inert(self):
         self.assertEqual(self.contract["status"], "SOURCE_ONLY_NOT_READY")
         self.assertTrue(all(value is False for value in self.contract["availability"].values()))
-        self.assertIs(self.contract["journal"]["adapter_implementation_present"], False)
-        self.assertGreaterEqual(len(self.contract["unresolved_activation_blockers"]), 8)
-        self.assertEqual(self.contract["containment"]["evidence"],
-                         "uncompiled_static_source_design_only")
-        self.assertIs(
-            self.contract["containment"]["forward_mutation_after_shutdown"],
-            False,
+        self.assertEqual(self.contract["authority"]["operation_identity"],
+                         "exact 16-byte array, never integer or hash coercion")
+        self.assertEqual(self.contract["journal"]["owner_api"], "ProcessDispatchLease")
+        self.assertFalse(self.contract["launch"]["reachable"])
+        self.assertFalse(self.contract["launch"]["irreversible_mutation"])
+
+    def test_no_product_activation_or_registry_changes(self):
+        native = (ROOT / "native/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertNotIn("windows_supervisor", native)
+        supervisor_text = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (CPP, TRANSACTION)
         )
-        self.assertEqual(
-            self.contract["containment"]["cleanup_after_shutdown"],
-            "mandatory_serialized_idempotent_root_termination_and_registry_detach",
-        )
-        self.assertIs(
-            self.contract["containment"]["cleanup_waits_hold_mutation_fence"],
-            False,
-        )
-        self.assertEqual(self.contract["limits"]["max_cleanup_reserve_ms"], 120000)
-        self.assertEqual(self.contract["limits"]["max_transaction_horizon_ms"], 240000)
-        self.assertTrue(any("cooperative cancellation" in item
-                            for item in self.contract["unresolved_activation_blockers"]))
-        self.assertIn("terminal_failure", self.contract["receipt"]["statuses"])
+        self.assertNotIn("CreateProcess", supervisor_text)
 
-    def test_no_public_or_product_integration_surface(self):
-        for token in (
-            "LaunchPlan", "LaunchReceipt", "DurableJournalAdapter",
-            "CreateProcessAsUserW", "process_launch_authority",
-        ):
-            self.assertNotIn(token, self.hpp)
-        cmake = (ROOT / "native/CMakeLists.txt").read_text(encoding="utf-8")
-        self.assertNotIn("process_transaction", cmake)
-        self.assertNotIn("windows_supervisor", cmake)
-        product_surfaces = "\n".join(
-            (ROOT / path).read_text(encoding="utf-8")
-            for path in (
-                "host/agent/controller.mjs",
-                "host/providers/index.mjs",
-                "host/tools/local/index.mjs",
-                "host/server/host-server.mjs",
-            )
-        )
-        self.assertNotIn("process_transaction.inc", product_surfaces)
-        self.assertNotIn("supervisor_owned_launch_transaction", product_surfaces)
-
-    def test_immutable_false_gate_precedes_path_handle_and_process_access(self):
-        self.assertIn("kSupervisorOwnedProcessTransactionAccepted = false", self.hpp)
-        self.assertIn("kRetainedExecutingSectionIdentityProven = false", self.hpp)
-        self.assertIn("kRetainedWorkingDirectoryIdentityProven = false", self.hpp)
-        start = self.tx.index("LaunchReceipt supervisor_owned_launch_transaction")
-        body = self.tx[start:]
-        gate = body.index("if (!process_launch_gates_open()) return output")
-        for token in (
-            "process_state()", "GetWindowsDirectoryW", "CreateFileW(",
-            "create_restricted_low_token", "make_pipe_pair",
-            "dispatch_owned(",
-        ):
-            self.assertGreater(body.index(token), gate, token)
-
-    def test_adapter_is_module_private_absent_and_recovery_is_mandatory(self):
-        self.assertIn("class DurableJournalAdapter", self.cpp)
-        self.assertIn("append_and_readback_exact", self.cpp)
-        self.assertIn("load_latest_exact", self.cpp)
-        self.assertIn("DurableJournalAdapter* const durable_adapter = nullptr", self.tx)
-        self.assertIn("const bool recovered = false", self.tx)
-        self.assertIn("const std::uint64_t root_generation = 0", self.tx)
-        self.assertNotIn("durable_adapter = &", self.tx)
-        self.assertIn("bool recover_owned(DurableJournalAdapter& adapter)", self.cpp)
-        launch = self.tx[self.tx.index("LaunchReceipt supervisor_owned_launch_transaction"):]
-        self.assertIn("!authority.recovered || !authority.durable_adapter", launch)
-        self.assertNotIn("class DurableJournalAdapter", self.hpp)
-
-    def test_creation_is_in_root_job_at_first_existence(self):
-        owner = self.tx[self.tx.index("class StartupAttributeOwner"):
-                        self.tx.index("struct PreparedLaunch")]
-        self.assertIn("PROC_THREAD_ATTRIBUTE_HANDLE_LIST", owner)
-        self.assertIn("PROC_THREAD_ATTRIBUTE_JOB_LIST", owner)
-        self.assertIn("const std::array<HANDLE, 3> inherited_handles_", owner)
-        self.assertIn("const std::array<HANDLE, 1> job_handles_", owner)
-        self.assertIn("std::unique_ptr<StartupAttributeOwner>", self.tx)
-        create = self.tx[self.tx.index("STARTUPINFOEXW startup"):
-                         self.tx.index("if (!launched)")]
-        self.assertIn("payloads_match", create)
-        self.assertIn("startup_attributes->get()", create)
-        self.assertIn("CREATE_SUSPENDED", create)
-        self.assertIn("EXTENDED_STARTUPINFO_PRESENT", create)
-        self.assertIn("CreateProcessAsUserW", create)
-        self.assertNotIn("AssignProcessToJobObject", self.tx)
-        self.assertNotIn("CREATE_BREAKAWAY_FROM_JOB", self.tx)
-
-    def test_durable_start_is_immediately_before_creation_callback(self):
-        owned = self.cpp[self.cpp.index("JournalOutcome dispatch_owned"):
-                         self.cpp.index("bool recover_owned")]
-        implementation = self.cpp[self.cpp.index("JournalOutcome dispatch_impl"):
-                                  self.cpp.index("public:\n  JournalState query")]
-        self.assertIn("persist(adapter, record, context)", owned)
-        self.assertLess(implementation.index("persist(start)"),
-                        implementation.index("operation(capability)"))
-        callback = self.tx[self.tx.index("DispatchStatus create_monitor_reap_after_durable_start"):
-                           self.tx.index("[[maybe_unused]] LaunchReceipt")]
-        self.assertLess(callback.index("checkpoint("), callback.index("CreateProcessAsUserW"))
-        self.assertLess(callback.index("same_identity_handle"), callback.index("CreateProcessAsUserW"))
-        between = callback[callback.index("const LaunchPlan& plan"):callback.index("CreateProcessAsUserW")]
-        for forbidden in ("Sleep(", "WaitForMultipleObjects", "ReadFile(", "WriteFile(", "CreateThread"):
-            self.assertNotIn(forbidden, between)
-
-    def test_capability_is_private_recomputed_complete_and_one_use(self):
-        launch = self.tx[self.tx.index("LaunchReceipt supervisor_owned_launch_transaction"):]
-        self.assertLess(launch.index("digest_plan("), launch.index("consume_capability("))
-        self.assertLess(launch.index("consume_capability("), launch.index("dispatch_owned("))
-        for token in (
-            "request_id", "operation_id", "session_id", "root_generation",
-            "expected_content_sha256", "expected_token_policy_digest",
-            "expected_executable.file_id", "expected_executable.volume_serial",
-            "expected_executable.file_index", "expected_executable.size",
-            "digests.arguments", "digests.limits", "digests.environment",
-            "capability.expires_at_ms",
-        ):
-            self.assertIn(token, self.tx)
-        self.assertIn("state.replay.consume(capability)", self.cpp)
-
-    def test_exact_executable_fixed_argv_minimal_environment_and_restricted_token(self):
-        for token in (
-            "FILE_SHARE_READ", "FILE_FLAG_OPEN_REPARSE_POINT",
-            "hash_retained_executable", "same_identity_handle",
-            "CreateRestrictedToken", "DISABLE_MAX_PRIVILEGE",
-            "SECURITY_MANDATORY_LOW_RID", "SystemRoot=",
-            "build_command_line", "append_quoted_argument",
-        ):
-            self.assertIn(token, self.tx)
-        for forbidden in (
-            "CreateProcessW(", "CreateProcessA(", "ShellExecute", "SearchPath",
-            "system(", "cmd.exe", "powershell", "GetEnvironmentVariable",
-            "CREATE_BREAKAWAY_FROM_JOB",
-        ):
-            self.assertNotIn(forbidden, self.tx)
-
-    def test_registry_transfer_and_whole_job_failure_are_fail_closed(self):
-        registry = self.cpp[self.cpp.index("class ChildRegistry"):
-                            self.cpp.index("struct SupervisorState")]
-        self.assertIn("children_.try_emplace(child.stable_id)", registry)
-        self.assertLess(registry.index("try_emplace"), registry.index("std::move(child)"))
-        cleanup = self.tx[self.tx.index("bool terminate_unregistered"):
-                          self.tx.index("DispatchStatus create_monitor")]
-        self.assertIn("context.authority->poisoned.store(true", cleanup)
-        self.assertIn("children.terminate_root_once", cleanup)
-        self.assertIn("wait_job_empty_until", cleanup)
-        self.assertIn("cleanup_deadline_at_ms", cleanup)
-        self.assertIn("!context.child.process ||", cleanup)
-        self.assertIn("authority.active", self.tx)
-
-    def test_output_and_waits_are_bounded_and_secret_free(self):
-        self.assertIn("kMaxCapturedBytesPerStream = 64 * 1024", self.cpp)
-        self.assertIn("context->limit", self.cpp)
-        self.assertIn("CancelSynchronousIo", self.cpp)
-        self.assertIn("settle_drain_worker", self.cpp)
-        self.assertNotIn("TerminateThread", self.cpp + self.tx)
-        self.assertNotIn("INFINITE", self.cpp + self.tx)
-        self.assertEqual(self.contract["limits"]["max_aggregate_output_bytes"], 131072)
-        self.assertNotIn("std::cout", self.tx)
-        self.assertNotIn("printf(", self.tx)
-        self.assertEqual(
-            set(self.contract["receipt"]["fields"]),
-            {"status", "stdout_bytes", "stderr_bytes", "exit_code",
-             "journal_bound", "job_reaped", "mutation_attempted"},
-        )
-
-    def test_overlapped_read_settles_before_stack_objects_can_return(self):
-        settle = self.tx[self.tx.index("bool settle_started_overlapped_read"):
-                         self.tx.index("bool overlapped_read")]
-        read = self.tx[self.tx.index("bool overlapped_read"):
-                       self.tx.index("bool hash_retained_executable")]
-        self.assertIn("CancelIoEx(file, &operation)", settle)
-        self.assertIn("WaitForSingleObject(operation.hEvent", settle)
-        self.assertIn("GetOverlappedResult(file, &operation", settle)
-        self.assertIn("GetTickCount64() >= cleanup_deadline_at_ms", settle)
-        self.assertIn("ERROR_IO_INCOMPLETE", settle)
-        self.assertIn("launch_cleanup_fail_stop()", settle)
-        for branch in (
-            "now >= deadline_at_ms", "WAIT_OBJECT_0 + 1",
-            "result != WAIT_TIMEOUT", "ERROR_IO_INCOMPLETE",
-        ):
-            self.assertIn(branch, read)
-        self.assertGreaterEqual(read.count("settle_started_overlapped_read("), 4)
-        self.assertIn("if (!operation.hEvent || !ResetEvent(operation.hEvent))", read)
-
-    def test_overlapped_model_covers_every_terminal_and_ambiguous_path(self):
-        for path in (
-            "sync_success", "sync_terminal_error", "not_started",
-            "pending_success", "pending_terminal_error", "deadline", "cancel",
-            "wait_error", "cancel_api_error_then_terminal",
-        ):
-            with self.subTest(path=path):
-                result = model_overlapped_read(path)
-                self.assertTrue(result.settled)
-                self.assertFalse(result.fail_stop)
-        for path in ("pending_never_signals", "get_still_incomplete"):
-            with self.subTest(path=path):
-                result = model_overlapped_read(path)
-                self.assertFalse(result.returned)
-                self.assertFalse(result.settled)
-                self.assertTrue(result.fail_stop)
-
-    def test_cancellation_event_and_shutdown_order_are_supervisor_owned(self):
-        initialize = self.cpp[self.cpp.index("bool initialize_supervisor"):
-                              self.cpp.index("bool executable_identity_bound",
-                                             self.cpp.index("bool initialize_supervisor"))]
-        shutdown = self.cpp[self.cpp.index("bool stop_supervisor"):
-                            self.cpp.index("JournalOutcome durable_journal_authorize")]
-        self.assertIn("state.cancellation.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr))", initialize)
-        signal = shutdown.index("SetEvent(state.cancellation.get())")
-        lock = shutdown.index("transaction_lock.try_lock()")
-        registry = shutdown.index("terminate_and_reap_all(")
-        self.assertLess(signal, lock)
-        self.assertLess(lock, registry)
-        self.assertIn("cleanup_deadline_at_ms = now + deadline_ms", shutdown)
-        self.assertIn("cleanup_deadline_at_ms,", shutdown)
-        self.assertNotIn("kMaxWaitMs, nullptr", shutdown)
-        self.assertIn("return GetTickCount64() < deadline_at_ms", self.cpp)
-
-    def test_shutdown_retains_authority_when_settlement_is_unproved(self):
-        shutdown = self.cpp[self.cpp.index("bool stop_supervisor"):
-                            self.cpp.index("JournalOutcome durable_journal_authorize")]
-        failure = shutdown.index("return false;", shutdown.index("terminate_and_reap_all"))
-        close_registry = shutdown.index("state.children.close_all(launch.mutation_fence)")
-        close_job = shutdown.index("state.root_job.reset()")
-        self.assertLess(failure, close_registry)
-        self.assertLess(failure, close_job)
-        self.assertIn("Retain the signaled event, root Job, registry", shutdown)
-        self.assertIn("launch.shutting_down.store(true", shutdown)
-
-    def test_shutdown_model_signals_first_and_never_drops_ambiguous_ownership(self):
-        for lock_acquired, reap_proved in ((False, False), (True, False)):
-            with self.subTest(lock=lock_acquired, reap=reap_proved):
-                result = model_shutdown(lock_acquired, reap_proved)
-                self.assertTrue(result.cancellation_signalled)
-                self.assertTrue(result.authority_retained)
-                self.assertFalse(result.job_closed)
-        complete = model_shutdown(True, True)
-        self.assertTrue(complete.cancellation_signalled)
-        self.assertFalse(complete.authority_retained)
-        self.assertTrue(complete.job_closed)
-
-    def test_failed_set_event_still_stops_every_later_checkpoint(self):
-        checkpoint = self.tx[self.tx.index("bool checkpoint"):
-                             self.tx.index("bool append_bytes")]
-        shutdown = self.cpp[self.cpp.index("bool stop_supervisor"):
-                            self.cpp.index("JournalOutcome durable_journal_authorize")]
-        self.assertLess(shutdown.index("shutting_down.store(true"),
-                        shutdown.index("SetEvent(state.cancellation.get())"))
-        self.assertIn("authority.shutting_down.load(std::memory_order_acquire)",
-                      checkpoint)
-        self.assertGreaterEqual(
-            self.tx.count("shutting_down.load(std::memory_order_acquire)"), 4)
-        # A failed event signal cannot erase the already-published atomic stop.
-        self.assertFalse(model_active_checkpoint(
-            shutting_down=True, cancellation_signalled=False))
-
-    def test_mutation_fence_orders_shutdown_create_resume_and_journal(self):
-        authority = self.tx[self.tx.index("struct ProcessLaunchAuthority"):
-                            self.tx.index("ProcessLaunchAuthority&")]
-        shutdown = self.cpp[self.cpp.index("bool stop_supervisor"):
-                            self.cpp.index("JournalOutcome durable_journal_authorize")]
-        create = self.tx[self.tx.index("BOOL launched = FALSE"):
-                         self.tx.index("if (!launched)")]
-        resume = self.tx[self.tx.index("bool monitor_registered_child"):
-                         self.tx.index("bool saw_exit")]
-        persist = self.tx[self.tx.index("bool persist_launch_record"):
-                          self.tx.index("bool make_pipe_pair")]
-        self.assertIn("std::mutex mutation_fence", authority)
-        self.assertIn("std::lock_guard fence(launch.mutation_fence)", shutdown)
-        self.assertLess(shutdown.index("mutation_fence"),
-                        shutdown.index("shutting_down.store(true"))
-        self.assertLess(shutdown.index("shutting_down.store(true"),
-                        shutdown.index("SetEvent(state.cancellation.get())"))
-        self.assertIn("std::lock_guard fence(context->authority->mutation_fence)",
-                      create)
-        self.assertIn("std::lock_guard fence(context->authority->mutation_fence)",
-                      resume)
-        self.assertIn("std::lock_guard fence(context->authority->mutation_fence)",
-                      persist)
-        self.assertIn("journal_transition_claimed_sequence = record.sequence",
-                      persist)
-        self.assertLess(persist.index("mutation_fence"),
-                        persist.index("adapter.append_and_readback_exact"))
-        wrapper = self.tx[self.tx.index("const JournalOutcome journal"):]
-        self.assertIn("finish_claimed_terminal", wrapper)
-        self.assertIn(
-            "prepared.journal_transition_claimed_sequence != journal.sequence",
-            wrapper,
-        )
-        for bounded_section in (create, resume):
-            self.assertNotIn("Sleep(", bounded_section)
-            self.assertNotIn("WaitForMultipleObjects", bounded_section)
-
-    def test_interleaving_model_never_mutates_or_succeeds_after_shutdown_wins(self):
-        for boundary in (
-            "before_create", "before_final", "during_sync_read",
-            "set_event_failure",
-        ):
-            with self.subTest(boundary=boundary):
-                model = MutationFenceModel()
-                if boundary == "before_create":
-                    model.shutdown_wins()
-                    self.assertFalse(model.mutation_wins())
-                elif boundary == "before_final":
-                    self.assertTrue(model.mutation_wins())
-                    model.shutdown_wins()
-                    self.assertFalse(model.terminal_wins())
-                elif boundary == "during_sync_read":
-                    self.assertTrue(model.precheck())
-                    model.shutdown_wins()
-                    self.assertFalse(model.consume_hash())
-                else:
-                    model.shutdown_wins(event_signal_succeeds=False)
-                    self.assertFalse(model.mutation_wins())
-                self.assertEqual(model.successes, 0)
-
-        create_first = MutationFenceModel()
-        self.assertTrue(create_first.mutation_wins())
-        create_first.shutdown_wins()
-        self.assertEqual(create_first.mutations, 1)
-        final_first = MutationFenceModel()
-        self.assertTrue(final_first.terminal_wins())
-        final_first.shutdown_wins()
-        self.assertEqual(final_first.successes, 1)
-
-    def test_check_to_hash_and_drain_append_are_fence_owned(self):
-        hash_model = MutationFenceModel()
-        self.assertTrue(hash_model.precheck())
-        hash_model.shutdown_wins()
-        self.assertFalse(hash_model.consume_hash())
-        self.assertEqual(hash_model.hash_updates, 0)
-
-        drain_model = MutationFenceModel()
-        self.assertTrue(drain_model.precheck())
-        drain_model.shutdown_wins()
-        self.assertFalse(drain_model.append_drain(32))
-        self.assertEqual(drain_model.drain_bytes, 0)
-
-    def test_cleanup_is_serialized_idempotent_and_allowed_after_shutdown(self):
-        model = MutationFenceModel()
-        model.shutdown_wins()
-        self.assertTrue(model.cleanup_root_once())
-        self.assertTrue(model.cleanup_root_once())
-        self.assertEqual(model.cleanup_mutations, 1)
-        self.assertFalse(model.mutation_wins())
-
-    def test_sync_and_awaited_reads_recheck_stop_before_consuming_bytes(self):
-        read = self.tx[self.tx.index("bool overlapped_read"):
-                       self.tx.index("bool hash_retained_executable")]
-        usable = self.tx[self.tx.index("bool consume_hash_chunk"):
-                         self.tx.index("bool append_bytes")]
-        self.assertIn("std::lock_guard fence(authority.mutation_fence)", usable)
-        self.assertIn("authority.shutting_down.load", usable)
-        self.assertIn("WaitForSingleObject(cancellation, 0) != WAIT_TIMEOUT", usable)
-        self.assertIn("BCryptHashData", usable)
-        self.assertIn("BCryptFinishHash", usable)
-        self.assertIn("transferred = 0", read)
-        hashing = self.tx[self.tx.index("bool hash_retained_executable"):
-                          self.tx.index("bool append_quoted_argument")]
-        self.assertIn("consume_hash_chunk", hashing)
-        self.assertIn("finish_hash_under_fence", hashing)
-        self.assertNotIn("BCryptHashData(hash", hashing)
-        drain = self.cpp[self.cpp.index("DWORD WINAPI drain_child_pipe"):
-                         self.cpp.index("bool settle_drain_worker")]
-        self.assertGreaterEqual(
-            drain.count("std::lock_guard fence(*context->mutation_fence)"), 2)
-        self.assertGreaterEqual(
-            drain.count("drain_result_usable_locked(*context)"), 2)
-        self.assertEqual(drain.count("context->captured.store"), 6)
-        self.assertEqual(
-            drain.count("std::lock_guard fence(*context->mutation_fence)"), 4)
-        self.assertIn("SecureZeroMemory(context->bytes.data() + total, read)",
-                      drain)
-        settle = self.cpp[self.cpp.index("bool settle_child_drains"):
-                          self.cpp.index("class ChildRegistry")]
-        self.assertIn(
-            "std::lock_guard fence(*child.stdout_context->mutation_fence)",
-            settle,
-        )
-        self.assertLess(settle.index("std::lock_guard fence"),
-                        settle.index("child.stdout_bytes ="))
-        self.assertIn("capture_usable", settle)
-        self.assertIn("? child.stdout_context->captured.load", settle)
-        self.assertIn("? child.stderr_context->captured.load", settle)
-
-    def test_terminal_claim_is_fenced_with_exact_sequence_and_stop_state(self):
-        wrapper = self.tx[self.tx.index("const JournalOutcome journal"):]
-        finish = wrapper[wrapper.index("const auto finish_claimed_terminal"):
-                         wrapper.index("switch (journal.status)")]
-        self.assertIn("std::lock_guard fence(authority.mutation_fence)", finish)
-        self.assertIn("prepared.journal_transition_claimed_sequence != journal.sequence", finish)
-        self.assertIn("authority.poisoned.load", finish)
-        self.assertIn("authority.shutting_down.load", finish)
-        self.assertIn("GetTickCount64() >= deadline_at_ms", finish)
-        self.assertIn("WaitForSingleObject(supervisor.cancellation.get(), 0) != WAIT_TIMEOUT", finish)
-        self.assertLess(finish.index("std::lock_guard fence"),
-                        finish.index("authority.journal.begin_next_operation()"))
-
-    def test_cleanup_mutations_share_fence_and_root_termination_is_once(self):
-        registry = self.cpp[self.cpp.index("class ChildRegistry"):
-                            self.cpp.index("struct SupervisorState")]
-        helper = registry[registry.index("bool terminate_root_once_locked"):
-                          registry.index("std::mutex mutex_")]
-        self.assertIn("std::lock_guard fence(cleanup_fence)", helper)
-        self.assertIn("root_termination_issued_", helper)
-        self.assertIn("TerminateJobObject(root_job, 1)", helper)
-        self.assertEqual(registry.count("TerminateJobObject(root_job, 1)"), 1)
-        self.assertGreaterEqual(registry.count("terminate_root_once_locked("), 3)
-        self.assertIn("std::lock_guard fence(cleanup_fence);\n      children_.erase", registry)
-        self.assertIn("std::lock_guard fence(cleanup_fence);\n    for (auto&", registry)
-        cleanup = self.tx[self.tx.index("bool terminate_unregistered"):
-                          self.tx.index("DispatchStatus create_monitor")]
-        self.assertIn("children.terminate_root_once", cleanup)
-        self.assertNotIn("TerminateJobObject", cleanup)
-
-    def test_preparation_rechecks_stop_between_resource_acquisitions(self):
-        launch = self.tx[self.tx.index("PreparedLaunch prepared"):
-                         self.tx.index("const JournalOutcome journal")]
-        for token in (
-            "CreateFileW(", "hash_retained_executable(",
-            "create_restricted_low_token(", "make_pipe_pair(",
-            "make_stdin_pair(", "prepare_startup_attributes(",
-        ):
-            self.assertIn(token, launch)
-        self.assertGreaterEqual(launch.count("checkpoint(supervisor, authority"), 8)
-
-    def test_worker_context_requires_join_before_release_or_fail_stops(self):
-        owner = self.cpp[self.cpp.index("class DrainContextOwner"):
-                         self.cpp.index("struct Child final")]
-        settle = self.cpp[self.cpp.index("bool settle_child_drains"):
-                          self.cpp.index("class ChildRegistry")]
-        self.assertIn("if (context_) std::terminate()", owner)
-        self.assertIn("release_after_join", owner)
-        self.assertNotIn("std::unique_ptr<DrainContext>", self.cpp)
-        self.assertLess(settle.index("stdout_worker.reset()"),
-                        settle.index("stdout_context.release_after_join()"))
-        self.assertLess(settle.index("stderr_worker.reset()"),
-                        settle.index("stderr_context.release_after_join()"))
-        unresolved = model_context_destruction(True, False)
-        self.assertEqual(unresolved, ContextDestruction(False, True, True))
-        self.assertEqual(model_context_destruction(True, True),
-                         ContextDestruction(True, False, False))
-        self.assertEqual(model_context_destruction(False, False),
-                         ContextDestruction(True, False, False))
-
-    def test_receipt_projection_uses_actual_journal_and_callback_outcome(self):
-        wrapper = self.tx[self.tx.index("const JournalOutcome journal"):]
-        self.assertIn("switch (journal.status)", wrapper)
-        self.assertIn("concrete_terminal_failure(output.status)", wrapper)
-        self.assertIn("output.status = LaunchResultCode::kTerminalFailure", wrapper)
-        for callback in ("ok", "unavailable", "invalid_request"):
-            with self.subTest(callback=callback):
-                result = project_receipt(
-                    "terminal_failure", callback, True, True)
-                self.assertEqual(result.status, "terminal_failure")
-                self.assertTrue(result.journal_bound)
-                self.assertTrue(result.job_reaped)
-        for callback in (
-            "pre_dispatch_failure", "cancelled", "deadline", "output_limit",
-            "exit_failure", "terminal_failure",
-        ):
-            with self.subTest(callback=callback):
-                self.assertEqual(
-                    project_receipt("terminal_failure", callback, True, True).status,
-                    callback,
-                )
-        self.assertEqual(
-            project_receipt("terminal_success", "ok", True, True).status, "ok")
-        self.assertEqual(
-            project_receipt("terminal_success", "unavailable", True, True).status,
-            "dispatched_unknown",
-        )
-        for journal in ("dispatched_unknown", "persistence_failure"):
-            with self.subTest(journal=journal):
-                result = project_receipt(journal, "ok", False, True)
-                self.assertEqual(result.status, "dispatched_unknown")
-                self.assertFalse(result.journal_bound)
-                self.assertTrue(result.job_reaped)
-
-    def test_cleanup_uses_bound_absolute_deadlines(self):
-        for token in (
-            "wait_reaped_until", "wait_job_empty_until",
-            "cleanup_deadline_at_ms", "now >= deadline_at_ms",
-        ):
-            self.assertIn(token, self.cpp + self.tx)
-        self.assertIn("plan.limits.cleanup_deadline_at_ms", self.tx)
-        self.assertNotIn("wait_reaped(context.child.process.get(), kMaxWaitMs", self.tx)
-        self.assertNotIn("wait_job_empty_bounded", self.cpp + self.tx)
-
-    def test_model_refuses_all_pre_dispatch_faults_without_create(self):
-        for fault in ("gate", "shape", "identity", "token", "pipes"):
-            with self.subTest(fault=fault):
-                result = TransactionModel().run(fault)
-                self.assertEqual(result.status, "pre_dispatch")
-                self.assertEqual(result.create_calls, 0)
-                self.assertTrue(result.job_empty)
-
-    def test_model_start_persistence_and_create_ack_loss_are_unknown(self):
-        start = TransactionModel().run("start_persist")
-        self.assertEqual((start.status, start.create_calls, start.terminal_durable),
-                         ("unknown_manual", 0, False))
-        create = TransactionModel().run("create_return")
-        self.assertEqual((create.status, create.create_calls, create.terminal_durable),
-                         ("unknown_manual", 1, False))
-
-    def test_model_post_create_failures_require_reap_or_unknown(self):
-        for fault in ("membership", "registry", "pre_resume", "monitor"):
-            with self.subTest(fault=fault):
-                result = TransactionModel().run(fault)
-                self.assertEqual(result.create_calls, 1)
-                self.assertTrue(result.job_empty)
-                self.assertTrue(result.poisoned)
-                self.assertEqual(result.status, "terminal_failure")
-        ambiguous = TransactionModel().run("drain")
-        self.assertEqual(ambiguous.status, "unknown_manual")
-        self.assertFalse(ambiguous.job_empty)
-
-    def test_model_terminal_ack_replay_and_serialization(self):
-        model = TransactionModel()
-        result = model.run()
-        self.assertEqual(result.status, "ok")
-        self.assertTrue(result.terminal_durable)
-        self.assertTrue(result.job_empty)
-        self.assertEqual(model.run(nonce="n1").status, "refused")
-        model.active = True
-        self.assertEqual(model.run(nonce="n2").status, "refused")
-
-    def test_current_qa_inventory_includes_this_test(self):
+    def test_current_qa_inventory_contains_this_test(self):
         inventory = (ROOT / "scripts/test/run_qa.py").read_text(encoding="utf-8")
-        self.assertIn(
-            '"tests/native/test_windows_process_transaction_static.py": "native_static"',
-            inventory,
-        )
+        self.assertIn('"tests/native/test_windows_process_transaction_static.py": "native_static"', inventory)
 
 
 if __name__ == "__main__":
