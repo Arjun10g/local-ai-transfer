@@ -39,6 +39,10 @@ TARGET_SOURCES = {
     "lae_compilecheck_windows_supervisor": {
         "windows_supervisor/authority.cpp",
         "windows_supervisor/process_transaction.inc",
+        "action_journal_helper/pipe_server.cpp",
+        "action_journal_helper/protocol_codec.cpp",
+        "action_journal_helper/store_codec.cpp",
+        "action_journal_storage/windows_storage.cpp",
     },
     "lae_compilecheck_windows_clipboard": {
         "windows_clipboard/windows_clipboard.cpp",
@@ -61,11 +65,7 @@ TARGET_LIBRARIES = {
         "bcrypt",
         "ntdll",
     },
-    "lae_compilecheck_windows_supervisor": {
-        "advapi32",
-        "bcrypt",
-        "wintrust",
-    },
+    "lae_compilecheck_windows_supervisor": {"advapi32", "bcrypt"},
     "lae_compilecheck_windows_clipboard": {
         "advapi32",
         "bcrypt",
@@ -102,11 +102,9 @@ TARGET_LIBRARY_API_MARKERS = {
     "lae_compilecheck_windows_supervisor": {
         "advapi32": (
             "OpenProcessToken(",
-            "CreateRestrictedToken(",
-            "CreateProcessAsUserW(",
+            "GetSecurityInfo(",
         ),
         "bcrypt": ("BCryptOpenAlgorithmProvider(", "BCryptGenRandom("),
-        "wintrust": ("WinVerifyTrust(",),
     },
     "lae_compilecheck_windows_clipboard": {
         "advapi32": ("OpenProcessToken(", "GetSecurityDescriptorControl("),

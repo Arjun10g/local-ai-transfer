@@ -138,22 +138,22 @@ class WindowsActionJournalHelperStaticTests(unittest.TestCase):
         )
         self.assertLess(
             self.pipe.index("read_bootstrap(issuer.bootstrap_pipe.get(), bootstrap)"),
-            self.pipe.index("JournalAuthorityOwner::open"),
+            self.pipe.index("owner.ready()"),
         )
+        self.assertNotIn("JournalAuthorityOwner::open", self.pipe)
         authority = self.contract["bootstrap"]["issuer_authority"]
         self.assertIs(authority["production_gate"], False)
         self.assertIn("not supplied in bootstrap", authority["required_activation_binding"])
 
-    def test_storage_is_exact_open_existing_retained_authority_before_pipe(self):
+    def test_storage_is_supervisor_owned_and_borrowed_before_pipe(self):
         for token in (
-            "OpenMode::kOpenExisting", "has_expected_identity = true",
-            "expected_storage_volume_serial", "expected_storage_file_id",
-            "expected_container_id", "JournalStorageLease&& lease",
-            "retained_file_handle()", "load_and_recover", "JournalAuthorityOwner::open",
-            "CreateNamedPipeW",
+            "JournalStorageLease&& lease", "retained_file_handle()",
+            "load_and_recover", "CreateNamedPipeW",
         ):
             self.assertIn(token, self.pipe + self.store + self.headers)
-        self.assertLess(self.pipe.index("JournalAuthorityOwner::open"), self.pipe.index("CreateNamedPipeW"))
+        self.assertNotIn("JournalAuthorityOwner::open", self.pipe)
+        self.assertIn("JournalAuthorityOwner& owner", self.pipe)
+        self.assertLess(self.pipe.index("owner.ready()"), self.pipe.index("CreateNamedPipeW"))
         self.assertNotIn("storage_directory", self.store)
         self.assertNotRegex(self.store, r"CreateFileW|DeleteFileW|MoveFileW")
 
@@ -387,19 +387,11 @@ class WindowsActionJournalHelperStaticTests(unittest.TestCase):
         self.assertIn("completed && ignored != 0", wait)
         self.assertNotIn("completed && transferred != 0", wait)
 
-    def test_recovery_has_one_explicit_deadline_and_cancel_probe_before_pipe(self):
-        for token in (
-            "StartupCancellationContext", "startup_cancelled",
-            "GetTickCount64() + kIoDeadlineMs", "StorageIoControl startup_io",
-            "JournalAuthorityOwner::open",
-        ):
-            self.assertIn(token, self.pipe)
-        self.assertLess(
-            self.pipe.index("JournalAuthorityOwner::open"),
-            self.pipe.index("CreateNamedPipeW"),
-        )
-        final_probe = self.pipe.index("if (startup_io.stop_requested())")
-        self.assertLess(final_probe, self.pipe.index("CreateNamedPipeW"))
+    def test_recovery_is_supervisor_owned_and_borrowed_before_pipe(self):
+        self.assertNotIn("StartupCancellationContext", self.pipe)
+        self.assertNotIn("JournalAuthorityOwner::open", self.pipe)
+        self.assertLess(self.pipe.index("owner.ready()"),
+                        self.pipe.index("CreateNamedPipeW"))
 
     def test_exact_deadline_and_persisted_authority_enums_fail_closed(self):
         self.assertIn("if (deadline <= now_ms)", self.protocol)

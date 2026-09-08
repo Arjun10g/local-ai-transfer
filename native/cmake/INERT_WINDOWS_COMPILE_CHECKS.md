@@ -13,14 +13,15 @@ The checked boundaries are exactly:
   `action_journal_storage` implementation;
 - `windows_release_verifier`;
 - `windows_supervisor`, with `process_transaction.inc` retained as an included,
-  header-only source dependency rather than an independent translation unit;
+  header-only source dependency and the private owner/helper implementation
+  included only in this isolated static target;
 - `windows_clipboard`.
 
 The journal codec uses the repository's already-vendored nlohmann 3.12 headers.
 No dependency is downloaded and no runtime dependency is added. Explicit
 non-default import libraries are a finite set of Windows SDK system libraries
 only; Kernel32 and the MSVC runtime remain toolchain platform defaults. The
-supervisor declares `advapi32`, `bcrypt`, and `wintrust`; clipboard declares
+supervisor declares `advapi32` and `bcrypt`; clipboard declares
 `advapi32`, `bcrypt`, and `user32`. Static checks cover both directions: each
 declared library has an imported API justification, and each observed
 non-default API family has its required declaration. This is source-level

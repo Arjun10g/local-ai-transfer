@@ -17,6 +17,8 @@
 
 namespace lae::action_journal_helper {
 
+class JournalAuthorityOwner;
+
 enum class HelperStatus : std::uint8_t {
   kOk,
   kPlatformUnavailable,
@@ -61,7 +63,10 @@ struct BootstrapRecord {
 // Reads only from an inherited pipe installed as standard input. The function
 // never accepts bootstrap bytes from argv, environment, a file, or the pipe
 // client. It creates at most one named-pipe instance and then exits.
-HelperStatus run_foreground_helper_from_inherited_stdin() noexcept;
+// The helper borrows the supervisor-owned owner; it never constructs or owns
+// storage authority. The borrow must remain valid for the complete call.
+HelperStatus run_foreground_helper_from_inherited_stdin(
+    JournalAuthorityOwner& owner) noexcept;
 const char* helper_status_name(HelperStatus status) noexcept;
 
 }  // namespace lae::action_journal_helper

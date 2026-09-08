@@ -11,7 +11,6 @@
 #include <utility>
 #include <vector>
 
-#include "../action_journal_storage/windows_storage.hpp"
 #include "protocol_codec.hpp"
 #include "journal_authority_owner.hpp"
 
@@ -604,28 +603,6 @@ bool recoverable_store_status(StoreStatus status) noexcept {
       status == StoreStatus::kCommitNonCancellable;
 }
 
-HelperStatus authority_status(AuthorityStatus status) noexcept {
-  switch (status) {
-    case AuthorityStatus::kStorageUnavailable:
-      return HelperStatus::kStorageUnavailable;
-    case AuthorityStatus::kStorageCorrupt:
-      return HelperStatus::kStorageCorrupt;
-    case AuthorityStatus::kIoTimeout:
-      return HelperStatus::kIoTimeout;
-    case AuthorityStatus::kIoCancelFailed:
-      return HelperStatus::kIoCancelFailed;
-    case AuthorityStatus::kRecoveryFailed:
-      return HelperStatus::kRecoveryFailed;
-    case AuthorityStatus::kReady:
-      return HelperStatus::kOk;
-    case AuthorityStatus::kNotReady:
-    case AuthorityStatus::kPoisoned:
-    case AuthorityStatus::kInternal:
-      return HelperStatus::kInternal;
-  }
-  return HelperStatus::kInternal;
-}
-
 struct RequestCancellationContext {
   HANDLE pipe = INVALID_HANDLE_VALUE;
   HANDLE client_process = INVALID_HANDLE_VALUE;
@@ -733,19 +710,10 @@ bool monitored_request_cancelled(void* raw) noexcept {
   return monitor == nullptr || monitor->cancellation_signaled();
 }
 
-struct StartupCancellationContext {
-  HANDLE supervisor_process = INVALID_HANDLE_VALUE;
-};
-
-bool startup_cancelled(void* raw) noexcept {
-  const auto* context = static_cast<const StartupCancellationContext*>(raw);
-  return context == nullptr || context->supervisor_process == INVALID_HANDLE_VALUE ||
-      WaitForSingleObject(context->supervisor_process, 0) != WAIT_TIMEOUT;
-}
-
 }  // namespace
 
-HelperStatus run_foreground_helper_from_inherited_stdin() noexcept {
+HelperStatus run_foreground_helper_from_inherited_stdin(
+    JournalAuthorityOwner& owner) noexcept {
   BootstrapRecord bootstrap;
   BootstrapScope bootstrap_scope(bootstrap);
   try {
@@ -757,32 +725,12 @@ HelperStatus run_foreground_helper_from_inherited_stdin() noexcept {
     if (!read_bootstrap(issuer.bootstrap_pipe.get(), bootstrap))
       return HelperStatus::kBootstrapInvalid;
     bootstrap_scope.locked = VirtualLock(&bootstrap, sizeof(bootstrap)) != FALSE;
-    action_journal_storage::StorageRequest storage_request;
-    storage_request.mode = action_journal_storage::OpenMode::kOpenExisting;
-    storage_request.absolute_directory = bootstrap.storage_directory;
-    storage_request.has_expected_identity = true;
-    storage_request.expected_identity.volume_serial =
-        bootstrap.expected_storage_volume_serial;
-    storage_request.expected_identity.file_id = bootstrap.expected_storage_file_id;
-    storage_request.expected_identity.container_id = bootstrap.expected_container_id;
-    action_journal_storage::StorageReceipt storage_receipt;
-    StartupCancellationContext startup_context{issuer.process.get()};
-    const StorageIoControl startup_io{
-        CancellationProbe{startup_cancelled, &startup_context},
-        GetTickCount64() + kIoDeadlineMs, true};
-    AuthorityStatus owner_status = AuthorityStatus::kInternal;
-    auto owner = JournalAuthorityOwner::open(
-        storage_request, bootstrap.expected_container_id, startup_io,
-        owner_status, storage_receipt);
-    if (!owner) return authority_status(owner_status);
+    if (!owner.ready() || owner.poisoned()) return HelperStatus::kStorageUnavailable;
     PipeSecurity security;
     if (!private_pipe_security(user.sid, security))
       return HelperStatus::kPipeSecurityFailed;
     // Recheck the shared startup authority at the final pipe-publication
     // boundary; recovery success must not outlive its supervisor or deadline.
-    if (startup_io.stop_requested())
-      return startup_io.cancellation_requested()
-          ? HelperStatus::kRecoveryFailed : HelperStatus::kIoTimeout;
     const std::wstring pipe_name = kPipePrefix +
         std::to_wstring(GetCurrentProcessId());
     UniqueHandle pipe(CreateNamedPipeW(
@@ -846,7 +794,7 @@ HelperStatus run_foreground_helper_from_inherited_stdin() noexcept {
                                             &cancellation_monitor};
       const StorageIoControl request_io{
           cancellation, GetTickCount64() + kIoDeadlineMs, true};
-      const auto applied = owner->apply(request, request_io, result);
+      const auto applied = owner.apply(request, request_io, result);
       // Do not encode or return a result after the transport stopped during
       // the owner-locked store application.
       if (cancellation_monitor.cancellation_signaled() ||

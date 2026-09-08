@@ -78,12 +78,19 @@ set_source_files_properties(
   PROPERTIES HEADER_FILE_ONLY TRUE)
 add_library(lae_compilecheck_windows_supervisor STATIC
   "${_LAE_INERT_NATIVE_ROOT}/windows_supervisor/authority.cpp"
-  "${_LAE_INERT_NATIVE_ROOT}/windows_supervisor/process_transaction.inc")
+  "${_LAE_INERT_NATIVE_ROOT}/windows_supervisor/process_transaction.inc"
+  # The owner/helper implementation is in this optional, default-OFF target
+  # only.  It is not a product or runtime dependency.
+  "${_LAE_INERT_NATIVE_ROOT}/action_journal_helper/pipe_server.cpp"
+  "${_LAE_INERT_NATIVE_ROOT}/action_journal_helper/protocol_codec.cpp"
+  "${_LAE_INERT_NATIVE_ROOT}/action_journal_helper/store_codec.cpp"
+  "${_LAE_INERT_NATIVE_ROOT}/action_journal_storage/windows_storage.cpp")
 _lae_configure_inert_compile_check(lae_compilecheck_windows_supervisor)
+target_include_directories(lae_compilecheck_windows_supervisor SYSTEM PRIVATE
+  "${_LAE_INERT_REPOSITORY_ROOT}/vendor/llama.cpp/vendor")
 target_link_libraries(lae_compilecheck_windows_supervisor PRIVATE
   advapi32
-  bcrypt
-  wintrust)
+  bcrypt)
 
 add_library(lae_compilecheck_windows_clipboard STATIC
   "${_LAE_INERT_NATIVE_ROOT}/windows_clipboard/windows_clipboard.cpp")

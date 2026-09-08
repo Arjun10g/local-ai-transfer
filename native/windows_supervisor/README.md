@@ -1,51 +1,27 @@
-# Inert Windows supervisor authority
+# Inert Windows supervisor topology
 
-This directory is a deliberately unlinked `_WIN32` reference boundary. It is
-not in `native/CMakeLists.txt`, the launcher, the Node host, the package
-allowlist, or the production registry. `authority.hpp` exposes only refusal
-and redacted loopback metadata; it has no public issuer, capability factory,
-child-launch API, or caller-supplied path/identity API.
+This directory is a deliberately unlinked `_WIN32` source boundary. It is not
+in `native/CMakeLists.txt`, the launcher, the host, the package allowlist, or a
+production registry. The public header exposes refusal and redacted loopback
+metadata only.
 
-The source records the required future control flow so it can be independently
-reviewed before integration. Trust gates are compile-time false and are
-checked before any Windows process, token, pipe, job, module, or filesystem
-operation. The latent supervisor creates one foreground kill-on-close root
-Job and keeps direct root membership in a bounded stable registry; nested jobs
-are refused until policy is proven, and
-requires bounded terminate/wait/reap plus an empty-job proof before closure.
-There is no leader-only fallback, `INFINITE` wait, shell/search/PATH lookup,
-or detached process path.
+Phase 2a establishes one co-located supervisor/helper ownership topology:
+`SupervisorState` owns the sole `JournalAuthorityOwner`; the pipe server and
+process transaction borrow that owner under an explicit lifetime proof. Startup
+requires an explicit canonical `StorageRequest` handoff, with no implicit
+storage path. Shutdown stops admission, drains process borrows and children,
+stops the pipe, destroys leases, and releases the owner last. No owner lock is
+held across waits.
 
-Bootstrap accepts only inherited anonymous pipe handles and binds them to a
-parent/pipe-server PID, creation time, token session/SID digest, image
-identity, and retained regular non-reparse file identity. Both endpoints have
-an explicit private direction and must report the expected server/client
-relationship; a caller-supplied pathname or identity is not authority. The
-future private issuer would generate per-launch/session opaque IDs, nonces,
-and MACs using CNG while retaining its signing key privately; consumers receive
-only a verifier capability. The MAC covers the complete scope, session,
-expiry, operation ID, operation/argument/preview digests, and nonce. A bounded
-replay set rejects nonce reuse, partial random issuance zeroizes immediately,
-and these values never enter argv, environment, disk, logs, or receipts. Only
-bounded redacted metadata can cross a loopback boundary. A durable
-ActionJournal authority is a hard prerequisite: its start record must be
-durable before dispatch and its terminal record durable before acknowledgement.
+All process-path identities are complete sixteen-byte arrays. Lease binding is
+the complete typed binding from the owner helper, including request/call refs,
+tool/risk/side-effect labels, argument/preview/operation digests,
+authorization kind, sequence-one authorization, and receipt/event proof
+digests. The process path owns no journal state or persistence callback.
 
-The source-only process-transaction include models supervisor-owned ordering
-using creation-time `PROC_THREAD_ATTRIBUTE_JOB_LIST`, a suspended child, one
-serialized active launch, retained startup-attribute payloads, one owned
-cancellation event/absolute cleanup deadline, guarded join-before-free drain
-contexts, a shutdown/mutation/finalization linearization fence,
-journal-sequence-bound terminal claims, fenced hash/capture consumption, and
-serialized idempotent cleanup mutations with waits outside the fence,
-journal-outcome-derived terminal receipts, and a private
-durable-adapter interface. No adapter
-implementation or startup-recovery installation is present, and the public
-header exposes no process API. See
-`contracts/windows-process-transaction/v0.1.0.md`.
-
-The retained executing-image section and retained working-directory identity
-gates are false, so pathname-based process creation cannot authorize a launch.
-The reference implementation is not a proof of Windows API behavior. It has
-no compile, target, Authenticode, package, process-tree, cancellable-I/O, or
-live evidence. Production and target availability remain **false**.
+The accepted lease has no proof issuer and external-proof authority is false.
+Therefore phase 2a refuses before lease persistence, external dispatch, process
+creation, or any irreversible mutation. A separately audited phase-2b
+OS-handle evidence verifier is required; this source adds no issuer, friend,
+factory, mint, or fake proof. Trust, production, host, package, and controller
+activation remain false.
