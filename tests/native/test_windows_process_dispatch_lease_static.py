@@ -31,6 +31,34 @@ def strict_json(path: Path):
     return json.loads(text(path), object_pairs_hook=lambda pairs: dict(pairs))
 
 
+def cpp_constructor_signature(source: str, marker: str) -> tuple[str, bool]:
+    """Extract one balanced constructor signature and its noexcept marker."""
+
+    # The public copy/move declarations contain the same class-name prefix;
+    # use the final private constructor declaration/definition rather than a
+    # first-match regex that could silently compare the wrong overload.
+    start = source.rindex(marker)
+    opening = source.index("(", start)
+    depth = 0
+    closing = None
+    for index in range(opening, len(source)):
+        character = source[index]
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+            if depth == 0:
+                closing = index
+                break
+    if closing is None:
+        raise AssertionError(f"unterminated constructor signature: {marker}")
+    suffix = source[closing + 1:]
+    tokens = suffix.lstrip().split(None, 1)
+    signature = " ".join(source[start:closing + 1].split())
+    signature = signature.replace("( ", "(").replace(" )", ")")
+    return signature, bool(tokens and tokens[0] == "noexcept")
+
+
 class LeaseModel:
     """Bounded state model for hostile ordering, not a runtime implementation."""
 
@@ -103,10 +131,13 @@ class LeaseModel:
             return "unknown_manual_blocked"
         return "ok"
 
-    def lost_ack_lookup(self, operation, exact_ack=False):
-        if exact_ack:
+    def lost_ack_lookup(self, operation, outcome="not_found"):
+        if operation not in self.registry:
+            return "mutation_conflict"
+        if outcome == "exact_ack":
             return "ok"
-        return "lost_acknowledgement"
+        self.poisoned = True
+        return "readback_mismatch" if outcome in {"corrupt", "divergent"} else "lost_acknowledgement"
 
     def abandon(self, operation):
         lease = self.registry.pop(operation, None)
@@ -213,6 +244,23 @@ class ProcessDispatchLeaseStaticTests(unittest.TestCase):
         self.assertNotIn("persist_dispatching(lease", tail)
         self.assertNotIn("begin_external_dispatch", tail)
 
+    def test_lost_ack_failures_poison_after_authoritative_lookup(self):
+        for outcome in ("not_found", "invalid", "corrupt", "divergent"):
+            model = LeaseModel()
+            operation = "act_" + outcome[0] * 32
+            self.assertEqual(model.acquire(operation), "ok")
+            self.assertEqual(model.persist(operation), "ok")
+            self.assertEqual(model.begin_dispatch(operation), "ok")
+            result = model.lost_ack_lookup(operation, outcome)
+            self.assertIn(result, {"lost_acknowledgement", "readback_mismatch"})
+            self.assertTrue(model.poisoned, outcome)
+            self.assertEqual(model.acquire("act_" + "z" * 32), "unknown_manual_blocked")
+        # A caller-side lease/owner mismatch occurs before the authoritative
+        # lookup and remains a non-poisoning conflict.
+        model = LeaseModel()
+        self.assertEqual(model.lost_ack_lookup("not-registered"), "mutation_conflict")
+        self.assertFalse(model.poisoned)
+
     def test_ambiguity_poison_and_global_unknown_block(self):
         model = LeaseModel()
         operation = "act_" + "c" * 32
@@ -305,10 +353,13 @@ class ProcessDispatchLeaseStaticTests(unittest.TestCase):
         # Constructors that copy strings/containers must let acquisition's
         # catch boundary observe allocation failure; noexcept would terminate.
         self.assertNotIn("std::string operation_text) noexcept", self.owner)
-        self.assertNotIn(
-            "const std::array<std::uint8_t, 32>& container_id) noexcept",
-            self.owner,
-        )
+        owner_decl, owner_decl_noexcept = cpp_constructor_signature(
+            self.owner, "JournalAuthorityOwner(")
+        owner_def, owner_def_noexcept = cpp_constructor_signature(
+            self.store, "JournalAuthorityOwner::JournalAuthorityOwner(")
+        self.assertEqual(owner_decl, owner_def.replace("JournalAuthorityOwner::", ""))
+        self.assertEqual(owner_decl_noexcept, owner_def_noexcept)
+        self.assertFalse(owner_decl_noexcept)
         open_start = self.store.index("JournalAuthorityOwner::open")
         self.assertLess(self.store.index("try {", open_start),
                         self.store.index("receipt = {}", open_start))

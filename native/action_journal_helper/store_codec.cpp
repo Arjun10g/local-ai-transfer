@@ -1249,7 +1249,7 @@ const char* store_status_name(StoreStatus status) noexcept {
 
 JournalAuthorityOwner::JournalAuthorityOwner(
     action_journal_storage::JournalStorageLease&& lease,
-    const std::array<std::uint8_t, 32>& container_id) noexcept
+    const std::array<std::uint8_t, 32>& container_id)
     : lease_(std::move(lease)), store_(lease_, container_id) {}
 
 JournalAuthorityOwner::~JournalAuthorityOwner() noexcept {
@@ -2035,12 +2035,16 @@ ProcessDispatchLeaseStatus JournalAuthorityOwner::lookup_lost_ack(
       return ProcessDispatchLeaseStatus::kStorageFailure;
     }
     const auto found = store_.records_.find(lease.operation_text_);
-    if (found == store_.records_.end() || found->second.events.empty())
+    if (found == store_.records_.end() || found->second.events.empty()) {
+      poisoned_.store(true, std::memory_order_release);
       return ProcessDispatchLeaseStatus::kLostAcknowledgement;
+    }
     const JournalEvent& event = found->second.events.back();
     if (event.state != "acknowledged" || event.action != "acknowledge" ||
-        event.authorization_kind != lease.binding_.authorization_kind)
+        event.authorization_kind != lease.binding_.authorization_kind) {
+      poisoned_.store(true, std::memory_order_release);
       return ProcessDispatchLeaseStatus::kLostAcknowledgement;
+    }
     proof.operation_id = lease.binding_.operation_id;
     proof.sequence = event.sequence;
     if (!process_decode_hex(event.receipt_digest, proof.receipt_digest.data(),
