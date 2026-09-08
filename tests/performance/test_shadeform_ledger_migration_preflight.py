@@ -82,12 +82,21 @@ class PreflightFixtureTests(unittest.TestCase):
             preflight._decimal(Decimal("0.0000001"))
         with self.assertRaises(InvalidOperation):
             preflight._decimal(Decimal("0E+999"))
+        for value in (" 1", "+1", "1e2", "01"):
+            with self.subTest(lexical=value), self.assertRaises(InvalidOperation):
+                preflight._decimal(value)
 
     def test_huge_exponent_and_missing_secure_flags_are_sanitized(self) -> None:
         with self.assertRaises(preflight._EvidenceError):
             preflight._strict_object(b'{"amount":0e999999}')
         issues: set[str] = set()
         with mock.patch.object(preflight.os, "O_NOFOLLOW", None):
+            with self.assertRaises(preflight._EvidenceError):
+                preflight._read_snapshot(self.ledger, limit=100, issues=issues)
+        self.assertIn("secure_read_capability_unavailable", issues)
+        original_stat = preflight.os.stat
+        with mock.patch.object(preflight.os, "stat", lambda path: original_stat(path)):
+            issues = set()
             with self.assertRaises(preflight._EvidenceError):
                 preflight._read_snapshot(self.ledger, limit=100, issues=issues)
         self.assertIn("secure_read_capability_unavailable", issues)
@@ -126,7 +135,7 @@ class PreflightFixtureTests(unittest.TestCase):
             legacy_ledger=self.ledger, display_ledger=self.display,
             deletion_root=self.runtime, incidents=self.incidents,
         )
-        self.assertEqual(report["deletion_receipts"]["unmatched_absent_actual_cost_usd"], "$0.000071")
+        self.assertIsNone(report["deletion_receipts"]["unmatched_absent_actual_cost_usd"])
         self.assertIsNone(report["legacy_ledger"]["latest_stream_pending_group_count"])
         self.assertIn("display_rounding_mismatch", report["path_safety"]["issues"])
 
@@ -168,6 +177,12 @@ class PreflightFixtureTests(unittest.TestCase):
             deletion_root=self.runtime, incidents=self.incidents,
         )
         self.assertIn("duplicate_incident", report["path_safety"]["issues"])
+        with self.assertRaises(preflight._EvidenceError):
+            preflight._strict_object((b'{"' + b"a" * 257 + b'":1}\n'))
+        with self.assertRaises(preflight._EvidenceError):
+            preflight._strict_object((b'{"a":[' + b"0," * 1024 + b"0]}\n"))
+        with self.assertRaises(preflight._EvidenceError):
+            preflight._strict_object((b'{"a":"' + b"x" * 20_000 + b'"}\n'))
 
     def test_receipt_overflow_and_root_swap_never_return_partial_counts(self) -> None:
         receipt = {
@@ -224,6 +239,23 @@ class PreflightFixtureTests(unittest.TestCase):
             os.close(parent_fd)
         self.assertIn("evidence_mutated_during_read", issues)
 
+    def test_ancestor_component_swap_is_rejected_after_read(self) -> None:
+        expected = preflight._check_ancestors(self.ledger, set())
+        original_lstat = preflight.os.lstat
+        calls = {"count": 0}
+        def swapped(path, *args, **kwargs):
+            result = original_lstat(path, *args, **kwargs)
+            calls["count"] += 1
+            if calls["count"] == 1:
+                values = list(result)
+                values[1] += 1
+                return os.stat_result(values)
+            return result
+        issues: set[str] = set()
+        with mock.patch.object(preflight.os, "lstat", side_effect=swapped):
+            self.assertFalse(preflight._ancestors_stable(self.ledger, expected, issues))
+        self.assertIn("ancestor_component_swap", issues)
+
     def test_owner_mismatch_is_only_a_sanitized_blocker(self) -> None:
         self.write_jsonl(self.ledger, [self.row()])
         self.display.write_text("", encoding="utf-8")
@@ -274,7 +306,7 @@ class PreflightFixtureTests(unittest.TestCase):
         def changed(path, *args, **kwargs):
             result = original_stat(path, *args, **kwargs)
             calls["count"] += 1
-            if calls["count"] == 3:
+            if calls["count"] == 4:
                 values = list(result)
                 values[6] += 1
                 return os.stat_result(values)

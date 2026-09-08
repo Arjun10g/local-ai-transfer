@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import stat
 import sys
+import re
 from typing import Any
 
 
@@ -28,6 +29,8 @@ MAX_JSON_TOKEN_DIGITS = 64
 MAX_USD = Decimal("1000000000")
 MAX_RECEIPT_NAME_BYTES = 256
 MAX_RECEIPT_DIRECTORY_BYTES = 1_048_576
+MAX_IDENTITY_BYTES = 256
+MAX_JSON_ELEMENTS = 1024
 USD_QUANTUM = Decimal("0.000001")
 ZERO_USD = Decimal("0")
 
@@ -47,6 +50,11 @@ def _require_secure_capabilities(issues: set[str]) -> None:
         os.open in os.supports_dir_fd, os.stat in os.supports_dir_fd,
         os.scandir in os.supports_fd,
     )
+    try:
+        os.stat(os.curdir, follow_symlinks=False)
+        os.lstat(os.curdir)
+    except (TypeError, OSError, ValueError):
+        required = (*required, False)
     if not all(required):
         _issue(issues, "secure_read_capability_unavailable")
         raise _EvidenceError("secure_read_capability_unavailable")
@@ -55,10 +63,12 @@ def _require_secure_capabilities(issues: set[str]) -> None:
 def _decimal(value: Any) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float) or not isinstance(value, (int, Decimal, str)):
         raise InvalidOperation
+    if isinstance(value, str) and re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.[0-9]{1,6})?", value) is None:
+        raise InvalidOperation
     parsed = Decimal(str(value))
     if not parsed.is_finite() or parsed < ZERO_USD or parsed > MAX_USD:
         raise InvalidOperation
-    if parsed.as_tuple().exponent < -6 or parsed.as_tuple().exponent > 6:
+    if parsed.as_tuple().exponent < -6 or parsed.as_tuple().exponent > 0:
         raise InvalidOperation
     return parsed
 
@@ -117,11 +127,15 @@ def _strict_object(data: bytes) -> dict[str, Any]:
         def bounded_number(value: str) -> int:
             if len(value.lstrip("-")) > MAX_JSON_TOKEN_DIGITS:
                 raise _EvidenceError("json_number_limit")
+            if re.fullmatch(r"-?(?:0|[1-9][0-9]*)", value) is None:
+                raise _EvidenceError("json_number_lexical")
             return int(value)
 
         def bounded_decimal(value: str) -> Decimal:
             if len(value.lstrip("-")) > MAX_JSON_TOKEN_DIGITS:
                 raise _EvidenceError("json_number_limit")
+            if re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.[0-9]{1,6})?", value) is None:
+                raise _EvidenceError("json_number_lexical")
             parsed = Decimal(value)
             if not parsed.is_finite():
                 raise _EvidenceError("nonfinite_number")
@@ -134,12 +148,44 @@ def _strict_object(data: bytes) -> dict[str, Any]:
             parse_float=bounded_decimal, parse_int=bounded_number,
             parse_constant=lambda _: (_ for _ in ()).throw(_EvidenceError("nonfinite_number")),
         )
+        _validate_tree(value)
     except (UnicodeError, json.JSONDecodeError, InvalidOperation, RecursionError,
             OverflowError, ValueError, TypeError) as exc:
         raise _EvidenceError("invalid_json") from exc
     if not isinstance(value, dict):
         raise _EvidenceError("json_not_object")
     return value
+
+
+def _validate_tree(value: Any, depth: int = 0) -> None:
+    if depth > MAX_JSON_DEPTH:
+        raise _EvidenceError("json_depth_limit")
+    if isinstance(value, dict):
+        if len(value) > MAX_JSON_ELEMENTS:
+            raise _EvidenceError("json_container_limit")
+        for key, child in value.items():
+            if not isinstance(key, str) or not key or len(key.encode("utf-8")) > MAX_IDENTITY_BYTES or not key.isascii():
+                raise _EvidenceError("json_key_limit")
+            _validate_tree(child, depth + 1)
+    elif isinstance(value, list):
+        if len(value) > MAX_JSON_ELEMENTS:
+            raise _EvidenceError("json_container_limit")
+        for child in value:
+            _validate_tree(child, depth + 1)
+    elif isinstance(value, str) and len(value.encode("utf-8")) > MAX_JSON_OBJECT_BYTES // 4:
+        raise _EvidenceError("json_string_limit")
+
+
+def _safe_identity(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        encoded = value.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return bool(encoded) and len(encoded) <= MAX_IDENTITY_BYTES and re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_.:-]*", value
+    ) is not None
 
 
 def _canonical_signature(value: dict[str, Any]) -> str:
@@ -161,7 +207,7 @@ def _absolute_path(path: Path) -> Path:
     return Path(os.path.abspath(os.fspath(path)))
 
 
-def _check_ancestors(path: Path, issues: set[str]) -> None:
+def _check_ancestors(path: Path, issues: set[str]) -> list[tuple[int, int, int, int]]:
     # lstat every named ancestor, so a symlink cannot hide an alternate root.
     cursor = path.parent
     chain: list[Path] = []
@@ -170,6 +216,7 @@ def _check_ancestors(path: Path, issues: set[str]) -> None:
         if cursor == cursor.parent:
             break
         cursor = cursor.parent
+    identities: list[tuple[int, int, int, int]] = []
     for directory in reversed(chain):
         try:
             info = os.lstat(directory)
@@ -182,6 +229,19 @@ def _check_ancestors(path: Path, issues: set[str]) -> None:
         if not stat.S_ISDIR(info.st_mode):
             _issue(issues, "parent_not_directory")
             raise _EvidenceError("parent_not_directory")
+        identities.append((int(info.st_dev), int(info.st_ino), int(info.st_mode), int(info.st_uid)))
+    return identities
+
+
+def _ancestors_stable(path: Path, expected: list[tuple[int, int, int, int]], issues: set[str]) -> bool:
+    try:
+        actual = _check_ancestors(path, issues)
+    except _EvidenceError:
+        return False
+    if actual != expected:
+        _issue(issues, "ancestor_component_swap")
+        return False
+    return True
 
 
 def _require_private_directory(info: os.stat_result, issues: set[str], label: str) -> None:
@@ -200,7 +260,7 @@ def _read_snapshot(path: Path, *, limit: int, issues: set[str]) -> tuple[bytes, 
     try:
         _require_secure_capabilities(issues)
         path = _absolute_path(path)
-        _check_ancestors(path, issues)
+        ancestors = _check_ancestors(path, issues)
         parent = path.parent
         try:
             if stat.S_ISLNK(os.lstat(path).st_mode):
@@ -249,6 +309,8 @@ def _read_snapshot(path: Path, *, limit: int, issues: set[str]) -> tuple[bytes, 
                     _issue(issues, "evidence_mutated_during_read")
                     raise _EvidenceError("evidence_mutated_during_read")
                 _require_private_directory(current_parent, issues, "parent")
+                if not _ancestors_stable(path, ancestors, issues):
+                    raise _EvidenceError("ancestor_component_swap")
                 if len(data) > limit:
                     _issue(issues, "byte_limit")
                     raise _EvidenceError("byte_limit")
@@ -381,7 +443,7 @@ def _parse_legacy(path: Path, issues: set[str]) -> tuple[dict[str, Any], dict[tu
         if set(row) - allowed:
             _issue(issues, "legacy_future_or_unknown_fields")
         phase, instance = row.get("phase_id"), row.get("instance_id")
-        if not isinstance(phase, str) or not isinstance(instance, str):
+        if not _safe_identity(phase) or not _safe_identity(instance):
             _issue(issues, "legacy_identity_invalid")
             continue
         if "schema" not in row or "owner_binding_sha256" not in row:
@@ -474,7 +536,7 @@ def _parse_display(path: Path, groups: dict[tuple[str, str], dict[str, Any]], is
     if malformed:
         _issue(issues, "display_malformed_rows")
     display_parse_errors = {"display_partial_line", "display_invalid_utf8", "display_malformed_row", "display_malformed_rows", "display_orphan_row"}
-    if malformed or display_parse_errors & issues:
+    if mismatch or malformed or display_parse_errors & issues:
         return {"row_count": None, "rounding_mismatch_count": None, "malformed_count": None, "parse_refused": True}
     return {"row_count": len(rows), "rounding_mismatch_count": mismatch, "malformed_count": malformed, "parse_refused": False}
 
@@ -484,7 +546,7 @@ def _receipt_files(root: Path, issues: set[str]) -> tuple[int | None, os.stat_re
     try:
         _require_secure_capabilities(issues)
         root = _absolute_path(root)
-        _check_ancestors(root / "placeholder", issues)
+        ancestors = _check_ancestors(root / "placeholder", issues)
         info = os.lstat(root)
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             _issue(issues, "deletion_root_not_directory")
@@ -514,6 +576,8 @@ def _receipt_files(root: Path, issues: set[str]) -> tuple[int | None, os.stat_re
                 (current.st_dev, current.st_ino, current.st_mode, current.st_uid):
             _issue(issues, "evidence_mutated_during_read")
             raise _EvidenceError("evidence_mutated_during_read")
+        if not _ancestors_stable(root / "placeholder", ancestors, issues):
+            raise _EvidenceError("ancestor_component_swap")
         return root_fd, anchored, sorted(entries)
     except (OSError, _EvidenceError):
         _issue(issues, "deletion_root_unavailable")
@@ -540,7 +604,7 @@ def _parse_receipts(root: Path, groups: dict[tuple[str, str], dict[str, Any]], i
                 raise _EvidenceError("receipt_schema_invalid")
             phase, instance = value.get("phase_id"), value.get("instance_id")
             deletion = value.get("deletion")
-            if not isinstance(phase, str) or not isinstance(instance, str) or not isinstance(deletion, dict):
+            if not _safe_identity(phase) or not _safe_identity(instance) or not isinstance(deletion, dict):
                 raise _EvidenceError("receipt_identity_invalid")
             status = deletion.get("status")
             if status == "deleted":
@@ -552,6 +616,8 @@ def _parse_receipts(root: Path, groups: dict[tuple[str, str], dict[str, Any]], i
                 except InvalidOperation:
                     _issue(issues, "receipt_cost_invalid")
                     amount = ZERO_USD
+                    refused = True
+                refused = True
             else:
                 raise _EvidenceError("receipt_status_invalid")
             key = (phase, instance)
@@ -585,6 +651,7 @@ def _parse_receipts(root: Path, groups: dict[tuple[str, str], dict[str, Any]], i
             os.close(root_fd)
     if unmatched:
         _issue(issues, "orphan_deletion_receipt")
+        refused = True
     if refused:
         receipt_count = deleted_count = absent_count = unmatched_count = unmatched_absent_count = duplicate_count = malformed_count = None
         absent_value: str | None = None
@@ -618,7 +685,7 @@ def _parse_incidents(path: Path, groups: dict[tuple[str, str], dict[str, Any]], 
             _issue(issues, "duplicate_incident")
         signatures.add(signature)
         phase, instance = row.get("phase_id"), row.get("instance_id")
-        if not isinstance(incident, str) or not isinstance(phase, str) or not isinstance(instance, str):
+        if not _safe_identity(incident) or not _safe_identity(phase) or not _safe_identity(instance):
             _issue(issues, "incident_identity_invalid")
             continue
         key = (phase, instance)
@@ -633,7 +700,7 @@ def _parse_incidents(path: Path, groups: dict[tuple[str, str], dict[str, Any]], 
         _issue(issues, "unmatched_incidents")
     refused = bool(metadata.get("parse_refused", False)) or any(
         issue in {"incident_identity_invalid", "duplicate_incident"} for issue in issues
-    )
+    ) or bool(unmatched_teardown or unmatched_other)
     if refused:
         unmatched_teardown = unmatched_other = duplicate_count = None
     return {
@@ -653,12 +720,18 @@ def run_preflight(*, legacy_ledger: Path, display_ledger: Path, deletion_root: P
     display = _parse_display(display_ledger, groups, issues)
     receipts = _parse_receipts(deletion_root, groups, issues)
     incident_report = _parse_incidents(incidents, groups, issues)
+    evidence_complete = not any(
+        bool(section.get("parse_refused"))
+        for section in (legacy, display, receipts, incident_report)
+    )
     # These are review facts, never authority.  In particular no field here can
     # be passed to the v2 genesis initializer.
     return {
         "schema": SCHEMA, "preflight_only": True,
         "bookkeeping_is_not_spend_authorization": True,
         "safe_to_migrate_now": False,
+        "evidence_complete": evidence_complete,
+        "cross_stream_reconciliation_available": evidence_complete,
         "legacy_ledger": legacy, "display_ledger": display,
         "deletion_receipts": receipts, "incidents": incident_report,
         "path_safety": {
