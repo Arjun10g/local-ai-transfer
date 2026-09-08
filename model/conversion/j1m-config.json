@@ -78,6 +78,18 @@
         "cleanup_reserve": 480
       },
       "active_cost_usd": 2.619
+    },
+    "canary": {
+      "runtime_hours": 0.25,
+      "external_watchdog_seconds": 1080,
+      "host_shutdown_delay_minutes": 18,
+      "provider_backstop_hours": 0.3125,
+      "transfer_reserve_seconds": 180,
+      "active_cost_usd": 0.3375,
+      "no_model": true,
+      "probe_only": true,
+      "salvage_required": true,
+      "teardown_required": true
     }
   },
   "resources": {

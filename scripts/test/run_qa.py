@@ -81,6 +81,7 @@ TEST_INVENTORY = {
     "tests/performance/test_j1m_lifecycle.py": "lifecycle",
     "tests/performance/test_model_specs.py": "model_fixture",
     "tests/performance/test_probe_and_preflight.py": "lifecycle",
+    "tests/performance/test_remote_canary_secret_hardening.py": "lifecycle",
     "tests/performance/test_remote_external_tools_lifecycle.py": "lifecycle",
     "tests/performance/test_shadeform_teardown_durability.py": "lifecycle",
     "tests/performance/test_vulkan_source_closure.py": "native_static",
