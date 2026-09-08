@@ -36,6 +36,9 @@ _EVAL_RECEIPT_MAX_BYTES = 64 * 1024
 _EVAL_ARTIFACT_RECEIPT_MAX_BYTES = 8 * 1024
 _PREFLIGHT_RECEIPT_MAX_BYTES = 1024
 _MAX_OUTPUT_RESERVE_TOKENS = 256
+# Bounded capacity for the current production fixture; identity checks still
+# require the exact catalog supplied by the fixture.
+_MAX_EVAL_TOOLS = 33
 _DELETION_RESERVE_SECONDS = 660.0
 # This is source-controlled acceptance data, not a value supplied by a run
 # configuration.  The config repeats it for operator visibility/parity checks,
@@ -127,7 +130,7 @@ def _progress(path: Path, event: str, **details: Any) -> None:
 
 
 def _tool_eval_contract() -> dict[str, Any]:
-    """Return the bounded case/category contract shipped with the evaluator."""
+    """Return the bounded contract; ``limits.max_cases`` is a ceiling."""
 
     fixture_path = ROOT / "tests" / "model" / "production_tool_call_eval.json"
     fixture_raw = _bounded_bytes(fixture_path, _EVAL_FIXTURE_MAX_BYTES)
@@ -142,8 +145,8 @@ def _tool_eval_contract() -> dict[str, Any]:
             set(limits) != {"context_tokens", "max_output_tokens", "temperature", "max_cases"} or
             fixture.get("schema") != "local_bmo.tool-call-eval.v1" or fixture.get("model") != "Qwen3.5-9B-Q4_K_M" or
             fixture.get("protocol") != "qwen35-xml-tool-call-v1" or isinstance(count, bool) or not isinstance(count, int) or
-            not isinstance(cases, list) or len(cases) != count or not 1 <= count <= 64 or
-            not isinstance(tools, list) or len(tools) != 28 or len(set(tool_names)) != len(tool_names) or
+            not isinstance(cases, list) or not 1 <= len(cases) <= count <= 64 or
+            not isinstance(tools, list) or not 1 <= len(tools) <= _MAX_EVAL_TOOLS or len(set(tool_names)) != len(tool_names) or
             any(not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_.-]{1,95}", name) for name in tool_names) or
             not isinstance(limits.get("context_tokens"), int) or not 1 <= limits["context_tokens"] <= 16384 or
             isinstance(limits.get("max_output_tokens"), bool) or not isinstance(limits.get("max_output_tokens"), int) or not 1 <= limits["max_output_tokens"] <= 256 or limits["max_output_tokens"] >= limits["context_tokens"]):
@@ -159,14 +162,14 @@ def _tool_eval_contract() -> dict[str, Any]:
         raise ValueError("eval fixture categories invalid")
     category_counts = {category: sum(case["category"] == category for case in cases) for category in categories}
     return {
-        "case_count": count, "categories": categories, "category_counts": category_counts,
+        "case_count": len(cases), "categories": categories, "category_counts": category_counts,
         "tool_count": len(tools), "context_tokens": limits["context_tokens"],
         "output_reserve_tokens": limits["max_output_tokens"],
         "fixture_identity": {
             "sha256": hashlib.sha256(fixture_raw).hexdigest(),
             "schema": fixture["schema"], "model": fixture["model"], "protocol": fixture["protocol"],
             "limits": dict(limits), "tool_names": list(tool_names), "tool_count": len(tools),
-            "case_count": count, "category_counts": dict(sorted(category_counts.items())),
+            "case_count": len(cases), "category_counts": dict(sorted(category_counts.items())),
         },
     }
 

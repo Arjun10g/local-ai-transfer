@@ -35,16 +35,20 @@ from scripts import j1m_orchestrator
 class ToolCallEvaluatorTests(unittest.TestCase):
     def test_production_fixture_is_bounded_and_covers_exact_host_profile(self):
         fixture = load_fixture(Path(__file__).with_name("production_tool_call_eval.json"))
-        self.assertEqual(len(fixture["tools"]), 28)
-        self.assertEqual(len(fixture["cases"]), 32)
+        self.assertEqual(len(fixture["tools"]), 33)
+        self.assertEqual(len(fixture["cases"]), 37)
+        self.assertEqual(fixture["limits"]["max_cases"], 64)
         self.assertEqual(fixture["limits"]["context_tokens"], 8192)
         self.assertEqual(fixture["limits"]["max_output_tokens"], 256)
         names = {tool["function"]["name"] for tool in fixture["tools"]}
         covered = {case["expected"]["call"]["name"] for case in fixture["cases"] if "call" in case["expected"]}
         self.assertEqual(covered, names)
         contract = remote_model_eval._fixture_contract(Path(__file__).with_name("production_tool_call_eval.json"))
-        self.assertEqual(contract["case_count"], 32)
-        self.assertEqual(contract["tool_count"], 28)
+        self.assertEqual(contract["case_count"], 37)
+        self.assertEqual(contract["tool_count"], 33)
+        orchestrator_contract = j1m_orchestrator._tool_eval_contract()
+        self.assertEqual(orchestrator_contract["case_count"], 37)
+        self.assertEqual(orchestrator_contract["tool_count"], 33)
         self.assertEqual(contract["context_tokens"], 8192)
         self.assertEqual(contract["output_reserve_tokens"], 256)
         for output_limit in (256, 257):
@@ -56,8 +60,32 @@ class ToolCallEvaluatorTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "fixture_limit_invalid"):
                     validate_fixture(candidate)
         self.assertEqual(contract["fixture_identity"]["sha256"], hashlib.sha256(Path(__file__).with_name("production_tool_call_eval.json").read_bytes()).hexdigest())
-        self.assertEqual(contract["fixture_identity"]["tool_count"], 28)
-        self.assertEqual(contract["fixture_identity"]["case_count"], 32)
+        self.assertEqual(contract["fixture_identity"]["tool_count"], 33)
+        self.assertEqual(contract["fixture_identity"]["case_count"], 37)
+
+    def test_production_fixture_ceiling_and_critical_no_call_contract(self):
+        fixture_path = Path(__file__).with_name("production_tool_call_eval.json")
+        fixture = load_fixture(fixture_path)
+        self.assertEqual(
+            {category: sum(case["category"] == category for case in fixture["cases"])
+             for category in {case["category"] for case in fixture["cases"]}},
+            {"tool_selection": 18, "confirmation_sensitive": 15, "schema_edge": 1,
+             "prompt_injection": 1, "abstention": 1, "no_tool": 1},
+        )
+        critical = {"prod-schema-invalid-001", "prod-injection-001", "prod-abstention-001", "prod-no-tool-001"}
+        self.assertEqual(
+            {case["id"] for case in fixture["cases"] if case["expected"].get("no_call") is True},
+            critical,
+        )
+        overflow = json.loads(fixture_path.read_text(encoding="utf-8"))
+        overflow["limits"]["max_cases"] = 36
+        with self.assertRaisesRegex(ValueError, "fixture_cases_invalid"):
+            validate_fixture(overflow)
+        with tempfile.TemporaryDirectory() as directory:
+            overflow_path = Path(directory) / "overflow.json"
+            overflow_path.write_text(json.dumps(overflow), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "evaluator_fixture_count_invalid"):
+                remote_model_eval._fixture_contract(overflow_path)
 
     def test_production_positive_cases_ground_every_expected_value_without_function_leaks(self):
         fixture = load_fixture(Path(__file__).with_name("production_tool_call_eval.json"))
@@ -90,13 +118,13 @@ class ToolCallEvaluatorTests(unittest.TestCase):
     def test_remote_and_orchestrator_canary_reject_output_reserve_257(self):
         canary = {
             "attempted": True, "passed": True, "error_code": None,
-            "tool_count": 28, "message_chars": 2400, "prompt_tokens": 513,
+            "tool_count": 33, "message_chars": 2400, "prompt_tokens": 513,
             "context_tokens": 8192, "output_reserve_tokens": 257,
         }
         with self.assertRaisesRegex(ValueError, "canary"):
-            remote_model_eval._validate_canary(canary, expected_tool_count=28, expected_context_tokens=8192, expected_output_reserve_tokens=257)
+            remote_model_eval._validate_canary(canary, expected_tool_count=33, expected_context_tokens=8192, expected_output_reserve_tokens=257)
         with self.assertRaisesRegex(ValueError, "canary"):
-            j1m_orchestrator._verify_eval_canary(canary, expected_tool_count=28, expected_context_tokens=8192, expected_output_reserve_tokens=257)
+            j1m_orchestrator._verify_eval_canary(canary, expected_tool_count=33, expected_context_tokens=8192, expected_output_reserve_tokens=257)
 
     def test_runtime_oneof_conflict_has_finite_schema_diagnostic(self):
         tools = load_fixture(Path(__file__).with_name("production_tool_call_eval.json"))["tools"]
