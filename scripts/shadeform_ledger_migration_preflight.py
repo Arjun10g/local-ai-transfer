@@ -18,6 +18,18 @@ import sys
 import re
 from typing import Any
 
+
+if __package__ in (None, ""):
+    # Direct script execution puts ``scripts/`` (rather than its parent) on
+    # sys.path. Derive and validate the repository root from this trusted
+    # source location; never accept a cwd/environment path injection.
+    _REPO_ROOT = Path(__file__).resolve().parents[1]
+    _SCRIPTS_PACKAGE = _REPO_ROOT / "scripts"
+    if not (_SCRIPTS_PACKAGE.is_dir() and
+            (_SCRIPTS_PACKAGE / "__init__.py").is_file()):
+        raise RuntimeError("repository scripts package is unavailable")
+    sys.path.insert(0, os.fspath(_REPO_ROOT))
+
 from scripts import shadeform_teardown as _teardown
 
 

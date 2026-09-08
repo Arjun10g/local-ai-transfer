@@ -9,11 +9,16 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
 from scripts import shadeform_ledger_migration_preflight as preflight
+
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class PreflightFixtureTests(unittest.TestCase):
@@ -741,6 +746,44 @@ class PreflightFixtureTests(unittest.TestCase):
         self.assertFalse(report["evidence_complete"])
         self.assertFalse(report["cross_stream_reconciliation_available"])
         self.assertIsNone(report["deletion_receipts"]["unmatched_absent_actual_cost_usd"])
+
+    def test_direct_and_module_cli_invocations_match_safely(self) -> None:
+        self.write_jsonl(self.ledger, [self.row()])
+        prefix = preflight._canonical_display_prefix()
+        self.assertIsNotNone(prefix)
+        self.display.write_bytes(prefix + (
+            preflight._DISPLAY_HEADER + "\n" + preflight._DISPLAY_SEPARATOR + "\n"
+        ).encode())
+        self.write_jsonl(self.incidents, [])
+        script = ROOT / "scripts" / "shadeform_ledger_migration_preflight.py"
+        fixture_args = [
+            "--legacy-ledger", str(self.ledger),
+            "--display-ledger", str(self.display),
+            "--deletion-root", str(self.runtime),
+            "--incidents", str(self.incidents),
+        ]
+        direct_help = subprocess.run(
+            [sys.executable, str(script), "--help"], cwd=ROOT,
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(direct_help.returncode, 0, direct_help.stderr)
+        outputs: list[dict] = []
+        commands = (
+            [sys.executable, str(script), *fixture_args],
+            [sys.executable, "-m", "scripts.shadeform_ledger_migration_preflight", *fixture_args],
+        )
+        for command in commands:
+            with self.subTest(command=command[1]):
+                completed = subprocess.run(
+                    command, cwd=ROOT, capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                value = json.loads(completed.stdout)
+                self.assertFalse(value["safe_to_migrate_now"])
+                self.assertTrue(value["preflight_only"])
+                self.assertNotIn("instance-a", completed.stdout)
+                outputs.append(value)
+        self.assertEqual(outputs[0], outputs[1])
 
 
 if __name__ == "__main__":
