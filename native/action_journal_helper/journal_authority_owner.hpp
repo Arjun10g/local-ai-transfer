@@ -257,7 +257,8 @@ class JournalAuthorityOwner final {
       ProcessDispatchLease& lease, const ProcessExternalProof& proof,
       StorageIoControl io) noexcept;
   ProcessDispatchLeaseStatus lookup_lost_ack(
-      ProcessDispatchLease& lease, StorageIoControl io,
+      ProcessDispatchLease& lease, const ProcessExternalProof& external_proof,
+      StorageIoControl io,
       ProcessDispatchReadbackProof& proof) noexcept;
   ProcessDispatchLeaseStatus transition_lease(
       ProcessDispatchLease& lease, const char* method,

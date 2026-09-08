@@ -59,6 +59,14 @@ def cpp_constructor_signature(source: str, marker: str) -> tuple[str, bool]:
     return signature, bool(tokens and tokens[0] == "noexcept")
 
 
+def cpp_method_signature(source: str, marker: str, terminator: str) -> str:
+    """Extract one method signature without relying on a fragile regex."""
+
+    start = source.index(marker)
+    end = source.index(terminator, start) + len(terminator)
+    return " ".join(source[start:end].split())
+
+
 class LeaseModel:
     """Bounded state model for hostile ordering, not a runtime implementation."""
 
@@ -291,6 +299,26 @@ class ProcessDispatchLeaseStaticTests(unittest.TestCase):
         self.assertIn('"dispatch_generation", external_proof.dispatch_generation_', tail)
         self.assertIn("process_transition_receipt(", tail)
         self.assertIn("event.receipt_digest != expected_receipt", tail)
+
+    def test_lost_ack_owner_declaration_definition_and_call_match(self):
+        declaration = cpp_method_signature(
+            self.owner,
+            "ProcessDispatchLeaseStatus lookup_lost_ack(\n      ProcessDispatchLease& lease",
+            ";",
+        )
+        definition = cpp_method_signature(
+            self.store,
+            "ProcessDispatchLeaseStatus JournalAuthorityOwner::lookup_lost_ack(",
+            "{",
+        )
+        self.assertEqual(
+            declaration,
+            definition.replace("JournalAuthorityOwner::", "", 1).rstrip("{").strip() + ";",
+        )
+        self.assertIn(
+            "owner_->lookup_lost_ack(*this, external_proof, io, readback)",
+            " ".join(self.store.split()),
+        )
 
     def test_lost_ack_failures_poison_after_authoritative_lookup(self):
         for outcome in ("not_found", "invalid", "corrupt", "divergent"):
