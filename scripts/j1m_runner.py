@@ -725,16 +725,22 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
+    try:
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError:
+        raise ValueError("artifact hash read refused") from None
     return digest.hexdigest()
 
 
 def _bounded_json_file(path: Path, *, limit: int = _RECEIPT_MAX_BYTES) -> Any:
     """Read one receipt snapshot, rejecting oversize and duplicate keys."""
-    with path.open("rb") as stream:
-        raw = stream.read(limit + 1)
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read(limit + 1)
+    except OSError:
+        raise ValueError("receipt read refused") from None
     if len(raw) > limit:
         raise ValueError("receipt exceeds its bounded size")
     payload = _bounded_json_loads(raw)
@@ -890,7 +896,11 @@ def verify_source(source_dir: Path, lock_path: Path = SOURCE_LOCK) -> dict[str, 
         raise ValueError("source lock file inventory is invalid")
     revision = str(lock.get("revision", ""))
     marker = next((source_dir / name for name in (".source-revision", "REVISION") if (source_dir / name).is_file()), None)
-    if marker is None or marker.read_text(encoding="utf-8").strip() != revision:
+    try:
+        marker_revision = marker.read_text(encoding="utf-8").strip() if marker is not None else ""
+    except (OSError, UnicodeError):
+        raise ValueError("source revision marker is unavailable") from None
+    if marker is None or marker_revision != revision:
         raise ValueError("HF source revision marker does not match the immutable lock")
     checked: list[str] = []
     for item in lock.get("source_files", []):

@@ -107,6 +107,8 @@ def _bounded_bytes(path: Path, limit: int) -> bytes:
                 (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino)):
             raise ValueError("receipt changed during bounded read")
         return raw
+    except OSError:
+        raise ValueError("receipt read refused") from None
     finally:
         os.close(descriptor)
 
@@ -873,7 +875,13 @@ def _salvage(
 ) -> list[dict[str, Any]]:
     """Attempt each allowlisted receipt independently; one missing file cannot stop cleanup."""
 
-    destination.mkdir(parents=True, exist_ok=True)
+    try:
+        destination_stat = os.lstat(destination)
+    except OSError:
+        raise ValueError("salvage destination is unavailable") from None
+    if (stat.S_ISLNK(destination_stat.st_mode) or not stat.S_ISDIR(destination_stat.st_mode) or
+            destination_stat.st_uid != os.getuid() or stat.S_IMODE(destination_stat.st_mode) & 0o077):
+        raise ValueError("salvage destination is not a private directory")
     results = []
     for name in names:
         if deadline is not None and deadline - time.monotonic() - _DELETION_RESERVE_SECONDS <= 0.0:
