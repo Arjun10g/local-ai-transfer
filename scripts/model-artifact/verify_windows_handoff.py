@@ -29,7 +29,11 @@ ASCII_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 SCHEMA = "local_bmo.windows-hf-release-handoff.v1"
 MODEL_ID = "qwen35-9b-q4-k-m"
 MODEL_NAME = "Qwen3.5-9B-Q4_K_M.gguf"
-MAX_MODEL_BYTES = 100_000_000_000
+MODEL_SIZE_BYTES = 5_629_109_088
+MODEL_SHA256 = "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b"
+SOURCE_REVISION = "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
+LLAMA_CPP_REVISION = "3581ba0cf591b3f772fbb002de0f70e294bc0396"
+MAX_MODEL_BYTES = MODEL_SIZE_BYTES
 
 TOP_LEVEL = {"schema", "artifact", "evidence", "release", "security", "signature"}
 ARTIFACT_KEYS = {"model_id", "file_name", "size_bytes", "sha256", "manifest_sha256", "source_revision", "llama_cpp_revision", "quantization", "text_only", "vision_projection_present"}
@@ -89,20 +93,21 @@ def parse_handoff_bytes(data: bytes) -> dict[str, Any]:
 
 
 def load_handoff(path: Path) -> dict[str, Any]:
-    if not isinstance(path, Path) or path.is_symlink() or not path.is_file():
-        raise HandoffError("handoff must be a regular non-link file")
+    if not isinstance(path, Path):
+        raise HandoffError("handoff path type is invalid")
     nofollow = getattr(os, "O_NOFOLLOW", None)
     if nofollow is None:
         raise HandoffError("nofollow open capability is unavailable")
     fd = -1
+    failed = False
     try:
-        before = path.stat()
-        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > MAX_HANDOFF_BYTES:
-            raise HandoffError("handoff file identity or size is unsafe")
         fd = os.open(path, os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0))
         opened = os.fstat(fd)
         identity = lambda value: (value.st_dev, value.st_ino, value.st_mode, value.st_nlink, value.st_size)
-        if identity(before) != identity(opened) or not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1 or opened.st_size > MAX_HANDOFF_BYTES:
+            raise HandoffError("handoff file identity or size is unsafe")
+        before = path.stat()
+        if identity(before) != identity(opened) or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
             raise HandoffError("handoff identity changed before bounded read")
         chunks: list[bytes] = []
         total = 0
@@ -113,11 +118,19 @@ def load_handoff(path: Path) -> dict[str, Any]:
             chunks.append(chunk)
             total += len(chunk)
         after = os.fstat(fd)
-    except OSError as exc:
+    except HandoffError:
+        failed = True
+        raise
+    except (OSError, ValueError, TypeError) as exc:
+        failed = True
         raise HandoffError("handoff could not be read") from exc
     finally:
         if fd >= 0:
-            os.close(fd)
+            try:
+                os.close(fd)
+            except (OSError, ValueError) as exc:
+                if not failed:
+                    raise HandoffError("handoff close failed") from exc
     data = b"".join(chunks)
     if (
         not stat.S_ISREG(after.st_mode)
@@ -151,6 +164,12 @@ def _revision(value: Any, label: str) -> str:
 
 def _canonical_payload(value: dict[str, Any]) -> bytes:
     unsigned = {key: item for key, item in value.items() if key != "signature"}
+    signature = value.get("signature")
+    if isinstance(signature, dict):
+        unsigned["signature"] = {
+            key: item for key, item in signature.items()
+            if key not in {"signature_base64", "payload_sha256"}
+        }
     return json.dumps(unsigned, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("ascii")
 
 
@@ -160,7 +179,14 @@ def validate_handoff(value: Any) -> dict[str, Any]:
         raise HandoffError("handoff schema is not exact")
 
     artifact = _exact(root["artifact"], ARTIFACT_KEYS, "artifact")
-    if artifact["model_id"] != MODEL_ID or artifact["file_name"] != MODEL_NAME:
+    if (
+        artifact["model_id"] != MODEL_ID
+        or artifact["file_name"] != MODEL_NAME
+        or artifact["size_bytes"] != MODEL_SIZE_BYTES
+        or artifact["sha256"] != MODEL_SHA256
+        or artifact["source_revision"] != SOURCE_REVISION
+        or artifact["llama_cpp_revision"] != LLAMA_CPP_REVISION
+    ):
         raise HandoffError("artifact identity is not the approved Q4_K_M model")
     size = artifact["size_bytes"]
     if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= MAX_MODEL_BYTES:

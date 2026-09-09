@@ -26,13 +26,13 @@ def handoff() -> dict:
     value = {
         "schema": module.SCHEMA,
         "artifact": {
-            "model_id": module.MODEL_ID,
-            "file_name": module.MODEL_NAME,
+            "model_id": "qwen35-9b-q4-k-m",
+            "file_name": "Qwen3.5-9B-Q4_K_M.gguf",
             "size_bytes": 5629109088,
-            "sha256": "a" * 64,
+            "sha256": "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b",
             "manifest_sha256": "b" * 64,
-            "source_revision": "c" * 40,
-            "llama_cpp_revision": "d" * 40,
+            "source_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+            "llama_cpp_revision": "3581ba0cf591b3f772fbb002de0f70e294bc0396",
             "quantization": "Q4_K_M",
             "text_only": True,
             "vision_projection_present": False,
@@ -47,6 +47,7 @@ def handoff() -> dict:
     }
     value["evidence"]["artifact_manifest_sha256"] = value["artifact"]["manifest_sha256"]
     unsigned = {key: item for key, item in value.items() if key != "signature"}
+    unsigned["signature"] = {key: item for key, item in value["signature"].items() if key not in {"signature_base64", "payload_sha256"}}
     value["signature"]["payload_sha256"] = hashlib.sha256(json.dumps(unsigned, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("ascii")).hexdigest()
     return value
 
@@ -55,6 +56,26 @@ class WindowsArtifactHandoffTests(unittest.TestCase):
     def test_contract_schema_accepts_only_the_fixture_shape(self):
         schema = json.loads((ROOT / "contracts/windows-release-artifact-handoff/v1.0.0.json").read_text(encoding="utf-8"))
         self.assertEqual([], schema_errors(handoff(), schema))
+
+    def test_exact_approved_artifact_fields_and_independent_payload_digest(self):
+        value = handoff()
+        self.assertEqual({
+            "model_id": "qwen35-9b-q4-k-m",
+            "file_name": "Qwen3.5-9B-Q4_K_M.gguf",
+            "size_bytes": 5629109088,
+            "sha256": "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b",
+            "source_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+            "llama_cpp_revision": "3581ba0cf591b3f772fbb002de0f70e294bc0396",
+        }, {key: value["artifact"][key] for key in (
+            "model_id", "file_name", "size_bytes", "sha256", "source_revision", "llama_cpp_revision"
+        )})
+        unsigned = {key: item for key, item in value.items() if key != "signature"}
+        unsigned["signature"] = {key: item for key, item in value["signature"].items() if key not in {"signature_base64", "payload_sha256"}}
+        expected = hashlib.sha256(json.dumps(unsigned, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("ascii")).hexdigest()
+        self.assertEqual(expected, value["signature"]["payload_sha256"])
+        value["signature"]["key_id"] = "substituted-key"
+        with self.assertRaisesRegex(module.HandoffError, "payload digest"):
+            module.validate_handoff(value)
 
     def test_public_verifier_refuses_without_trust_anchor(self):
         result = module.verify_handoff(handoff())
@@ -87,7 +108,7 @@ class WindowsArtifactHandoffTests(unittest.TestCase):
         with self.assertRaises(module.HandoffError): module.validate_handoff(value)
 
     def test_rejects_payload_digest_and_signature_encoding_changes(self):
-        value = handoff(); value["artifact"]["size_bytes"] += 1
+        value = handoff(); value["release"]["manifest_sha256"] = "9" * 64
         with self.assertRaisesRegex(module.HandoffError, "payload digest"): module.validate_handoff(value)
         value = handoff(); value["signature"]["signature_base64"] = "not*base64"
         with self.assertRaisesRegex(module.HandoffError, "signature encoding"): module.validate_handoff(value)
@@ -95,7 +116,11 @@ class WindowsArtifactHandoffTests(unittest.TestCase):
         with self.assertRaisesRegex(module.HandoffError, "signature exceeds"): module.validate_handoff(value)
 
     def test_rejects_model_metadata_variants(self):
-        for key, bad in (("sha256", "A" * 64), ("source_revision", "e" * 39), ("quantization", "Q8_0"), ("text_only", False), ("vision_projection_present", True)):
+        for key, bad in ((
+            ("size_bytes", 5629109089), ("sha256", "d" * 64),
+            ("source_revision", "e" * 40), ("llama_cpp_revision", "f" * 40),
+            ("quantization", "Q8_0"), ("text_only", False), ("vision_projection_present", True)
+        )):
             value = handoff(); value["artifact"][key] = bad
             with self.assertRaises(module.HandoffError): module.validate_handoff(value)
 
@@ -131,7 +156,7 @@ class WindowsArtifactHandoffTests(unittest.TestCase):
             link = root / "link.json"
             try: link.symlink_to(path)
             except OSError: self.skipTest("symlinks unavailable")
-            with self.assertRaisesRegex(module.HandoffError, "regular non-link"): module.load_handoff(link)
+            with self.assertRaises(module.HandoffError): module.load_handoff(link)
 
     def test_load_requires_single_link_and_nofollow_capability(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -147,6 +172,17 @@ class WindowsArtifactHandoffTests(unittest.TestCase):
             hardlink.unlink()
             with mock.patch.object(module.os, "O_NOFOLLOW", None):
                 with self.assertRaisesRegex(module.HandoffError, "nofollow"):
+                    module.load_handoff(path)
+
+    def test_load_sanitizes_probe_and_close_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.json"
+            path.write_text(json.dumps(handoff()), encoding="utf-8")
+            with mock.patch.object(Path, "stat", side_effect=OSError("sensitive path")):
+                with self.assertRaisesRegex(module.HandoffError, "could not be read"):
+                    module.load_handoff(path)
+            with mock.patch.object(module.os, "close", side_effect=OSError("sensitive fd")):
+                with self.assertRaisesRegex(module.HandoffError, "close failed"):
                     module.load_handoff(path)
 
     def test_cli_is_sanitized_and_refuses_without_external_trust(self):
