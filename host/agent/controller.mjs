@@ -31,8 +31,12 @@ export const NATIVE_SUPERVISOR_HANDOFF_VERSION = 'native-supervisor-handoff.v1';
 const NATIVE_SUPERVISOR_TOOL_NAMES = new Set(['app.open', 'process.run_allowlisted']);
 const JOURNAL_RECEIPT_DIGEST = /^[a-f0-9]{64}$/u;
 const exactAuthorizationReadback = (receipt, operationId) => receipt?.operation_id === operationId && receipt?.state === 'authorized' && receipt?.sequence === 1 && JOURNAL_RECEIPT_DIGEST.test(receipt?.receipt_hash ?? '');
-const nativeSupervisorOwnerFor = (tool, platform) => platform === 'win32' && NATIVE_SUPERVISOR_TOOL_NAMES.has(tool?.name)
+const nativeSupervisorOwnerFor = (toolName, tool, platform) => platform === 'win32' && NATIVE_SUPERVISOR_TOOL_NAMES.has(toolName) && tool?.name === toolName
   ? NATIVE_SUPERVISOR_DISPATCH_OWNER : null;
+const NATIVE_CANONICAL_METADATA = Object.freeze({
+  'app.open': Object.freeze({ version: '1.0.0', risk_tier: 'T1', side_effect: 'launch', network: false, data_egress: null, requires_confirmation: true }),
+  'process.run_allowlisted': Object.freeze({ version: '0.1.0', risk_tier: 'T3', side_effect: 'process_execution', network: true, data_egress: 'operator_configured', requires_confirmation: true }),
+});
 const BROWSER_TOOL_NAMES = new Set(['browser.session_start', 'browser.inspect_links', 'browser.inspect_page', 'browser.follow_link', 'browser.fill_field', 'browser.activate_control', 'browser.session_close']);
 const COPILOT_TOOL_NAMES = new Set(['coding.copilot_ask']);
 const BROWSER_PROOFS = new Set(['session_started', 'navigation_verified', 'input_verified', 'activation_verified']);
@@ -156,12 +160,50 @@ export function requiresDurableAction(tool) {
   return false;
 }
 
+const TOOL_DESCRIPTOR_FIELDS = Object.freeze(['name', 'version', 'description', 'risk_tier', 'side_effect', 'network', 'data_egress', 'requires_confirmation', 'timeout_ms', 'output_limit', 'parameters', 'input_schema', 'authorize', 'preview', 'confirmationRequired', 'execute']);
+const MISSING_TOOL_PROPERTY = Symbol('missing-tool-property');
+function snapshotToolValue(value, seen = new WeakSet()) {
+  if (!value || typeof value !== 'object') return value;
+  if (seen.has(value)) throw new TypeError('tool descriptor contains a cycle');
+  seen.add(value);
+  let snapshot;
+  if (Array.isArray(value)) snapshot = value.map(item => snapshotToolValue(item, seen));
+  else {
+    snapshot = Object.create(Object.getPrototypeOf(value) === null ? null : Object.prototype);
+    for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(value))) {
+      if (!Object.hasOwn(descriptor, 'value')) throw new TypeError(`tool descriptor field ${key} must be a data property`);
+      Object.defineProperty(snapshot, key, { value: snapshotToolValue(descriptor.value, seen), enumerable: descriptor.enumerable, writable: false, configurable: false });
+    }
+  }
+  seen.delete(value);
+  return Object.freeze(snapshot);
+}
+function readToolDataProperty(tool, key, required = false) {
+  let descriptor;
+  try { descriptor = Object.getOwnPropertyDescriptor(tool, key); } catch { throw new TypeError(`tool descriptor field ${key} is unavailable`); }
+  if (!descriptor) { if (required) throw new TypeError(`tool descriptor field ${key} is required`); return MISSING_TOOL_PROPERTY; }
+  if (!Object.hasOwn(descriptor, 'value')) throw new TypeError(`tool descriptor field ${key} must be a data property`);
+  return descriptor.value;
+}
+function snapshotToolDescriptor(name, tool) {
+  const snapshot = Object.create(null);
+  for (const key of TOOL_DESCRIPTOR_FIELDS) {
+    const value = readToolDataProperty(tool, key, ['name', 'execute'].includes(key));
+    if (value !== MISSING_TOOL_PROPERTY) snapshot[key] = ['parameters', 'input_schema'].includes(key) ? snapshotToolValue(value) : value;
+  }
+  if (snapshot.name !== name) throw new TypeError(`tool registry key ${name} does not match its immutable name`);
+  const canonical = NATIVE_CANONICAL_METADATA[name];
+  if (canonical && Object.entries(canonical).some(([key, value]) => value === null ? Object.hasOwn(snapshot, key) : snapshot[key] !== value)) throw new TypeError(`canonical security metadata for ${name} is invalid`);
+  return Object.freeze(snapshot);
+}
 function executionRegistryEntries(toolRegistry) {
   if (toolRegistry === undefined) return [];
   if (!toolRegistry || typeof toolRegistry !== 'object' || Array.isArray(toolRegistry)) throw new TypeError('toolRegistry must be an object');
   return Object.entries(toolRegistry).map(([name, tool]) => {
-    if (!tool || typeof tool !== 'object' || Array.isArray(tool) || tool.name !== name || typeof tool.execute !== 'function') throw new TypeError(`toolRegistry entry ${name} must provide its matching name and execute function`);
-    return [name, tool];
+    if (!tool || typeof tool !== 'object' || Array.isArray(tool)) throw new TypeError(`toolRegistry entry ${name} must be an object`);
+    const snapshot = snapshotToolDescriptor(name, tool);
+    if (typeof snapshot.execute !== 'function') throw new TypeError(`toolRegistry entry ${name} must provide its matching execute function`);
+    return [name, snapshot];
   });
 }
 
@@ -179,6 +221,7 @@ async function invokeWithTimeout(tool, operation, call, signal) {
 }
 
 export class ConversationController {
+  #tools;
   constructor({ engine, maxToolCalls = 8, confirmationTimeoutMs = 30000, maxSessions = 4, maxHistoryMessages = 64, maxHistoryBytes = 262144, toolRegistry, actionJournal } = {}) {
     if (!engine?.generate) throw new TypeError('engine.generate is required');
     if (!Number.isInteger(maxSessions) || maxSessions < 1) throw new TypeError('maxSessions must be positive');
@@ -186,7 +229,7 @@ export class ConversationController {
     if (actionJournal !== undefined && (!actionJournal || typeof actionJournal.health !== 'function' || typeof actionJournal.prepare !== 'function' || typeof actionJournal.authorize !== 'function' || typeof actionJournal.dispatch !== 'function' || typeof actionJournal.acknowledge !== 'function' || typeof actionJournal.beginReconciliation !== 'function' || typeof actionJournal.complete !== 'function' || typeof actionJournal.cancel !== 'function' || typeof actionJournal.failDefinitive !== 'function' || typeof actionJournal.markUnknown !== 'function')) throw new TypeError('actionJournal does not implement the durable transition contract');
     this.engine = engine; this.maxToolCalls = maxToolCalls; this.confirmationTimeoutMs = confirmationTimeoutMs; this.maxSessions = maxSessions; this.maxHistoryMessages = maxHistoryMessages; this.maxHistoryBytes = maxHistoryBytes; this.actionJournal = actionJournal; this.clock = 0;
     this.sessions = new Map(); this.active = null; this.pending = new Map();
-    this.tools = new Map([[timeNowDefinition.name, { ...timeNowDefinition, execute: ({ id, arguments: args }) => timeNowTool({ id, arguments: args }) }], ...executionRegistryEntries(toolRegistry)]);
+    this.#tools = new Map([[timeNowDefinition.name, { ...timeNowDefinition, execute: ({ id, arguments: args }) => timeNowTool({ id, arguments: args }) }], ...executionRegistryEntries(toolRegistry)]);
   }
   createSession(sessionId = opaque('ses')) {
     if (!sessionIdPattern.test(sessionId)) throw new Error('invalid session id');
@@ -230,8 +273,8 @@ export class ConversationController {
         if (controller.signal.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' });
         session.state = calls ? 'CONTINUING_MODEL' : 'INFERENCING'; emit('message.started', { mode, state: session.state, continuation: calls > 0 });
         const journalReady = this.actionJournal?.health().state === 'ready';
-        const tools = modelToolDefinitions(new Map([...this.tools].filter(([, tool]) => {
-          const nativeOwned = nativeSupervisorOwnerFor(tool, process.platform) !== null;
+        const tools = modelToolDefinitions(new Map([...this.#tools].filter(([name, tool]) => {
+          const nativeOwned = nativeSupervisorOwnerFor(name, tool, process.platform) !== null;
           return nativeOwned ? journalReady : !requiresDurableAction(tool) || journalReady;
         })));
         let callText = ''; let gotCall = false; let usage;
@@ -244,7 +287,7 @@ export class ConversationController {
         if (text.trim()) throw new EnvelopeError('mixed_tool_call_output', 'tool call output cannot contain assistant text');
         calls++; if (calls > this.maxToolCalls) throw Object.assign(new Error('tool_call_limit_exceeded'), { code: 'tool_call_limit_exceeded' });
         const call = parseToolCall(callText); session.state = 'TOOL_PROPOSED';
-        const tool = this.tools.get(call.name); if (!tool) throw Object.assign(new Error('unknown_tool'), { code: 'unknown_tool' });
+        const tool = this.#tools.get(call.name); if (!tool) throw Object.assign(new Error('unknown_tool'), { code: 'unknown_tool' });
         validateToolArgumentShape(tool, call);
         let preview;
         if (tool.preview) preview = await invokeWithTimeout(tool, tool.preview, call, controller.signal);
@@ -259,7 +302,7 @@ export class ConversationController {
           if (!approved) { authorization = { kind: 'policy' }; previewAccessDenied = true; }
           else { preview = await invokeWithTimeout(tool, tool.preview, { ...call, authorization: { kind: 'user_confirmation' }, preview_authorized: true }, controller.signal); emit('tool.proposed', { call: publicToolCall(call), preview }); }
         }
-        const nativeDispatchOwner = nativeSupervisorOwnerFor(tool, process.platform);
+        const nativeDispatchOwner = nativeSupervisorOwnerFor(tool.name, tool, process.platform);
         if (nativeDispatchOwner !== null || requiresDurableAction(tool)) {
           if (!this.actionJournal) throw Object.assign(new Error('durable action journal is not configured'), { code: 'action_journal_unavailable' });
           const binding = createActionBinding({ requestId, callId: call.id, toolName: call.name, arguments: call.arguments, preview });
