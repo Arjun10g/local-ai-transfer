@@ -63,6 +63,7 @@ TEST_INVENTORY = {
     "tests/host/windows-fs-refusal-slice.test.mjs": "windows_refusal_static",
     "tests/model/production_tool_fixture_parity.test.mjs": "model_fixture",
     "tests/model/test_tool_call_eval.py": "model_fixture",
+    "tests/model/test_windows_artifact_handoff.py": "release_static",
     "tests/native/http_negative_tests.py": "loopback_fixture",
     "tests/native/model_validator_tests.cpp": "native_build",
     "tests/native/real_init_guard.py": "real_model",

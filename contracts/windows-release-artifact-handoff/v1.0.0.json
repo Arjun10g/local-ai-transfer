@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "lae://contracts/windows-release-artifact-handoff/1.0.0",
+  "title": "External HF artifact to Windows release provenance handoff",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "artifact", "evidence", "release", "security", "signature"],
+  "properties": {
+    "schema": {"const": "local_bmo.windows-hf-release-handoff.v1"},
+    "artifact": {"$ref": "#/$defs/artifact"},
+    "evidence": {"$ref": "#/$defs/evidence"},
+    "release": {"$ref": "#/$defs/release"},
+    "security": {"$ref": "#/$defs/security"},
+    "signature": {"$ref": "#/$defs/signature"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "not": {"const": "0000000000000000000000000000000000000000000000000000000000000000"}},
+    "revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "asciiId": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_.:-]+$"},
+    "artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["model_id", "file_name", "size_bytes", "sha256", "manifest_sha256", "source_revision", "llama_cpp_revision", "quantization", "text_only", "vision_projection_present"],
+      "properties": {
+        "model_id": {"const": "qwen35-9b-q4-k-m"},
+        "file_name": {"const": "Qwen3.5-9B-Q4_K_M.gguf"},
+        "size_bytes": {"const": 5629109088},
+        "sha256": {"const": "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b"},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "source_revision": {"const": "c202236235762e1c871ad0ccb60c8ee5ba337b9a"},
+        "llama_cpp_revision": {"const": "3581ba0cf591b3f772fbb002de0f70e294bc0396"},
+        "quantization": {"const": "Q4_K_M"},
+        "text_only": {"const": true},
+        "vision_projection_present": {"const": false}
+      }
+    },
+    "evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_model_receipt_sha256", "conversion_receipt_sha256", "model_receipt_sha256", "scan_receipt_sha256", "artifact_manifest_sha256", "toolchain_receipt_sha256", "checksums_sha256"],
+      "properties": {
+        "source_model_receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "conversion_receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "model_receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "scan_receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "artifact_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "toolchain_receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "checksums_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "release": {
+      "type": "object", "additionalProperties": false,
+      "required": ["manifest_sha256", "package_kind", "model_included"],
+      "properties": {
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "package_kind": {"enum": ["fixture-skeleton", "portable-release"]},
+        "model_included": {"const": false}
+      }
+    },
+    "security": {
+      "type": "object", "additionalProperties": false,
+      "required": ["no_model_bytes_in_handoff", "no_credentials", "no_urls", "offline_verifier"],
+      "properties": {
+        "no_model_bytes_in_handoff": {"const": true},
+        "no_credentials": {"const": true},
+        "no_urls": {"const": true},
+        "offline_verifier": {"const": true}
+      }
+    },
+    "signature": {
+      "type": "object", "additionalProperties": false,
+      "required": ["algorithm", "key_id", "signature_base64", "payload_sha256"],
+      "properties": {
+        "algorithm": {"const": "ed25519"},
+        "key_id": {"$ref": "#/$defs/asciiId"},
+        "signature_base64": {"type": "string", "minLength": 88, "maxLength": 88, "pattern": "^[A-Za-z0-9+/]+={0,2}$"},
+        "payload_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}
