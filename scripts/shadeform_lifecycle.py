@@ -550,10 +550,20 @@ def _parse_mixed_env_source(raw: bytes) -> dict[str, str]:
             continue
         if "=" not in line:
             raise ShadeformError("donor environment assignment is malformed")
-        key, value = line.split("=", 1)
+        raw_key, value = line.split("=", 1)
+        key = raw_key.strip(" \t")
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) is None:
             raise ShadeformError("donor environment key is malformed")
         if key in MUTATION_ENV_KEYS:
+            # Projection values keep the strict canonical grammar used by
+            # mutation callers.  In particular, whitespace must not turn a
+            # near-match into an allowlisted key.  Surrounding horizontal
+            # whitespace is tolerated only for unrelated donor keys, whose
+            # values are ignored and never enter the projected environment.
+            if raw_key != key:
+                raise ShadeformError(
+                    "donor environment selected key has noncanonical whitespace"
+                )
             if key in selected:
                 raise ShadeformError("donor environment selected key is duplicated")
             selected[key] = _parse_mutation_env_value(value)

@@ -186,6 +186,38 @@ class ShadeformMutationEnvironmentTests(unittest.TestCase):
         self.assertNotIn("before\tafter", serialized)
         self.assertNotIn("quoted = donor", serialized)
 
+    def test_projection_accepts_surrounding_ascii_whitespace_on_unrelated_keys(self) -> None:
+        self._write_donor(
+            "git_access =opaque-donor-value\n"
+            "\tUNRELATED_TAB\t=another-opaque-value\n"
+            "SHADEFORM_API_KEY=api\n"
+            "SHADEFORM_SSH=ssh\n"
+        )
+        destination = self.root / "projected.env"
+        report = sf.project_mutation_env(self.env, destination)
+        self.assertEqual(report["selected_keys"], ["SHADEFORM_API_KEY", "SHADEFORM_SSH"])
+        projected = destination.read_text(encoding="utf-8")
+        self.assertNotIn("git_access", projected)
+        self.assertNotIn("UNRELATED_TAB", projected)
+        self.assertNotIn("opaque-donor-value", str(report))
+        self.assertNotIn("another-opaque-value", str(report))
+
+    def test_projection_rejects_whitespace_aliases_of_selected_keys(self) -> None:
+        destination = self.root / "projected.env"
+        cases = (
+            " SHADEFORM_API_KEY=api\nSHADEFORM_SSH=ssh\n",
+            "SHADEFORM_API_KEY =api\nSHADEFORM_SSH=ssh\n",
+            "SHADEFORM_API_KEY=api\nSHADEFORM_SSH\t=ssh\n",
+        )
+        for content in cases:
+            with self.subTest():
+                self._write_donor(content)
+                with self.assertRaisesRegex(
+                    sf.ShadeformError, "selected key has noncanonical whitespace",
+                ):
+                    sf.project_mutation_env(self.env, destination)
+                self.assertFalse(destination.exists())
+
     def test_projection_rejects_duplicate_or_malformed_donor_assignments(self) -> None:
         destination = self.root / "projected.env"
         cases = (
