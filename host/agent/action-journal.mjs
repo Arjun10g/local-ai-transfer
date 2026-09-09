@@ -46,7 +46,9 @@ const TRANSITIONS = Object.freeze({
 const EVENT_KEYS = Object.freeze(['version', 'operation_id', 'sequence', 'state', 'timestamp_utc', 'tool_name', 'risk_tier', 'side_effect', 'request_ref', 'call_ref', 'arguments_digest', 'preview_digest', 'operation_digest', 'authorization_kind', 'resolution', 'prev_hash', 'hash']);
 const MAX_FILE_BYTES = ACTION_JOURNAL_LIMITS.max_event_bytes * ACTION_JOURNAL_LIMITS.max_events_per_operation;
 const DESCRIPTOR_WAL_HEADER = '{"format":"lae-action-journal-wal","version":2}\n';
-const DESCRIPTOR_FRAME_COMMIT = Buffer.from('COMMIT\n', 'ascii');
+const DESCRIPTOR_FRAME_MAGIC = '@LAE2:';
+const DESCRIPTOR_FRAME_HEADER_BYTES = 145;
+const DESCRIPTOR_FRAME_COMMIT = Buffer.from(':COMMIT\n', 'ascii');
 const MAX_DESCRIPTOR_WAL_BYTES = 32 * 1024 * 1024;
 
 export class ActionJournalError extends Error {
@@ -172,9 +174,23 @@ async function descriptorAccessProbe(fd) {
 }
 function descriptorFrame(event) {
   const payload = Buffer.from(JSON.stringify(event), 'utf8');
-  const prefix = Buffer.from(`@${payload.length.toString(16).padStart(8, '0')}:`, 'ascii');
-  const seal = Buffer.from(`:${sha256(payload)}:`, 'ascii');
-  return { payloadLength: payload.length, body: Buffer.concat([prefix, payload, seal]), commit: DESCRIPTOR_FRAME_COMMIT, bytes: Buffer.concat([prefix, payload, seal, DESCRIPTOR_FRAME_COMMIT]) };
+  const lengthHex = payload.length.toString(16).padStart(8, '0'); const payloadDigest = sha256(payload);
+  const unsignedHeader = `${DESCRIPTOR_FRAME_MAGIC}${lengthHex}:${payloadDigest}:`;
+  const header = Buffer.from(`${unsignedHeader}${sha256(Buffer.from(unsignedHeader, 'ascii'))}:`, 'ascii');
+  if (header.length !== DESCRIPTOR_FRAME_HEADER_BYTES) throw new ActionJournalError('action_journal_invalid_record');
+  return { payloadLength: payload.length, body: Buffer.concat([header, payload]), commit: DESCRIPTOR_FRAME_COMMIT, bytes: Buffer.concat([header, payload, DESCRIPTOR_FRAME_COMMIT]) };
+}
+function descriptorHeaderPrefixValid(bytes) {
+  const text = bytes.toString('latin1');
+  if (text.length <= DESCRIPTOR_FRAME_MAGIC.length) return DESCRIPTOR_FRAME_MAGIC.startsWith(text);
+  if (!text.startsWith(DESCRIPTOR_FRAME_MAGIC)) return false;
+  for (let index = DESCRIPTOR_FRAME_MAGIC.length; index < Math.min(text.length, 14); index++) if (!/[0-9a-f]/u.test(text[index])) return false;
+  if (text.length > 14 && text[14] !== ':') return false;
+  for (let index = 15; index < Math.min(text.length, 79); index++) if (!/[0-9a-f]/u.test(text[index])) return false;
+  if (text.length > 79 && text[79] !== ':') return false;
+  for (let index = 80; index < Math.min(text.length, 144); index++) if (!/[0-9a-f]/u.test(text[index])) return false;
+  if (text.length > 144 && text[144] !== ':') return false;
+  return text.length <= DESCRIPTOR_FRAME_HEADER_BYTES;
 }
 
 export class ActionJournal {
@@ -322,7 +338,9 @@ export class ActionJournal {
  * or unlinks a pathname.  A production launcher/native supervisor must create
  * or reopen the owner-private file, durably publish it, enforce a single writer,
  * and pass the descriptor as an inherited child handle.  Supplying only a path
- * remains deliberately unsupported by the production composition.
+ * remains deliberately unsupported by the production composition. Frame and
+ * chain SHA-256 values detect corruption; they provide no external authenticity
+ * or anti-rollback guarantee without that separate trusted owner/anchor.
  */
 export class DescriptorActionJournal extends ActionJournal {
   constructor({ fd, ownsDescriptor = false, platform = process.platform, ...options } = {}) {
@@ -361,34 +379,37 @@ export class DescriptorActionJournal extends ActionJournal {
       let offset = header.length; let frames = 0; let recoverAt = null;
       while (offset < bytes.length) {
         const remaining = bytes.length - offset;
-        const prefixLength = Math.min(10, remaining);
-        const prefixText = bytes.subarray(offset, offset + prefixLength).toString('ascii');
-        if (remaining < 10) {
-          if (!/^@[0-9a-f]{0,8}$/u.test(prefixText)) throw new ActionJournalError('action_journal_corrupt');
+        if (remaining < DESCRIPTOR_FRAME_HEADER_BYTES) {
+          if (!descriptorHeaderPrefixValid(bytes.subarray(offset))) throw new ActionJournalError('action_journal_corrupt');
           recoverAt = offset; break;
         }
-        if (!/^@[0-9a-f]{8}:$/u.test(prefixText)) throw new ActionJournalError('action_journal_corrupt');
-        const payloadLength = Number.parseInt(prefixText.slice(1, 9), 16);
+        const frameHeader = bytes.subarray(offset, offset + DESCRIPTOR_FRAME_HEADER_BYTES);
+        const headerText = frameHeader.toString('latin1');
+        const headerMatch = /^@LAE2:([0-9a-f]{8}):([0-9a-f]{64}):([0-9a-f]{64}):$/u.exec(headerText);
+        if (!headerMatch) throw new ActionJournalError('action_journal_corrupt');
+        const [, lengthHex, payloadDigest, headerDigest] = headerMatch;
+        const unsignedHeader = `${DESCRIPTOR_FRAME_MAGIC}${lengthHex}:${payloadDigest}:`;
+        if (sha256(Buffer.from(unsignedHeader, 'ascii')) !== headerDigest) throw new ActionJournalError('action_journal_corrupt');
+        const payloadLength = Number.parseInt(lengthHex, 16);
         if (!Number.isSafeInteger(payloadLength) || payloadLength < 1 || payloadLength > ACTION_JOURNAL_LIMITS.max_event_bytes) throw new ActionJournalError('action_journal_corrupt');
-        const bodyLength = 10 + payloadLength + 66;
-        const frameLength = bodyLength + DESCRIPTOR_FRAME_COMMIT.length;
+        const frameLength = DESCRIPTOR_FRAME_HEADER_BYTES + payloadLength + DESCRIPTOR_FRAME_COMMIT.length;
         if (remaining < frameLength) {
-          if (remaining > 10 + payloadLength) {
-            const payload = bytes.subarray(offset + 10, offset + 10 + payloadLength);
+          if (bytes.subarray(offset).subarray(-DESCRIPTOR_FRAME_COMMIT.length).equals(DESCRIPTOR_FRAME_COMMIT)) throw new ActionJournalError('action_journal_corrupt');
+          if (remaining >= DESCRIPTOR_FRAME_HEADER_BYTES + payloadLength) {
+            const payload = bytes.subarray(offset + DESCRIPTOR_FRAME_HEADER_BYTES, offset + DESCRIPTOR_FRAME_HEADER_BYTES + payloadLength);
+            if (sha256(payload) !== payloadDigest) throw new ActionJournalError('action_journal_corrupt');
             let partialParsed; const payloadText = payload.toString('utf8');
             try { partialParsed = parseStrictJson(payloadText, { maxBytes: ACTION_JOURNAL_LIMITS.max_event_bytes, maxDepth: 2, maxString: 1024, maxArray: 0, maxObject: EVENT_KEYS.length }); } catch { throw new ActionJournalError('action_journal_corrupt'); }
             if (JSON.stringify(partialParsed) !== payloadText) throw new ActionJournalError('action_journal_corrupt');
             const partialRecord = this.records.get(partialParsed?.operation_id);
             validateEvent(partialParsed, `${partialParsed?.operation_id}.jsonl`, partialRecord?.events.at(-1));
-            const expectedTail = Buffer.from(`:${sha256(payload)}:COMMIT\n`, 'ascii');
-            const actualTail = bytes.subarray(offset + 10 + payloadLength);
-            if (!expectedTail.subarray(0, actualTail.length).equals(actualTail)) throw new ActionJournalError('action_journal_corrupt');
+            const actualCommit = bytes.subarray(offset + DESCRIPTOR_FRAME_HEADER_BYTES + payloadLength);
+            if (!DESCRIPTOR_FRAME_COMMIT.subarray(0, actualCommit.length).equals(actualCommit)) throw new ActionJournalError('action_journal_corrupt');
           }
           recoverAt = offset; break;
         }
-        const payload = bytes.subarray(offset + 10, offset + 10 + payloadLength);
-        const expectedTail = Buffer.from(`:${sha256(payload)}:COMMIT\n`, 'ascii');
-        if (!bytes.subarray(offset + 10 + payloadLength, offset + frameLength).equals(expectedTail)) throw new ActionJournalError('action_journal_corrupt');
+        const payload = bytes.subarray(offset + DESCRIPTOR_FRAME_HEADER_BYTES, offset + DESCRIPTOR_FRAME_HEADER_BYTES + payloadLength);
+        if (sha256(payload) !== payloadDigest || !bytes.subarray(offset + DESCRIPTOR_FRAME_HEADER_BYTES + payloadLength, offset + frameLength).equals(DESCRIPTOR_FRAME_COMMIT)) throw new ActionJournalError('action_journal_corrupt');
         const payloadText = payload.toString('utf8');
         let parsed; try { parsed = parseStrictJson(payloadText, { maxBytes: ACTION_JOURNAL_LIMITS.max_event_bytes, maxDepth: 2, maxString: 1024, maxArray: 0, maxObject: EVENT_KEYS.length }); } catch { throw new ActionJournalError('action_journal_corrupt'); }
         if (JSON.stringify(parsed) !== payloadText) throw new ActionJournalError('action_journal_corrupt');

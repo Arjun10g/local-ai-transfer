@@ -16,6 +16,20 @@ import { createHostComposition } from '../../lae-host.mjs';
 const REQUEST = 'request_descriptor01';
 const CALL = 'call_descriptor001';
 const SECRET = 'descriptor-secret-must-not-persist';
+const WAL_HEADER = Buffer.from('{"format":"lae-action-journal-wal","version":2}\n');
+const FRAME_HEADER_BYTES = 145;
+
+function encodedFrame(payloadText) {
+  const payload = Buffer.from(payloadText, 'utf8'); const length = payload.length.toString(16).padStart(8, '0'); const payloadDigest = createHash('sha256').update(payload).digest('hex');
+  const unsignedHeader = `@LAE2:${length}:${payloadDigest}:`; const headerDigest = createHash('sha256').update(unsignedHeader, 'ascii').digest('hex');
+  return Buffer.concat([Buffer.from(`${unsignedHeader}${headerDigest}:`, 'ascii'), payload, Buffer.from(':COMMIT\n', 'ascii')]);
+}
+
+function frameOffsets(raw) {
+  const offsets = []; let offset = WAL_HEADER.length;
+  while (offset < raw.length) { const length = Number.parseInt(raw.subarray(offset + 6, offset + 14).toString('ascii'), 16); offsets.push({ offset, length }); offset += FRAME_HEADER_BYTES + length + 8; }
+  assert.equal(offset, raw.length); return offsets;
+}
 
 async function wal(t, options = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'lae-descriptor-journal-'));
@@ -85,23 +99,53 @@ test('descriptor access probes reject read-only and write-only handles without c
 });
 
 test('only an exact incomplete final frame is truncated; complete or noncanonical corruption blocks', async t => {
-  for (const damage of ['partial-payload', 'partial-commit', 'complete-checksum', 'noncanonical']) await t.test(damage, async t => {
+  for (const damage of ['partial-magic', 'partial-length', 'partial-checksum', 'partial-header-digest', 'partial-payload', 'partial-commit', 'complete-checksum', 'committed-length-mismatch', 'noncanonical']) await t.test(damage, async t => {
     const store = await wal(t); const journal = await store.openJournal(); await journal.prepare(journalInput()); await journal.close();
-    const raw = await readFile(store.path); const headerLength = raw.indexOf(0x0a) + 1; const payloadLength = Number.parseInt(raw.subarray(headerLength + 1, headerLength + 9).toString('ascii'), 16);
-    if (damage === 'partial-payload') await truncate(store.path, headerLength + 10 + Math.floor(payloadLength / 2));
+    const raw = await readFile(store.path); const headerLength = WAL_HEADER.length; const payloadLength = frameOffsets(raw)[0].length;
+    if (damage === 'partial-magic') await truncate(store.path, headerLength + 3);
+    else if (damage === 'partial-length') await truncate(store.path, headerLength + 10);
+    else if (damage === 'partial-checksum') await truncate(store.path, headerLength + 40);
+    else if (damage === 'partial-header-digest') await truncate(store.path, headerLength + 100);
+    else if (damage === 'partial-payload') await truncate(store.path, headerLength + FRAME_HEADER_BYTES + Math.floor(payloadLength / 2));
     else if (damage === 'partial-commit') await truncate(store.path, raw.length - 3);
-    else if (damage === 'complete-checksum') { raw[headerLength + 10] ^= 1; await writeFile(store.path, raw); }
+    else if (damage === 'complete-checksum') { raw[headerLength + FRAME_HEADER_BYTES] ^= 1; await writeFile(store.path, raw); }
+    else if (damage === 'committed-length-mismatch') {
+      const payload = raw.subarray(headerLength + FRAME_HEADER_BYTES, headerLength + FRAME_HEADER_BYTES + payloadLength); const length = (payloadLength + 1).toString(16).padStart(8, '0'); const payloadDigest = createHash('sha256').update(payload).digest('hex');
+      const unsignedHeader = `@LAE2:${length}:${payloadDigest}:`; const headerDigest = createHash('sha256').update(unsignedHeader, 'ascii').digest('hex');
+      await writeFile(store.path, Buffer.concat([raw.subarray(0, headerLength), Buffer.from(`${unsignedHeader}${headerDigest}:`), payload, Buffer.from(':COMMIT\n')]));
+    }
     else {
-      const payload = raw.subarray(headerLength + 10, headerLength + 10 + payloadLength).toString('utf8').replace(',"operation_id"', ', "operation_id"');
+      const payload = raw.subarray(headerLength + FRAME_HEADER_BYTES, headerLength + FRAME_HEADER_BYTES + payloadLength).toString('utf8').replace(',"operation_id"', ', "operation_id"');
       assert.notEqual(payload.length, payloadLength);
-      const payloadBytes = Buffer.from(payload, 'utf8'); const prefix = Buffer.from(`@${payloadBytes.length.toString(16).padStart(8, '0')}:`); const checksum = createHash('sha256').update(payloadBytes).digest('hex');
-      await writeFile(store.path, Buffer.concat([raw.subarray(0, headerLength), prefix, payloadBytes, Buffer.from(`:${checksum}:COMMIT\n`)]));
+      await writeFile(store.path, Buffer.concat([raw.subarray(0, headerLength), encodedFrame(payload)]));
     }
     const reopened = await store.openJournal();
     if (damage.startsWith('partial-')) {
       assert.deepEqual(reopened.health(), { state: 'ready', error: null }); assert.equal((await reopened.summary()).records.length, 0); assert.equal((await readFile(store.path)).length, headerLength);
     } else assert.deepEqual(reopened.health(), { state: 'blocked', error: 'action_journal_corrupt' });
   });
+});
+
+test('every committed frame-header byte mutation blocks and a length flip cannot erase a dispatch tombstone', async t => {
+  const store = await wal(t); const journal = await store.openJournal(); const receipt = await dispatch(journal); assert.equal((await journal.detail(receipt.operation_id)).state, 'dispatching'); await journal.close();
+  const raw = await readFile(store.path); const dispatchFrame = frameOffsets(raw).at(-1);
+  for (let index = 0; index < FRAME_HEADER_BYTES; index++) {
+    const mutated = Buffer.from(raw); const position = dispatchFrame.offset + index; const character = String.fromCharCode(mutated[position]);
+    mutated[position] = /^[0-9a-f]$/u.test(character) ? (character === '0' ? '1' : '0').charCodeAt(0) : (mutated[position] ^ 1);
+    await writeFile(store.path, mutated); const blocked = await store.openJournal();
+    assert.deepEqual(blocked.health(), { state: 'blocked', error: 'action_journal_corrupt' }, `header byte ${index}`);
+    assert.equal((await readFile(store.path)).length, raw.length, `header byte ${index} truncated`); await blocked.close();
+  }
+  const exploit = Buffer.from(raw); const lengthText = exploit.subarray(dispatchFrame.offset + 6, dispatchFrame.offset + 14).toString('ascii');
+  let changedLength = null;
+  for (let index = 7; index >= 0 && changedLength === null; index--) {
+    const candidate = `${lengthText.slice(0, index)}f${lengthText.slice(index + 1)}`; const value = Number.parseInt(candidate, 16);
+    if (candidate !== lengthText && value > dispatchFrame.length && value <= 65536) changedLength = candidate;
+  }
+  assert.ok(changedLength); exploit.write(changedLength, dispatchFrame.offset + 6, 'ascii'); await writeFile(store.path, exploit);
+  const blocked = await store.openJournal(); assert.deepEqual(blocked.health(), { state: 'blocked', error: 'action_journal_corrupt' });
+  await assert.rejects(blocked.prepare(journalInput()), error => error?.code === 'action_journal_corrupt');
+  assert.equal((await readFile(store.path)).length, raw.length);
 });
 
 test('restart cancels pre-dispatch work, tombstones dispatched work, and never manufactures completion', async t => {
