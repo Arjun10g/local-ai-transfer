@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { makeEvent } from './assistant-events.mjs';
 import { makeToolResult, parseToolCall, validateToolResult, EnvelopeError } from './tool-envelope.mjs';
-import { createActionBinding } from './action-journal.mjs';
+import { ACTION_JOURNAL_HEALTH_ERRORS, createActionBinding } from './action-journal.mjs';
 import { readGraphAttestation, transferGraphAttestation } from '../providers/microsoft-graph.mjs';
 import { browserSafeCompletionDigest, projectBrowserResult, readBrowserAttestation, transferBrowserAttestation } from '../providers/browser-actions.mjs';
 import { isGraphReadTool, readGraphReadAttestation, transferGraphReadAttestation } from '../providers/microsoft-graph-reads.mjs';
@@ -160,14 +160,14 @@ export function requiresDurableAction(tool) {
   return false;
 }
 
-const JOURNAL_FAILURE_CODE = /^action_journal_[a-z0-9_]{1,96}$/u;
+const JOURNAL_FAILURE_CODES = new Set(ACTION_JOURNAL_HEALTH_ERRORS);
 function journalStatus(journal) {
   try {
     if (!journal || typeof journal.health !== 'function') return { ready: false, code: 'action_journal_unavailable' };
     const health = journal.health();
     if (!health || typeof health !== 'object' || Array.isArray(health) || typeof health.state !== 'string') return { ready: false, code: 'action_journal_unavailable' };
     if (health.state === 'ready') return { ready: health.error === null, code: health.error === null ? null : 'action_journal_unavailable' };
-    return { ready: false, code: typeof health.error === 'string' && JOURNAL_FAILURE_CODE.test(health.error) ? health.error : 'action_journal_unavailable' };
+    return { ready: false, code: typeof health.error === 'string' && JOURNAL_FAILURE_CODES.has(health.error) ? health.error : 'action_journal_unavailable' };
   } catch { return { ready: false, code: 'action_journal_unavailable' }; }
 }
 

@@ -7,6 +7,7 @@ import {
   NATIVE_SUPERVISOR_DISPATCH_OWNER,
   NATIVE_SUPERVISOR_HANDOFF_VERSION,
 } from '../../host/agent/controller.mjs';
+import { ACTION_JOURNAL_HEALTH_ERRORS } from '../../host/agent/action-journal.mjs';
 
 const operationId = 'act_' + 'a'.repeat(32);
 const digest = value => value.repeat(64);
@@ -144,7 +145,7 @@ test('unavailable journal never advertises a native action even with falsified m
 });
 
 test('malformed or hostile journal health is a finite unavailable refusal', async () => {
-  const healthValues = [null, { state: 'blocked', error: 'raw provider failure' }, { state: 'blocked', error: `action_journal_${'x'.repeat(97)}` }];
+  const healthValues = [null, { state: 'blocked', error: 'raw provider failure' }, { state: 'blocked', error: 'action_journal_access_token_supersecret' }, { state: 'blocked', error: `action_journal_${'x'.repeat(97)}` }];
   for (const [index, health] of healthValues.entries()) {
     const journal = new MockJournal({ healthState: 'blocked' }); journal.health = () => health;
     const controller = new ConversationController({ engine: engineFor('process.run_allowlisted', {}), actionJournal: journal, toolRegistry: { 'process.run_allowlisted': tool('process.run_allowlisted', 'process_execution', async () => { throw new Error('preview must not run'); }) } });
@@ -156,6 +157,15 @@ test('malformed or hostile journal health is a finite unavailable refusal', asyn
   Object.defineProperty(throwing, 'health', { get() { throw new Error('health getter sentinel'); } });
   const result = await runAsPlatform('win32', () => controller.runTurn({ sessionId: 'ses_health_getter', requestId: 'req_health_getter', message: 'run it' }));
   assert.equal(result.error, 'action_journal_unavailable');
+});
+
+test('journal health preserves every exact contract diagnostic and nothing else', async () => {
+  for (const [index, error] of ACTION_JOURNAL_HEALTH_ERRORS.entries()) {
+    const journal = new MockJournal({ healthState: 'blocked' }); journal.health = () => ({ state: 'blocked', error });
+    const controller = new ConversationController({ engine: engineFor('process.run_allowlisted', {}), actionJournal: journal, toolRegistry: { 'process.run_allowlisted': tool('process.run_allowlisted', 'process_execution', async () => { throw new Error('preview must not run'); }) } });
+    const result = await runAsPlatform('win32', () => controller.runTurn({ sessionId: `ses_diag_${index}`, requestId: `req_diag_${index}`, message: 'run it' }));
+    assert.equal(result.error, error);
+  }
 });
 
 test('registry snapshots defeat post-admission mutation and public map replacement', async () => {
