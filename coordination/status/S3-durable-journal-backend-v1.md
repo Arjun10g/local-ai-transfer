@@ -8,7 +8,7 @@
 - **Current phase:** Phase 6 failure recovery, source-only
 - **Primary task ID:** TOOL-DURABLE-JOURNAL-BACKEND
 - **Secondary task ID, if any:** None
-- **Task state:** IN_PROGRESS
+- **Task state:** READY_FOR_REVIEW
 - **Last merged `main` commit:** `9c2d15f95618bfe85ad5c7a21d6f43a20d025215`
 
 ## Objective for this work interval
@@ -35,12 +35,32 @@ live execution, while preserving existing contracts and fail-closed gates.
   instructions in the required order.
 - Created this isolated branch/worktree and claimed the bounded task before
   editing journal/controller/provider source.
+- Added an append-only, descriptor-authority ActionJournal WAL. It validates
+  owner/mode/link/file identity, bounds the file and records, fsyncs and reads
+  back every transition, checks the complete digest and per-operation chains,
+  and never reopens or mutates a pathname.
+- Added restart recovery which cancels only pre-dispatch records, converts a
+  durable dispatch into an `unknown_manual` tombstone, and leaves a
+  provider-acknowledged record nonterminal instead of manufacturing success.
+- Moved the journal acknowledgement after the controller verifies the
+  provider module's private, exact operation-bound completion attestation.
+  Generic provider-shaped JSON now transitions directly to reconciliation.
+- Wired exact inherited-descriptor configuration and isolated journal cleanup
+  in HostServer shutdown; invalid journal configuration fails before engine
+  creation.
+- Added crash-boundary, restart, tamper, disclosure, provider-proof,
+  composition, and teardown adversarial tests and QA inventory coverage.
 
 ## Evidence
 
-- Commit: startup claim commit pending.
-- Commands: read-only source/instruction inspection only.
-- Tests: not yet run.
+- Commits: claim `775a321`; implementation `c1c8684d8b4eb7eac9f1a13717158dc072cd227a`.
+- Commands:
+  - `node --check host/agent/action-journal.mjs && node --check host/agent/controller.mjs && node --check host/server/host-server.mjs && node --check lae-host.mjs && git diff --check`
+  - `node --test tests/host/descriptor-action-journal.test.mjs tests/host/action-journal.test.mjs tests/host/graph-production-composition-restart.test.mjs tests/host/graph-manual-resolution-guard.test.mjs tests/host/external-tools.test.mjs tests/security/permission-mode-adversarial.test.mjs tests/security/tool-calling-adversarial.test.mjs`
+  - `python3 -m unittest -q tests.qa.test_safe_runner`
+- Tests: Node 192 discovered, 191 passed, 0 failed, 1 existing TODO,
+  1.271 seconds; Python QA inventory 20/20 passed in 0.037 seconds; all syntax
+  and diff checks passed.
 - Machine: local macOS development host; no target equivalence claimed.
 - Artifact/index: this status packet.
 - Metrics: none.
@@ -53,18 +73,29 @@ live execution, while preserving existing contracts and fail-closed gates.
 - A provider proof must be independently bound to the exact durable operation
   and provider-owned idempotency/reconciliation identity; a host assertion is
   not sufficient to resolve an ambiguous Graph mutation.
+- An inherited file descriptor is sufficient to remove pathname lookup from
+  the Node journal after bootstrap, but secure creation/reopen/publication,
+  single-writer exclusion, and rollback anchoring remain launcher/native-owner
+  responsibilities.
 
 ## Blockers
 
-- Fact/evidence: Windows handle-relative storage/helper source remains inert,
-  uncompiled, unimported, and without target evidence.
+- Fact/evidence: Windows secure descriptor acquisition and owner-only DACL,
+  durable directory-entry publication, cross-process single-writer exclusion,
+  and anti-rollback anchoring are not supplied by this Node slice. Existing
+  handle-relative storage/helper source remains inert, uncompiled, unimported,
+  and without target evidence. The WAL is bounded and append-only, with no
+  compaction; it fails closed at its record/event/32 MiB ceilings. Provider
+  ambiguity is retained for manual/provider reconciliation, not automatically
+  retried or promoted to a terminal result.
 - Impact: this source slice cannot establish Windows production or release
   readiness.
-- What was tried: existing contracts and source boundaries are being reused;
-  no unsafe pathname promotion will be attempted.
-- Proposed workaround: implement and test a strict provider-proof/recovery
-  interface and only a backend whose durability/identity claims are locally
-  enforceable; retain refusal elsewhere.
+- What was tried: implemented the bounded inherited-descriptor WAL and private
+  provider-attestation ordering with source/mock crash and restart evidence;
+  the unsafe pathname backend remains blocked.
+- Proposed workaround: connect the accepted native single owner to an inherited
+  descriptor plus durable publication/locking/anti-rollback evidence, and add
+  provider reconciliation before allowing terminal recovery.
 - Decision/asset needed: later S1/S4 native bridge, compile, crash, Windows, and
   target evidence.
 - Owner: S1/S4/S0.
@@ -75,12 +106,12 @@ live execution, while preserving existing contracts and fail-closed gates.
 - To: S0/S1/S4
 - Handoff file: this status packet
 - Required by: review/merge and any later native production bridge
-- Acknowledged: pending
+- Acknowledged: pending independent review
 
 ## Next bounded action
 
-Map the journal/controller/Graph mutation state machine and implement the
-smallest durable proof-bound recovery boundary with restart/crash tests.
+Independent source/security review of `c1c8684`; retain all production and
+target gates until the native owner and provider recovery blockers are closed.
 
 ## Sol action requested
 
