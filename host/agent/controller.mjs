@@ -179,12 +179,12 @@ async function invokeWithTimeout(tool, operation, call, signal) {
 }
 
 export class ConversationController {
-  constructor({ engine, maxToolCalls = 8, confirmationTimeoutMs = 30000, maxSessions = 4, maxHistoryMessages = 64, maxHistoryBytes = 262144, toolRegistry, actionJournal, platform = process.platform } = {}) {
+  constructor({ engine, maxToolCalls = 8, confirmationTimeoutMs = 30000, maxSessions = 4, maxHistoryMessages = 64, maxHistoryBytes = 262144, toolRegistry, actionJournal } = {}) {
     if (!engine?.generate) throw new TypeError('engine.generate is required');
     if (!Number.isInteger(maxSessions) || maxSessions < 1) throw new TypeError('maxSessions must be positive');
     if (!Number.isInteger(maxHistoryMessages) || maxHistoryMessages < 1 || !Number.isInteger(maxHistoryBytes) || maxHistoryBytes < 1024) throw new TypeError('history limits are invalid');
     if (actionJournal !== undefined && (!actionJournal || typeof actionJournal.health !== 'function' || typeof actionJournal.prepare !== 'function' || typeof actionJournal.authorize !== 'function' || typeof actionJournal.dispatch !== 'function' || typeof actionJournal.acknowledge !== 'function' || typeof actionJournal.beginReconciliation !== 'function' || typeof actionJournal.complete !== 'function' || typeof actionJournal.cancel !== 'function' || typeof actionJournal.failDefinitive !== 'function' || typeof actionJournal.markUnknown !== 'function')) throw new TypeError('actionJournal does not implement the durable transition contract');
-    this.engine = engine; this.maxToolCalls = maxToolCalls; this.confirmationTimeoutMs = confirmationTimeoutMs; this.maxSessions = maxSessions; this.maxHistoryMessages = maxHistoryMessages; this.maxHistoryBytes = maxHistoryBytes; this.actionJournal = actionJournal; this.platform = platform; this.clock = 0;
+    this.engine = engine; this.maxToolCalls = maxToolCalls; this.confirmationTimeoutMs = confirmationTimeoutMs; this.maxSessions = maxSessions; this.maxHistoryMessages = maxHistoryMessages; this.maxHistoryBytes = maxHistoryBytes; this.actionJournal = actionJournal; this.clock = 0;
     this.sessions = new Map(); this.active = null; this.pending = new Map();
     this.tools = new Map([[timeNowDefinition.name, { ...timeNowDefinition, execute: ({ id, arguments: args }) => timeNowTool({ id, arguments: args }) }], ...executionRegistryEntries(toolRegistry)]);
   }
@@ -230,7 +230,10 @@ export class ConversationController {
         if (controller.signal.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' });
         session.state = calls ? 'CONTINUING_MODEL' : 'INFERENCING'; emit('message.started', { mode, state: session.state, continuation: calls > 0 });
         const journalReady = this.actionJournal?.health().state === 'ready';
-        const tools = modelToolDefinitions(new Map([...this.tools].filter(([, tool]) => !requiresDurableAction(tool) || journalReady)));
+        const tools = modelToolDefinitions(new Map([...this.tools].filter(([, tool]) => {
+          const nativeOwned = nativeSupervisorOwnerFor(tool, process.platform) !== null;
+          return nativeOwned ? journalReady : !requiresDurableAction(tool) || journalReady;
+        })));
         let callText = ''; let gotCall = false; let usage;
         for await (const frame of this.engine.generate({ requestId, sessionId: session.id, messages: session.history, tools, mode, signal: controller.signal })) {
           if (frame.kind === 'text_delta') { text += frame.text; emit('message.delta', { text: frame.text }); }
@@ -256,11 +259,12 @@ export class ConversationController {
           if (!approved) { authorization = { kind: 'policy' }; previewAccessDenied = true; }
           else { preview = await invokeWithTimeout(tool, tool.preview, { ...call, authorization: { kind: 'user_confirmation' }, preview_authorized: true }, controller.signal); emit('tool.proposed', { call: publicToolCall(call), preview }); }
         }
-        if (requiresDurableAction(tool)) {
+        const nativeDispatchOwner = nativeSupervisorOwnerFor(tool, process.platform);
+        if (nativeDispatchOwner !== null || requiresDurableAction(tool)) {
           if (!this.actionJournal) throw Object.assign(new Error('durable action journal is not configured'), { code: 'action_journal_unavailable' });
           const binding = createActionBinding({ requestId, callId: call.id, toolName: call.name, arguments: call.arguments, preview });
           const receipt = await this.actionJournal.prepare({ requestId, callId: call.id, toolName: call.name, riskTier: tool.risk_tier, sideEffect: tool.side_effect, argumentsDigest: binding.argumentsDigest, previewDigest: binding.previewDigest, operationDigest: binding.operationDigest });
-          const dispatchOwner = nativeSupervisorOwnerFor(tool, this.platform);
+          const dispatchOwner = nativeDispatchOwner;
           activeJournalOperation = {
             id: receipt.operation_id,
             dispatched: false,
