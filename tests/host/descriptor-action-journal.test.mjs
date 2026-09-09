@@ -148,6 +148,22 @@ test('every committed frame-header byte mutation blocks and a length flip cannot
   assert.equal((await readFile(store.path)).length, raw.length);
 });
 
+test('writer-order canonicalization rejects reordered, missing, and unknown event keys even with recomputed frame digests', async t => {
+  const store = await wal(t); const journal = await store.openJournal(); await journal.prepare(journalInput()); await journal.close();
+  const raw = await readFile(store.path); const frame = frameOffsets(raw)[0]; const payload = JSON.parse(raw.subarray(frame.offset + FRAME_HEADER_BYTES, frame.offset + FRAME_HEADER_BYTES + frame.length).toString('utf8')); const entries = Object.entries(payload);
+  const reversed = Object.fromEntries([...entries].reverse()); assert.equal(reversed.hash, payload.hash);
+  const variants = [{ name: 'reversed-partial-commit', value: reversed, partial: true }, { name: 'reversed', value: reversed }];
+  for (let shift = 1; shift < entries.length; shift++) variants.push({ name: `rotation-${shift}`, value: Object.fromEntries([...entries.slice(shift), ...entries.slice(0, shift)]) });
+  variants.push({ name: 'unknown', value: { ...payload, unknown: 'value' } });
+  variants.push({ name: 'missing', value: Object.fromEntries(entries.slice(0, -1)) });
+  for (const variant of variants) {
+    let replacement = encodedFrame(JSON.stringify(variant.value)); if (variant.partial) replacement = replacement.subarray(0, replacement.length - 3);
+    const candidate = Buffer.concat([WAL_HEADER, replacement]); await writeFile(store.path, candidate);
+    const blocked = await store.openJournal(); assert.deepEqual(blocked.health(), { state: 'blocked', error: 'action_journal_corrupt' }, variant.name);
+    assert.deepEqual(await readFile(store.path), candidate, `${variant.name} was truncated or rewritten`); await blocked.close();
+  }
+});
+
 test('restart cancels pre-dispatch work, tombstones dispatched work, and never manufactures completion', async t => {
   const store = await wal(t); const journal = await store.openJournal();
   const prepared = await journal.prepare(journalInput()); await journal.authorize(prepared.operation_id, 'user_confirmation');

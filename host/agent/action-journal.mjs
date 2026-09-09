@@ -99,6 +99,7 @@ function eventPayload(event) {
     authorization_kind: event.authorization_kind, resolution: event.resolution, prev_hash: event.prev_hash
   };
 }
+function canonicalEventText(event) { return JSON.stringify(Object.fromEntries(EVENT_KEYS.map(key => [key, event[key]]))); }
 function validateEvent(event, filename, previous) {
   if (!exactKeys(event) || event.version !== VERSION || !OPERATION_ID.test(event.operation_id) || filename !== `${event.operation_id}.jsonl` || !Number.isInteger(event.sequence) || event.sequence < 0 || event.sequence >= ACTION_JOURNAL_LIMITS.max_events_per_operation || !ACTION_STATES.includes(event.state) || !isoTimestamp(event.timestamp_utc) || !TOOL_NAME.test(event.tool_name) || !RISK.has(event.risk_tier) || !SIDE_EFFECT.test(event.side_effect) || !HASH.test(event.request_ref) || !HASH.test(event.call_ref) || !HASH.test(event.arguments_digest) || !HASH.test(event.preview_digest) || !HASH.test(event.operation_digest) || event.authorization_kind !== null && !AUTHORIZATION.has(event.authorization_kind) || event.resolution !== null && !RESOLUTIONS.has(event.resolution) || !HASH.test(event.prev_hash) || !HASH.test(event.hash)) throw new ActionJournalError('action_journal_corrupt');
   if (event.hash !== sha256(JSON.stringify(eventPayload(event)))) throw new ActionJournalError('action_journal_corrupt');
@@ -173,7 +174,7 @@ async function descriptorAccessProbe(fd) {
   await descriptorCall(done => write(fd, Buffer.alloc(0), 0, 0, 0, error => done(error)));
 }
 function descriptorFrame(event) {
-  const payload = Buffer.from(JSON.stringify(event), 'utf8');
+  const payload = Buffer.from(canonicalEventText(event), 'utf8');
   const lengthHex = payload.length.toString(16).padStart(8, '0'); const payloadDigest = sha256(payload);
   const unsignedHeader = `${DESCRIPTOR_FRAME_MAGIC}${lengthHex}:${payloadDigest}:`;
   const header = Buffer.from(`${unsignedHeader}${sha256(Buffer.from(unsignedHeader, 'ascii'))}:`, 'ascii');
@@ -400,9 +401,9 @@ export class DescriptorActionJournal extends ActionJournal {
             if (sha256(payload) !== payloadDigest) throw new ActionJournalError('action_journal_corrupt');
             let partialParsed; const payloadText = payload.toString('utf8');
             try { partialParsed = parseStrictJson(payloadText, { maxBytes: ACTION_JOURNAL_LIMITS.max_event_bytes, maxDepth: 2, maxString: 1024, maxArray: 0, maxObject: EVENT_KEYS.length }); } catch { throw new ActionJournalError('action_journal_corrupt'); }
-            if (JSON.stringify(partialParsed) !== payloadText) throw new ActionJournalError('action_journal_corrupt');
             const partialRecord = this.records.get(partialParsed?.operation_id);
-            validateEvent(partialParsed, `${partialParsed?.operation_id}.jsonl`, partialRecord?.events.at(-1));
+            const partialEvent = validateEvent(partialParsed, `${partialParsed?.operation_id}.jsonl`, partialRecord?.events.at(-1));
+            if (canonicalEventText(partialEvent) !== payloadText) throw new ActionJournalError('action_journal_corrupt');
             const actualCommit = bytes.subarray(offset + DESCRIPTOR_FRAME_HEADER_BYTES + payloadLength);
             if (!DESCRIPTOR_FRAME_COMMIT.subarray(0, actualCommit.length).equals(actualCommit)) throw new ActionJournalError('action_journal_corrupt');
           }
@@ -412,11 +413,11 @@ export class DescriptorActionJournal extends ActionJournal {
         if (sha256(payload) !== payloadDigest || !bytes.subarray(offset + DESCRIPTOR_FRAME_HEADER_BYTES + payloadLength, offset + frameLength).equals(DESCRIPTOR_FRAME_COMMIT)) throw new ActionJournalError('action_journal_corrupt');
         const payloadText = payload.toString('utf8');
         let parsed; try { parsed = parseStrictJson(payloadText, { maxBytes: ACTION_JOURNAL_LIMITS.max_event_bytes, maxDepth: 2, maxString: 1024, maxArray: 0, maxObject: EVENT_KEYS.length }); } catch { throw new ActionJournalError('action_journal_corrupt'); }
-        if (JSON.stringify(parsed) !== payloadText) throw new ActionJournalError('action_journal_corrupt');
         if (!OPERATION_ID.test(parsed?.operation_id ?? '')) throw new ActionJournalError('action_journal_corrupt');
         let record = this.records.get(parsed.operation_id);
         const previous = record?.events.at(-1);
         const event = validateEvent(parsed, `${parsed.operation_id}.jsonl`, previous);
+        if (canonicalEventText(event) !== payloadText) throw new ActionJournalError('action_journal_corrupt');
         if (!record) {
           if (this.records.size >= this.maxRecords) throw new ActionJournalError('action_journal_limit_exceeded');
           record = { operation_id: event.operation_id, tool_name: event.tool_name, risk_tier: event.risk_tier, side_effect: event.side_effect, request_ref: event.request_ref, call_ref: event.call_ref, arguments_digest: event.arguments_digest, preview_digest: event.preview_digest, operation_digest: event.operation_digest, state: event.state, events: [], identity: this.descriptorIdentity, size: this.descriptorSize };
