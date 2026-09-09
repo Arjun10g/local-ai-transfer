@@ -20,6 +20,9 @@ struct LaunchPlan final {
   ProcessIdentity session_identity{};
   ProcessIdentity stable_identity{};
   LaunchLimits limits{};
+  // Non-serializable, supervisor-issued proof shape.  The current source
+  // authority is permanently unavailable, so this remains an inert refusal.
+  LaunchAuthorityProof authority_proof{};
 };
 
 enum class LaunchResultCode : std::uint8_t {
@@ -35,7 +38,7 @@ struct LaunchReceipt final {
 };
 
 // The accepted lease has no proof issuer and external-proof authority is
-// false.  Refusal is before persist_dispatching/begin_external_dispatch and
+// false.  Refusal is before journal persistence/external dispatch and
 // before any process creation or other irreversible mutation.
 LaunchReceipt execute_process_transaction(ProcessLaunchAuthority authority,
                                           const LaunchPlan& plan) noexcept {
@@ -43,7 +46,8 @@ LaunchReceipt execute_process_transaction(ProcessLaunchAuthority authority,
   // borrow ticket for the entire call, including this inert refusal path. No
   // SupervisorState/raw-owner entry point exists for a future bypass.
   if (!authority.consume()) return LaunchReceipt{};
-  (void)plan;
+  if (!launch_authority_proven(plan.authority_proof))
+    return LaunchReceipt{};
   if (!kProcessLaunchAvailable || !kSupervisorOwnedProcessTransactionAccepted)
     return LaunchReceipt{};
   return LaunchReceipt{};

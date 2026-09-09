@@ -2,6 +2,7 @@
 
 #if defined(_WIN32)
 
+#include "launch_authority.hpp"
 #include "../action_journal_helper/journal_authority_owner.hpp"
 #include "../action_journal_storage/windows_storage.hpp"
 #include "borrow_ticket.hpp"

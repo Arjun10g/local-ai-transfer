@@ -1,0 +1,114 @@
+{
+  "schema": "lae.windows-process-authority.contract.v1.0.0",
+  "status": "SOURCE_ONLY_NOT_READY",
+  "availability": {
+    "production": false,
+    "target": false,
+    "public_api": false,
+    "package": false,
+    "cmake": false,
+    "host": false,
+    "registry": false,
+    "proof_issuer": false,
+    "native_verifier": false
+  },
+  "identity_pinned_handles": {
+    "executable": {
+      "required": [
+        "supervisor_owned_executable_handle",
+        "supervisor_owned_containing_directory_handle",
+        "absolute_manifest_path_binding",
+        "size_bytes",
+        "volume_serial",
+        "file_id_128",
+        "sha256",
+        "read_only_open",
+        "identity_rechecked_after_open"
+      ],
+      "request_path_or_reopen_allowed": false
+    },
+    "working_directory": {
+      "required": [
+        "supervisor_owned_directory_handle",
+        "absolute_manifest_path_binding",
+        "volume_serial",
+        "directory_id_128",
+        "no_reparse_components",
+        "identity_rechecked_after_open"
+      ],
+      "request_path_or_reopen_allowed": false
+    },
+    "receipt_fields": ["status", "journal_bound", "mutation_attempted"],
+    "raw_paths_or_handles_in_receipt": false
+  },
+  "pre_child_containment": {
+    "required": [
+      "job_created_before_child",
+      "kill_on_job_close",
+      "active_process_zero_on_terminal",
+      "no_ambient_handle_inheritance",
+      "least_privilege_token"
+    ],
+    "create_then_attach_gap_allowed": false,
+    "child_creation_without_proof": false
+  },
+  "environment": {
+    "mode": "fresh implementation-owned fixed allowlist",
+    "caller_environment_or_map_allowed": false,
+    "credential_categories": ["tokens", "keys", "SSH_AUTH_SOCK", "proxy", "user_config"],
+    "credential_categories_inherited": false,
+    "ambient_environment_inherited": false,
+    "proof_fields": [
+      "exact_allowlist",
+      "credentials_excluded",
+      "proxy_excluded",
+      "user_config_excluded"
+    ]
+  },
+  "cancellation_and_orphan": {
+    "required": [
+      "supervisor_owned_cancellation_event",
+      "bounded_cancel_join",
+      "kill_entire_contained_tree",
+      "active_process_zero_before_release",
+      "supervisor_death_closes_containment"
+    ],
+    "late_completion_may_mutate_new_run": false,
+    "automatic_retry_after_ambiguous_outcome": false,
+    "ambiguous_outcome": "unknown_manual"
+  },
+  "activation": {
+    "manifest_and_authenticode": false,
+    "package_identity": false,
+    "native_sdk_verification": false,
+    "windows_target_receipt": false,
+    "provider_or_browser_execution": false,
+    "product_cmake_registration": false,
+    "activation_requires_all": true,
+    "activation_refusal_is_sticky": true
+  },
+  "transaction": {
+    "authority_type": "ProcessLaunchAuthority",
+    "one_use_move_only": true,
+    "complete_binding_required": true,
+    "pre_mutation_refusal": true,
+    "journal_write_or_external_launch_in_this_revision": false,
+    "max_children": 8,
+    "max_leases": 8
+  },
+  "forbidden": [
+    "caller_supplied_executable_or_cwd_path",
+    "caller_supplied_environment",
+    "ambient_credential_inheritance",
+    "CreateProcess_before_containment_proof",
+    "shell_or_fallback_execution",
+    "raw_path_handle_or_environment_receipt",
+    "automatic_retry_or_completion_after_ambiguous_outcome"
+  ],
+  "unresolved": [
+    "Windows handle-relative identity verifier",
+    "Job-object and restricted-token implementation",
+    "native SDK compile and target race evidence",
+    "production proof issuer and journal bridge"
+  ]
+}
