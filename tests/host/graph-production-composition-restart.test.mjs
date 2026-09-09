@@ -7,7 +7,7 @@ import { readGraphReadAttestation } from '../../host/providers/microsoft-graph-r
 import { ConversationController } from '../../host/agent/controller.mjs';
 import { HostServer } from '../../host/server/host-server.mjs';
 import { mergeConfig } from '../../host/agent/config.mjs';
-import { createHostComposition } from '../../lae-host.mjs';
+import { bootstrap, createHostComposition } from '../../lae-host.mjs';
 
 const clientId = '00001111-aaaa-2222-bbbb-3333cccc4444';
 const call = (name, arguments_, id) => ({ id: id ?? `call_${name.replaceAll('.', '_')}`, name, arguments: arguments_ });
@@ -53,6 +53,7 @@ test('production Graph composition has no credential or transport injection path
   for (const key of ['token', 'access_token', 'credential_source', 'transport', 'auth_transport']) {
     assert.throws(() => mergeConfig({ providers: { microsoft_graph: { [key]: 'opaque' } } }), /unknown key/u);
   }
+  await composition.host.close(); await composition.host.close(); assert.equal(engineShutdowns, 1);
 });
 
 test('controller advertises Graph reads but refuses hidden durable writes before provider transport without a journal', async () => {
@@ -73,16 +74,22 @@ test('controller advertises Graph reads but refuses hidden durable writes before
   for (const name of ['mail.create_draft', 'mail.send_draft', 'mail.mark_read', 'teams.send_message']) assert.equal(advertised[0].includes(name), false, name);
   assert.equal(requests.length, 1);
 
-  let tokenReads = 0; const hiddenRequests = [];
-  const hidden = new MicrosoftGraphProvider({ enabled: true, permissionProfile: 'ask_before_writes', credentialSource: { getAccessToken: async () => { tokenReads += 1; return 'u'.repeat(32); } }, transport: { request: async request => { hiddenRequests.push(request); return { status: 201, body: { id: 'unexpected' } }; } }, accountFingerprint: 'acct-hidden', testOnly: true });
-  const hiddenRegistry = createExternalToolRegistry({ graph: hidden });
-  const hiddenEngine = { async *generate() { yield { kind: 'tool_call_chunk', text: JSON.stringify(call('mail.create_draft', { to: ['alice@example.com'], subject: 'safe', body: 'safe' }, 'call_hidden_write')) }; } };
-  const hiddenController = new ConversationController({ engine: hiddenEngine, toolRegistry: hiddenRegistry });
-  const refused = await hiddenController.runTurn({ sessionId: 'session_hidden_write', requestId: 'request_hidden_write', message: 'create a draft' });
-  assert.equal(refused.state, 'FAILED');
-  assert.equal(refused.error, 'action_journal_unavailable');
-  assert.equal(hiddenRequests.length, 0);
-  assert.equal(tokenReads, 0);
+  const mutationArguments = {
+    'mail.create_draft': { to: ['alice@example.com'], subject: 'safe', body: 'safe' },
+    'mail.send_draft': { draft_id: 'draft-hidden' },
+    'mail.mark_read': { message_id: 'message-hidden', is_read: true },
+    'teams.send_message': { chat_id: 'chat-hidden', body: 'safe' }
+  };
+  for (const [name, arguments_] of Object.entries(mutationArguments)) {
+    let tokenReads = 0; let transportCalls = 0;
+    const hidden = new MicrosoftGraphProvider({ enabled: true, permissionProfile: 'ask_before_writes', credentialSource: { getAccessToken: async () => { tokenReads += 1; return 'u'.repeat(32); } }, transport: { request: async () => { transportCalls += 1; return { status: 201, body: { id: 'unexpected' } }; } }, accountFingerprint: 'acct-hidden', testOnly: true });
+    const hiddenRegistry = createExternalToolRegistry({ graph: hidden });
+    const hiddenEngine = { async *generate() { yield { kind: 'tool_call_chunk', text: JSON.stringify(call(name, arguments_, `call_hidden_${name.replaceAll('.', '_')}`)) }; } };
+    const hiddenController = new ConversationController({ engine: hiddenEngine, toolRegistry: hiddenRegistry });
+    const refused = await hiddenController.runTurn({ sessionId: `session_hidden_${name.replaceAll('.', '_')}`, requestId: `request_hidden_${name.replaceAll('.', '_')}`, message: 'perform the requested action' });
+    assert.equal(refused.state, 'FAILED'); assert.equal(refused.error, 'action_journal_unavailable');
+    assert.equal(transportCalls, 0, name); assert.equal(tokenReads, 0, name);
+  }
 });
 
 test('new Graph composition has no stale auth, grant, proposal, write ledger, cursor, or read attestation authority', async () => {
@@ -196,6 +203,98 @@ test('late abort-insensitive token completion cannot authenticate or clear a new
   assert.equal(credential.authStatus().state, 'idle');
 });
 
+test('provider auth epoch keeps late /me completion from replacing a newer account', async () => {
+  async function runRace({ oldFirst, oldReject = false, oldUnauthorized = false }) {
+    const me = [deferred(), deferred()]; let meRequests = 0; let deviceRequests = 0;
+    const transport = { request: async request => {
+      if (request.path.endsWith('/devicecode')) { deviceRequests += 1; return { status: 200, body: { device_code: `device-${deviceRequests}`, user_code: `OPAQUE-${deviceRequests}`, verification_uri: 'https://microsoft.com/devicelogin' } }; }
+      if (request.path.endsWith('/token')) return { status: 200, body: { access_token: `token-${deviceRequests}`, expires_in: 3600, scope: 'User.Read' } };
+      if (request.path === '/v1.0/me') return me[meRequests++].promise;
+      throw new Error('unexpected path');
+    } };
+    const grants = new OperatorGrantStore();
+    const provider = new MicrosoftGraphProvider({ enabled: true, permissionProfile: 'full_access', tenant: 'organizations', clientId, scopes: ['User.Read'], transport, grantStore: grants, sleep: async () => {} });
+    const old = provider.startAuth().catch(error => error.code);
+    for (let attempt = 0; attempt < 20 && meRequests < 1; attempt++) await nextTurn();
+    assert.equal(meRequests, 1);
+    provider.cancelAuth();
+    const fresh = provider.startAuth().catch(error => error.code);
+    for (let attempt = 0; attempt < 20 && meRequests < 2; attempt++) await nextTurn();
+    assert.equal(meRequests, 2);
+    if (oldFirst) oldReject ? me[0].reject(new Error('old account failure')) : oldUnauthorized ? me[0].resolve({ status: 401, body: {} }) : me[0].resolve({ status: 200, body: { id: 'account-a' } });
+    await nextTurn();
+    me[1].resolve({ status: 200, body: { id: 'account-b' } });
+    assert.equal(typeof await fresh, 'string');
+    const accountB = provider.getAccountFingerprint();
+    grants.grant({ capability: 'microsoft.graph.mail', provider: 'microsoft_graph', accountFingerprint: accountB });
+    await nextTurn();
+    if (!oldFirst) me[0].resolve({ status: 200, body: { id: 'account-a' } });
+    await nextTurn();
+    assert.equal(await old, 'provider_cancelled');
+    assert.equal(provider.authStatus().accountVerified, true);
+    assert.equal(typeof accountB, 'string');
+    assert.ok(grants.get('microsoft.graph.mail'));
+    if (!oldFirst) { await nextTurn(); assert.equal(provider.getAccountFingerprint(), accountB); }
+    provider.cancelAuth();
+  }
+  await runRace({ oldFirst: false });
+  await runRace({ oldFirst: true });
+  await runRace({ oldFirst: true, oldReject: true });
+  await runRace({ oldFirst: true, oldUnauthorized: true });
+});
+
+test('clear during a pending account check leaves no late identity or grant', async () => {
+  const accountCheck = deferred();
+  const transport = { request: async request => {
+    if (request.path.endsWith('/devicecode')) return { status: 200, body: { device_code: 'clear-pending-device', user_code: 'CLEAR-PENDING', verification_uri: 'https://microsoft.com/devicelogin' } };
+    if (request.path.endsWith('/token')) return { status: 200, body: { access_token: 'clear-pending-token', expires_in: 3600, scope: 'User.Read' } };
+    return accountCheck.promise;
+  } };
+  const provider = new MicrosoftGraphProvider({ enabled: true, tenant: 'organizations', clientId, scopes: ['User.Read'], transport, sleep: async () => {} });
+  const pending = provider.startAuth().catch(error => error.code);
+  for (let attempt = 0; attempt < 20 && provider.authStatus().state !== 'checking_account'; attempt++) await nextTurn();
+  provider.clearAuth(); accountCheck.resolve({ status: 200, body: { id: 'late-account' } });
+  assert.equal(await pending, 'provider_cancelled');
+  assert.equal(provider.authStatus().state, 'idle'); assert.equal(provider.authStatus().accountVerified, false); assert.equal(provider.getAccountFingerprint(), 'unknown');
+});
+
+test('device-code validation permits opaque protocol strings but rejects concrete credential aliases', async () => {
+  const aliases = [clientId, 'same-device-code'];
+  for (const alias of aliases) {
+    const credential = new MicrosoftDeviceCodeCredential({ tenant: 'organizations', clientId, scopes: ['User.Read'], transport: { request: async () => ({ status: 200, body: { device_code: alias, user_code: alias, verification_uri: 'https://microsoft.com/devicelogin' } }) }, sleep: async () => {} });
+    await assert.rejects(() => credential.start(), error => error.code === 'provider_unauthorized');
+  }
+  const sleepGate = deferred();
+  const credential = new MicrosoftDeviceCodeCredential({ tenant: 'organizations', clientId, scopes: ['User.Read'], transport: { request: async request => request.path.endsWith('/devicecode') ? ({ status: 200, body: { device_code: 'different-device', user_code: 'BEARER-AUTHORIZATION', verification_uri: 'https://microsoft.com/devicelogin' } }) : ({ status: 200, body: { error: 'authorization_pending' } }) }, sleep: async () => sleepGate.promise });
+  const pending = credential.start().catch(error => error.code);
+  await nextTurn();
+  assert.equal(credential.authStatus().state, 'awaiting_user');
+  credential.cancel(); sleepGate.resolve();
+  assert.equal(await pending, 'provider_cancelled');
+});
+
+test('public provider field mutation cannot mint a verified identity without /me', () => {
+  const provider = new MicrosoftGraphProvider({ enabled: true, tenant: 'organizations', clientId, scopes: ['User.Read'], transport: { request: async () => { throw new Error('transport must not run'); } } });
+  provider.authenticatedAccountFingerprint = 'f'.repeat(64);
+  provider.accountFingerprint = 'f'.repeat(64);
+  provider.authState = 'authenticated'; provider.credentialSource.authState = 'authenticated';
+  const status = provider.authStatus();
+  assert.equal(status.accountVerified, false);
+  assert.equal(status.state, 'checking_account');
+});
+
+test('HostServer closes an unlistened composition once and bootstrap cleans failed listen', async () => {
+  let shutdowns = 0;
+  const engine = { async shutdown() { shutdowns += 1; } };
+  const controller = { cancelActive() {} };
+  const host = new HostServer({ controller, engine });
+  await host.close(); await host.close();
+  assert.equal(shutdowns, 1);
+  let cleanup = 0;
+  await assert.rejects(() => bootstrap({ fileConfig: {}, env: { LAE_ENGINE_MODE: 'fixture', LAE_PORT: '0' }, compositionFactory: async () => ({ host: { async listen() { throw new Error('listen sentinel'); }, async close() { cleanup += 1; } } }) }), /listen sentinel/u);
+  assert.equal(cleanup, 1);
+});
+
 test('authenticated Graph clear removes token, auth fingerprint projection, prompt, and grants', async () => {
   const transport = { request: async request => {
     if (request.path.endsWith('/devicecode')) return { status: 200, body: { device_code: 'c'.repeat(32), user_code: 'CLEAR-CODE', verification_uri: 'https://microsoft.com/devicelogin' } };
@@ -211,7 +310,8 @@ test('authenticated Graph clear removes token, auth fingerprint projection, prom
   assert.equal(provider.authStatus().accountFingerprint, fingerprint);
   assert.equal(provider.authStatus().accountVerified, true);
   provider.authenticatedAccountFingerprint = 'opaque-account';
-  assert.equal(provider.authStatus().accountVerified, false);
+  provider.authState = 'authenticated';
+  assert.equal(provider.authStatus().accountVerified, true);
   provider.authenticatedAccountFingerprint = fingerprint;
   provider.clearAuth();
   assert.deepEqual(provider.authStatus(), { state: 'idle', prompt: null, accountFingerprint: null, accountVerified: false });

@@ -160,6 +160,10 @@ export function requiresDurableAction(tool) {
   return false;
 }
 
+function journalReady(journal) {
+  try { return journal?.health?.().state === 'ready'; } catch { return false; }
+}
+
 const TOOL_DESCRIPTOR_FIELDS = Object.freeze(['name', 'version', 'description', 'risk_tier', 'side_effect', 'network', 'data_egress', 'requires_confirmation', 'timeout_ms', 'output_limit', 'parameters', 'input_schema', 'authorize', 'preview', 'confirmationRequired', 'execute']);
 const MISSING_TOOL_PROPERTY = Symbol('missing-tool-property');
 function snapshotToolValue(value, seen = new WeakSet()) {
@@ -272,10 +276,10 @@ export class ConversationController {
       while (true) {
         if (controller.signal.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' });
         session.state = calls ? 'CONTINUING_MODEL' : 'INFERENCING'; emit('message.started', { mode, state: session.state, continuation: calls > 0 });
-        const journalReady = this.actionJournal?.health().state === 'ready';
+        const ready = journalReady(this.actionJournal);
         const tools = modelToolDefinitions(new Map([...this.#tools].filter(([name, tool]) => {
           const nativeOwned = nativeSupervisorOwnerFor(name, tool, process.platform) !== null;
-          return nativeOwned ? journalReady : !requiresDurableAction(tool) || journalReady;
+          return nativeOwned ? ready : !requiresDurableAction(tool) || ready;
         })));
         let callText = ''; let gotCall = false; let usage;
         for await (const frame of this.engine.generate({ requestId, sessionId: session.id, messages: session.history, tools, mode, signal: controller.signal })) {
@@ -289,6 +293,8 @@ export class ConversationController {
         const call = parseToolCall(callText); session.state = 'TOOL_PROPOSED';
         const tool = this.#tools.get(call.name); if (!tool) throw Object.assign(new Error('unknown_tool'), { code: 'unknown_tool' });
         validateToolArgumentShape(tool, call);
+        const nativeDispatchOwner = nativeSupervisorOwnerFor(tool.name, tool, process.platform);
+        if ((nativeDispatchOwner !== null || requiresDurableAction(tool)) && !journalReady(this.actionJournal)) throw Object.assign(new Error('durable action journal is not configured'), { code: 'action_journal_unavailable' });
         let preview;
         if (tool.preview) preview = await invokeWithTimeout(tool, tool.preview, call, controller.signal);
         emit('tool.proposed', { call: publicToolCall(call), ...(preview === undefined ? {} : { preview }) });
@@ -302,9 +308,8 @@ export class ConversationController {
           if (!approved) { authorization = { kind: 'policy' }; previewAccessDenied = true; }
           else { preview = await invokeWithTimeout(tool, tool.preview, { ...call, authorization: { kind: 'user_confirmation' }, preview_authorized: true }, controller.signal); emit('tool.proposed', { call: publicToolCall(call), preview }); }
         }
-        const nativeDispatchOwner = nativeSupervisorOwnerFor(tool.name, tool, process.platform);
         if (nativeDispatchOwner !== null || requiresDurableAction(tool)) {
-          if (!this.actionJournal) throw Object.assign(new Error('durable action journal is not configured'), { code: 'action_journal_unavailable' });
+          if (!journalReady(this.actionJournal)) throw Object.assign(new Error('durable action journal is not configured'), { code: 'action_journal_unavailable' });
           const binding = createActionBinding({ requestId, callId: call.id, toolName: call.name, arguments: call.arguments, preview });
           const receipt = await this.actionJournal.prepare({ requestId, callId: call.id, toolName: call.name, riskTier: tool.risk_tier, sideEffect: tool.side_effect, argumentsDigest: binding.argumentsDigest, previewDigest: binding.previewDigest, operationDigest: binding.operationDigest });
           const dispatchOwner = nativeDispatchOwner;

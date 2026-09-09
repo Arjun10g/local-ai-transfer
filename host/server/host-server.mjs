@@ -73,7 +73,7 @@ export class HostServer {
     if (!controller) throw new TypeError('controller is required');
     const controllerJournal = controller.actionJournal;
     if (controllerJournal !== undefined && actionJournal !== undefined && controllerJournal !== actionJournal) throw new TypeError('controller and host action journals must be identical');
-    this.controller = controller; this.engine = engine; this.config = mergeConfig(config); this.providers = providers; this.providerAuth = providerAuth; this.providerShutdown = providerShutdown; this.operatorGrants = operatorGrants; this.localCapabilities = localCapabilities; this.actionJournal = actionJournal ?? controllerJournal; this.actionJournalBound = this.actionJournal !== undefined && this.controller.actionJournal === this.actionJournal; this.token = randomBytes(32).toString('base64url'); this.bootstrapNonce = randomBytes(32).toString('base64url'); this.bootstrapExpiresAt = 0; this.bootstrapUsed = false; this.server = null; this.port = null; this.authFailures = new Map();
+    this.controller = controller; this.engine = engine; this.config = mergeConfig(config); this.providers = providers; this.providerAuth = providerAuth; this.providerShutdown = providerShutdown; this.operatorGrants = operatorGrants; this.localCapabilities = localCapabilities; this.actionJournal = actionJournal ?? controllerJournal; this.actionJournalBound = this.actionJournal !== undefined && this.controller.actionJournal === this.actionJournal; this.token = randomBytes(32).toString('base64url'); this.bootstrapNonce = randomBytes(32).toString('base64url'); this.bootstrapExpiresAt = 0; this.bootstrapUsed = false; this.server = null; this.port = null; this.authFailures = new Map(); this.closePromise = null;
   }
   async listen(port = 0) {
     if (this.server) return this.address();
@@ -85,7 +85,21 @@ export class HostServer {
     this.port = this.server.address().port; this.bootstrapExpiresAt = Date.now() + BOOTSTRAP_TTL_MS; return this.address();
   }
   address() { const url = `http://127.0.0.1:${this.port}`; return { host: '127.0.0.1', port: this.port, token: this.token, url, bootstrap_url: this.bootstrapNonce ? `${url}/#bootstrap=${encodeURIComponent(this.bootstrapNonce)}` : null }; }
-  async close() { this.operatorGrants?.revokeAll?.(); this.controller.cancelActive?.(); await this.providerShutdown?.(); if (!this.server) return; await new Promise(resolve => this.server.close(() => resolve())); this.server = null; await this.engine?.shutdown?.(); }
+  async close() {
+    if (this.closePromise) return this.closePromise;
+    this.closePromise = (async () => {
+      this.operatorGrants?.revokeAll?.(); this.controller.cancelActive?.();
+      try {
+        await this.providerShutdown?.();
+        if (this.server) {
+          const server = this.server;
+          await new Promise((resolve, reject) => { server.close(error => error ? reject(error) : resolve()); });
+          this.server = null;
+        }
+      } finally { await this.engine?.shutdown?.(); }
+    })();
+    return this.closePromise;
+  }
   allowedRequest(req) {
     if (req.socket.remoteAddress && !['127.0.0.1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) return false;
     if (!LOCAL_HOST.test(req.headers.host ?? '')) return false;

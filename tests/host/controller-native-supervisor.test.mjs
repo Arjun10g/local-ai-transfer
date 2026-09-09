@@ -139,7 +139,7 @@ test('unavailable journal never advertises a native action even with falsified m
   const canonicalMetadata = tool('process.run_allowlisted', 'process_execution', async () => makeToolResult({ id: 'call_native_01', name: 'process.run_allowlisted', status: 'ok', text: '{}' }));
   const controller = new ConversationController({ engine: engineFor('process.run_allowlisted', {}, advertised), actionJournal: journal, toolRegistry: { 'process.run_allowlisted': canonicalMetadata } });
   const result = await runAsPlatform('win32', () => controller.runTurn({ sessionId: 'ses_native05', requestId: 'req_native05', message: 'run it' }));
-  assert.equal(result.error, 'native_supervisor_unavailable');
+  assert.equal(result.error, 'action_journal_unavailable');
   assert.equal(advertised[0].some(item => item.function?.name === 'process.run_allowlisted'), false);
 });
 

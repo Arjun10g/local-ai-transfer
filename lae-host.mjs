@@ -47,10 +47,12 @@ export async function createHostComposition({ fileConfig = {}, env = process.env
   return { config, mode, engine, grantStore, operatorGrants, externalTools, localTools, toolRegistry, controller, host, actionJournal };
 }
 
-export async function bootstrap({ fileConfig, env = process.env } = {}) {
+export async function bootstrap({ fileConfig, env = process.env, compositionFactory = createHostComposition } = {}) {
   const resolvedConfig = fileConfig ?? await loadFileConfig(env);
-  const composition = await createHostComposition({ fileConfig: resolvedConfig, env });
-  const address = await composition.host.listen(Number(env.LAE_PORT ?? 0));
+  const composition = await compositionFactory({ fileConfig: resolvedConfig, env });
+  let address;
+  try { address = await composition.host.listen(Number(env.LAE_PORT ?? 0)); }
+  catch (error) { try { await composition.host.close?.(); } catch {} throw error; }
   if (env.LAE_REVEAL_BOOTSTRAP_URL === '1') console.log(address.bootstrap_url);
   else console.log(JSON.stringify({ ready: true, host: address.host, port: address.port, bootstrap: 'hidden-use-approved-launcher', engine: composition.mode, network: composition.config.network.provider, action_journal: composition.actionJournal?.health().state ?? 'unavailable' }));
   return { ...composition, address };
