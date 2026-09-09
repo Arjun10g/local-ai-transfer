@@ -13,7 +13,7 @@
 
 ## Objective for this work interval
 
-Add mocked behavioral coverage for Microsoft Graph production composition, journal-gated controller admission, restart non-persistence, host auth disclosure limits, and scope/account binding. Keep production sources, provider availability, credentials, live transport, and remote enablement unchanged.
+Add mocked behavioral coverage for Microsoft Graph production composition, journal-gated controller admission, restart non-persistence, host auth disclosure limits, and scope/account binding. Apply only the bounded auth-run lifecycle and public-status projection repairs; keep provider availability, credential storage, live transport, and remote enablement unchanged.
 
 ## Inputs and dependencies
 
@@ -30,7 +30,7 @@ Add mocked behavioral coverage for Microsoft Graph production composition, journ
 
 ## Evidence
 
-- Commit: Pending review
+- Commit: `48c4889dc31f6da34aae7a56d07fbb7c3f7eb984` (auth repair; this status correction is included in the final follow-up tip)
 - Commands: `node --test tests/host/graph-production-composition-restart.test.mjs`; selected Graph/host/controller/security Node inventory; `python3 scripts/test/run_qa.py`; `git diff --check`
 - Tests: New auth/composition suite 9/9; selected relevant Graph/host/controller/security inventory 153/153 after the auth-run and projection repair; QA safe inventory recognizes the test and remains BLOCKED by safe-mode mandatory-suite skips
 - Machine: Not applicable
