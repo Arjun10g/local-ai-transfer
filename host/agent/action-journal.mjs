@@ -6,6 +6,20 @@ import { parseStrictJson } from './tool-envelope.mjs';
 
 export const ACTION_JOURNAL_LIMITS = Object.freeze({ max_event_bytes: 64 * 1024, max_active: 256, max_records: 1024, max_terminal_records: 768, max_events_per_operation: 16 });
 export const ACTION_STATES = Object.freeze(['prepared', 'authorized', 'dispatching', 'acknowledged', 'reconciling', 'completed', 'cancelled', 'failed_definitive', 'unknown_manual']);
+// Stable, finite diagnostics which a journal implementation may expose through
+// health().  Controller admission imports this contract instead of accepting
+// arbitrary action_journal_* strings that could carry provider data.
+export const ACTION_JOURNAL_HEALTH_ERRORS = Object.freeze([
+  'action_journal_unavailable', 'action_journal_platform_unavailable', 'action_journal_handle_relative_unavailable',
+  'action_journal_permissions_invalid', 'action_journal_limit_exceeded', 'action_journal_corrupt',
+  'action_journal_clock_invalid', 'action_journal_write_failed', 'action_journal_invalid_record',
+  'action_journal_duplicate_active', 'action_journal_id_unavailable', 'action_journal_invalid_transition',
+  'action_journal_not_found', 'action_journal_invalid_request', 'action_journal_close_requested',
+  'action_journal_close_unproven', 'action_journal_commit_unknown', 'action_journal_deadline_expired',
+  'action_journal_invalid_response', 'action_journal_prewrite_invalid', 'action_journal_queue_full',
+  'action_journal_record_limit_exceeded', 'action_journal_recovery_incomplete', 'action_journal_recovery_required',
+  'action_journal_transport_settlement_unproven', 'action_journal_transport_unavailable'
+]);
 
 const VERSION = 1;
 const ZERO_HASH = '0'.repeat(64);

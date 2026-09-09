@@ -464,7 +464,7 @@ test('HostServer exposes guarded Graph auth controls and deduplicates device sta
 test('Graph auth controls are present in the UI without exposing account credentials', async () => {
   const html = await readFile(new URL('../../ui/index.html', import.meta.url), 'utf8'); const script = await readFile(new URL('../../ui/app.js', import.meta.url), 'utf8');
   for (const id of ['graph-auth', 'graph-auth-cancel', 'graph-auth-clear']) assert.match(html, new RegExp(`id=["']${id}["']`, 'u'));
-  assert.match(script, /accountFingerprint/u); assert.match(script, /body_preview/u); assert.match(script, /Recipients/u); assert.match(script, /Approve/u); assert.match(script, /Deny/u); assert.match(script, /textContent/u); assert.doesNotMatch(script, /innerHTML/u); assert.doesNotMatch(html, /access_token|userPrincipalName|account[_-]?id/iu); assert.doesNotMatch(script, /access_token|userPrincipalName|account[_-]?id/iu);
+  assert.match(script, /account_verified/u); assert.doesNotMatch(script, /accountFingerprint/u); assert.match(script, /body_preview/u); assert.match(script, /Recipients/u); assert.match(script, /Approve/u); assert.match(script, /Deny/u); assert.match(script, /textContent/u); assert.doesNotMatch(script, /innerHTML/u); assert.doesNotMatch(html, /access_token|userPrincipalName|account[_-]?id/iu); assert.doesNotMatch(script, /access_token|userPrincipalName|account[_-]?id/iu);
 });
 
 test('external Graph credentials cannot opt into full_access outside test-only fixtures', () => {

@@ -5,6 +5,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { sseFrame } from '../agent/assistant-events.mjs';
 import { mergeConfig } from '../agent/config.mjs';
 import { parseStrictJson } from '../agent/tool-envelope.mjs';
+import { readProviderAuthStatus } from '../providers/microsoft-graph.mjs';
 
 const UI_ROOT = join(import.meta.dirname, '..', '..', 'ui');
 const ASSETS = new Map([['/', ['index.html', 'text/html; charset=utf-8']], ['/index.html', ['index.html', 'text/html; charset=utf-8']], ['/app.js', ['app.js', 'text/javascript; charset=utf-8']], ['/styles.css', ['styles.css', 'text/css; charset=utf-8']]]);
@@ -12,6 +13,9 @@ const LOCAL_HOST = /^(?:127\.0\.0\.1|localhost)(?::\d{1,5})?$/i;
 const OPAQUE_ID = /^[A-Za-z0-9_-]{8,96}$/;
 const BOOTSTRAP_NONCE = /^[A-Za-z0-9_-]{43}$/;
 const BOOTSTRAP_TTL_MS = 60_000;
+const AUTH_STATES = new Set(['disabled', 'unconfigured', 'idle', 'requesting_device_code', 'awaiting_user', 'authenticated', 'checking_account', 'expired', 'failed', 'offline', 'unauthorized']);
+const AUTH_USER_CODE = /^(?=.{1,128}$)[^\s\p{Cc}\p{Cf}]+$/u;
+const AUTH_VERIFICATION_URIS = new Set(['https://microsoft.com/devicelogin', 'https://www.microsoft.com/devicelogin', 'https://login.microsoftonline.com/common/oauth2/deviceauth']);
 
 /** Platform-neutral containment check; avoids assuming `/` on Windows. */
 export function isWithinDirectory(root, target) {
@@ -21,6 +25,21 @@ export function isWithinDirectory(root, target) {
 
 function json(res, status, value) { const body = JSON.stringify(value); res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store', ...securityHeaders() }); res.end(body); }
 function securityHeaders() { return { 'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'", 'x-content-type-options': 'nosniff', 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'permissions-policy': 'camera=(), microphone=(), geolocation=()' }; }
+function authStatusProjection(value) {
+  try {
+    const issued = readProviderAuthStatus(value);
+    if (!issued) return { state: 'unavailable', prompt: null, account_verified: false };
+    const state = AUTH_STATES.has(issued.state) ? issued.state : 'unavailable';
+    const rawPrompt = issued.prompt;
+    let prompt = null;
+    if (rawPrompt && typeof rawPrompt === 'object' && !Array.isArray(rawPrompt) && Object.getPrototypeOf(rawPrompt) === Object.prototype && typeof rawPrompt.userCode === 'string' && AUTH_USER_CODE.test(rawPrompt.userCode) && typeof rawPrompt.verificationUri === 'string' && rawPrompt.verificationUri.length <= 256) {
+      try { const verification = new URL(rawPrompt.verificationUri); if (!verification.username && !verification.password && !verification.search && !verification.hash && AUTH_VERIFICATION_URIS.has(verification.toString())) prompt = { userCode: rawPrompt.userCode, verificationUri: verification.toString() }; } catch {}
+    }
+    return { state, prompt, account_verified: state === 'authenticated' && issued.accountVerified === true };
+  } catch { return { state: 'unavailable', prompt: null, account_verified: false }; }
+}
+function resolveAuthControl(providerAuth) { try { return providerAuth?.()?.microsoft_graph ?? null; } catch { return null; } }
+function safeAuthStatus(control) { try { return authStatusProjection(control?.status?.()); } catch { return authStatusProjection(null); } }
 function tokenMatch(actual, expected) { if (typeof actual !== 'string' || typeof expected !== 'string') return false; const actualBytes = Buffer.from(actual, 'utf8'); const expectedBytes = Buffer.from(expected, 'utf8'); if (actualBytes.length !== expectedBytes.length) return false; return timingSafeEqual(actualBytes, expectedBytes); }
 function jsonContentType(req) { return /^application\/json(?:\s*;\s*charset\s*=\s*(?:utf-8|utf8))?$/i.test(req.headers['content-type'] ?? ''); }
 function exactBody(input, allowed, required = []) {
@@ -54,7 +73,7 @@ export class HostServer {
     if (!controller) throw new TypeError('controller is required');
     const controllerJournal = controller.actionJournal;
     if (controllerJournal !== undefined && actionJournal !== undefined && controllerJournal !== actionJournal) throw new TypeError('controller and host action journals must be identical');
-    this.controller = controller; this.engine = engine; this.config = mergeConfig(config); this.providers = providers; this.providerAuth = providerAuth; this.providerShutdown = providerShutdown; this.operatorGrants = operatorGrants; this.localCapabilities = localCapabilities; this.actionJournal = actionJournal ?? controllerJournal; this.actionJournalBound = this.actionJournal !== undefined && this.controller.actionJournal === this.actionJournal; this.token = randomBytes(32).toString('base64url'); this.bootstrapNonce = randomBytes(32).toString('base64url'); this.bootstrapExpiresAt = 0; this.bootstrapUsed = false; this.server = null; this.port = null; this.authFailures = new Map();
+    this.controller = controller; this.engine = engine; this.config = mergeConfig(config); this.providers = providers; this.providerAuth = providerAuth; this.providerShutdown = providerShutdown; this.operatorGrants = operatorGrants; this.localCapabilities = localCapabilities; this.actionJournal = actionJournal ?? controllerJournal; this.actionJournalBound = this.actionJournal !== undefined && this.controller.actionJournal === this.actionJournal; this.token = randomBytes(32).toString('base64url'); this.bootstrapNonce = randomBytes(32).toString('base64url'); this.bootstrapExpiresAt = 0; this.bootstrapUsed = false; this.server = null; this.port = null; this.authFailures = new Map(); this.closePromise = null;
   }
   async listen(port = 0) {
     if (this.server) return this.address();
@@ -66,7 +85,27 @@ export class HostServer {
     this.port = this.server.address().port; this.bootstrapExpiresAt = Date.now() + BOOTSTRAP_TTL_MS; return this.address();
   }
   address() { const url = `http://127.0.0.1:${this.port}`; return { host: '127.0.0.1', port: this.port, token: this.token, url, bootstrap_url: this.bootstrapNonce ? `${url}/#bootstrap=${encodeURIComponent(this.bootstrapNonce)}` : null }; }
-  async close() { this.operatorGrants?.revokeAll?.(); this.controller.cancelActive?.(); await this.providerShutdown?.(); if (!this.server) return; await new Promise(resolve => this.server.close(() => resolve())); this.server = null; await this.engine?.shutdown?.(); }
+  async close() {
+    if (this.closePromise) return this.closePromise;
+    this.closePromise = (async () => {
+      let failed = false;
+      const attempt = async action => { try { await action?.(); } catch { failed = true; } };
+      await attempt(() => this.operatorGrants?.revokeAll?.());
+      await attempt(() => this.controller.cancelActive?.());
+      await attempt(() => this.providerShutdown?.());
+      const server = this.server; this.server = null; this.port = null;
+      if (server) await attempt(() => new Promise((resolve, reject) => {
+        try {
+          server.close(error => {
+            if (error) { server.closeAllConnections?.(); reject(error); } else resolve();
+          });
+        } catch (error) { server.closeAllConnections?.(); reject(error); }
+      }));
+      await attempt(() => this.engine?.shutdown?.());
+      if (failed) throw Object.assign(new Error('host_shutdown_failed'), { code: 'host_shutdown_failed' });
+    })();
+    return this.closePromise;
+  }
   allowedRequest(req) {
     if (req.socket.remoteAddress && !['127.0.0.1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) return false;
     if (!LOCAL_HOST.test(req.headers.host ?? '')) return false;
@@ -130,7 +169,7 @@ export class HostServer {
       if (req.method === 'POST' && path === '/api/sessions') { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); const input = exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), ['session_id', 'reset']); if (input.session_id !== undefined && (typeof input.session_id !== 'string' || !OPAQUE_ID.test(input.session_id))) return json(res, 400, { error: 'invalid_request_body' }); if (input.reset !== undefined && typeof input.reset !== 'boolean') return json(res, 400, { error: 'invalid_request_body' }); const session = this.controller.createSession(input.session_id); if (input.reset) this.controller.resetSession(session.id); return json(res, 201, { session_id: session.id, state: this.controller.state(session.id) }); }
       if (req.method === 'POST' && path === '/api/chat') return await this.chat(req, res);
       const authAction = path.match(/^\/api\/provider-auth\/microsoft_graph\/(start|cancel|clear)$/);
-      if (req.method === 'POST' && authAction) { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), []); const control = this.providerAuth?.()?.microsoft_graph; if (!control || control.configured !== true) return json(res, 409, { error: 'provider_unconfigured' }); if (authAction[1] === 'start') { void Promise.resolve(control.start()).catch(() => {}); return json(res, 202, { accepted: true, status: control.status() }); } if (authAction[1] === 'cancel') control.cancel(); else control.clear(); return json(res, 200, { accepted: true, status: control.status() }); }
+      if (req.method === 'POST' && authAction) { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), []); const control = resolveAuthControl(this.providerAuth); let configured = false; try { configured = control?.configured === true; } catch {} if (!configured) return json(res, 409, { error: 'provider_unconfigured' }); if (authAction[1] === 'start') { void Promise.resolve().then(() => control.start()).catch(() => {}); return json(res, 202, { accepted: true, status: safeAuthStatus(control) }); } let accepted = true; try { if (authAction[1] === 'cancel') control.cancel(); else control.clear(); } catch { accepted = false; } return json(res, accepted ? 200 : 503, { accepted, status: safeAuthStatus(control) }); }
       if (req.method === 'POST' && path === '/api/cancel') { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); const input = exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), ['request_id'], ['request_id']); if (typeof input.request_id !== 'string' || !OPAQUE_ID.test(input.request_id)) return json(res, 400, { error: 'invalid_request_id' }); const cancelled = this.controller.cancel(input.request_id); return json(res, cancelled ? 200 : 404, { cancelled }); }
       if (req.method === 'POST' && path === '/api/operator-grants/revoke-all') { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), []); this.controller.cancelActive?.(); return json(res, 200, this.operatorGrants?.revokeAll?.() ?? { revoked: 0 }); }
       const grant = path.match(/^\/api\/operator-grants\/([A-Za-z0-9_.:-]{1,256})$/);
@@ -143,11 +182,11 @@ export class HostServer {
       }
       const confirmation = path.match(/^\/api\/tool-confirmations\/([A-Za-z0-9_-]{8,96})$/);
       if (req.method === 'POST' && confirmation) { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); const input = exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), ['approved', 'request_id', 'call_id'], ['approved', 'request_id', 'call_id']); if (typeof input.approved !== 'boolean' || typeof input.request_id !== 'string' || !OPAQUE_ID.test(input.request_id) || typeof input.call_id !== 'string' || !OPAQUE_ID.test(input.call_id)) return json(res, 400, { error: 'invalid_request_body' }); const accepted = this.controller.confirm(confirmation[1], input.approved, { requestId: input.request_id, callId: input.call_id }); return json(res, accepted ? 200 : 404, { accepted }); }
-      if (req.method === 'POST' && path === '/api/shutdown') { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), []); json(res, 200, { shutting_down: true }); setImmediate(() => this.close()); return; }
+      if (req.method === 'POST' && path === '/api/shutdown') { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), []); json(res, 200, { shutting_down: true }); setImmediate(() => { void this.close().catch(() => {}); }); return; }
       return json(res, 404, { error: 'not_found' });
     } catch (error) { if (res.headersSent) return this.fail(res, error); const code = error.code ?? (error instanceof TypeError ? 'invalid_request_body' : 'request_failed'); return json(res, errorStatus(code), { error: code }); }
   }
-  providerAuthStatus(res) { const status = this.providerAuth?.()?.microsoft_graph?.status?.() ?? { state: 'unavailable', prompt: null }; return json(res, 200, { microsoft_graph: status }); }
+  providerAuthStatus(res) { const control = resolveAuthControl(this.providerAuth); return json(res, 200, { microsoft_graph: safeAuthStatus(control) }); }
   async asset(path, res) {
     const [file, type] = ASSETS.get(path); const candidate = resolve(join(UI_ROOT, file));
     if (!isWithinDirectory(UI_ROOT, candidate)) return json(res, 404, { error: 'not_found' });

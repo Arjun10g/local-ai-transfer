@@ -7,6 +7,7 @@ import {
   NATIVE_SUPERVISOR_DISPATCH_OWNER,
   NATIVE_SUPERVISOR_HANDOFF_VERSION,
 } from '../../host/agent/controller.mjs';
+import { ACTION_JOURNAL_HEALTH_ERRORS } from '../../host/agent/action-journal.mjs';
 
 const operationId = 'act_' + 'a'.repeat(32);
 const digest = value => value.repeat(64);
@@ -139,8 +140,115 @@ test('unavailable journal never advertises a native action even with falsified m
   const canonicalMetadata = tool('process.run_allowlisted', 'process_execution', async () => makeToolResult({ id: 'call_native_01', name: 'process.run_allowlisted', status: 'ok', text: '{}' }));
   const controller = new ConversationController({ engine: engineFor('process.run_allowlisted', {}, advertised), actionJournal: journal, toolRegistry: { 'process.run_allowlisted': canonicalMetadata } });
   const result = await runAsPlatform('win32', () => controller.runTurn({ sessionId: 'ses_native05', requestId: 'req_native05', message: 'run it' }));
-  assert.equal(result.error, 'native_supervisor_unavailable');
+  assert.equal(result.error, 'action_journal_unavailable');
   assert.equal(advertised[0].some(item => item.function?.name === 'process.run_allowlisted'), false);
+});
+
+test('malformed or hostile journal health is a finite unavailable refusal', async () => {
+  const healthValues = [null, { state: 'blocked', error: 'raw provider failure' }, { state: 'blocked', error: 'action_journal_access_token_supersecret' }, { state: 'blocked', error: `action_journal_${'x'.repeat(97)}` }];
+  for (const [index, health] of healthValues.entries()) {
+    const journal = new MockJournal({ healthState: 'blocked' }); journal.health = () => health;
+    const controller = new ConversationController({ engine: engineFor('process.run_allowlisted', {}), actionJournal: journal, toolRegistry: { 'process.run_allowlisted': tool('process.run_allowlisted', 'process_execution', async () => { throw new Error('preview must not run'); }) } });
+    const result = await runAsPlatform('win32', () => controller.runTurn({ sessionId: `ses_health_${index}`, requestId: `req_health_${index}`, message: 'run it' }));
+    assert.equal(result.error, 'action_journal_unavailable');
+  }
+  const throwing = new MockJournal({ healthState: 'blocked' });
+  const controller = new ConversationController({ engine: engineFor('process.run_allowlisted', {}), actionJournal: throwing, toolRegistry: { 'process.run_allowlisted': tool('process.run_allowlisted', 'process_execution', async () => { throw new Error('preview must not run'); }) } });
+  Object.defineProperty(throwing, 'health', { get() { throw new Error('health getter sentinel'); } });
+  const result = await runAsPlatform('win32', () => controller.runTurn({ sessionId: 'ses_health_getter', requestId: 'req_health_getter', message: 'run it' }));
+  assert.equal(result.error, 'action_journal_unavailable');
+
+  let healthCalls = 0; let previewCalls = 0; const flipping = new MockJournal({ healthState: 'blocked' });
+  flipping.health = () => { healthCalls += 1; return healthCalls === 1 ? { state: 'blocked', error: 'action_journal_platform_unavailable' } : { state: 'ready', error: null }; };
+  const flipController = new ConversationController({ engine: engineFor('process.run_allowlisted', {}), actionJournal: flipping, toolRegistry: { 'process.run_allowlisted': tool('process.run_allowlisted', 'process_execution', async () => { previewCalls += 1; }) } });
+  const flipped = await runAsPlatform('win32', () => flipController.runTurn({ sessionId: 'ses_health_flip', requestId: 'req_health_flip', message: 'run it' }));
+  assert.equal(flipped.error, 'action_journal_platform_unavailable'); assert.equal(healthCalls, 1); assert.equal(previewCalls, 0);
+
+  const proxyTarget = Object.freeze({ state: 'blocked', error: 'action_journal_platform_unavailable' });
+  const proxy = new Proxy(proxyTarget, { getOwnPropertyDescriptor(target, key) { if (key === 'state') return { configurable: false, enumerable: true, get: () => target.state }; return Reflect.getOwnPropertyDescriptor(target, key); } });
+  const proxyJournal = new MockJournal({ healthState: 'blocked' }); proxyJournal.health = () => proxy;
+  const proxyController = new ConversationController({ engine: engineFor('process.run_allowlisted', {}), actionJournal: proxyJournal, toolRegistry: { 'process.run_allowlisted': tool('process.run_allowlisted', 'process_execution', async () => { throw new Error('preview must not run'); }) } });
+  const proxied = await runAsPlatform('win32', () => proxyController.runTurn({ sessionId: 'ses_health_proxy', requestId: 'req_health_proxy', message: 'run it' }));
+  assert.equal(proxied.error, 'action_journal_unavailable');
+
+  for (const [index, [health, label]] of [[0, [{ state: 'ready', error: null }, 'ready']], [1, [{ state: 'blocked', error: 'action_journal_platform_unavailable' }, 'blocked']]]) {
+    let executions = 0; const transparent = new MockJournal({ healthState: 'blocked' }); transparent.health = () => new Proxy(health, {});
+    const transparentController = new ConversationController({ engine: engineFor('process.run_allowlisted', {}), actionJournal: transparent, toolRegistry: { 'process.run_allowlisted': tool('process.run_allowlisted', 'process_execution', async () => { executions += 1; }) } });
+    const transparentResult = await runAsPlatform('win32', () => transparentController.runTurn({ sessionId: `ses_health_transparent_${index}`, requestId: `req_health_transparent_${index}`, message: 'run it' }));
+    assert.equal(transparentResult.error, 'action_journal_unavailable', label); assert.equal(executions, 0, label); assert.deepEqual(transparent.calls, []);
+  }
+});
+
+test('journal health preserves every exact contract diagnostic and nothing else', async () => {
+  for (const [index, error] of ACTION_JOURNAL_HEALTH_ERRORS.entries()) {
+    const journal = new MockJournal({ healthState: 'blocked' }); journal.health = () => ({ state: 'blocked', error });
+    const controller = new ConversationController({ engine: engineFor('process.run_allowlisted', {}), actionJournal: journal, toolRegistry: { 'process.run_allowlisted': tool('process.run_allowlisted', 'process_execution', async () => { throw new Error('preview must not run'); }) } });
+    const result = await runAsPlatform('win32', () => controller.runTurn({ sessionId: `ses_diag_${index}`, requestId: `req_diag_${index}`, message: 'run it' }));
+    assert.equal(result.error, error);
+  }
+});
+
+test('journal method snapshot rejects accessors and ignores post-construction replacement', async () => {
+  const blocked = new MockJournal({ healthState: 'blocked' });
+  const blockedController = new ConversationController({ engine: engineFor('process.run_allowlisted', {}), actionJournal: blocked, toolRegistry: { 'process.run_allowlisted': tool('process.run_allowlisted', 'process_execution', async () => { throw new Error('preview must not run'); }) } });
+  blocked.health = () => ({ state: 'ready', error: null });
+  blocked.prepare = () => { throw new Error('replacement prepare must not run'); };
+  const blockedResult = await runAsPlatform('win32', () => blockedController.runTurn({ sessionId: 'ses_journal_replace_health', requestId: 'req_journal_replace_health', message: 'run it' }));
+  assert.equal(blockedResult.error, 'action_journal_unavailable');
+
+  const replaced = new MockJournal({ nativeOnly: false }); const replacements = { prepare: 0, authorize: 0, dispatch: 0 };
+  const replacedController = new ConversationController({ engine: engineFor('test.write', {}), actionJournal: replaced, toolRegistry: { 'test.write': tool('test.write', 'create', async () => makeToolResult({ id: 'call_native_01', name: 'test.write', status: 'ok', text: '{}' })) } });
+  for (const name of Object.keys(replacements)) replaced[name] = () => { replacements[name] += 1; throw new Error(`replacement ${name} must not run`); };
+  const replacedResult = await runAsPlatform('linux', () => replacedController.runTurn({ sessionId: 'ses_journal_replace_methods', requestId: 'req_journal_replace_methods', message: 'write it' }));
+  assert.equal(replacedResult.state, 'COMPLETED'); assert.deepEqual(replacements, { prepare: 0, authorize: 0, dispatch: 0 });
+
+  const accessor = new MockJournal(); Object.defineProperty(accessor, 'prepare', { get() { return async () => {}; } });
+  assert.throws(() => new ConversationController({ engine: engineFor('test.write', {}), actionJournal: accessor, toolRegistry: { 'test.write': tool('test.write', 'create', async () => makeToolResult({ id: 'call_native_01', name: 'test.write', status: 'ok', text: '{}' })) } }), /actionJournal does not implement/u);
+  const proxied = new Proxy(new MockJournal(), {});
+  assert.throws(() => new ConversationController({ engine: engineFor('test.write', {}), actionJournal: proxied, toolRegistry: { 'test.write': tool('test.write', 'create', async () => makeToolResult({ id: 'call_native_01', name: 'test.write', status: 'ok', text: '{}' })) } }), /actionJournal does not implement/u);
+
+  const methodNames = ['health', 'prepare', 'authorize', 'dispatch', 'acknowledge', 'beginReconciliation', 'complete', 'cancel', 'failDefinitive', 'markUnknown'];
+  for (const methodName of methodNames) {
+    const hostile = new MockJournal(); hostile[methodName] = new Proxy(hostile[methodName], { apply() { throw new Error('callable proxy must be rejected'); } });
+    assert.throws(() => new ConversationController({ engine: engineFor('test.write', {}), actionJournal: hostile, toolRegistry: { 'test.write': tool('test.write', 'create', async () => makeToolResult({ id: 'call_native_01', name: 'test.write', status: 'ok', text: '{}' })) } }), /actionJournal does not implement/u);
+
+    const inheritedHostile = new MockJournal();
+    const inheritedPrototype = Object.create(Object.getPrototypeOf(inheritedHostile));
+    Object.defineProperty(inheritedPrototype, methodName, { configurable: true, value: new Proxy(Object.getPrototypeOf(inheritedHostile)[methodName], { apply() { throw new Error('inherited callable proxy must be rejected'); } }) });
+    Object.setPrototypeOf(inheritedHostile, inheritedPrototype);
+    assert.throws(() => new ConversationController({ engine: engineFor('test.write', {}), actionJournal: inheritedHostile, toolRegistry: { 'test.write': tool('test.write', 'create', async () => makeToolResult({ id: 'call_native_01', name: 'test.write', status: 'ok', text: '{}' })) } }), /actionJournal does not implement/u);
+  }
+
+  const controllerForJournal = journal => new ConversationController({ engine: engineFor('test.write', {}), actionJournal: journal, toolRegistry: { 'test.write': tool('test.write', 'create', async () => makeToolResult({ id: 'call_native_01', name: 'test.write', status: 'ok', text: '{}' })) } });
+  for (const bindVariant of ['getter', 'throwing']) {
+    for (const methodName of methodNames) {
+      const hostile = new MockJournal(); const original = Object.getPrototypeOf(hostile)[methodName];
+      const replacement = function (...args) { return Reflect.apply(original, this, args); };
+      if (bindVariant === 'getter') Object.defineProperty(replacement, 'bind', { configurable: true, get() { throw new Error('poisoned bind getter'); } });
+      else Object.defineProperty(replacement, 'bind', { configurable: true, value() { throw new Error('poisoned bind call'); } });
+      hostile[methodName] = replacement;
+      assert.doesNotThrow(() => controllerForJournal(hostile), `${bindVariant} ${methodName}`);
+    }
+  }
+
+  const bindProxyJournal = new MockJournal({ nativeOnly: false }); const bindProxyCalls = Object.fromEntries(methodNames.map(name => [name, 0]));
+  for (const methodName of methodNames) {
+    const original = Object.getPrototypeOf(bindProxyJournal)[methodName];
+    const replacement = function (...args) { return Reflect.apply(original, this, args); };
+    Object.defineProperty(replacement, 'bind', { configurable: true, value() {
+      return new Proxy(function (...args) { bindProxyCalls[methodName] += 1; return Reflect.apply(replacement, this, args); }, {});
+    } });
+    bindProxyJournal[methodName] = replacement;
+  }
+  const bindProxyController = controllerForJournal(bindProxyJournal);
+  const bindProxyResult = await runAsPlatform('linux', () => bindProxyController.runTurn({ sessionId: 'ses_journal_bind_proxy', requestId: 'req_journal_bind_proxy', message: 'write it' }));
+  assert.equal(bindProxyResult.state, 'COMPLETED'); assert.deepEqual(bindProxyCalls, Object.fromEntries(methodNames.map(name => [name, 0])));
+
+  const stable = new MockJournal({ nativeOnly: false }); const proxyCalls = Object.fromEntries(methodNames.map(name => [name, 0]));
+  const stableController = new ConversationController({ engine: engineFor('test.write', {}), actionJournal: stable, toolRegistry: { 'test.write': tool('test.write', 'create', async () => makeToolResult({ id: 'call_native_01', name: 'test.write', status: 'ok', text: '{}' })) } });
+  for (const methodName of methodNames) stable[methodName] = new Proxy(stable[methodName], { apply(target, thisArg, args) { proxyCalls[methodName] += 1; return Reflect.apply(target, thisArg, args); } });
+  const stableResult = await runAsPlatform('linux', () => stableController.runTurn({ sessionId: 'ses_journal_proxy_replace', requestId: 'req_journal_proxy_replace', message: 'write it' }));
+  assert.equal(stableResult.state, 'COMPLETED'); assert.deepEqual(proxyCalls, Object.fromEntries(methodNames.map(name => [name, 0])));
 });
 
 test('registry snapshots defeat post-admission mutation and public map replacement', async () => {
