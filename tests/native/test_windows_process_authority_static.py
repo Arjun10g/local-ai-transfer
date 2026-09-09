@@ -105,6 +105,7 @@ class WindowsProcessAuthorityStaticTests(unittest.TestCase):
                             key != "activation_refusal_is_sticky"))
         self.assertTrue(activation["activation_requires_all"])
         self.assertTrue(activation["activation_refusal_is_sticky"])
+        self.assertFalse(activation["nested_job_policy"])
 
     def test_identity_contract_requires_handles_and_rechecks(self):
         identity = self.contract["identity_pinned_handles"]
@@ -159,21 +160,40 @@ class WindowsProcessAuthorityStaticTests(unittest.TestCase):
 
     def test_header_has_nonserializable_proof_shape_and_sticky_false_gate(self):
         for token in (
-            "ExecutableHandleProof", "HANDLE executable_handle",
-            "containing_directory_handle", "WorkingDirectoryHandleProof",
-            "ContainmentProof", "job_created_before_child",
-            "MinimalEnvironmentProof", "credentials_excluded",
-            "LaunchAuthorityProof", "issuer_bound_to_supervisor",
-            "cancellation_owner_is_supervisor", "kLaunchAuthorityAvailable = false",
-            "launch_authority_proven", "identity_rechecked_after_open",
+            "class UniqueHandle final", "UniqueHandle(const UniqueHandle&) = delete",
+            "::CloseHandle(value_)", "class CancellationState final",
+            "std::uint64_t active_generation_", "kCancelRequested",
+            "kUnknownManual", "class LaunchAuthority final",
+            "LaunchAuthority(const LaunchAuthority&) = delete",
+            "class LaunchAuthorityIssuer final", "LaunchAuthorityIssuer() = delete",
+            "std::wstring canonical_absolute_path",
+            "operation_id_", "generation_", "nonce_", "volume_serial",
+            "file_id", "sha256", "token_", "job_", "cancellation_event_",
+            "environment_digest_", "kMinimalEnvironmentAllowlist",
+            "kLaunchAuthorityAvailable = false", "valid_for_admission",
+            "validate_for_admission", "mark_orphaned",
+            "friend class LaunchAuthorityIssuer", "CloseHandle(value_)",
         ):
             self.assertIn(token, self.header)
         self.assertIn("#error", self.header)
-        self.assertNotIn("std::wstring", self.header)
+        self.assertIn("private:", self.header)
+        self.assertNotIn("HANDLE get(", self.header)
+        self.assertNotIn("operator HANDLE", self.header)
+
+    def test_cancellation_state_machine_is_source_connected_and_fail_closed(self):
+        for token in (
+            "cancellation_state_", "cancellation_state_->begin",
+            "cancellation_state_->request_cancel", "cancellation_state_->complete",
+            "cancellation_state_->orphan", "std::lock_guard<std::mutex>",
+            "active_generation_ != generation", "state_ = RunState::kUnknownManual",
+            "kill_on_job_close_", "active_process_zero_on_terminal_",
+        ):
+            self.assertIn(token, self.header)
+        self.assertNotIn("TerminateProcess", self.header)
 
     def test_transaction_checks_proof_and_all_gates_before_mutation(self):
-        self.assertIn("LaunchAuthorityProof authority_proof", self.transaction)
-        refusal = self.transaction.index("if (!launch_authority_proven")
+        self.assertIn("std::optional<LaunchAuthority> authority", self.transaction)
+        refusal = self.transaction.index("if (!plan.authority.has_value()")
         returned = self.transaction.index("return LaunchReceipt{};", refusal)
         self.assertLess(refusal, returned)
         pre_refusal = self.transaction[:refusal]
@@ -183,7 +203,9 @@ class WindowsProcessAuthorityStaticTests(unittest.TestCase):
         gate = self.transaction.index("if (!kProcessLaunchAvailable", returned)
         self.assertGreater(gate, returned)
         self.assertIn("return LaunchReceipt{};", self.transaction[gate:])
-        self.assertIn("kSupervisorOwnedProcessTransactionAccepted", self.transaction)
+        self.assertIn("kSupervisorOwnedProcessTransactionAccepted", self.authority)
+        consume = self.transaction.index("authority.consume()")
+        self.assertGreater(consume, gate)
         self.assertNotIn("CreateProcess", self.transaction)
 
     def test_broker_launch_remains_refusal_only_and_no_public_activation(self):

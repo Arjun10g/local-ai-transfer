@@ -1,9 +1,10 @@
 # Inert Windows supervisor topology
 
-This directory is a deliberately unlinked `_WIN32` source boundary. It is not
-in `native/CMakeLists.txt`, the launcher, the host, the package allowlist, or a
-production registry. The public header exposes refusal and redacted loopback
-metadata only.
+This directory is a deliberately inert `_WIN32` source boundary. Its
+`authority.cpp` is transitively covered only by the default-OFF isolated
+Windows compile-check; it is not in the product CMake target, launcher, host,
+package allowlist, or production registry. The public authority API exposes
+refusal and redacted loopback metadata only.
 
 Phase 2a establishes one co-located supervisor/helper ownership topology:
 `SupervisorState` owns the sole `JournalAuthorityOwner`; the pipe server and

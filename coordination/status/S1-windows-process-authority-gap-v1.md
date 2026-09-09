@@ -25,27 +25,31 @@
 
 ## Outcome
 
-- Added the dormant `windows-process-authority` v1.0.0 contract and the
-  Windows-only `LaunchAuthorityProof` shape. It binds supervisor-owned
-  executable and working-directory handles to manifest identity, requires
-  pre-child containment, least privilege, a fixed child environment, and
+- Added the dormant `windows-process-authority` v1.0.0 contract and a private,
+  noncopyable `LaunchAuthority` with move-only `UniqueHandle` ownership. It
+  binds supervisor-owned executable/working-directory, token, Job, and
+  cancellation handles to canonical identity values, operation ID/generation/
+  nonce, pre-child containment, least privilege, a fixed environment, and
   supervisor-owned cancellation/orphan cleanup. It carries no serializable
   path, handle, argv, environment, prompt, or credential receipt fields.
-- `process_transaction.inc` now checks the proof before the existing global
-  process gates and before any future mutation boundary. The proof authority,
-  CMake/package/host/registry gates, and broker containment/confinement gates
-  remain false; this slice cannot launch or activate a process.
-- Added nine hostile static/model tests and registered them in the bounded QA
-  inventory. The test model refuses every missing proof and the complete proof
-  while the global gate is false.
+- `process_transaction.inc` now validates the private authority before
+  consuming the process borrow, then checks the existing global process gates
+  before any future mutation boundary. The proof issuer, CMake/package/host/
+  registry gates, and broker containment/confinement gates remain false; this
+  slice cannot launch or activate a process.
+- Added the C++ generation-fenced cancellation state machine (stale
+  completion refusal and `unknown_manual` orphan state), plus twelve hostile
+  static/model tests, registered in the bounded QA inventory. The model
+  refuses every missing proof and complete proof while the global gate is
+  false.
 
 ## Evidence
 
-- `python3 tests/native/test_windows_process_authority_static.py`: 9/9 PASS.
+- `python3 tests/native/test_windows_process_authority_static.py`: 12/12 PASS.
 - `python3 tests/native/test_windows_process_transaction_static.py`: 23/23
   PASS; broker static: 11/11 PASS; supervisor authority: 11/11 PASS; dispatch
   lease: 23/23 PASS; inert compile harness: 13/13 PASS; clipboard: 26/26
-  PASS. Combined Windows-static discovery: 236/236 PASS.
+  PASS. Combined Windows-static discovery: 239/239 PASS.
 - `python3 scripts/test/run_qa.py --output -`: no missing/unknown inventory
   entries and the expected safe-mode `BLOCKED` result. `git diff --check` and
   contract JSON parsing pass. No CMake, compiler, Windows, child-process,
@@ -56,6 +60,7 @@
 - A native Windows handle-relative identity verifier, supervisor-owned RAII
   handle lifetime, Job-object/token implementation, cancellation race suite,
   SDK compile/static-analysis evidence, and target receipt remain absent.
-- The proof header is intentionally not in CMake and has no issuer or public
-  activation path. Production, package, host, registry, live, and target
-  readiness remain `NO`/`NOT_READY`.
+- The proof header is transitively included by the default-OFF inert Windows
+  compile-check through `authority.cpp`, but remains outside the product CMake
+  graph and has no issuer or public activation path. Production, package,
+  host, registry, live, and target readiness remain `NO`/`NOT_READY`.

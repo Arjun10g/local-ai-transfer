@@ -12,6 +12,14 @@
     "proof_issuer": false,
     "native_verifier": false
   },
+  "authority_object": {
+    "type": "private noncopyable RAII LaunchAuthority",
+    "issuer": "private LaunchAuthorityIssuer only",
+    "handle_owner": "UniqueHandle closes each owning HANDLE exactly once",
+    "move_only": true,
+    "public_raw_handle_accessor": false,
+    "operation_identity": ["operation_id_128", "generation_uint64", "nonce_128"]
+  },
   "identity_pinned_handles": {
     "executable": {
       "required": [
@@ -54,6 +62,8 @@
   },
   "environment": {
     "mode": "fresh implementation-owned fixed allowlist",
+    "fixed_allowlist": ["SystemRoot", "WINDIR"],
+    "allowlist_digest_required": true,
     "caller_environment_or_map_allowed": false,
     "credential_categories": ["tokens", "keys", "SSH_AUTH_SOCK", "proxy", "user_config"],
     "credential_categories_inherited": false,
@@ -66,6 +76,8 @@
     ]
   },
   "cancellation_and_orphan": {
+    "state_machine": ["idle", "running", "cancel_requested", "complete", "unknown_manual"],
+    "generation_fence": true,
     "required": [
       "supervisor_owned_cancellation_event",
       "bounded_cancel_join",
@@ -80,6 +92,7 @@
   "activation": {
     "manifest_and_authenticode": false,
     "package_identity": false,
+    "nested_job_policy": false,
     "native_sdk_verification": false,
     "windows_target_receipt": false,
     "provider_or_browser_execution": false,
