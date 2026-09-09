@@ -43,13 +43,13 @@ The script deliberately does not invent rates. A catalogue profile must supply
 The read-only preflight's project-root `.env` input is not the credential-file
 layout for provider mutations. Mutation and recovery commands default to
 `.secrets/shadeform.env`. The `.secrets/` directory is ignored by Git and must
-already be a non-symlink directory owned by the effective user (including root
-when the process runs as root), with no group or world permission bits. Mode
-`0700` is the recommended writable setup for projection; mode `0500` is also
-safe for read-only loading of an existing file. The projected file is created
-once with exact mode `0600`. The migration helper deliberately does not create
-or chmod the directory, overwrite an existing destination, or relax these
-checks.
+already be a non-symlink directory whose owner UID equals the process real UID
+reported by `os.getuid()` (UID 0 only when the process real UID is root), with
+no group or world permission bits. Mode `0700` is the recommended writable
+setup for projection; mode `0500` is also safe for read-only loading of an
+existing file. The projected file is created once with exact mode `0600`. The
+migration helper deliberately does not create or chmod the directory,
+overwrite an existing destination, or relax these checks.
 
 From the repository root, prepare the directory and perform the offline,
 one-way projection explicitly:

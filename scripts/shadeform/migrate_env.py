@@ -25,8 +25,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--destination", type=Path, required=True,
         help=(
-            "new dotenv path beneath an existing effective-user-owned directory "
-            "with no group/world permission bits (mode 0700 recommended for projection)"
+            "new dotenv path beneath an existing directory owned by the process real UID "
+            "(os.getuid()), with no group/world permission bits "
+            "(mode 0700 recommended for projection)"
         ),
     )
     args = parser.parse_args(argv)

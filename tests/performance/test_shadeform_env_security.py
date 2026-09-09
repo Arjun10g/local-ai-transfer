@@ -79,7 +79,7 @@ class ShadeformMutationEnvironmentTests(unittest.TestCase):
         with self.assertRaises(sf.ShadeformError):
             sf.load_env(self.env)
 
-    def test_rejects_symlink_hardlink_wrong_mode_and_wrong_owner(self) -> None:
+    def test_rejects_symlink_hardlink_wrong_mode_and_wrong_real_uid(self) -> None:
         target = self.root / "target.env"
         target.write_text("SHADEFORM_API_KEY=fixture\n", encoding="utf-8")
         target.chmod(0o600)
@@ -102,7 +102,20 @@ class ShadeformMutationEnvironmentTests(unittest.TestCase):
             with self.assertRaisesRegex(sf.ShadeformError, "owner-private"):
                 sf.load_env(self.env)
 
-    def test_loader_accepts_owner_only_0500_and_0700_parent_modes(self) -> None:
+    @unittest.skipUnless(hasattr(os, "geteuid"), "POSIX real/effective UID distinction required")
+    def test_parent_ownership_binds_real_uid_not_effective_uid(self) -> None:
+        self.write_env("SHADEFORM_API_KEY=fixture\n")
+        real_uid = os.getuid()
+        with mock.patch.object(sf.os, "geteuid", return_value=real_uid + 1):
+            self.assertEqual(sf.load_env(self.env), {"SHADEFORM_API_KEY": "fixture"})
+        with (
+            mock.patch.object(sf.os, "getuid", return_value=real_uid + 1),
+            mock.patch.object(sf.os, "geteuid", return_value=real_uid),
+        ):
+            with self.assertRaisesRegex(sf.ShadeformError, "owner-private"):
+                sf.load_env(self.env)
+
+    def test_loader_accepts_real_uid_owned_0500_and_0700_parent_modes(self) -> None:
         self.write_env("SHADEFORM_API_KEY=fixture\n")
         try:
             for mode in (0o500, 0o700):
@@ -285,7 +298,7 @@ class ShadeformMutationEnvironmentTests(unittest.TestCase):
         self.assertEqual(protected_env.stat().st_mode & 0o777, 0o600)
         self.assertEqual(set(sf.load_env(protected_env)), {"SHADEFORM_API_KEY", "SHADEFORM_SSH"})
 
-    def test_explicit_override_uses_the_same_owner_only_parent_contract(self) -> None:
+    def test_explicit_override_uses_the_same_real_uid_parent_contract(self) -> None:
         override_directory = self.root / "operator-override"
         override_directory.mkdir(mode=0o700)
         override = override_directory / "custom-shadeform.env"
@@ -302,17 +315,28 @@ class ShadeformMutationEnvironmentTests(unittest.TestCase):
         finally:
             override_directory.chmod(0o700)
 
-    def test_mutation_entrypoints_default_to_ignored_owner_only_layout(self) -> None:
+    def test_mutation_entrypoints_default_to_ignored_real_uid_owned_layout(self) -> None:
         self.assertEqual(sf.MUTATION_ENV_FILE, sf.ROOT / ".secrets" / "shadeform.env")
         ignored = (sf.ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
         self.assertIn(".secrets/", ignored)
         instructions = (sf.ROOT / "scripts/shadeform/README.md").read_text(encoding="utf-8")
+        normalized_instructions = " ".join(instructions.split())
         self.assertIn("mkdir -m 700 .secrets", instructions)
         self.assertNotIn("chmod 700 .secrets", instructions)
-        self.assertIn("recommended writable setup", instructions)
-        self.assertIn("mode `0500`", instructions)
+        self.assertIn(
+            "Mode `0700` is the recommended writable setup for projection",
+            normalized_instructions,
+        )
+        self.assertIn("mode `0500`", normalized_instructions)
         self.assertIn("`0710` or `0755`", instructions)
+        self.assertIn("process real UID", instructions)
+        self.assertNotIn("effective user", instructions)
         self.assertNotIn("exact mode `0700`", instructions)
+        migration_source = (
+            sf.ROOT / "scripts/shadeform/migrate_env.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("process real UID", migration_source)
+        self.assertNotIn("effective-user", migration_source)
         expected_defaults = {
             "scripts/j1m_orchestrator.py": "sf.MUTATION_ENV_FILE",
             "scripts/shadeform_teardown.py": "shadeform.MUTATION_ENV_FILE",
