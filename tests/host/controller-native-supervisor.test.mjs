@@ -219,6 +219,31 @@ test('journal method snapshot rejects accessors and ignores post-construction re
     assert.throws(() => new ConversationController({ engine: engineFor('test.write', {}), actionJournal: inheritedHostile, toolRegistry: { 'test.write': tool('test.write', 'create', async () => makeToolResult({ id: 'call_native_01', name: 'test.write', status: 'ok', text: '{}' })) } }), /actionJournal does not implement/u);
   }
 
+  const controllerForJournal = journal => new ConversationController({ engine: engineFor('test.write', {}), actionJournal: journal, toolRegistry: { 'test.write': tool('test.write', 'create', async () => makeToolResult({ id: 'call_native_01', name: 'test.write', status: 'ok', text: '{}' })) } });
+  for (const bindVariant of ['getter', 'throwing']) {
+    for (const methodName of methodNames) {
+      const hostile = new MockJournal(); const original = Object.getPrototypeOf(hostile)[methodName];
+      const replacement = function (...args) { return Reflect.apply(original, this, args); };
+      if (bindVariant === 'getter') Object.defineProperty(replacement, 'bind', { configurable: true, get() { throw new Error('poisoned bind getter'); } });
+      else Object.defineProperty(replacement, 'bind', { configurable: true, value() { throw new Error('poisoned bind call'); } });
+      hostile[methodName] = replacement;
+      assert.doesNotThrow(() => controllerForJournal(hostile), `${bindVariant} ${methodName}`);
+    }
+  }
+
+  const bindProxyJournal = new MockJournal({ nativeOnly: false }); const bindProxyCalls = Object.fromEntries(methodNames.map(name => [name, 0]));
+  for (const methodName of methodNames) {
+    const original = Object.getPrototypeOf(bindProxyJournal)[methodName];
+    const replacement = function (...args) { return Reflect.apply(original, this, args); };
+    Object.defineProperty(replacement, 'bind', { configurable: true, value() {
+      return new Proxy(function (...args) { bindProxyCalls[methodName] += 1; return Reflect.apply(replacement, this, args); }, {});
+    } });
+    bindProxyJournal[methodName] = replacement;
+  }
+  const bindProxyController = controllerForJournal(bindProxyJournal);
+  const bindProxyResult = await runAsPlatform('linux', () => bindProxyController.runTurn({ sessionId: 'ses_journal_bind_proxy', requestId: 'req_journal_bind_proxy', message: 'write it' }));
+  assert.equal(bindProxyResult.state, 'COMPLETED'); assert.deepEqual(bindProxyCalls, Object.fromEntries(methodNames.map(name => [name, 0])));
+
   const stable = new MockJournal({ nativeOnly: false }); const proxyCalls = Object.fromEntries(methodNames.map(name => [name, 0]));
   const stableController = new ConversationController({ engine: engineFor('test.write', {}), actionJournal: stable, toolRegistry: { 'test.write': tool('test.write', 'create', async () => makeToolResult({ id: 'call_native_01', name: 'test.write', status: 'ok', text: '{}' })) } });
   for (const methodName of methodNames) stable[methodName] = new Proxy(stable[methodName], { apply(target, thisArg, args) { proxyCalls[methodName] += 1; return Reflect.apply(target, thisArg, args); } });

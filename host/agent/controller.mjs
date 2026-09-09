@@ -163,6 +163,8 @@ export function requiresDurableAction(tool) {
 
 const JOURNAL_FAILURE_CODES = new Set(ACTION_JOURNAL_HEALTH_ERRORS);
 const JOURNAL_METHODS = Object.freeze(['health', 'prepare', 'authorize', 'dispatch', 'acknowledge', 'beginReconciliation', 'complete', 'cancel', 'failDefinitive', 'markUnknown']);
+const primordialBind = Function.prototype.bind;
+const primordialReflectApply = Reflect.apply;
 function snapshotJournalMethods(journal) {
   if (!journal || typeof journal !== 'object' || utilTypes.isProxy(journal)) throw new TypeError('actionJournal does not implement the durable transition contract');
   const snapshot = Object.create(null);
@@ -176,7 +178,9 @@ function snapshotJournalMethods(journal) {
         current = Object.getPrototypeOf(current);
       }
       if (!descriptor || !Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'function' || utilTypes.isProxy(descriptor.value) || descriptor.get !== undefined || descriptor.set !== undefined) throw new TypeError('actionJournal does not implement the durable transition contract');
-      snapshot[name] = descriptor.value.bind(journal);
+      const bound = primordialReflectApply(primordialBind, descriptor.value, [journal]);
+      if (typeof bound !== 'function' || utilTypes.isProxy(bound)) throw new TypeError('actionJournal does not implement the durable transition contract');
+      snapshot[name] = bound;
     }
   } catch { throw new TypeError('actionJournal does not implement the durable transition contract'); }
   return Object.freeze(snapshot);
