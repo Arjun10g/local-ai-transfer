@@ -133,6 +133,7 @@ REVIEWED_TEST_SUPPORT_FILES = frozenset({
     "tests/native/fixtures/windows_hardware_attestor/display-correlation-cases.fixture.json",
     "tests/native/fixtures/windows_hardware_attestor/source-refusal.fixture.json",
     "tests/performance/__init__.py",
+    "tests/performance/fixtures/shadeform_donor_env_keys.txt",
     "tests/performance/lifecycle_test_isolation.py",
     "tests/qa/__init__.py",
     "tests/reference/action-journal-container-model.mjs",

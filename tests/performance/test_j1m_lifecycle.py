@@ -1310,7 +1310,7 @@ class StaticSafetyTests(unittest.TestCase):
 
     def test_watchdog_is_prearmed_before_ssh_key_mutation(self):
         source = (ROOT / "scripts" / "j1m_orchestrator.py").read_text(encoding="utf-8")
-        self.assertLess(source.index("watchdog = subprocess.Popen(watchdog_command)"), source.index("key_id = sf.add_ssh_key"))
+        self.assertLess(source.index("watchdog = subprocess.Popen("), source.index("key_id = sf.add_ssh_key"))
 
     def test_watchdog_settles_instance_and_attempt_before_key_failure(self):
         watchdog = load(ROOT / "scripts/shadeform_watchdog.py", "j1m_watchdog_key_failure_order")

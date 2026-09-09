@@ -37,6 +37,7 @@ import re
 import secrets
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -47,6 +48,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from collections.abc import Callable
+from types import MappingProxyType
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,6 +76,19 @@ MAX_MUTATION_ENV_LINE_BYTES = 4096
 MAX_MUTATION_ENV_VALUE_CHARS = 2048
 OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 STAT_SUPPORTS_DIR_FD = os.stat in os.supports_dir_fd
+LINK_SUPPORTS_DIR_FD = os.link in os.supports_dir_fd
+UNLINK_SUPPORTS_DIR_FD = os.unlink in os.supports_dir_fd
+_SECURE_SUBPROCESS_ENV = MappingProxyType({
+    "PATH": "/usr/bin:/bin",
+    "LANG": "C",
+    "LC_ALL": "C",
+})
+_SECURE_EXECUTABLES = {
+    "ssh-keygen": ("/usr/bin/ssh-keygen", "/bin/ssh-keygen", "/usr/local/bin/ssh-keygen", "/opt/homebrew/bin/ssh-keygen"),
+    "ssh-keyscan": ("/usr/bin/ssh-keyscan", "/bin/ssh-keyscan", "/usr/local/bin/ssh-keyscan", "/opt/homebrew/bin/ssh-keyscan"),
+    "ssh": ("/usr/bin/ssh", "/bin/ssh", "/usr/local/bin/ssh", "/opt/homebrew/bin/ssh"),
+    "scp": ("/usr/bin/scp", "/bin/scp", "/usr/local/bin/scp", "/opt/homebrew/bin/scp"),
+}
 COST_EVENT_FIELDS = frozenset({
     "schema", "instance_id", "phase_id", "ownership_nonce",
     "owner_binding_sha256", "status", "estimated_cost_usd",
@@ -226,6 +241,75 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _verified_executable(name: str) -> str:
+    """Resolve one fixed, owner-safe helper without consulting ambient PATH."""
+
+    candidates = _SECURE_EXECUTABLES.get(name)
+    if candidates is None or os.name != "posix":
+        raise ShadeformError("required local helper is unavailable")
+    for candidate in candidates:
+        try:
+            resolved = Path(os.path.realpath(candidate))
+            ancestors = _env_ancestor_snapshot(resolved.parent)
+            if not _env_ancestors_stable(ancestors):
+                continue
+            info = os.stat(resolved, follow_symlinks=False)
+        except (OSError, ShadeformError):
+            continue
+        if (
+            stat.S_ISREG(info.st_mode)
+            and info.st_nlink == 1
+            and info.st_uid in {0, os.getuid()}
+            and not (stat.S_IMODE(info.st_mode) & 0o022)
+            and stat.S_IMODE(info.st_mode) & 0o111
+        ):
+            return str(resolved)
+    raise ShadeformError("required local helper is unavailable")
+
+
+def _secure_subprocess_env() -> dict[str, str]:
+    """Return a fresh, exact child environment from immutable source data."""
+
+    return dict(_SECURE_SUBPROCESS_ENV)
+
+
+def _verified_python_executable() -> str:
+    """Return the current interpreter after a complete private-path check.
+
+    Mutation children must run the interpreter that launched this process.  A
+    fallback interpreter would silently change the executable identity when
+    the configured one is unsafe, so an unsafe or changing path is a hard
+    refusal.  The final file identity is checked twice; callers invoke this
+    immediately while constructing each ``Popen`` argument vector.
+    """
+
+    if os.name != "posix":
+        raise ShadeformError("required local helper is unavailable")
+    try:
+        candidate = Path(os.path.abspath(os.fspath(sys.executable)))
+        if stat.S_ISLNK(os.lstat(candidate).st_mode):
+            raise ShadeformError("required local helper is unavailable")
+        ancestors = _env_ancestor_snapshot(candidate.parent)
+        first = os.stat(candidate, follow_symlinks=False)
+        safe = (
+            stat.S_ISREG(first.st_mode)
+            and first.st_nlink == 1
+            and first.st_uid in {0, os.getuid()}
+            and not (stat.S_IMODE(first.st_mode) & 0o022)
+            and stat.S_IMODE(first.st_mode) & 0o111
+        )
+        second = os.stat(candidate, follow_symlinks=False)
+    except (OSError, TypeError, ValueError, ShadeformError) as exc:
+        raise ShadeformError("required local helper is unavailable") from exc
+    if not safe or not _env_ancestors_stable(ancestors) or (
+        first.st_dev, first.st_ino, first.st_mode, first.st_uid, first.st_nlink
+    ) != (
+        second.st_dev, second.st_ino, second.st_mode, second.st_uid, second.st_nlink
+    ):
+        raise ShadeformError("required local helper is unavailable")
+    return str(candidate)
+
+
 def load_env(path: Path) -> dict[str, str]:
     """Load an owner-private, descriptor-bound mutation environment.
 
@@ -308,22 +392,324 @@ def _parse_mutation_env(raw: bytes) -> dict[str, str]:
             or key in values
         ):
             raise ShadeformError("environment file key is unknown or duplicated")
-        if len(value) > MAX_MUTATION_ENV_VALUE_CHARS:
-            raise ShadeformError("environment file value exceeds its bound")
-        if value != value.strip():
-            raise ShadeformError("environment file value has noncanonical whitespace")
-        if len(value) >= 2 and value[0] in {"'", '"'}:
-            if value[-1] != value[0] or len(value) == 2:
-                raise ShadeformError("environment file quoting is malformed")
-            value = value[1:-1]
-            if value[0].isspace() or value[-1].isspace():
-                raise ShadeformError("environment file quoted value has noncanonical whitespace")
-        elif value[:1] in {"'", '"'} or value[-1:] in {"'", '"'}:
-            raise ShadeformError("environment file quoting is malformed")
-        if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
-            raise ShadeformError("environment file value contains control data")
-        values[key] = value
+        values[key] = _parse_mutation_env_value(value)
     return values
+
+
+def _parse_mutation_env_value(value: str) -> str:
+    """Normalize one bounded value without retaining its source spelling."""
+
+    if len(value) > MAX_MUTATION_ENV_VALUE_CHARS:
+        raise ShadeformError("environment file value exceeds its bound")
+    if value != value.strip():
+        raise ShadeformError("environment file value has noncanonical whitespace")
+    if len(value) >= 2 and value[0] in {"'", '"'}:
+        if value[-1] != value[0] or len(value) == 2:
+            raise ShadeformError("environment file quoting is malformed")
+        value = value[1:-1]
+        if value[0].isspace() or value[-1].isspace():
+            raise ShadeformError("environment file quoted value has noncanonical whitespace")
+    elif value[:1] in {"'", '"'} or value[-1:] in {"'", '"'}:
+        raise ShadeformError("environment file quoting is malformed")
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+        raise ShadeformError("environment file value contains control data")
+    return value
+
+
+def _env_ancestor_snapshot(parent: Path) -> tuple[tuple[Path, tuple[int, ...]], ...]:
+    """Snapshot non-writable directory ancestors for a bounded env transfer."""
+
+    snapshot: list[tuple[Path, tuple[int, ...]]] = []
+    cursor = parent
+    current_uid = os.getuid()
+    while True:
+        try:
+            info = os.stat(cursor, follow_symlinks=False)
+        except OSError as exc:
+            raise ShadeformError("environment directory identity is unavailable") from exc
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid not in {current_uid, 0}
+            or stat.S_IMODE(info.st_mode) & 0o022
+            or info.st_nlink < 1
+        ):
+            raise ShadeformError("environment directory ancestor is unsafe")
+        snapshot.append((
+            cursor,
+            (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_nlink),
+        ))
+        if cursor == cursor.parent:
+            break
+        cursor = cursor.parent
+    return tuple(snapshot)
+
+
+def _env_ancestors_stable(
+    snapshot: tuple[tuple[Path, tuple[int, ...]], ...],
+    *, allow_direct_parent_nlink_increment: bool = False,
+) -> bool:
+    for index, (path, expected) in enumerate(snapshot):
+        try:
+            info = os.stat(path, follow_symlinks=False)
+        except OSError:
+            return False
+        observed = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_nlink)
+        if allow_direct_parent_nlink_increment and index == 0:
+            # Some filesystems count regular children in a directory's link
+            # count.  Publication legitimately adds one such child; identity,
+            # owner, and mode remain exact and a larger unexpected change is
+            # still refused.
+            if observed[:4] != expected[:4] or observed[4] not in {expected[4], expected[4] + 1}:
+                return False
+        elif expected != observed:
+            return False
+    return True
+
+
+def _open_env_parent_bound(
+    path: Path, *, label: str, require_private: bool,
+) -> tuple[int, tuple[tuple[Path, tuple[int, ...]], ...]]:
+    """Bind ancestor identities before and after opening a migration parent."""
+
+    before = _env_ancestor_snapshot(path.parent)
+    descriptor = _open_private_canonical_parent(
+        path, label=label, require_private=require_private,
+    )
+    if not _env_ancestors_stable(before):
+        os.close(descriptor)
+        raise ShadeformError(f"{label} directory changed before child open")
+    return descriptor, before
+
+
+def _read_mixed_env_source(path: Path) -> bytes:
+    """Read a donor dotenv through a bound file and non-writable ancestors."""
+
+    try:
+        requested = Path(os.path.abspath(os.fspath(path)))
+    except (TypeError, ValueError, OSError) as exc:
+        raise ShadeformError("donor environment path is invalid") from exc
+    parent_descriptor, ancestors = _open_env_parent_bound(
+        requested, label="donor environment", require_private=False,
+    )
+    descriptor = -1
+    try:
+        fcntl.flock(parent_descriptor, fcntl.LOCK_SH)
+        try:
+            descriptor = os.open(
+                requested.name, os.O_RDONLY | os.O_NOFOLLOW,
+                dir_fd=parent_descriptor,
+            )
+        except (FileNotFoundError, OSError) as exc:
+            raise ShadeformError("donor environment is unavailable") from exc
+        fcntl.flock(descriptor, fcntl.LOCK_SH)
+        raw = _read_private_file_at(
+            descriptor,
+            parent_descriptor=parent_descriptor,
+            path=requested,
+            limit=MAX_MUTATION_ENV_BYTES,
+            label="donor environment",
+            require_private_parent=False,
+        )
+        if not _env_ancestors_stable(ancestors):
+            raise ShadeformError("donor environment directory changed during read")
+        return raw
+    finally:
+        if descriptor >= 0:
+            with contextlib.suppress(OSError):
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+        with contextlib.suppress(OSError):
+            fcntl.flock(parent_descriptor, fcntl.LOCK_UN)
+        os.close(parent_descriptor)
+
+
+def _parse_mixed_env_source(raw: bytes) -> dict[str, str]:
+    """Select only Local BMO mutation keys from a bounded mixed dotenv."""
+
+    if (
+        not isinstance(raw, bytes)
+        or not raw
+        or len(raw) > MAX_MUTATION_ENV_BYTES
+        or not raw.endswith(b"\n")
+    ):
+        raise ShadeformError("donor environment must be a complete bounded text file")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ShadeformError("donor environment encoding is invalid") from exc
+    if "\r" in text or "\x00" in text:
+        raise ShadeformError("donor environment contains invalid control data")
+    lines = text.split("\n")[:-1]
+    if len(lines) > MAX_MUTATION_ENV_LINES:
+        raise ShadeformError("donor environment has too many lines")
+    selected: dict[str, str] = {}
+    for line in lines:
+        if len(line.encode("utf-8")) > MAX_MUTATION_ENV_LINE_BYTES:
+            raise ShadeformError("donor environment line exceeds its bound")
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise ShadeformError("donor environment assignment is malformed")
+        key, value = line.split("=", 1)
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) is None:
+            raise ShadeformError("donor environment key is malformed")
+        if key in MUTATION_ENV_KEYS:
+            if key in selected:
+                raise ShadeformError("donor environment selected key is duplicated")
+            selected[key] = _parse_mutation_env_value(value)
+        else:
+            # Unrelated donor values are deliberately opaque.  Their bytes
+            # have already passed the bounded file/line and global UTF-8,
+            # newline, NUL, and carriage-return checks; donor-specific value
+            # syntax must not become Local BMO parsing or storage.
+            continue
+    if not {"SHADEFORM_API_KEY", "SHADEFORM_SSH"} <= selected.keys():
+        raise ShadeformError("donor environment lacks required mutation keys")
+    return selected
+
+
+def _publish_projected_env(
+    path: Path, payload: bytes,
+) -> None:
+    """Publish projected dotenv bytes relative to one owner-private dirfd.
+
+    The no-overwrite hard link is the publication linearization point.  The
+    bound ancestor snapshot is checked immediately before that link; after
+    publication, later ancestor churn is not converted into an unsafe cleanup
+    attempt and the published inode is never rolled back by pathname.
+    """
+
+    if not OPEN_SUPPORTS_DIR_FD or not STAT_SUPPORTS_DIR_FD or not UNLINK_SUPPORTS_DIR_FD or not LINK_SUPPORTS_DIR_FD:
+        raise ShadeformError("environment publication requires descriptor-relative primitives")
+    parent_descriptor, ancestors = _open_env_parent_bound(
+        path, label="projected environment", require_private=True,
+    )
+    descriptor = -1
+    temporary_name = f".{path.name}.{secrets.token_hex(16)}.tmp"
+    published = False
+    published_identity: tuple[int, int, int, int, int, int] | None = None
+
+    try:
+        fcntl.flock(parent_descriptor, fcntl.LOCK_EX)
+        try:
+            existing = os.open(
+                path.name, os.O_RDONLY | os.O_NOFOLLOW,
+                dir_fd=parent_descriptor,
+            )
+        except FileNotFoundError:
+            existing = -1
+        except OSError as exc:
+            raise ShadeformError("projected environment destination is unsafe") from exc
+        if existing >= 0:
+            try:
+                _require_private_file_identity(
+                    existing, parent_descriptor=parent_descriptor, path=path,
+                    label="projected environment",
+                )
+            finally:
+                os.close(existing)
+            raise ShadeformError("projected environment destination already exists")
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=parent_descriptor,
+        )
+        os.fchmod(descriptor, 0o600)
+        written = 0
+        while written < len(payload):
+            count = os.write(descriptor, payload[written:])
+            if count <= 0:
+                raise OSError("projected environment write made no progress")
+            written += count
+        os.fsync(descriptor)
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_size != len(payload)
+        ):
+            raise ShadeformError("projected environment temporary file is unsafe")
+        # Keep the temporary descriptor open through publication so its exact
+        # inode is retained as the only identity that may be accepted below.
+        published_identity = (
+            info.st_dev, info.st_ino, info.st_mode,
+            info.st_uid, info.st_nlink, info.st_size,
+        )
+        if not _env_ancestors_stable(
+            ancestors, allow_direct_parent_nlink_increment=True,
+        ):
+            raise ShadeformError("projected environment directory changed before publication")
+        try:
+            os.link(
+                temporary_name, path.name,
+                src_dir_fd=parent_descriptor, dst_dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileExistsError as exc:
+            raise ShadeformError("projected environment destination appeared during publication") from exc
+        os.unlink(temporary_name, dir_fd=parent_descriptor)
+        published = True
+        os.fsync(parent_descriptor)
+        verification = os.open(
+            path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_descriptor,
+        )
+        try:
+            identity = os.fstat(verification)
+            observed_identity = (
+                identity.st_dev, identity.st_ino, identity.st_mode,
+                identity.st_uid, identity.st_nlink, identity.st_size,
+            )
+            if observed_identity != published_identity:
+                raise ShadeformError("projected environment identity changed after publication")
+            if _read_private_file_at(
+                verification,
+                parent_descriptor=parent_descriptor,
+                path=path,
+                limit=MAX_MUTATION_ENV_BYTES,
+                label="projected environment",
+            ) != payload:
+                raise ShadeformError("projected environment verification failed")
+        finally:
+            os.close(verification)
+        return None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if not published:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary_name, dir_fd=parent_descriptor)
+        with contextlib.suppress(OSError):
+            fcntl.flock(parent_descriptor, fcntl.LOCK_UN)
+        os.close(parent_descriptor)
+
+
+def project_mutation_env(
+    source: Path, destination: Path,
+) -> dict[str, object]:
+    """Project selected donor assignments into a new owner-private dotenv.
+
+    This is a one-way, offline migration helper.  It never invokes a provider,
+    reads the process environment, or returns assignment values.
+    """
+
+    source_path = Path(os.path.abspath(os.fspath(source)))
+    destination_path = Path(os.path.abspath(os.fspath(destination)))
+    if source_path == destination_path:
+        raise ShadeformError("donor and projected environment must differ")
+    selected = _parse_mixed_env_source(_read_mixed_env_source(source_path))
+    payload = (
+        "".join(f"{key}={selected[key]}\n" for key in sorted(selected))
+    ).encode("utf-8")
+    if len(payload) > MAX_MUTATION_ENV_BYTES:
+        raise ShadeformError("projected environment exceeds its byte bound")
+    _publish_projected_env(destination_path, payload)
+    return {
+        "status": "published",
+        "selected_key_count": len(selected),
+        "selected_keys": sorted(selected),
+    }
 
 
 def require_env(env: dict[str, str], name: str) -> str:
@@ -1135,7 +1521,7 @@ def _canonical_cost_genesis(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _open_private_canonical_parent(
-    path: Path, *, label: str = "cost ledger",
+    path: Path, *, label: str = "cost ledger", require_private: bool = True,
 ) -> int:
     """Open and identity-bind an existing private canonical parent directory."""
 
@@ -1165,8 +1551,8 @@ def _open_private_canonical_parent(
             or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
             or opened.st_uid != os.getuid()
             or current.st_uid != os.getuid()
-            or stat.S_IMODE(opened.st_mode) & 0o077
-            or stat.S_IMODE(current.st_mode) & 0o077
+            or stat.S_IMODE(opened.st_mode) & (0o077 if require_private else 0o022)
+            or stat.S_IMODE(current.st_mode) & (0o077 if require_private else 0o022)
         ):
             raise ShadeformError(
                 f"{label} parent must be identity-stable and owner-private"
@@ -1184,6 +1570,7 @@ def _require_private_file_identity(
     path: Path,
     label: str,
     maximum_size: int | None = None,
+    require_private_parent: bool = True,
 ) -> os.stat_result:
     """Require one mode-0600 current-user file at an identity-stable path."""
 
@@ -1219,8 +1606,8 @@ def _require_private_file_identity(
         != (parent_current.st_dev, parent_current.st_ino)
         or parent_opened.st_uid != os.getuid()
         or parent_current.st_uid != os.getuid()
-        or stat.S_IMODE(parent_opened.st_mode) & 0o077
-        or stat.S_IMODE(parent_current.st_mode) & 0o077
+        or stat.S_IMODE(parent_opened.st_mode) & (0o077 if require_private_parent else 0o022)
+        or stat.S_IMODE(parent_current.st_mode) & (0o077 if require_private_parent else 0o022)
         or (maximum_size is not None and opened.st_size > maximum_size)
     ):
         raise ShadeformError(
@@ -1236,12 +1623,14 @@ def _read_private_file_at(
     path: Path,
     limit: int,
     label: str,
+    require_private_parent: bool = True,
 ) -> bytes:
     """Read one already-open private file and revalidate its exact path."""
 
     before = _require_private_file_identity(
         descriptor, parent_descriptor=parent_descriptor, path=path,
         label=label, maximum_size=limit,
+        require_private_parent=require_private_parent,
     )
     os.lseek(descriptor, 0, os.SEEK_SET)
     chunks: list[bytes] = []
@@ -1257,6 +1646,7 @@ def _read_private_file_at(
     after = _require_private_file_identity(
         descriptor, parent_descriptor=parent_descriptor, path=path,
         label=label, maximum_size=limit,
+        require_private_parent=require_private_parent,
     )
     if (
         (before.st_dev, before.st_ino, before.st_size)
@@ -2567,10 +2957,11 @@ def create_keypair(directory: Path) -> tuple[Path, str]:
     directory.chmod(stat.S_IRWXU)
     private = directory / "id_ed25519"
     subprocess.run(
-        ["ssh-keygen", "-t", "ed25519", "-N", "", "-q", "-f", str(private)],
+        [_verified_executable("ssh-keygen"), "-t", "ed25519", "-N", "", "-q", "-f", str(private)],
         check=True,
         capture_output=True,
         timeout=30,
+        env=_secure_subprocess_env(),
     )
     private.chmod(stat.S_IRUSR | stat.S_IWUSR)
     return private, private.with_suffix(".pub").read_text(encoding="utf-8").strip()
@@ -3578,7 +3969,11 @@ def acquire_pinned_host_key(info: dict[str, Any], known_hosts: Path, *, provider
         "",
     )
     def scan_once() -> list[str]:
-        scan = subprocess.run(["ssh-keyscan", "-T", "15", "-p", str(port), ip], check=False, capture_output=True, text=True, timeout=30)
+        scan = subprocess.run(
+            [_verified_executable("ssh-keyscan"), "-T", "15", "-p", str(port), ip],
+            check=False, capture_output=True, text=True, timeout=30,
+            env=_secure_subprocess_env(),
+        )
         if scan.returncode != 0 or not scan.stdout.strip():
             raise ShadeformError("bounded host-key acquisition failed")
         return [line.strip() for line in scan.stdout.splitlines() if line.strip() and not line.lstrip().startswith("#")]
@@ -3603,7 +3998,11 @@ def acquire_pinned_host_key(info: dict[str, Any], known_hosts: Path, *, provider
     fingerprint_lines: dict[str, list[str]] = {}
     for line in sorted(first_keys):
         fields = line.split()
-        calculated = subprocess.run(["ssh-keygen", "-lf", "-", "-E", "sha256"], input=f"{fields[1]} {fields[2]}\n", check=False, capture_output=True, text=True, timeout=15)
+        calculated = subprocess.run(
+            [_verified_executable("ssh-keygen"), "-lf", "-", "-E", "sha256"],
+            input=f"{fields[1]} {fields[2]}\n", check=False, capture_output=True,
+            text=True, timeout=15, env=_secure_subprocess_env(),
+        )
         if calculated.returncode != 0 or len(calculated.stdout.split()) < 2:
             raise ShadeformError("host-key fingerprint calculation failed")
         fingerprint_lines.setdefault(calculated.stdout.split()[1], []).append(line)
@@ -3626,6 +4025,8 @@ def acquire_pinned_host_key(info: dict[str, Any], known_hosts: Path, *, provider
 
 def _transport_options(known_hosts: Path) -> list[str]:
     return [
+        "-F",
+        "/dev/null",
         "-o",
         "BatchMode=yes",
         "-o",
@@ -3641,11 +4042,11 @@ def _transport_options(known_hosts: Path) -> list[str]:
         "-o",
         "TCPKeepAlive=yes",
         "-o",
-        "ControlMaster=auto",
+        "ControlMaster=no",
         "-o",
-        "ControlPath=/tmp/ep-cm-%C",
+        "ControlPath=none",
         "-o",
-        "ControlPersist=600",
+        "ControlPersist=no",
         "-o",
         "IdentitiesOnly=yes",
     ]
@@ -3667,7 +4068,7 @@ def _endpoint(info: dict[str, Any]) -> tuple[str, str, Any]:
 def ssh_base(info: dict[str, Any], identity: Path, known_hosts: Path) -> list[str]:
     ip, user, port = _endpoint(info)
     return [
-        "ssh",
+        _verified_executable("ssh"),
         *_transport_options(known_hosts),
         "-i",
         str(identity),
@@ -3680,7 +4081,7 @@ def ssh_base(info: dict[str, Any], identity: Path, known_hosts: Path) -> list[st
 def scp_base(info: dict[str, Any], identity: Path, known_hosts: Path) -> list[str]:
     _, _, port = _endpoint(info)
     return [
-        "scp",
+        _verified_executable("scp"),
         "-q",
         *_transport_options(known_hosts),
         "-i",
