@@ -248,6 +248,40 @@ class ShadeformMutationEnvironmentTests(unittest.TestCase):
         with self.assertRaises(sf.ShadeformError):
             sf.project_mutation_env(self.env, destination)
 
+    def test_project_root_env_is_refused_but_private_secrets_layout_is_accepted(self) -> None:
+        self._write_donor("SHADEFORM_API_KEY=api\nSHADEFORM_SSH=ssh\n")
+        repository = self.root / "repository"
+        repository.mkdir(mode=0o755)
+        root_env = repository / ".env"
+        with self.assertRaisesRegex(sf.ShadeformError, "owner-private"):
+            sf.project_mutation_env(self.env, root_env)
+        self.assertFalse(root_env.exists())
+
+        secrets_directory = repository / ".secrets"
+        secrets_directory.mkdir(mode=0o700)
+        protected_env = secrets_directory / "shadeform.env"
+        report = sf.project_mutation_env(self.env, protected_env)
+        self.assertEqual(report["selected_key_count"], 2)
+        self.assertEqual(protected_env.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(set(sf.load_env(protected_env)), {"SHADEFORM_API_KEY", "SHADEFORM_SSH"})
+
+    def test_mutation_entrypoints_default_to_ignored_private_layout(self) -> None:
+        self.assertEqual(sf.MUTATION_ENV_FILE, sf.ROOT / ".secrets" / "shadeform.env")
+        ignored = (sf.ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+        self.assertIn(".secrets/", ignored)
+        instructions = (sf.ROOT / "scripts/shadeform/README.md").read_text(encoding="utf-8")
+        self.assertIn("mkdir -m 700 .secrets", instructions)
+        self.assertNotIn("chmod 700 .secrets", instructions)
+        for relative in (
+            "scripts/j1m_orchestrator.py",
+            "scripts/shadeform_teardown.py",
+            "scripts/shadeform_watchdog.py",
+            "scripts/shadeform/remote_external_tools.py",
+        ):
+            source = (sf.ROOT / relative).read_text(encoding="utf-8")
+            self.assertIn("MUTATION_ENV_FILE", source, relative)
+            self.assertNotIn('ROOT / ".env"', source, relative)
+
     def test_projection_refuses_ancestor_change_and_missing_capability(self) -> None:
         self._write_donor("SHADEFORM_API_KEY=api\nSHADEFORM_SSH=ssh\n")
         destination = self.root / "projected.env"

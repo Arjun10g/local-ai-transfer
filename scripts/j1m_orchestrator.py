@@ -1465,7 +1465,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--env-file", type=Path, default=ROOT / ".env")
+    parser.add_argument("--env-file", type=Path, default=sf.MUTATION_ENV_FILE)
     parser.add_argument("--config", type=Path, default=j1m_runner.DEFAULT_CONFIG)
     parser.add_argument("--phase-id", default="j1m-proving-run")
     parser.add_argument("--run-id", default="J1M")

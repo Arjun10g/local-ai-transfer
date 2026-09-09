@@ -87,6 +87,8 @@ def _deadline_windows(*, now_monotonic: float, now_epoch: float, max_seconds: fl
 
 
 def main(argv: list[str] | None = None) -> int:
+    from scripts import shadeform_lifecycle as shadeform
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--phase-id", required=True)
     parser.add_argument("--instance-id")
@@ -94,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-seconds", required=True, type=float)
     parser.add_argument("--deadline-epoch", type=float)
     parser.add_argument("--provider-delete-deadline-epoch", type=float)
-    parser.add_argument("--env-file", type=Path, default=ROOT / ".env")
+    parser.add_argument("--env-file", type=Path, default=shadeform.MUTATION_ENV_FILE)
     parser.add_argument("--launcher-start-marker")
     parser.add_argument("--ownership-nonce")
     parser.add_argument("--ssh-key-id")
@@ -114,7 +116,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--os-image")
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     args = parser.parse_args(argv)
-    from scripts import shadeform_lifecycle as shadeform
     from scripts.shadeform_teardown import teardown_recovered_exact
     try:
         shadeform.validate_phase_id(args.phase_id)

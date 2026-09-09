@@ -22,7 +22,10 @@ from scripts import shadeform_lifecycle as lifecycle
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True, help="mixed donor dotenv path")
-    parser.add_argument("--destination", type=Path, required=True, help="new owner-private dotenv path")
+    parser.add_argument(
+        "--destination", type=Path, required=True,
+        help="new dotenv path beneath an existing current-user mode-0700 directory",
+    )
     args = parser.parse_args(argv)
     try:
         report = lifecycle.project_mutation_env(

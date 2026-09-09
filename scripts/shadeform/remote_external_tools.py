@@ -1196,7 +1196,7 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--phase-id", default="qa-remote-tools")
     parser.add_argument("--run-id", default="remote-tools-001")
-    parser.add_argument("--env-file", type=Path, default=ROOT / ".env")
+    parser.add_argument("--env-file", type=Path, default=shadeform.MUTATION_ENV_FILE)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--runtime-hours", type=float, default=DEFAULT_RUNTIME_HOURS)
     parser.add_argument("--fuzz-cases", type=int, default=DEFAULT_FUZZ_CASES)

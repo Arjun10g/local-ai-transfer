@@ -52,6 +52,7 @@ from types import MappingProxyType
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+MUTATION_ENV_FILE = ROOT / ".secrets" / "shadeform.env"
 API_BASE = "https://api.shadeform.ai/v1"
 MAX_PROVIDER_RESPONSE_BYTES = 1_048_576
 RUNTIME_ROOT = ROOT / "experiments" / "runtime"

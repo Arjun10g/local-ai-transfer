@@ -38,6 +38,34 @@ python scripts/shadeform/readonly_preflight.py \
 The script deliberately does not invent rates. A catalogue profile must supply
 `hourly_usd`; missing/invalid rates are excluded from candidates.
 
+## Protected mutation environment
+
+The read-only preflight's project-root `.env` input is not the credential-file
+layout for provider mutations. Mutation and recovery commands default to
+`.secrets/shadeform.env`. The `.secrets/` directory is ignored by Git and must
+already be a current-user, non-symlink directory with exact mode `0700`; the
+projected file is created once with exact mode `0600`. The migration helper
+deliberately does not create or chmod the directory, overwrite an existing
+destination, or relax these checks.
+
+From the repository root, prepare the directory and perform the offline,
+one-way projection explicitly:
+
+```text
+mkdir -m 700 .secrets
+python3 scripts/shadeform/migrate_env.py \
+  --source "/path/to/mixed-donor.env" \
+  --destination .secrets/shadeform.env
+```
+
+`mkdir` must succeed by creating a new directory; do not follow it with a blind
+`chmod` when `.secrets` already exists. The migration command independently
+revalidates the complete path and refuses links or unsafe metadata. Do not use project-root `.env`
+for a mutation command: a normal mode-`0755` repository root is intentionally
+too broad to be the direct parent of credential material. An explicit
+`--env-file` override is permitted only when its direct parent satisfies the
+same mode-`0700`, current-user, non-symlink contract.
+
 ## Remote external-tools QA runner
 
 `remote_external_tools.py` is the dedicated, plan-first Shadeform wrapper for

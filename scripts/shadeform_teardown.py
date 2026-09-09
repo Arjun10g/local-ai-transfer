@@ -705,7 +705,7 @@ def _ensure_recovery_pending_cost(record: shadeform.OwnedResource) -> dict[str, 
 def teardown_recovered_exact(
     record: shadeform.OwnedResource,
     *,
-    env_file: Path = ROOT / ".env",
+    env_file: Path = shadeform.MUTATION_ENV_FILE,
     salvage: Path | None = None,
     salvage_destination: Path = ROOT / "experiments" / "results",
     deadline: float | None = None,
@@ -731,7 +731,7 @@ def teardown_recovered_exact(
         )
 
 
-def teardown_exact(phase_id: str, instance_id: str, *, env_file: Path = ROOT / ".env", salvage: Path | None = None, salvage_destination: Path = ROOT / "experiments" / "results", deadline: float | None = None) -> dict[str, object]:
+def teardown_exact(phase_id: str, instance_id: str, *, env_file: Path = shadeform.MUTATION_ENV_FILE, salvage: Path | None = None, salvage_destination: Path = ROOT / "experiments" / "results", deadline: float | None = None) -> dict[str, object]:
     phase_id = shadeform.validate_phase_id(phase_id)
     exact = shadeform.validate_resource_id(instance_id, field="requested instance id")
     with shadeform.phase_cleanup_lock(phase_id):
@@ -1079,7 +1079,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--phase-id", required=True)
     parser.add_argument("--instance-id", required=True)
-    parser.add_argument("--env-file", type=Path, default=ROOT / ".env")
+    parser.add_argument("--env-file", type=Path, default=shadeform.MUTATION_ENV_FILE)
     parser.add_argument("--salvage", type=Path)
     parser.add_argument("--deadline-epoch", type=float)
     args = parser.parse_args(argv)
