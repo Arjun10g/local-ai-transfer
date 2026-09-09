@@ -2,9 +2,10 @@
 
 ## Current governance snapshot — 2026-09-08
 
-- Exact baseline is `main@ec84d9eb36a45ab3756ed7a78970d86fd94ac58d`; production
-  ActionJournal authority/transport remains unavailable and overall state is
-  `NOT_READY`.
+- Audited integrated source baseline is candidate
+  `d195235b6a370d377785b6340b15ebc8e47585e3`; this docs descendant is not a
+  self-referential source hash. Production ActionJournal authority/transport
+  remains unavailable and overall state is `NOT_READY`.
 - Owner authority `7128278` and event-cap alignment `12e722a` are source-merged;
   the event cap is 16, not the historical 32 declaration. The inert dispatch
   lease `5bef3cd` is also merged but has no proof issuer, process mutation,
@@ -13,6 +14,12 @@
   `83cffab` and `089d05d`, with 31/31 postmerge integration. Strict lifecycle
   test sync `0bbfc77` records 117 lifecycle tests plus separately scoped
   related audit evidence.
+- Doubly accepted Graph composition/auth (`55c8a75`), strict Shadeform env
+  hardening (`e3b7238`), and the manual Graph resolution guard (`48312bf`) are
+  integrated by `d195235`; Graph auth/read source is present but not
+  live-proven, journalless writes refuse before preview, and manual resolution
+  requires provider proof. These source facts do not activate a production
+  journal, proof issuer, provider, or target.
 - Remote execution remains false; its inert hardening `a9d2388` allows only two
   no-model canary probes, with no fall-through/direct execution. External
   salvage is unavailable. Read-only ledger preflight is source-merged by
@@ -26,11 +33,11 @@
   at `71537d0` after two final source accepts, but remains inert with no native
   bridge, proof issuer, live process, or product activation. Legacy parallel
   journal types are removed. Phase-2b is design-only/in progress. The
-  final postmerge checks report broad Node 343/342/0/1 TODO and independent Node
-  187/186/0/1 same TODO (parent-directory replacement race limitation), Python
-  241/241, and diff-check pass. QA discovered 54 with 0 missing/unknown, 1
-  skeleton pass, 59 safe-mode skips, and 60 expected release blockers; overall
-  QA remains `BLOCKED`. No compile/live/provider/model/target claim follows.
+  Current bounded evidence is Node 350/349/0/0/1 TODO, Python 663/663/0/0/0
+  across 30/33 safe files, JSON 151/151, and import graph 28 modules/63
+  relative edges/0 cycles. QA discovers 57 with 0 missing/unknown and 63
+  records (1 PASS/62 expected SKIP); overall QA remains `BLOCKED`. No
+  compile/live/provider/model/target claim follows.
 
 ## HISTORICAL / SUPERSEDED governance snapshot — 2026-09-05
 

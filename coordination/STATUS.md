@@ -2,50 +2,37 @@
 
 ## Current governance snapshot — 2026-09-08
 
-- Authoritative source baseline: `main@ec84d9eb36a45ab3756ed7a78970d86fd94ac58d`.
-- Overall release/full-access state remains `BLOCKED` / `NOT_READY`. No compile,
-  live-provider, model-load, Windows-target, production, or target evidence is
-  claimed by this documentation refresh.
-- Accepted source merges, each independently scoped: owner authority
-  `7128278`; ActionJournal event-cap alignment `12e722a`; production evaluation
-  profile `b13deb5` (current fixture identity: 33 tools, 37 cases,
-  `max_cases=64` as a ceiling, never a trimming instruction); ledger preflight
-  `83cffab` with display-prefix fix `089d05d`; and phase-2a single-owner
-  topology `2ad3006` from `03885df`; strict J1M lifecycle test sync `0bbfc77`;
-  and phase-3 controller arbitration `71537d0` after the `356b97b` and
-  `4f8162e` source repairs. These source facts do not add runtime wiring or
-  gate approval.
-- Historical evaluation identities remain historical and are not combined:
-  13/32 and 28/32/11/34 are prior profiles/results, not current acceptance.
-  Remote execution remains false; the canary is limited to two no-model probes
+- Audited integrated source baseline: `d195235b6a370d377785b6340b15ebc8e47585e3`;
+  this documentation refresh is a descendant and must not be treated as a
+  self-referential source hash. Overall release/full-access state remains
+  `BLOCKED` / `NOT_READY`.
+- The integrated source contains the doubly accepted Graph composition/auth and
+  restart hardening (`55c8a75`), strict Shadeform mutation-env projection and
+  minimized subprocesses (`e3b7238`), and the manual Graph journal-resolution
+  guard (`48312bf`, integrated by `d195235`). Graph auth composition/read paths
+  are source-present but not live-proven; writes without a healthy production
+  ActionJournal refuse before preview, and manual Graph resolution remains
+  blocked without provider proof.
+- Current evaluation identity remains 33 tools/37 cases with `max_cases=64`
+  ceiling semantics. Historical 13/32 and 28/32/11/34 results remain separate.
+  Remote execution is false; only two no-model canary probes are permitted,
   with no fall-through or direct execution.
-- Production ActionJournal authority/transport remains unavailable. The lease
-  boundary has no proof issuer and no success/runtime wiring. External salvage
-  is unavailable and legacy lifecycle is non-green. Ledger preflight source
-  integration passed its bounded post-merge 31/31 checks, but
-  `SAFE_TO_MIGRATE_NOW` remains `NO`: current legacy evidence is
-  parse-refused/unavailable, with no spend authorization or genesis; orphan
-  receipts and unmatched incidents require adjudication. Bookkeeping is not
-  spend authorization. Source-side credential rotation/revocation remains
-  required.
-- Phase-2a single-owner topology is source-merged by `2ad3006` from `03885df`;
-  two independent audits and post-merge source integration passed. Phase-3
-  controller arbitration is also source-merged at `71537d0` after two final
-  source accepts, but remains inert with no native bridge, proof issuer, live
-  process, or product activation. Legacy parallel journal types are removed,
-  tracked tickets and exact IDs are present, and phase-2b remains design-only
-  and in progress, not source-accepted.
-- The merged lifecycle sync records 117 lifecycle tests plus separately scoped
-  related audit evidence in its status packet; no remote/provider/model/live
-  action is implied. Final post-merge checks report broad Node 343 total/342
-  passed/0 failed/1 known TODO and independent Node 187 total/186 passed/0
-  failed/1 same TODO (the parent-directory replacement race limitation), plus
-  Python 241/241 and a passing diff check. QA discovered 54 tests with 0
-  missing/unknown, 1 skeleton pass, 59 safe-mode skips, and 60 expected
-  release blockers; overall QA remains `BLOCKED`. These counts are separately
-  scoped and do not imply compile/live/provider/model/target readiness.
-- Missing hardware receipt/device identity, approved artifact custody, native
-  compile evidence, provider/account approval, and target acceptance remain
+- Production ActionJournal transport/proof authority remains unavailable.
+  External salvage is unavailable and legacy lifecycle is non-green. Ledger
+  preflight remains `SAFE_TO_MIGRATE_NOW=NO`; current evidence is
+  parse-refused/unavailable, with no genesis or spend authorization, and orphan
+  receipts/unmatched incidents require adjudication. Bookkeeping is not spend
+  authorization. Previously exposed credentials require rotation/revocation.
+- Source-only evidence is bounded and separately scoped: Node 350 total,
+  349 passed, 0 failed, 0 skipped, 1 known TODO; Python 663/663 with 0
+  failures/errors/skips across 30/33 safe files; JSON 151/151; import graph
+  28 modules, 63 relative edges, 0 cycles. QA discovers 57 tests with 0
+  missing/unknown and 63 records (1 PASS, 62 expected SKIP); overall QA remains
+  `BLOCKED`. These figures are not compile, live-provider, model, Windows,
+  production, or target evidence.
+- Missing hardware fields, approved HF artifact custody/model-quality evidence,
+  native compile and Windows process/broker evidence, provider/account consent,
+  production bridge/proof adapter/tombstones, and target acceptance remain
   release gates.
 
 The older status bullets below are retained as historical interval evidence and

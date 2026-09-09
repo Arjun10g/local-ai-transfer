@@ -1,5 +1,9 @@
 # Status Packet
 
+> HISTORICAL / SUPERSEDED branch packet. Its component evidence predates the
+> integrated candidate `d195235`; branch-local counts and claims are retained
+> as history and are not current aggregate evidence.
+
 - **Session:** S3
 - **Required model:** GPT-5.6 Luna
 - **Role:** Agent/Tools
@@ -8,7 +12,7 @@
 - **Current phase:** Phase 6 cleanup-order amendment
 - **Primary task ID:** Graph production-composition/restart refusal test slice
 - **Secondary task ID, if any:** None
-- **Task state:** READY_FOR_REVIEW
+- **Task state:** SUPERSEDED_SOURCE_HISTORY (source integrated by `d195235`)
 - **Last merged `main` commit:** `b813709daaed5c77b985e35550a19876eb9faf54`
 
 ## Objective for this work interval

@@ -2,15 +2,19 @@
 
 ## Current governance truth — 2026-09-08
 
-- Source baseline is exact `main@ec84d9eb36a45ab3756ed7a78970d86fd94ac58d`.
+- Audited integrated source baseline is exact candidate
+  `d195235b6a370d377785b6340b15ebc8e47585e3`; this document is its descendant,
+  not a self-referential source hash.
 - The current production evaluation fixture/profile is 33 tools and 37 cases;
   `max_cases=64` is a ceiling, not a request to trim. Historical 13/32 and
   28/32/11/34 profile/results remain separate and are not current acceptance.
 - The inert unmintable dispatch lease and inert remote-canary hardening are
   source-merged (`5bef3cd`, `a9d2388`) but have no proof issuer, process
   mutation, product activation, success/runtime wiring, live execution, or
-  production authority. Remote execution is false;
-  the canary is limited to two no-model probes.
+  production authority. Graph auth composition/read paths are source-present,
+  while durable Graph writes remain refused without a healthy production
+  ActionJournal. Remote execution is false; the canary is limited to two
+  no-model probes.
 - External salvage is unavailable and legacy lifecycle is non-green. Read-only
   ledger preflight and its canonical-prefix fix are source-merged (`83cffab`,
   `089d05d`) with 31/31 postmerge integration, but `SAFE_TO_MIGRATE_NOW` remains
@@ -23,12 +27,11 @@
   arbitration is merged at `71537d0` after two final source accepts, but remains
   inert with no native bridge, proof issuer, process mutation, product
   activation, or live process. Phase-2b is design-only/in progress, not
-  source-accepted. Strict lifecycle sync `0bbfc77` records 117 lifecycle tests
-  plus separately scoped related audit evidence. Final checks report broad Node
-  343/342/0/1 TODO and independent Node 187/186/0/1 same TODO (parent-directory
-  replacement race), Python 241/241, and diff-check pass. QA discovered 54
-  with 0 missing/unknown, 1 skeleton pass, 59 safe-mode skips, and 60 expected
-  release blockers; overall QA remains `BLOCKED` and no full suite is green.
+  source-accepted. Current bounded evidence is Node 350/349/0/0/1 TODO,
+  Python 663/663/0/0/0 across 30/33 safe files, JSON 151/151, and import graph
+  28 modules/63 relative edges/0 cycles. QA discovers 57 with 0 missing/unknown
+  and 63 records (1 PASS/62 expected SKIP); overall QA remains `BLOCKED` and no
+  full suite is green.
   Bookkeeping is not spend authorization. Credentials require source-side
   rotation/revocation.
 - The model-family/quantization decision below remains accepted only as a

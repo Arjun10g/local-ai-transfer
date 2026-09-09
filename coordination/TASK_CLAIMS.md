@@ -7,7 +7,13 @@ not a release or live-readiness approval. `PENDING_INDEPENDENT_AUDIT` and
 retains a historical task without making it current authority;
 `BLOCKED_BELOW_GATE` records evidence that failed or cannot satisfy its gate.
 
-Current claims are reconciled to exact `main@ec84d9eb36a45ab3756ed7a78970d86fd94ac58d`.
+Current claims are reconciled to audited integrated source candidate
+`d195235b6a370d377785b6340b15ebc8e47585e3`; this docs descendant is not a
+self-referential source hash. The current integrated evidence is Node
+350/349/0/0/1 TODO, Python 663/663/0/0/0 across 30/33 safe files, JSON
+151/151, and import graph 28 modules/63 relative edges/0 cycles. QA discovers
+57 with 0 missing/unknown and 63 records (1 PASS/62 expected SKIP); overall QA
+remains `BLOCKED`.
 The current evaluation profile identity is 33 tools/37 cases with
 `max_cases=64` ceiling semantics. Historical 13/32 and 28/32/11/34 results
 remain separate. Remote execution is false; only two no-model canary probes
@@ -86,4 +92,7 @@ target execution; bookkeeping is not spend authorization.
 | LEDGER-MIGRATION-PREFLIGHT | S2 | `main` (merged from `luna/ledger-migration-preflight-mainline-v2`) | MERGED_SOURCE_PENDING_GATE | SOL-003, B-006 | S0, S4 | read-only preflight source `b777b54`, display-prefix fix `310fd1d`, merge `83cffab` plus `089d05d`; post-merge 31/31 source integration checks passed, but `SAFE_TO_MIGRATE_NOW=NO`, current evidence is parse-refused/unavailable, orphan receipts/unmatched incidents require adjudication, and no genesis/spend-authority/provider claim is permitted |
 | SUPERVISOR-TOPOLOGY-PHASE2A | S1 | `main` (merged from `luna/design-a-supervisor-single-owner-v1`) | MERGED_SOURCE_PENDING_GATE | B-005-SOURCE, SOL-003 | S0, S4 | source `03885df`, merge `2ad3006`; two independent audits and post-merge source integration passed; legacy parallel journal removed, tracked tickets and exact IDs present, but proof issuer/process mutation/product activation and compile/live/target evidence remain absent; phase-2b is design-only/in progress |
 | J1M-STRICT-LIFECYCLE-SYNC | S2 | `main` (merged from `luna/j1m-strict-lifecycle-test-sync-v1`) | MERGED_SOURCE_PENDING_GATE | SOL-003, MODEL-006 | S0, S4 | source `f0ea73a`, merge `0bbfc77`; 117 lifecycle tests plus separately scoped related audit evidence; no remote/provider/model/live execution or readiness approval |
-| CONTROLLER-ARBITRATION-PHASE3 | S3 | `main` (merged from `luna/design-a-controller-arbitration-v1`) | MERGED_SOURCE_PENDING_GATE | SUPERVISOR-TOPOLOGY-PHASE2A, SOL-003 | S0, S4 | source `356b97b`, repairs `4f8162e`/`71537d0`; two final source accepts; inert controller arbitration with no native bridge, proof issuer, live process, or product activation; final broad Node 343/342/0/1 TODO, independent Node 187/186/0/1 same TODO, Python 241/241, and QA 54 discovered/0 missing-unknown/1 skeleton pass/59 skips/60 blockers remain separate and overall blocked |
+| CONTROLLER-ARBITRATION-PHASE3 | S3 | `main` (merged from `luna/design-a-controller-arbitration-v1`) | MERGED_SOURCE_PENDING_GATE | SUPERVISOR-TOPOLOGY-PHASE2A, SOL-003 | S0, S4 | source `356b97b`, repairs `4f8162e`/`71537d0`; two final source accepts; inert controller arbitration with no native bridge, proof issuer, live process, or product activation; current integrated QA 57 discovered/0 missing-unknown/63 records (1 PASS/62 expected SKIP), overall blocked; broader Node/Python/JSON/import evidence is separately recorded in current snapshots |
+| GRAPH-PRODUCTION-COMPOSITION | S3 | `main` (merged from `luna/graph-production-composition-restart-v1`) | MERGED_SOURCE_PENDING_GATE | TOOL-023, SOL-003 | S0, S4 | doubly accepted source `55c8a75`, integrated by `d195235`; Graph auth/read composition and restart-safe host boundary are source-present, but no live Graph account/consent/provider receipt or production readiness is claimed |
+| GRAPH-MANUAL-RESOLUTION-GUARD | S3 | `main` (merged from `luna/graph-manual-resolution-guard-v1`) | MERGED_SOURCE_PENDING_GATE | GRAPH-PRODUCTION-COMPOSITION, SOL-003 | S0, S4 | source `48312bf`, integrated by `d195235`; manual Graph completed/failed-definitive resolution refuses without provider proof, with no live/provider or journal transport evidence |
+| SHADEFORM-ENV-HARDENING | S2 | `main` (merged from `luna/shadeform-env-hardening-v1`) | MERGED_SOURCE_PENDING_GATE | SOL-003 | S0, S4 | doubly accepted source `e3b7238`, integrated by `d195235`; strict donor env projection, owner-private destination, and minimal subprocess environments are source-present; no donor values, provider, network, or release gate is authorized |

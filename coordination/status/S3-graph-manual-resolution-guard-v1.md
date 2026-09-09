@@ -1,11 +1,15 @@
 # Status Packet
 
+> HISTORICAL / SUPERSEDED branch packet. Its standalone packet state predates
+> integration at `d195235`; branch-local evidence is retained as history and
+> is not current aggregate evidence.
+
 - **Session:** S3
 - **Role:** Agent/Tools
 - **Branch/worktree:** `luna/graph-manual-resolution-guard-v1` / `wt-graph-manual-resolution-guard-v1`
 - **Task:** Fail-closed manual resolution for ambiguous Microsoft Graph mutations
 - **Base:** `b813709daaed5c77b985e35550a19876eb9faf54`
-- **State:** READY_FOR_REVIEW
+- **State:** SUPERSEDED_SOURCE_HISTORY (source integrated by `d195235`)
 
 ## Scope
 

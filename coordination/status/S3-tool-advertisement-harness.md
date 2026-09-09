@@ -2,7 +2,7 @@
 
 ## Historical-status banner — superseded 2026-09-08
 
-This packet predates the current `main@ec84d9e` truth refresh. Its 28-tool
+This packet predates the current integrated candidate `d195235`. Its 28-tool
 catalogue and interval claims are historical. The current evaluation fixture
 identity is 33 tools and 37 cases with `max_cases=64` ceiling semantics; this
 does not authorize runtime advertisement, live provider use, compile, or target
