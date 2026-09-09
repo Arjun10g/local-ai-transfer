@@ -175,7 +175,7 @@ function snapshotJournalMethods(journal) {
         if (descriptor) break;
         current = Object.getPrototypeOf(current);
       }
-      if (!descriptor || !Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'function' || descriptor.get !== undefined || descriptor.set !== undefined) throw new TypeError('actionJournal does not implement the durable transition contract');
+      if (!descriptor || !Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'function' || utilTypes.isProxy(descriptor.value) || descriptor.get !== undefined || descriptor.set !== undefined) throw new TypeError('actionJournal does not implement the durable transition contract');
       snapshot[name] = descriptor.value.bind(journal);
     }
   } catch { throw new TypeError('actionJournal does not implement the durable transition contract'); }

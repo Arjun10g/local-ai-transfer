@@ -206,6 +206,24 @@ test('journal method snapshot rejects accessors and ignores post-construction re
   assert.throws(() => new ConversationController({ engine: engineFor('test.write', {}), actionJournal: accessor, toolRegistry: { 'test.write': tool('test.write', 'create', async () => makeToolResult({ id: 'call_native_01', name: 'test.write', status: 'ok', text: '{}' })) } }), /actionJournal does not implement/u);
   const proxied = new Proxy(new MockJournal(), {});
   assert.throws(() => new ConversationController({ engine: engineFor('test.write', {}), actionJournal: proxied, toolRegistry: { 'test.write': tool('test.write', 'create', async () => makeToolResult({ id: 'call_native_01', name: 'test.write', status: 'ok', text: '{}' })) } }), /actionJournal does not implement/u);
+
+  const methodNames = ['health', 'prepare', 'authorize', 'dispatch', 'acknowledge', 'beginReconciliation', 'complete', 'cancel', 'failDefinitive', 'markUnknown'];
+  for (const methodName of methodNames) {
+    const hostile = new MockJournal(); hostile[methodName] = new Proxy(hostile[methodName], { apply() { throw new Error('callable proxy must be rejected'); } });
+    assert.throws(() => new ConversationController({ engine: engineFor('test.write', {}), actionJournal: hostile, toolRegistry: { 'test.write': tool('test.write', 'create', async () => makeToolResult({ id: 'call_native_01', name: 'test.write', status: 'ok', text: '{}' })) } }), /actionJournal does not implement/u);
+
+    const inheritedHostile = new MockJournal();
+    const inheritedPrototype = Object.create(Object.getPrototypeOf(inheritedHostile));
+    Object.defineProperty(inheritedPrototype, methodName, { configurable: true, value: new Proxy(Object.getPrototypeOf(inheritedHostile)[methodName], { apply() { throw new Error('inherited callable proxy must be rejected'); } }) });
+    Object.setPrototypeOf(inheritedHostile, inheritedPrototype);
+    assert.throws(() => new ConversationController({ engine: engineFor('test.write', {}), actionJournal: inheritedHostile, toolRegistry: { 'test.write': tool('test.write', 'create', async () => makeToolResult({ id: 'call_native_01', name: 'test.write', status: 'ok', text: '{}' })) } }), /actionJournal does not implement/u);
+  }
+
+  const stable = new MockJournal({ nativeOnly: false }); const proxyCalls = Object.fromEntries(methodNames.map(name => [name, 0]));
+  const stableController = new ConversationController({ engine: engineFor('test.write', {}), actionJournal: stable, toolRegistry: { 'test.write': tool('test.write', 'create', async () => makeToolResult({ id: 'call_native_01', name: 'test.write', status: 'ok', text: '{}' })) } });
+  for (const methodName of methodNames) stable[methodName] = new Proxy(stable[methodName], { apply(target, thisArg, args) { proxyCalls[methodName] += 1; return Reflect.apply(target, thisArg, args); } });
+  const stableResult = await runAsPlatform('linux', () => stableController.runTurn({ sessionId: 'ses_journal_proxy_replace', requestId: 'req_journal_proxy_replace', message: 'write it' }));
+  assert.equal(stableResult.state, 'COMPLETED'); assert.deepEqual(proxyCalls, Object.fromEntries(methodNames.map(name => [name, 0])));
 });
 
 test('registry snapshots defeat post-admission mutation and public map replacement', async () => {
