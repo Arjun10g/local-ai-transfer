@@ -289,6 +289,30 @@ test('HostServer applies the same explicit auth projection to status and every c
     const response = await fetch(`${failingAddress.url}/api/provider-auth/microsoft_graph/${action}`, { method: 'POST', headers: failingHeaders, body: '{}' });
     assertNoCredentialValues(await response.json(), [rawError]);
   }
+
+  const factorySentinel = 'provider-auth-factory-secret-error';
+  const factoryHost = new HostServer({ controller: { cancelActive() {} }, engine: { async shutdown() {} }, providerAuth: () => { throw new Error(factorySentinel); } });
+  const factoryAddress = await factoryHost.listen(0); t.after(() => factoryHost.close());
+  const factoryHeaders = authHeaders(factoryAddress);
+  const factoryGet = await fetch(`${factoryAddress.url}/api/provider-auth/microsoft_graph`, { headers: factoryHeaders });
+  assert.equal(factoryGet.status, 200); assert.deepEqual((await factoryGet.json()).microsoft_graph, { state: 'unavailable', prompt: null, account_verified: false });
+  for (const action of ['start', 'cancel', 'clear']) {
+    const response = await fetch(`${factoryAddress.url}/api/provider-auth/microsoft_graph/${action}`, { method: 'POST', headers: factoryHeaders, body: '{}' });
+    assert.equal(response.status, 409); assertNoCredentialValues(await response.json(), [factorySentinel]);
+  }
+
+  const getterSentinel = 'provider-auth-getter-secret-error';
+  const providerAuthValue = {};
+  Object.defineProperty(providerAuthValue, 'microsoft_graph', { get() { throw new Error(getterSentinel); } });
+  const getterHost = new HostServer({ controller: { cancelActive() {} }, engine: { async shutdown() {} }, providerAuth: () => providerAuthValue });
+  const getterAddress = await getterHost.listen(0); t.after(() => getterHost.close());
+  const getterHeaders = authHeaders(getterAddress);
+  const getterGet = await fetch(`${getterAddress.url}/api/provider-auth/microsoft_graph`, { headers: getterHeaders });
+  assert.equal(getterGet.status, 200); assert.deepEqual((await getterGet.json()).microsoft_graph, { state: 'unavailable', prompt: null, account_verified: false });
+  for (const action of ['start', 'cancel', 'clear']) {
+    const response = await fetch(`${getterAddress.url}/api/provider-auth/microsoft_graph/${action}`, { method: 'POST', headers: getterHeaders, body: '{}' });
+    assert.equal(response.status, 409); assertNoCredentialValues(await response.json(), [getterSentinel]);
+  }
 });
 
 test('Graph delegated scopes and operator grants stay bound to account and scope', async () => {
