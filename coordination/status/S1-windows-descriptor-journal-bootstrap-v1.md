@@ -8,7 +8,7 @@
 - **Current phase:** Phase 6 source hardening
 - **Primary task ID:** RUN-WINDOWS-DESCRIPTOR-JOURNAL-BOOTSTRAP
 - **Secondary task ID, if any:** None
-- **Task state:** IN_PROGRESS
+- **Task state:** READY_FOR_REVIEW
 - **Last merged `main` commit:** `d723c43263ee34211abe12c414aefa1c290a3ec1`
 
 ## Objective for this work interval
@@ -29,12 +29,36 @@ activating or packaging native code or asserting Windows/production evidence.
 
 - Created the isolated branch/worktree and read all mandatory repository,
   governance, execution, and coordination instructions in required order.
-- Began source/contract inventory; no native code has been compiled or run.
+- Extended the inert Windows storage boundary with a separate fixed
+  `action-journal-v2.wal` lease matching the descriptor journal v2 header and
+  32 MiB limit.
+- Reused retained no-follow ancestors, fixed local NTFS, protected exact-user
+  DACL, file identity, link/delete/reparse, final-path, and volume validation.
+  Create is atomic `CREATE_NEW`; reopen requires an external trusted volume/file
+  identity and never treats candidate-path metadata as its trust anchor.
+- Added bounded write-through header publication with flush/readback and
+  conservative empty/exact-partial-header reopen. Frame replay and torn-frame
+  recovery remain owned by `DescriptorActionJournal`; native code never
+  truncates or repairs a WAL.
+- Added a noncopyable single-writer lease and one-shot inheritable same-access
+  duplicate. Source-handle inheritance is refused and identity/DACL/size/prefix
+  checks repeat immediately before duplication.
+- Added explicit dormant bridge design and source/protocol/model tests, then
+  registered the new test in the exact QA inventory.
 
 ## Evidence
 
-- Commit: claim commit pending.
-- Tests: not yet run.
+- Commits: claim `06e045e`; implementation `e5b707f`.
+- `python3 -m unittest discover -s tests/native -p
+  'test_windows_*static.py'`: PASS, 236/236.
+- `python3 -m unittest tests.qa.test_safe_runner`: PASS, 20/20.
+- Focused bootstrap/storage/harness/inventory command: PASS, 39/39.
+- `node --test tests/host/descriptor-action-journal.test.mjs
+  tests/host/action-journal-protocol.test.mjs`: PASS, 63/63.
+- `python3 scripts/test/run_qa.py --root . --skip-native`: expected `BLOCKED`;
+  exact inventory 60 discovered / 0 unknown / 0 missing and bounded skeleton
+  scan PASS with no findings. Native/package/target execution stayed skipped.
+- `git diff --check`: PASS.
 - Machine: macOS source/static review only; no Windows equivalence claimed.
 
 ## Findings and changed assumptions
@@ -44,11 +68,20 @@ activating or packaging native code or asserting Windows/production evidence.
   authenticity, or anti-rollback authority.
 - Existing native storage/helper/owner sources are dormant and must remain
   outside product/package/activation graphs in this slice.
+- A Win32 `HANDLE` is not a child-process CRT descriptor. This slice prepares
+  an inheritable duplicate but deliberately does not serialize it as
+  `LAE_ACTION_JOURNAL_FD`, launch a process, or claim Node compatibility.
 
 ## Blockers
 
-- Windows compile, owner/DACL/locking behavior, handle inheritance, crash and
-  target evidence are absent by task constraint.
+- Windows/MSVC compile and static analysis; exact-target owner/DACL/share-mode,
+  short-write/flush/restart, filter-driver, and power-loss tests are absent.
+- A reviewed launcher must use an explicit handle allowlist, convert the
+  inherited `HANDLE` into a readable/writable CRT fd inside the child, prove
+  acknowledgement/ownership transfer, and close every failure path.
+- A durable external identity/anti-rollback anchor is still absent. Existing
+  WAL SHA-256 values detect corruption but do not authenticate or prevent a
+  self-consistent rollback.
 - Production and target readiness remain blocked pending independent native
   build and exact Windows execution.
 
@@ -59,8 +92,8 @@ activating or packaging native code or asserting Windows/production evidence.
 
 ## Next bounded action
 
-Map exact storage/owner/helper seams, then add a fail-closed dormant bootstrap
-contract and source/static tests without touching Graph or process-broker code.
+Independent source/security review, then remote Windows compilation only under
+the existing OFF-by-default inert compile-check gate.
 
 ## Sol action requested
 

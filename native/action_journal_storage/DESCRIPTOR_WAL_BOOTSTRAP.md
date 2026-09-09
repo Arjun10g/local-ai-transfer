@@ -47,4 +47,6 @@ activation switch is present here.
 Remote MSVC compile/static analysis and exact-target Windows tests must still
 prove DACL behavior, sharing exclusion, inheritance allowlisting, CRT/Node fd
 conversion, short-write/flush/restart behavior, filter-driver behavior, and
-power-loss recovery before integration or any readiness claim.
+power-loss recovery before integration or any readiness claim. A durable
+external identity and anti-rollback anchor is also absent: WAL digests detect
+corruption but cannot authenticate or reject a self-consistent older image.
