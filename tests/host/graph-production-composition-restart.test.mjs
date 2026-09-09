@@ -47,6 +47,9 @@ test('production Graph composition has no credential or transport injection path
   assert.equal(engineShutdowns, 0);
   assert.equal(composition.host.server, null);
   assert.equal(Object.hasOwn(composition.externalTools.providerAuthStatus().microsoft_graph, 'accountFingerprint'), true);
+  const issuedStatus = composition.externalTools.providerAuthStatus().microsoft_graph;
+  assert.equal(Object.isFrozen(issuedStatus), true);
+  assert.throws(() => { issuedStatus.accountVerified = true; }, TypeError);
   for (const key of ['token', 'access_token', 'credential_source', 'transport', 'auth_transport']) {
     assert.throws(() => mergeConfig({ providers: { microsoft_graph: { [key]: 'opaque' } } }), /unknown key/u);
   }
@@ -126,7 +129,7 @@ test('new Graph composition has no stale auth, grant, proposal, write ledger, cu
   const authTransport = { request: async request => {
     if (request.path.endsWith('/devicecode')) { firstAuthRequests += 1; return { status: 200, body: { device_code: 'a'.repeat(32), user_code: 'AUTH-1234', verification_uri: 'https://microsoft.com/devicelogin', interval: 5 } }; }
     if (request.path.endsWith('/token')) { firstAuthRequests += 1; return { status: 200, body: { access_token: 'k'.repeat(32), expires_in: 3600, scope: 'User.Read Mail.Read' } }; }
-    firstAuthRequests += 1; return { status: 200, body: { id: '01234567-89ab-4cde-8fab-0123456789ab' } };
+    firstAuthRequests += 1; return { status: 200, body: { id: 'restart-account' } };
   } };
   const authenticated = new MicrosoftGraphProvider({ enabled: true, tenant: 'organizations', clientId, scopes: ['User.Read', 'Mail.Read'], transport: authTransport, sleep: async () => {} });
   await authenticated.startAuth();
@@ -197,7 +200,7 @@ test('authenticated Graph clear removes token, auth fingerprint projection, prom
   const transport = { request: async request => {
     if (request.path.endsWith('/devicecode')) return { status: 200, body: { device_code: 'c'.repeat(32), user_code: 'CLEAR-CODE', verification_uri: 'https://microsoft.com/devicelogin' } };
     if (request.path.endsWith('/token')) return { status: 200, body: { access_token: 'z'.repeat(32), expires_in: 3600, scope: 'User.Read Mail.Read' } };
-    return { status: 200, body: { id: '89abcdef-0123-4567-89ab-cdef01234567' } };
+    return { status: 200, body: { id: 'clear-account' } };
   } };
   const grants = new OperatorGrantStore();
   const provider = new MicrosoftGraphProvider({ enabled: true, permissionProfile: 'full_access', tenant: 'organizations', clientId, scopes: ['User.Read', 'Mail.Read'], transport, grantStore: grants, sleep: async () => {} });
@@ -219,8 +222,8 @@ test('authenticated Graph clear removes token, auth fingerprint projection, prom
   await assert.rejects(() => provider.credentialSource.getAccessToken(), error => error.code === 'provider_unauthorized');
 });
 
-test('Graph account verification rejects noncanonical /me IDs before any account fingerprint is issued', async () => {
-  for (const invalidId of ['                ', 'bad\u0000id', 'arbitrary-account-id']) {
+test('Graph account verification rejects whitespace/control /me IDs while allowing safe string identities', async () => {
+  for (const invalidId of ['                ', 'bad\u0000id', '']) {
     const transport = { request: async request => {
       if (request.path.endsWith('/devicecode')) return { status: 200, body: { device_code: 'v'.repeat(32), user_code: 'VALID-0001', verification_uri: 'https://microsoft.com/devicelogin' } };
       if (request.path.endsWith('/token')) return { status: 200, body: { access_token: 'w'.repeat(32), expires_in: 3600, scope: 'User.Read' } };
@@ -235,10 +238,41 @@ test('Graph account verification rejects noncanonical /me IDs before any account
   }
 });
 
+test('Graph clear detaches learned identity while preserving an explicit account pin', async () => {
+  let identity = 'account-a';
+  const transport = { request: async request => {
+    if (request.path.endsWith('/devicecode')) return { status: 200, body: { device_code: 'p'.repeat(32), user_code: 'PINNED-0001', verification_uri: 'https://microsoft.com/devicelogin' } };
+    if (request.path.endsWith('/token')) return { status: 200, body: { access_token: 'q'.repeat(32), expires_in: 3600, scope: 'User.Read' } };
+    return { status: 200, body: { id: identity } };
+  } };
+  const learned = new MicrosoftGraphProvider({ enabled: true, tenant: 'organizations', clientId, scopes: ['User.Read'], transport, sleep: async () => {} });
+  await learned.startAuth();
+  const accountA = learned.getAccountFingerprint();
+  assert.equal(learned.authStatus().accountVerified, true);
+  learned.clearAuth();
+  assert.equal(learned.getAccountFingerprint(), 'unknown');
+  assert.equal(learned.authStatus().accountVerified, false);
+  identity = 'account-b';
+  await learned.startAuth();
+  assert.notEqual(learned.getAccountFingerprint(), accountA);
+  assert.equal(learned.authStatus().accountVerified, true);
+
+  identity = 'account-a';
+  const pinned = new MicrosoftGraphProvider({ enabled: true, tenant: 'organizations', clientId, scopes: ['User.Read'], accountFingerprint: accountA, transport, sleep: async () => {} });
+  await pinned.startAuth();
+  pinned.clearAuth();
+  assert.equal(pinned.getAccountFingerprint(), accountA);
+  assert.equal(pinned.authStatus().accountVerified, false);
+  identity = 'account-b';
+  await assert.rejects(() => pinned.startAuth(), error => error.code === 'provider_unauthorized');
+  assert.equal(pinned.getAccountFingerprint(), accountA);
+  assert.equal(pinned.authStatus().accountVerified, false);
+});
+
 test('host Graph auth controls expose bounded prompt state but no credential material', async t => {
   let deviceRequests = 0;
   const transport = { request: async request => {
-    if (request.path.endsWith('/devicecode')) { deviceRequests += 1; return { status: 200, body: { device_code: 'd'.repeat(32), user_code: 'ABCD-1234', verification_uri: 'https://microsoft.com/devicelogin', interval: 5 } }; }
+    if (request.path.endsWith('/devicecode')) { deviceRequests += 1; return { status: 200, body: { device_code: 'd'.repeat(32), user_code: 'ABC123XYZ', verification_uri: 'https://microsoft.com/devicelogin', interval: 5 } }; }
     throw new Error('unexpected auth completion');
   } };
   const sleep = (_milliseconds, signal) => new Promise((resolve, reject) => {
@@ -259,6 +293,7 @@ test('host Graph auth controls expose bounded prompt state but no credential mat
   for (let attempt = 0; attempt < 20 && provider.authStatus().state !== 'awaiting_user'; attempt++) await new Promise(resolve => setImmediate(resolve));
   const pending = await request('/api/provider-auth/microsoft_graph');
   assert.equal(pending.body.microsoft_graph.state, 'awaiting_user');
+  assert.equal(pending.body.microsoft_graph.prompt.userCode, 'ABC123XYZ');
   assert.equal(pending.body.microsoft_graph.prompt.userCode.length <= 128, true);
   assert.equal(pending.body.microsoft_graph.prompt.verificationUri.length <= 256, true);
   assertNoCredentialFields(pending.body);
@@ -284,12 +319,16 @@ test('HostServer applies the same explicit auth projection to status and every c
   const get = await fetch(`${address.url}/api/provider-auth/microsoft_graph`, { headers });
   const getBody = await get.json();
   assert.deepEqual(Object.keys(getBody.microsoft_graph).sort(), ['account_verified', 'prompt', 'state']);
+  assert.equal(getBody.microsoft_graph.state, 'unavailable');
+  assert.equal(getBody.microsoft_graph.prompt, null);
   assert.equal(getBody.microsoft_graph.account_verified, false);
   assertNoCredentialValues(getBody, secrets);
   for (const action of ['start', 'cancel', 'clear']) {
     const response = await fetch(`${address.url}/api/provider-auth/microsoft_graph/${action}`, { method: 'POST', headers, body: '{}' });
     const body = await response.json();
     assert.deepEqual(Object.keys(body.status).sort(), ['account_verified', 'prompt', 'state']);
+    assert.equal(body.status.state, 'unavailable');
+    assert.equal(body.status.prompt, null);
     assert.equal(body.status.account_verified, false);
     assertNoCredentialValues(body, secrets);
   }

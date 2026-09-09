@@ -10,7 +10,8 @@ const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const GRAPH_PATH = /^\/v1\.0\/(?:me(?:\/mailFolders\/[^/]+\/messages|\/messages(?:\/[^/]+(?:\/send)?)?|\/chats)?|chats\/[^/]+\/messages(?:\/[^/]+)?|teams\/[^/]+\/channels(?:\/[^/]+\/messages(?:\/[^/]+)?)?)$/u;
 const GRAPH_SCOPES = new Set(['User.Read', 'Mail.Read', 'Mail.ReadWrite', 'Mail.Send', 'Chat.Read', 'Chat.ReadWrite', 'ChatMessage.Send', 'Channel.ReadBasic.All', 'ChannelMessage.Read.All']);
 const AUTH_HEADERS = new Set(['accept', 'authorization', 'content-type', 'prefer', 'if-match']);
-const USER_CODE = /^[A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?$/u;
+const USER_CODE = /^(?=.{1,128}$)[^\s\p{Cc}\p{Cf}]+$/u;
+const SENSITIVE_USER_CODE = /(?:access[_-]?token|device[_-]?code|client[_-]?id|account[_-]?fingerprint|authorization|bearer|raw[_-]?error)/iu;
 
 const safeTenant = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$/u.test(value) && !value.includes('..') && !/[.-]$/u.test(value);
 const safeClientId = value => typeof value === 'string' && GUID.test(value);
@@ -111,7 +112,7 @@ export class MicrosoftDeviceCodeCredential {
     this.ensureCurrent(run);
     let verification;
     try { verification = new URL(device?.body?.verification_uri); } catch { verification = null; }
-    if (typeof device?.status !== 'number' || device.status < 200 || device.status >= 300 || typeof device.body?.device_code !== 'string' || device.body.device_code.length < 1 || device.body.device_code.length > 4096 || /[\u0000-\u001f\u007f]/u.test(device.body.device_code) || typeof device.body?.user_code !== 'string' || !USER_CODE.test(device.body.user_code) || !verification || verification.protocol !== 'https:' || !['microsoft.com', 'www.microsoft.com', 'login.microsoftonline.com'].includes(verification.hostname) || verification.username || verification.password || verification.hash || verification.search) throw new ProviderToolError(device?.status === 429 ? 'provider_rate_limited' : 'provider_unauthorized');
+    if (typeof device?.status !== 'number' || device.status < 200 || device.status >= 300 || typeof device.body?.device_code !== 'string' || device.body.device_code.length < 1 || device.body.device_code.length > 4096 || /[\u0000-\u001f\u007f]/u.test(device.body.device_code) || typeof device.body?.user_code !== 'string' || Buffer.byteLength(device.body.user_code, 'utf8') > 512 || !USER_CODE.test(device.body.user_code) || SENSITIVE_USER_CODE.test(device.body.user_code) || !verification || verification.protocol !== 'https:' || !['microsoft.com', 'www.microsoft.com', 'login.microsoftonline.com'].includes(verification.hostname) || verification.username || verification.password || verification.hash || verification.search) throw new ProviderToolError(device?.status === 429 ? 'provider_rate_limited' : 'provider_unauthorized');
     this.ensureCurrent(run); const expiresAt = this.now() + Math.min(Math.max(Number.isInteger(device.body.expires_in) ? device.body.expires_in : 900, 1), 900) * 1000; this.authPrompt = { userCode: device.body.user_code, verificationUri: verification.toString(), expiresAt }; this.authState = 'awaiting_user'; this.ensureCurrent(run); this.onUserCode?.({ userCode: this.authPrompt.userCode, verificationUri: this.authPrompt.verificationUri }); let interval = Math.min(Math.max(Number.isInteger(device.body.interval) ? device.body.interval : 5, 5), 60);
     while (this.now() < expiresAt) {
       this.ensureCurrent(run); await this.sleep(interval * 1000, signal); this.ensureCurrent(run); checkAborted(signal);

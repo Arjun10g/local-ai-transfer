@@ -5,6 +5,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { sseFrame } from '../agent/assistant-events.mjs';
 import { mergeConfig } from '../agent/config.mjs';
 import { parseStrictJson } from '../agent/tool-envelope.mjs';
+import { readProviderAuthStatus } from '../providers/microsoft-graph.mjs';
 
 const UI_ROOT = join(import.meta.dirname, '..', '..', 'ui');
 const ASSETS = new Map([['/', ['index.html', 'text/html; charset=utf-8']], ['/index.html', ['index.html', 'text/html; charset=utf-8']], ['/app.js', ['app.js', 'text/javascript; charset=utf-8']], ['/styles.css', ['styles.css', 'text/css; charset=utf-8']]]);
@@ -13,7 +14,7 @@ const OPAQUE_ID = /^[A-Za-z0-9_-]{8,96}$/;
 const BOOTSTRAP_NONCE = /^[A-Za-z0-9_-]{43}$/;
 const BOOTSTRAP_TTL_MS = 60_000;
 const AUTH_STATES = new Set(['disabled', 'unconfigured', 'idle', 'requesting_device_code', 'awaiting_user', 'authenticated', 'checking_account', 'expired', 'failed', 'offline', 'unauthorized']);
-const AUTH_USER_CODE = /^[A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?$/u;
+const AUTH_USER_CODE = /^(?=.{1,128}$)[^\s\p{Cc}\p{Cf}]+$/u;
 const AUTH_VERIFICATION_URIS = new Set(['https://microsoft.com/devicelogin', 'https://www.microsoft.com/devicelogin', 'https://login.microsoftonline.com/common/oauth2/deviceauth']);
 
 /** Platform-neutral containment check; avoids assuming `/` on Windows. */
@@ -26,13 +27,15 @@ function json(res, status, value) { const body = JSON.stringify(value); res.writ
 function securityHeaders() { return { 'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'", 'x-content-type-options': 'nosniff', 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'permissions-policy': 'camera=(), microphone=(), geolocation=()' }; }
 function authStatusProjection(value) {
   try {
-    const state = AUTH_STATES.has(value?.state) ? value.state : 'unavailable';
-    const rawPrompt = value?.prompt;
+    const issued = readProviderAuthStatus(value);
+    if (!issued) return { state: 'unavailable', prompt: null, account_verified: false };
+    const state = AUTH_STATES.has(issued.state) ? issued.state : 'unavailable';
+    const rawPrompt = issued.prompt;
     let prompt = null;
     if (rawPrompt && typeof rawPrompt === 'object' && !Array.isArray(rawPrompt) && Object.getPrototypeOf(rawPrompt) === Object.prototype && typeof rawPrompt.userCode === 'string' && AUTH_USER_CODE.test(rawPrompt.userCode) && typeof rawPrompt.verificationUri === 'string' && rawPrompt.verificationUri.length <= 256) {
       try { const verification = new URL(rawPrompt.verificationUri); if (!verification.username && !verification.password && !verification.search && !verification.hash && AUTH_VERIFICATION_URIS.has(verification.toString())) prompt = { userCode: rawPrompt.userCode, verificationUri: verification.toString() }; } catch {}
     }
-    return { state, prompt, account_verified: state === 'authenticated' && value?.accountVerified === true };
+    return { state, prompt, account_verified: state === 'authenticated' && issued.accountVerified === true };
   } catch { return { state: 'unavailable', prompt: null, account_verified: false }; }
 }
 function resolveAuthControl(providerAuth) { try { return providerAuth?.()?.microsoft_graph ?? null; } catch { return null; } }
