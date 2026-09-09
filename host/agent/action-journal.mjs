@@ -19,6 +19,7 @@ const AUTHORIZATION = new Set(['policy', 'user_confirmation', 'operator_grant'])
 const RESOLUTIONS = new Set(['user_denied', 'request_cancelled', 'pre_dispatch_failure', 'dispatch_ambiguous', 'provider_acknowledged', 'completed', 'startup_recovery', 'manual_completed', 'manual_failed_definitive']);
 const TERMINAL = new Set(['completed', 'cancelled', 'failed_definitive']);
 const ACTIVE = new Set(ACTION_STATES.filter(state => !TERMINAL.has(state)));
+const GRAPH_MUTATION_TOOLS = new Set(['mail.create_draft', 'mail.send_draft', 'mail.mark_read', 'teams.send_message']);
 const TRANSITIONS = Object.freeze({
   prepared: new Set(['authorized', 'cancelled', 'failed_definitive']),
   authorized: new Set(['dispatching', 'cancelled', 'failed_definitive']),
@@ -66,6 +67,7 @@ function sameIdentity(left, right) { return left && right && left.dev === right.
 function ownedByCurrentUser(value, platform) { return platform === 'win32' || typeof process.getuid !== 'function' || value?.uid === process.getuid(); }
 function activeCount(records) { return [...records.values()].filter(record => ACTIVE.has(record.state)).length; }
 function validateOpaque(value, name) { if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{8,96}$/u.test(value)) throw new ActionJournalError('action_journal_invalid_record', `${name} is invalid`); }
+export function isGraphMutationToolName(value) { return typeof value === 'string' && GRAPH_MUTATION_TOOLS.has(value); }
 function validateDirectoryPath(value, platform) {
   const platformAbsolute = platform === 'win32' ? /^[A-Za-z]:[\\/]/u.test(value ?? '') && !/^\\/u.test(value) : isAbsolute(value ?? '') && !/^\/\//u.test(value);
   if (!platformAbsolute || typeof value !== 'string' || value.length > 1024 || /[\u0000-\u001f\u007f]/u.test(value)) throw new TypeError('action journal directory must be an absolute local path');
@@ -229,7 +231,20 @@ export class ActionJournal {
   async detail(operationId) { await this.tail; this._assertHealthy(); if (!OPERATION_ID.test(operationId ?? '')) throw new ActionJournalError('action_journal_invalid_request'); const record = this.records.get(operationId); if (!record) throw new ActionJournalError('action_journal_not_found'); return publicRecord(record, true); }
   async resolve(operationId, resolution) {
     if (!['completed', 'failed_definitive'].includes(resolution)) throw new ActionJournalError('action_journal_invalid_request');
-    const receipt = await this._transition(operationId, resolution, { resolution: resolution === 'completed' ? 'manual_completed' : 'manual_failed_definitive' }); return receipt;
+    return this._serialize(async () => {
+      this._assertHealthy();
+      const record = this.records.get(operationId);
+      if (!record || !OPERATION_ID.test(operationId)) throw new ActionJournalError('action_journal_not_found');
+      // Graph mutation outcomes require provider-owned, operation-bound
+      // evidence. No such capability exists in this slice, so an operator
+      // assertion must not clear ambiguity or manufacture definitive failure.
+      // Controller-owned pre-dispatch transitions continue to use cancel() or
+      // failDefinitive(), never this manual endpoint.
+      if (isGraphMutationToolName(record.tool_name)) throw new ActionJournalError('action_journal_provider_proof_required');
+      const receipt = await this._appendLocked(operationId, resolution, { resolution: resolution === 'completed' ? 'manual_completed' : 'manual_failed_definitive' });
+      if (TERMINAL.has(resolution)) await this._pruneTerminalLocked();
+      return receipt;
+    });
   }
   async reconcile() { throw new ActionJournalError('action_reconciliation_unavailable'); }
 }
