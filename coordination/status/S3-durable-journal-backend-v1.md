@@ -61,6 +61,11 @@ live execution, while preserving existing contracts and fail-closed gates.
   header before trusting its length, so a length-byte mutation cannot turn a
   committed dispatch into a recoverable incomplete frame. All 145 individual
   header-byte mutations and the reported replay sequence are regression-tested.
+- Replay now reconstructs a fresh event object exclusively in the writer's
+  fixed field order after semantic validation and requires byte-exact payload
+  equality. Reversed and rotated key orders, missing or unknown fields, and a
+  reordered full payload with an incomplete commit all block without truncation
+  even when every unkeyed frame digest is recomputed.
 - Added nonmutating POSIX read/write capability probes before header creation;
   read-only and write-only descriptors fail without changing file bytes.
 - Added crash-boundary, restart, tamper, disclosure, provider-proof,
@@ -70,13 +75,14 @@ live execution, while preserving existing contracts and fail-closed gates.
 
 - Commits: claim `775a321`; implementation `c1c8684d8b4eb7eac9f1a13717158dc072cd227a`;
   repairs `c0b6c603577b162d70691475de598d2ee6cc463f` and
-  `3474a10e441112fe91b02b1a6799ffd411a4c974`.
+  `3474a10e441112fe91b02b1a6799ffd411a4c974`; canonical-order repair
+  `8777a8cbe001d64aa5cbce5c6c813807a277ed1a`.
 - Commands:
   - `node --check host/agent/action-journal.mjs && node --check host/agent/controller.mjs && node --check host/server/host-server.mjs && node --check lae-host.mjs && git diff --check`
   - `node --test tests/host/descriptor-action-journal.test.mjs tests/host/action-journal.test.mjs tests/host/graph-production-composition-restart.test.mjs tests/host/graph-manual-resolution-guard.test.mjs tests/host/external-tools.test.mjs tests/security/permission-mode-adversarial.test.mjs tests/security/tool-calling-adversarial.test.mjs`
   - `python3 -m unittest -q tests.qa.test_safe_runner`
-- Tests: Node 209 discovered, 208 passed, 0 failed, 1 existing TODO,
-  1.332 seconds; Python QA inventory 20/20 passed in 0.035 seconds; all syntax
+- Tests: Node 210 discovered, 209 passed, 0 failed, 1 existing TODO,
+  1.386 seconds; Python QA inventory 20/20 passed in 0.033 seconds; all syntax
   and diff checks passed.
 - Machine: local macOS development host; no target equivalence claimed.
 - Artifact/index: this status packet.
@@ -134,9 +140,9 @@ live execution, while preserving existing contracts and fail-closed gates.
 
 ## Next bounded action
 
-Independent source/security review of `3474a10`; retain all production and
+Independent source/security review of `8777a8c`; retain all production and
 target gates until the native owner and provider recovery blockers are closed.
 
 ## Sol action requested
 
-Review after the third repair commit; no gate change requested.
+Review after the fourth repair commit; no gate change requested.
