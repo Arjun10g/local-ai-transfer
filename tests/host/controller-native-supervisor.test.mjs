@@ -188,6 +188,26 @@ test('journal health preserves every exact contract diagnostic and nothing else'
   }
 });
 
+test('journal method snapshot rejects accessors and ignores post-construction replacement', async () => {
+  const blocked = new MockJournal({ healthState: 'blocked' });
+  const blockedController = new ConversationController({ engine: engineFor('process.run_allowlisted', {}), actionJournal: blocked, toolRegistry: { 'process.run_allowlisted': tool('process.run_allowlisted', 'process_execution', async () => { throw new Error('preview must not run'); }) } });
+  blocked.health = () => ({ state: 'ready', error: null });
+  blocked.prepare = () => { throw new Error('replacement prepare must not run'); };
+  const blockedResult = await runAsPlatform('win32', () => blockedController.runTurn({ sessionId: 'ses_journal_replace_health', requestId: 'req_journal_replace_health', message: 'run it' }));
+  assert.equal(blockedResult.error, 'action_journal_unavailable');
+
+  const replaced = new MockJournal({ nativeOnly: false }); const replacements = { prepare: 0, authorize: 0, dispatch: 0 };
+  const replacedController = new ConversationController({ engine: engineFor('test.write', {}), actionJournal: replaced, toolRegistry: { 'test.write': tool('test.write', 'create', async () => makeToolResult({ id: 'call_native_01', name: 'test.write', status: 'ok', text: '{}' })) } });
+  for (const name of Object.keys(replacements)) replaced[name] = () => { replacements[name] += 1; throw new Error(`replacement ${name} must not run`); };
+  const replacedResult = await runAsPlatform('linux', () => replacedController.runTurn({ sessionId: 'ses_journal_replace_methods', requestId: 'req_journal_replace_methods', message: 'write it' }));
+  assert.equal(replacedResult.state, 'COMPLETED'); assert.deepEqual(replacements, { prepare: 0, authorize: 0, dispatch: 0 });
+
+  const accessor = new MockJournal(); Object.defineProperty(accessor, 'prepare', { get() { return async () => {}; } });
+  assert.throws(() => new ConversationController({ engine: engineFor('test.write', {}), actionJournal: accessor, toolRegistry: { 'test.write': tool('test.write', 'create', async () => makeToolResult({ id: 'call_native_01', name: 'test.write', status: 'ok', text: '{}' })) } }), /actionJournal does not implement/u);
+  const proxied = new Proxy(new MockJournal(), {});
+  assert.throws(() => new ConversationController({ engine: engineFor('test.write', {}), actionJournal: proxied, toolRegistry: { 'test.write': tool('test.write', 'create', async () => makeToolResult({ id: 'call_native_01', name: 'test.write', status: 'ok', text: '{}' })) } }), /actionJournal does not implement/u);
+});
+
 test('registry snapshots defeat post-admission mutation and public map replacement', async () => {
   let executions = 0; const journal = new MockJournal({ nativeOnly: false });
   const mutable = tool('test.write', 'create', async () => { executions++; return makeToolResult({ id: 'call_native_01', name: 'test.write', status: 'ok', text: '{}' }); });
