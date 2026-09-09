@@ -54,6 +54,7 @@ export async function createHostComposition({ fileConfig = {}, env = process.env
     const localCapabilities = localTools.capabilitySnapshot;
     const toolRegistry = { ...localTools, ...externalTools };
     const controller = new ConversationController({ engine, actionJournal, toolRegistry });
+    await controller.reconcileRestartActions();
     const host = new HostServer({ controller, engine, config, providers: externalTools.providerStatus, providerAuth: externalTools.providerAuthControl, providerShutdown: externalTools.shutdown, operatorGrants, actionJournal, localCapabilities });
     return { config, mode, engine, grantStore, operatorGrants, externalTools, localTools, toolRegistry, controller, host, actionJournal };
   } catch (error) {

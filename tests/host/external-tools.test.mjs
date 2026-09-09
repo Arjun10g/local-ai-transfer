@@ -59,7 +59,8 @@ test('Graph hostile pre-materialized response arrays fail closed before projecti
 
 test('Graph draft reconciliation uses the private journal marker and never replays an ambiguous create', async () => {
   const binding = { operation_id: `act_${'1'.repeat(32)}`, operation_digest: 'a'.repeat(64), arguments_digest: 'b'.repeat(64), preview_digest: 'c'.repeat(64) };
-  const requests = []; const transport = { request: async request => { requests.push(request); if (request.method === 'POST') { request.onDispatch?.(); throw Object.assign(new Error('late timeout'), { code: 'provider_timeout' }); } return { status: 200, body: { value: [{ id: 'draft-reconciled', internetMessageHeaders: [{ name: 'x-lae-operation', value: `${binding.operation_id}:${binding.operation_digest}` }], subject: 'x', body: { content: 'x', contentType: 'Text' }, toRecipients: [{ emailAddress: { address: 'alice@example.com' } }] }] } }; } };
+  const draft = { id: 'draft-reconciled', internetMessageHeaders: [{ name: 'x-lae-operation', value: `${binding.operation_id}:${binding.operation_digest}` }], subject: 'x', body: { content: 'x', contentType: 'Text' }, toRecipients: [{ emailAddress: { address: 'alice@example.com' } }] };
+  const requests = []; const transport = { request: async request => { requests.push(request); if (request.method === 'POST') { request.onDispatch?.(); throw Object.assign(new Error('late timeout'), { code: 'provider_timeout' }); } if (request.path === '/v1.0/me/messages/draft-reconciled') return { status: 200, body: draft }; return { status: 200, body: { value: [{ id: draft.id }] } }; } };
   const tool = createMicrosoftGraphTools({ enabled: true, credentialSource: { getAccessToken: async () => 'synthetic-token' }, transport })['mail.create_draft']; const request = call('mail.create_draft', { to: ['alice@example.com'], subject: 'x', body: 'x' }, 'call_marker'); await tool.preview(request);
   const first = value(await tool.execute({ ...request, authorization: { kind: 'user_confirmation' }, internal: { journal_binding: binding } })); assert.equal(first.provider_completion, 'verified'); assert.equal(first.reconciliation, 'unique_exact_draft'); assert.deepEqual(requests[0].body.internetMessageHeaders, [{ name: 'x-lae-operation', value: `${binding.operation_id}:${binding.operation_digest}` }]);
   const second = value(await tool.execute({ ...request, authorization: { kind: 'user_confirmation' }, internal: { journal_binding: binding } })); assert.equal(second.code, 'provider_write_already_attempted'); assert.equal(requests.filter(item => item.method === 'POST').length, 1);
@@ -68,9 +69,11 @@ test('Graph draft reconciliation uses the private journal marker and never repla
 test('Graph create reconciliation requires exact requested draft content', async () => {
   const binding = { operation_id: `act_${'3'.repeat(32)}`, operation_digest: 'c'.repeat(64), arguments_digest: 'd'.repeat(64), preview_digest: 'e'.repeat(64) };
   const marker = `${binding.operation_id}:${binding.operation_digest}`; let posts = 0;
+  const draft = { id: 'draft-mismatch', internetMessageHeaders: [{ name: 'x-lae-operation', value: marker }], subject: 'different', body: { content: 'x', contentType: 'Text' }, toRecipients: [{ emailAddress: { address: 'alice@example.com' } }] };
   const transport = { request: async request => {
     if (request.method === 'POST') { posts += 1; request.onDispatch?.(); throw Object.assign(new Error('late timeout'), { code: 'provider_timeout' }); }
-    return { status: 200, body: { value: [{ id: 'draft-mismatch', internetMessageHeaders: [{ name: 'x-lae-operation', value: marker }], subject: 'different', body: { content: 'x', contentType: 'Text' }, toRecipients: [{ emailAddress: { address: 'alice@example.com' } }] }] } };
+    if (request.path === '/v1.0/me/messages/draft-mismatch') return { status: 200, body: draft };
+    return { status: 200, body: { value: [{ id: draft.id }] } };
   } };
   const tool = createMicrosoftGraphTools({ enabled: true, credentialSource: { getAccessToken: async () => 'synthetic-token' }, transport })['mail.create_draft'];
   const request = call('mail.create_draft', { to: ['alice@example.com'], subject: 'requested', body: 'x' }, 'call_marker_mismatch'); await tool.preview(request);

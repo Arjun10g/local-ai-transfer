@@ -8,13 +8,32 @@ ID and SHA-256 digests; the model-facing call, schema, events, and receipts do
 not expose this authority metadata.
 
 The mail draft creator carries a bounded `x-lae-operation` Internet message
-header when a journal binding is present. On a timeout or incomplete response,
-the adapter searches only the signed-in account's bounded Drafts collection
-and accepts one exact marker match. Multiple or absent matches remain
+header when a journal binding is present. Once device authentication has
+provider-attested the canonical account identity, new markers also bind its
+SHA-256 fingerprint. On a timeout or incomplete response, the adapter lists a
+bounded set of Draft IDs in the signed-in account and performs an explicit GET
+with `$select=internetMessageHeaders,...` for every returned ID. It accepts one
+exact marker match. Pagination, malformed projections, duplicate IDs, multiple
+matches, or absent matches remain
 `reconciling` and require manual resolution. The marker match is additionally
 required to have the exact normalized subject, plain-text body, content type,
 and recipient projection requested by the action; a marker on different draft
 content is never treated as completion.
+
+After a process restart, only a durably `acknowledged` `mail.create_draft`
+record is eligible for automatic reconciliation. After explicit device auth
+again verifies the current canonical account, the controller requests a fresh
+bounded provider proof. Completion requires exactly one draft whose immutable
+custom marker binds the journal operation ID, operation digest, and that
+account fingerprint, and whose complete provider projection reconstructs the
+persisted arguments digest. The provider returns this proof through a
+module-private capability; serialized or cloned proof-shaped objects cannot
+complete a record. Concurrent reconciliation calls coalesce. A `dispatching`
+record still becomes `unknown_manual` on journal open, while `reconciling`,
+`unknown_manual`, all other Graph mutations, legacy two-part markers, and
+collections beyond the bounded first page stay manual. At most eight
+acknowledged records and 20 draft IDs per record are examined within a
+30-second deadline per authentication trigger.
 
 `mail.mark_read` first reads the requested message state, performs no PATCH
 when the requested state is already present, and always verifies with a fresh

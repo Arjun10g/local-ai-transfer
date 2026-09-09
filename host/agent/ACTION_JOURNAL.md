@@ -29,6 +29,6 @@ The loopback HostServer bearer token protects bounded summary and detail reads:
 - `GET /api/action-journal?limit=1..100&state=<state>`
 - `GET /api/action-journal/<operation_id>`
 
-`POST /api/action-journal/<operation_id>/resolve` accepts only an explicit operator assertion of `completed` or `failed_definitive`. It appends an audited terminal state and never invokes or replays a provider. `POST .../reconcile` returns HTTP 501 with typed `action_reconciliation_unavailable` until a provider-owned reconciliation adapter exists. Journal request errors are 400, missing records are 404, and unavailable/invalid-transition journal states are 409; response bodies expose only the typed code.
+`POST /api/action-journal/<operation_id>/resolve` accepts only an explicit operator assertion of `completed` or `failed_definitive`. It appends an audited terminal state and never invokes or replays a provider. The manual `POST .../reconcile` route remains unavailable and returns HTTP 501 with typed `action_reconciliation_unavailable`; the bounded Graph draft recovery path is internal, automatic after canonical device authentication, and does not make a provider callback from this operator endpoint. Journal request errors are 400, missing records are 404, and unavailable/invalid-transition journal states are 409; response bodies expose only the typed code.
 
 This core alone does not make Graph, browser automation, Copilot, or Windows execution release-ready.
