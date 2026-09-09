@@ -84,39 +84,53 @@ export class MicrosoftDeviceCodeCredential {
   constructor({ tenant, clientId, scopes, transport, now = () => Date.now(), sleep = waitDefault, requestTimeoutMs = 10000, onUserCode } = {}) {
     if (!safeTenant(tenant) || !safeClientId(clientId) || !safeScopes(scopes)) throw new TypeError('explicit Microsoft tenant, client ID, and scopes are required');
     if (!transport || typeof transport.request !== 'function') throw new TypeError('Microsoft auth transport is required');
-    this.tenant = tenant; this.clientId = clientId; this.scopes = [...scopes]; this.transport = transport; this.now = now; this.sleep = sleep; this.requestTimeoutMs = requestTimeoutMs; this.onUserCode = onUserCode; this.cached = null; this.inFlight = null; this.authAbort = null; this.authState = 'idle'; this.authPrompt = null; this.authEnabled = false;
+    this.tenant = tenant; this.clientId = clientId; this.scopes = [...scopes]; this.transport = transport; this.now = now; this.sleep = sleep; this.requestTimeoutMs = requestTimeoutMs; this.onUserCode = onUserCode; this.cached = null; this.authRun = null; this.authState = 'idle'; this.authPrompt = null; this.authEnabled = false;
   }
+  isCurrent(run) { return this.authRun === run && run.cancelled !== true; }
+  ensureCurrent(run) { if (!this.isCurrent(run)) throw new ProviderToolError('provider_cancelled'); }
   async getAccessToken(signal) {
     checkAborted(signal); if (this.cached && this.cached.expiresAt > this.now() + 60000) { this.authEnabled = false; this.authState = 'authenticated'; return this.cached.value; } if (this.cached) { this.cached = null; this.authState = 'expired'; this.authPrompt = null; } if (!this.authEnabled) throw new ProviderToolError('provider_unauthorized', 'explicit authentication is required');
-    if (!this.inFlight) { this.authAbort = new AbortController(); this.inFlight = this.authenticate(this.authAbort.signal).catch(error => { if (error?.code !== 'provider_cancelled') { this.authEnabled = false; this.authPrompt = null; if (this.authState !== 'expired') this.authState = 'failed'; } throw error; }).finally(() => { this.inFlight = null; this.authAbort = null; }); }
-    return raceAbort(this.inFlight, signal);
+    let run = this.authRun;
+    if (!run) {
+      run = { controller: new AbortController(), cancelled: false, promise: null };
+      this.authRun = run;
+      run.promise = this.authenticate(run).catch(error => {
+        if (!this.isCurrent(run)) throw new ProviderToolError('provider_cancelled');
+        if (error?.code !== 'provider_cancelled') { this.authEnabled = false; this.authPrompt = null; if (this.authState !== 'expired') this.authState = 'failed'; }
+        throw error;
+      }).finally(() => { if (this.authRun === run) this.authRun = null; });
+    }
+    return raceAbort(run.promise, signal);
   }
   start(signal) { this.authEnabled = true; return this.getAccessToken(signal); }
-  async authenticate(signal) {
-    this.authState = 'requesting_device_code'; this.authPrompt = null;
+  async authenticate(run) {
+    const signal = run.controller.signal;
+    this.ensureCurrent(run); this.authState = 'requesting_device_code'; this.authPrompt = null;
     const device = await this.transport.request({ origin: LOGIN_ORIGIN, method: 'POST', path: `/${this.tenant}/oauth2/v2.0/devicecode`, headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ client_id: this.clientId, scope: this.scopes.join(' ') }).toString(), signal });
+    this.ensureCurrent(run);
     let verification;
     try { verification = new URL(device?.body?.verification_uri); } catch { verification = null; }
     if (typeof device?.status !== 'number' || device.status < 200 || device.status >= 300 || typeof device.body?.device_code !== 'string' || device.body.device_code.length < 1 || device.body.device_code.length > 4096 || /[\u0000-\u001f\u007f]/u.test(device.body.device_code) || typeof device.body?.user_code !== 'string' || device.body.user_code.length < 1 || device.body.user_code.length > 128 || /[\u0000-\u001f\u007f]/u.test(device.body.user_code) || !verification || verification.protocol !== 'https:' || !['microsoft.com', 'www.microsoft.com', 'login.microsoftonline.com'].includes(verification.hostname) || verification.username || verification.password || verification.hash || verification.search) throw new ProviderToolError(device?.status === 429 ? 'provider_rate_limited' : 'provider_unauthorized');
-    const expiresAt = this.now() + Math.min(Math.max(Number.isInteger(device.body.expires_in) ? device.body.expires_in : 900, 1), 900) * 1000; this.authPrompt = { userCode: device.body.user_code, verificationUri: verification.toString(), expiresAt }; this.authState = 'awaiting_user'; this.onUserCode?.({ userCode: this.authPrompt.userCode, verificationUri: this.authPrompt.verificationUri }); let interval = Math.min(Math.max(Number.isInteger(device.body.interval) ? device.body.interval : 5, 5), 60);
+    this.ensureCurrent(run); const expiresAt = this.now() + Math.min(Math.max(Number.isInteger(device.body.expires_in) ? device.body.expires_in : 900, 1), 900) * 1000; this.authPrompt = { userCode: device.body.user_code, verificationUri: verification.toString(), expiresAt }; this.authState = 'awaiting_user'; this.ensureCurrent(run); this.onUserCode?.({ userCode: this.authPrompt.userCode, verificationUri: this.authPrompt.verificationUri }); let interval = Math.min(Math.max(Number.isInteger(device.body.interval) ? device.body.interval : 5, 5), 60);
     while (this.now() < expiresAt) {
-      await this.sleep(interval * 1000, signal); checkAborted(signal);
+      this.ensureCurrent(run); await this.sleep(interval * 1000, signal); this.ensureCurrent(run); checkAborted(signal);
       const response = await this.transport.request({ origin: LOGIN_ORIGIN, method: 'POST', path: `/${this.tenant}/oauth2/v2.0/token`, headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: DEVICE_GRANT, client_id: this.clientId, device_code: device.body.device_code }).toString(), signal });
+      this.ensureCurrent(run);
       if (typeof response?.status === 'number' && response.status >= 200 && response.status < 300 && typeof response.body?.access_token === 'string' && response.body.access_token.length > 0 && Buffer.byteLength(response.body.access_token, 'utf8') <= 4096 && !/[\u0000-\u001f\u007f]/u.test(response.body.access_token)) {
         const returnedScope = response.body.scope; if (returnedScope !== undefined && (typeof returnedScope !== 'string' || returnedScope.length > 4096 || /[\u0000-\u001f\u007f]/u.test(returnedScope) || !this.scopes.every(scope => scopeSatisfies(new Set(returnedScope.split(/\s+/u)), scope)))) throw new ProviderToolError('provider_unauthorized');
-        const expiresIn = Number.isInteger(response.body.expires_in) ? Math.min(Math.max(response.body.expires_in, 1), 86400) : 3600; this.cached = { value: response.body.access_token, expiresAt: this.now() + expiresIn * 1000 }; this.authEnabled = false; this.authState = 'authenticated'; this.authPrompt = null; return response.body.access_token;
+        this.ensureCurrent(run); const expiresIn = Number.isInteger(response.body.expires_in) ? Math.min(Math.max(response.body.expires_in, 1), 86400) : 3600; this.cached = { value: response.body.access_token, expiresAt: this.now() + expiresIn * 1000 }; this.authEnabled = false; this.authState = 'authenticated'; this.authPrompt = null; return response.body.access_token;
       }
       const code = response.body?.error;
       if (code === 'authorization_pending') continue;
       if (code === 'slow_down') { interval = Math.min(interval + 5, 60); continue; }
       if (code === 'authorization_declined' || code === 'expired_token' || response.status === 400) throw new ProviderToolError('provider_unauthorized');
-      if (response.status === 429) { await this.sleep(retryAfter(response.headers), signal); continue; }
+      if (response.status === 429) { await this.sleep(retryAfter(response.headers), signal); this.ensureCurrent(run); continue; }
       throw new ProviderToolError('provider_unauthorized');
     }
-    this.authState = 'expired'; throw new ProviderToolError('provider_unauthorized');
+    this.ensureCurrent(run); this.authState = 'expired'; throw new ProviderToolError('provider_unauthorized');
   }
   authStatus() { if (this.cached && this.cached.expiresAt <= this.now() + 60000) { this.cached = null; this.authEnabled = false; this.authPrompt = null; this.authState = 'expired'; } return { state: this.authState, prompt: this.authPrompt ? { ...this.authPrompt } : null }; }
-  cancel() { this.authEnabled = false; this.authAbort?.abort(); this.cached = null; this.authPrompt = null; this.authState = 'idle'; }
+  cancel() { const run = this.authRun; if (run) { run.cancelled = true; this.authRun = null; run.controller.abort(); } this.authEnabled = false; this.cached = null; this.authPrompt = null; this.authState = 'idle'; }
   clear() { this.cached = null; this.cancel(); }
 }
 

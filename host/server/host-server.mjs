@@ -12,6 +12,7 @@ const LOCAL_HOST = /^(?:127\.0\.0\.1|localhost)(?::\d{1,5})?$/i;
 const OPAQUE_ID = /^[A-Za-z0-9_-]{8,96}$/;
 const BOOTSTRAP_NONCE = /^[A-Za-z0-9_-]{43}$/;
 const BOOTSTRAP_TTL_MS = 60_000;
+const AUTH_STATES = new Set(['disabled', 'unconfigured', 'idle', 'requesting_device_code', 'awaiting_user', 'authenticated', 'checking_account', 'expired', 'failed', 'offline', 'unauthorized']);
 
 /** Platform-neutral containment check; avoids assuming `/` on Windows. */
 export function isWithinDirectory(root, target) {
@@ -21,6 +22,15 @@ export function isWithinDirectory(root, target) {
 
 function json(res, status, value) { const body = JSON.stringify(value); res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store', ...securityHeaders() }); res.end(body); }
 function securityHeaders() { return { 'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'", 'x-content-type-options': 'nosniff', 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'permissions-policy': 'camera=(), microphone=(), geolocation=()' }; }
+function authStatusProjection(value) {
+  const state = AUTH_STATES.has(value?.state) ? value.state : 'unavailable';
+  const rawPrompt = value?.prompt;
+  let prompt = null;
+  if (rawPrompt && typeof rawPrompt === 'object' && !Array.isArray(rawPrompt) && typeof rawPrompt.userCode === 'string' && rawPrompt.userCode.length >= 1 && rawPrompt.userCode.length <= 128 && !/[\u0000-\u001f\u007f]/u.test(rawPrompt.userCode) && typeof rawPrompt.verificationUri === 'string' && rawPrompt.verificationUri.length >= 1 && rawPrompt.verificationUri.length <= 256 && !/[\u0000-\u001f\u007f]/u.test(rawPrompt.verificationUri)) {
+    try { const verification = new URL(rawPrompt.verificationUri); if (verification.protocol === 'https:' && ['microsoft.com', 'www.microsoft.com', 'login.microsoftonline.com'].includes(verification.hostname) && !verification.username && !verification.password && !verification.search && !verification.hash) prompt = { userCode: rawPrompt.userCode, verificationUri: verification.toString() }; } catch {}
+  }
+  return { state, prompt, account_verified: state === 'authenticated' && typeof value?.accountFingerprint === 'string' && value.accountFingerprint.length > 0 };
+}
 function tokenMatch(actual, expected) { if (typeof actual !== 'string' || typeof expected !== 'string') return false; const actualBytes = Buffer.from(actual, 'utf8'); const expectedBytes = Buffer.from(expected, 'utf8'); if (actualBytes.length !== expectedBytes.length) return false; return timingSafeEqual(actualBytes, expectedBytes); }
 function jsonContentType(req) { return /^application\/json(?:\s*;\s*charset\s*=\s*(?:utf-8|utf8))?$/i.test(req.headers['content-type'] ?? ''); }
 function exactBody(input, allowed, required = []) {
@@ -130,7 +140,7 @@ export class HostServer {
       if (req.method === 'POST' && path === '/api/sessions') { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); const input = exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), ['session_id', 'reset']); if (input.session_id !== undefined && (typeof input.session_id !== 'string' || !OPAQUE_ID.test(input.session_id))) return json(res, 400, { error: 'invalid_request_body' }); if (input.reset !== undefined && typeof input.reset !== 'boolean') return json(res, 400, { error: 'invalid_request_body' }); const session = this.controller.createSession(input.session_id); if (input.reset) this.controller.resetSession(session.id); return json(res, 201, { session_id: session.id, state: this.controller.state(session.id) }); }
       if (req.method === 'POST' && path === '/api/chat') return await this.chat(req, res);
       const authAction = path.match(/^\/api\/provider-auth\/microsoft_graph\/(start|cancel|clear)$/);
-      if (req.method === 'POST' && authAction) { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), []); const control = this.providerAuth?.()?.microsoft_graph; if (!control || control.configured !== true) return json(res, 409, { error: 'provider_unconfigured' }); if (authAction[1] === 'start') { void Promise.resolve(control.start()).catch(() => {}); return json(res, 202, { accepted: true, status: control.status() }); } if (authAction[1] === 'cancel') control.cancel(); else control.clear(); return json(res, 200, { accepted: true, status: control.status() }); }
+      if (req.method === 'POST' && authAction) { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), []); const control = this.providerAuth?.()?.microsoft_graph; if (!control || control.configured !== true) return json(res, 409, { error: 'provider_unconfigured' }); if (authAction[1] === 'start') { void Promise.resolve(control.start()).catch(() => {}); return json(res, 202, { accepted: true, status: authStatusProjection(control.status()) }); } if (authAction[1] === 'cancel') control.cancel(); else control.clear(); return json(res, 200, { accepted: true, status: authStatusProjection(control.status()) }); }
       if (req.method === 'POST' && path === '/api/cancel') { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); const input = exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), ['request_id'], ['request_id']); if (typeof input.request_id !== 'string' || !OPAQUE_ID.test(input.request_id)) return json(res, 400, { error: 'invalid_request_id' }); const cancelled = this.controller.cancel(input.request_id); return json(res, cancelled ? 200 : 404, { cancelled }); }
       if (req.method === 'POST' && path === '/api/operator-grants/revoke-all') { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), []); this.controller.cancelActive?.(); return json(res, 200, this.operatorGrants?.revokeAll?.() ?? { revoked: 0 }); }
       const grant = path.match(/^\/api\/operator-grants\/([A-Za-z0-9_.:-]{1,256})$/);
@@ -147,7 +157,7 @@ export class HostServer {
       return json(res, 404, { error: 'not_found' });
     } catch (error) { if (res.headersSent) return this.fail(res, error); const code = error.code ?? (error instanceof TypeError ? 'invalid_request_body' : 'request_failed'); return json(res, errorStatus(code), { error: code }); }
   }
-  providerAuthStatus(res) { const status = this.providerAuth?.()?.microsoft_graph?.status?.() ?? { state: 'unavailable', prompt: null }; return json(res, 200, { microsoft_graph: status }); }
+  providerAuthStatus(res) { const status = this.providerAuth?.()?.microsoft_graph?.status?.() ?? { state: 'unavailable', prompt: null }; return json(res, 200, { microsoft_graph: authStatusProjection(status) }); }
   async asset(path, res) {
     const [file, type] = ASSETS.get(path); const candidate = resolve(join(UI_ROOT, file));
     if (!isWithinDirectory(UI_ROOT, candidate)) return json(res, 404, { error: 'not_found' });

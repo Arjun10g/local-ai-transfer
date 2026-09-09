@@ -32,10 +32,10 @@ Add mocked behavioral coverage for Microsoft Graph production composition, journ
 
 - Commit: Pending review
 - Commands: `node --test tests/host/graph-production-composition-restart.test.mjs`; selected Graph/host/controller/security Node inventory; `python3 scripts/test/run_qa.py`; `git diff --check`
-- Tests: New 5/5; selected relevant inventory 149/149; QA safe inventory recognized the new test and remained BLOCKED by safe-mode mandatory-suite skips
+- Tests: New auth/composition suite 9/9; selected relevant Graph/host/controller/security inventory 153/153 after the auth-run and projection repair; QA safe inventory recognizes the test and remains BLOCKED by safe-mode mandatory-suite skips
 - Machine: Not applicable
 - Artifact/index: None
-- Metrics: No live/provider/model/build execution; hidden durable-write case recorded zero transport/token access
+- Metrics: No live/provider/model/build execution; hidden durable-write case recorded zero transport/token access; late auth completions recorded no stale prompt/cache/callback mutation
 
 ## Findings and changed assumptions
 
@@ -43,14 +43,17 @@ Add mocked behavioral coverage for Microsoft Graph production composition, journ
 - ActionJournal is absent by default and durable Graph writes are therefore expected to be withheld by the controller.
 - Graph auth state, grants, proposals, write ledger, read cursors, and attestation markers are in-memory; restart coverage must assert behavior without exposing credential material.
 - Host auth responses were checked for credential-like fields and bounded prompt fields across status/start/cancel/clear.
+- Auth runs are identity-bound: cancellation detaches the old run immediately, and stale device/sleep/token completions cannot mutate a replacement run.
+- Public host auth status/control responses expose only `state`, bounded prompt fields, and `account_verified`; the full fingerprint remains internal for account/grant binding.
+- Durable Graph writes remain unavailable without a bound ActionJournal; existing Teams/send and other post-dispatch ambiguity paths remain at-most-once/manual-reconciliation cases and are not reopened or replayed here.
 
 ## Blockers
 
-- Fact/evidence: Immediate cancel followed synchronously by `startAuth()` reuses the still-in-flight promise; a mocked reproduction made one device-code request and left the restarted state idle.
-- Impact: A production auth restart can fail to begin a fresh device flow until the old promise settles.
-- What was tried: Mocked cancellation/restart reproduction; no production edit authorized.
-- Proposed workaround: A separate production fix must clear or detach the in-flight generation before admitting a new start; this slice leaves the behavior unchanged and does not claim closure.
-- Decision/asset needed: Parent review of whether to schedule a narrow auth lifecycle repair.
+- Fact/evidence: No blocker remains in the repaired auth-run lifecycle under abort-insensitive mocked device, sleep, and token completions.
+- Impact: None for this bounded auth slice.
+- What was tried: Deterministic same-instance coalescing, cancel→immediate restart, late completion, and clear/revocation tests.
+- Proposed workaround: Not applicable.
+- Decision/asset needed: Parent review of the committed candidate.
 - Owner: S3
 - Independent work continuing: None; candidate is ready for review.
 
@@ -63,7 +66,7 @@ Add mocked behavioral coverage for Microsoft Graph production composition, journ
 
 ## Next bounded action
 
-Review and, if accepted, merge the test/status-only candidate; schedule the separate immediate-restart auth repair if required.
+Review and, if accepted, merge the auth lifecycle/public projection repair; retain the existing separate gate that durable Graph writes need an ActionJournal.
 
 ## Sol action requested
 
