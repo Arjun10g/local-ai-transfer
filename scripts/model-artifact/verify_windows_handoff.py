@@ -24,6 +24,7 @@ MAX_HANDOFF_BYTES = 64 * 1024
 MAX_JSON_DEPTH = 8
 SIGNATURE_BYTES = 64
 SIGNATURE_BASE64_CHARS = 88
+REFUSAL_SCHEMA = "local_bmo.windows-hf-release-verdict.v1"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 REVISION = re.compile(r"^[0-9a-f]{40}$")
 ASCII_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
@@ -62,7 +63,11 @@ def _depth(value: Any, level: int = 0) -> None:
         raise HandoffError("JSON nesting exceeds bound")
     if isinstance(value, dict):
         for key, item in value.items():
-            if not isinstance(key, str) or len(key.encode("utf-8")) > 128:
+            try:
+                key_length = len(key.encode("utf-8")) if isinstance(key, str) else 0
+            except UnicodeEncodeError as exc:
+                raise HandoffError("handoff contains invalid Unicode") from exc
+            if not isinstance(key, str) or key_length > 128:
                 raise HandoffError("JSON key exceeds bound")
             _depth(item, level + 1)
     elif isinstance(value, list):
@@ -70,8 +75,13 @@ def _depth(value: Any, level: int = 0) -> None:
             raise HandoffError("JSON array exceeds bound")
         for item in value:
             _depth(item, level + 1)
-    elif isinstance(value, str) and len(value.encode("utf-8")) > MAX_HANDOFF_BYTES:
-        raise HandoffError("JSON string exceeds bound")
+    elif isinstance(value, str):
+        try:
+            value_length = len(value.encode("utf-8"))
+        except UnicodeEncodeError as exc:
+            raise HandoffError("handoff contains invalid Unicode") from exc
+        if value_length > MAX_HANDOFF_BYTES:
+            raise HandoffError("JSON string exceeds bound")
 
 
 def parse_handoff_bytes(data: bytes) -> dict[str, Any]:
@@ -102,7 +112,10 @@ def load_handoff(path: Path) -> dict[str, Any]:
     fd = -1
     failed = False
     try:
-        fd = os.open(path, os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0))
+        nonblock = getattr(os, "O_NONBLOCK", 0)
+        if not isinstance(nonblock, int):
+            nonblock = 0
+        fd = os.open(path, os.O_RDONLY | nofollow | nonblock | getattr(os, "O_CLOEXEC", 0))
         opened = os.fstat(fd)
         identity = lambda value: (
             value.st_dev, value.st_ino, value.st_mode, value.st_nlink, value.st_size,
@@ -180,10 +193,13 @@ def _canonical_payload(value: dict[str, Any]) -> bytes:
             key: item for key, item in signature.items()
             if key not in {"signature_base64", "payload_sha256"}
         }
-    return json.dumps(unsigned, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("ascii")
+    try:
+        return json.dumps(unsigned, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise HandoffError("handoff contains invalid Unicode") from exc
 
 
-def validate_handoff(value: Any) -> dict[str, Any]:
+def _validate_handoff(value: Any) -> dict[str, Any]:
     root = _exact(value, TOP_LEVEL, "handoff")
     if root["schema"] != SCHEMA:
         raise HandoffError("handoff schema is not exact")
@@ -243,9 +259,16 @@ def validate_handoff(value: Any) -> dict[str, Any]:
     return {"payload": payload, "signature": detached, "key_id": signature["key_id"], "artifact": artifact}
 
 
+def validate_handoff(value: Any) -> dict[str, Any]:
+    try:
+        return _validate_handoff(value)
+    except UnicodeEncodeError as exc:
+        raise HandoffError("handoff contains invalid Unicode") from exc
+
+
 def _refused(reason: str, *, identity_valid: bool = True) -> dict[str, Any]:
     return {
-        "schema": "local_bmo.windows-hf-release-verdict.v1",
+        "schema": REFUSAL_SCHEMA,
         "status": "REFUSED_NOT_ACTIVATED",
         "reason": reason,
         "artifact_identity_valid": identity_valid,
@@ -289,11 +312,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         verdict = verify_handoff(load_handoff(args.handoff))
-    except HandoffError as exc:
+    except Exception:
         verdict = {
-            "schema": "local_bmo.windows-hf-release-verdict.v1",
+            "schema": REFUSAL_SCHEMA,
             "status": "REFUSED_NOT_ACTIVATED",
-            "reason": str(exc),
+            "reason": "input_refused",
             "artifact_identity_valid": False,
             "signature_verified": False,
             "model_external": True,

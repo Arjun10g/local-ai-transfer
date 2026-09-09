@@ -8,6 +8,8 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -154,6 +156,12 @@ class WindowsArtifactHandoffTests(unittest.TestCase):
         with self.assertRaises(module.HandoffError): module.parse_handoff_bytes(b'{"x":NaN}')
         with self.assertRaises(module.HandoffError): module.parse_handoff_bytes((b'{"x":' + b'[' * 20 + b'0' + b']' * 20 + b'}'))
 
+    def test_rejects_escaped_surrogate_keys_and_values(self):
+        with self.assertRaisesRegex(module.HandoffError, "invalid Unicode"):
+            module.parse_handoff_bytes(b'{"\\ud800":"safe"}')
+        with self.assertRaisesRegex(module.HandoffError, "invalid Unicode"):
+            module.parse_handoff_bytes(b'{"safe":"\\ud800"}')
+
     def test_rejects_oversize_and_nonobject_inputs(self):
         with self.assertRaises(module.HandoffError): module.parse_handoff_bytes(b"x" * (module.MAX_HANDOFF_BYTES + 1))
         with self.assertRaises(module.HandoffError): module.parse_handoff_bytes(b"[]")
@@ -234,6 +242,43 @@ class WindowsArtifactHandoffTests(unittest.TestCase):
             self.assertIn("REFUSED_NOT_ACTIVATED", rendered)
             self.assertNotIn(str(path), rendered)
             self.assertNotIn("a" * 64, rendered)
+
+    def test_cli_surrogates_emit_fixed_refusal_without_traceback_or_marker(self):
+        script = ROOT / "scripts/model-artifact/verify_windows_handoff.py"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, marker, mutate in (("key", "\\ud800", lambda value: value.update({"\ud800": "safe"})), ("value", "\\udc00", lambda value: value["artifact"].update({"file_name": "\udc00"}))):
+                path = root / f"{name}.json"
+                value = handoff(); mutate(value)
+                path.write_text(json.dumps(value, ensure_ascii=True), encoding="utf-8")
+                result = subprocess.run([sys.executable, str(script), str(path)], capture_output=True, text=True, timeout=2, check=False)
+                self.assertEqual(2, result.returncode)
+                self.assertEqual("", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertNotIn(str(path), result.stdout + result.stderr)
+                self.assertNotIn(marker, result.stdout + result.stderr)
+                self.assertEqual({
+                    "schema": module.REFUSAL_SCHEMA,
+                    "status": "REFUSED_NOT_ACTIVATED",
+                    "reason": "input_refused",
+                    "artifact_identity_valid": False,
+                    "signature_verified": False,
+                    "model_external": True,
+                    "activated": False,
+                }, json.loads(result.stdout))
+
+    def test_cli_fifo_refuses_without_blocking(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("FIFO unavailable")
+        script = ROOT / "scripts/model-artifact/verify_windows_handoff.py"
+        with tempfile.TemporaryDirectory() as directory:
+            fifo = Path(directory) / "handoff.fifo"
+            os.mkfifo(fifo)
+            result = subprocess.run([sys.executable, str(script), str(fifo)], capture_output=True, text=True, timeout=2, check=False)
+            self.assertEqual(2, result.returncode)
+            self.assertEqual("", result.stderr)
+            self.assertNotIn(str(fifo), result.stdout + result.stderr)
+            self.assertEqual("input_refused", json.loads(result.stdout)["reason"])
 
     def test_verifier_exception_is_fail_closed(self):
         with self.assertRaisesRegex(module.HandoffError, "failed closed"):
