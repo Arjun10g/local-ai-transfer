@@ -6,6 +6,7 @@ import { sseFrame } from '../agent/assistant-events.mjs';
 import { mergeConfig } from '../agent/config.mjs';
 import { parseStrictJson } from '../agent/tool-envelope.mjs';
 import { readProviderAuthStatus } from '../providers/microsoft-graph.mjs';
+import { isGraphMutationToolName } from '../agent/action-journal.mjs';
 
 const UI_ROOT = join(import.meta.dirname, '..', '..', 'ui');
 const ASSETS = new Map([['/', ['index.html', 'text/html; charset=utf-8']], ['/index.html', ['index.html', 'text/html; charset=utf-8']], ['/app.js', ['app.js', 'text/javascript; charset=utf-8']], ['/styles.css', ['styles.css', 'text/css; charset=utf-8']]]);
@@ -159,6 +160,8 @@ export class HostServer {
         if (!this.actionJournal) return json(res, 409, { error: 'action_journal_unavailable' }); if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' });
         const input = exactBody(await body(req, Math.min(this.config.host.max_body_bytes, 1024), this.config.host.request_timeout_ms), ['resolution'], ['resolution']);
         if (!['completed', 'failed_definitive'].includes(input.resolution)) return json(res, 400, { error: 'action_journal_invalid_request' });
+        const current = await this.actionJournal.detail(actionResolution[1]);
+        if (isGraphMutationToolName(current.tool_name)) return json(res, 409, { error: 'action_journal_provider_proof_required' });
         return json(res, 200, { resolved: true, receipt: await this.actionJournal.resolve(actionResolution[1], input.resolution) });
       }
       const actionReconcile = path.match(/^\/api\/action-journal\/(act_[a-f0-9]{32})\/reconcile$/u);
