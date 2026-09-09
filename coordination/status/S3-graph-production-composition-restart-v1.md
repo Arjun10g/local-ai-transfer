@@ -47,6 +47,7 @@ Add mocked behavioral coverage for Microsoft Graph production composition, journ
 - Public host auth status/control responses expose only `state`, bounded prompt fields, and `account_verified`; the full fingerprint remains internal for account/grant binding.
 - The launcher now exposes an importable composition seam that builds the actual registry/controller/HostServer graph without listening; production defaults still select concrete engines and no credential/transport injection is wired through configuration.
 - `account_verified` is emitted only from the provider's canonical identity match; arbitrary nonempty or malformed fingerprint values remain unverified.
+- Graph `/me.id` is accepted only in canonical lowercase UUID form, and public device-code prompts accept only the bounded uppercase Microsoft user-code shape; malformed or credential-like values are refused/dropped.
 - Durable Graph writes remain unavailable without a bound ActionJournal; existing Teams/send and other post-dispatch ambiguity paths remain at-most-once/manual-reconciliation cases and are not reopened or replayed here.
 
 ## Blockers

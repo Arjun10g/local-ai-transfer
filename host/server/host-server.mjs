@@ -13,7 +13,7 @@ const OPAQUE_ID = /^[A-Za-z0-9_-]{8,96}$/;
 const BOOTSTRAP_NONCE = /^[A-Za-z0-9_-]{43}$/;
 const BOOTSTRAP_TTL_MS = 60_000;
 const AUTH_STATES = new Set(['disabled', 'unconfigured', 'idle', 'requesting_device_code', 'awaiting_user', 'authenticated', 'checking_account', 'expired', 'failed', 'offline', 'unauthorized']);
-const AUTH_USER_CODE = /^[A-Za-z0-9][A-Za-z0-9-]{0,127}$/u;
+const AUTH_USER_CODE = /^[A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})?$/u;
 const AUTH_VERIFICATION_URIS = new Set(['https://microsoft.com/devicelogin', 'https://www.microsoft.com/devicelogin', 'https://login.microsoftonline.com/common/oauth2/deviceauth']);
 
 /** Platform-neutral containment check; avoids assuming `/` on Windows. */

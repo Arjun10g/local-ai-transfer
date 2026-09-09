@@ -126,7 +126,7 @@ test('new Graph composition has no stale auth, grant, proposal, write ledger, cu
   const authTransport = { request: async request => {
     if (request.path.endsWith('/devicecode')) { firstAuthRequests += 1; return { status: 200, body: { device_code: 'a'.repeat(32), user_code: 'AUTH-1234', verification_uri: 'https://microsoft.com/devicelogin', interval: 5 } }; }
     if (request.path.endsWith('/token')) { firstAuthRequests += 1; return { status: 200, body: { access_token: 'k'.repeat(32), expires_in: 3600, scope: 'User.Read Mail.Read' } }; }
-    firstAuthRequests += 1; return { status: 200, body: { id: 'restart-account' } };
+    firstAuthRequests += 1; return { status: 200, body: { id: '01234567-89ab-4cde-8fab-0123456789ab' } };
   } };
   const authenticated = new MicrosoftGraphProvider({ enabled: true, tenant: 'organizations', clientId, scopes: ['User.Read', 'Mail.Read'], transport: authTransport, sleep: async () => {} });
   await authenticated.startAuth();
@@ -153,15 +153,15 @@ test('same credential cancel detaches the old run and late device/sleep work can
   credential.cancel();
   const freshRun = credential.start().catch(error => error.code);
   await nextTurn();
-  deviceRuns[0].resolve({ status: 200, body: { device_code: 'o'.repeat(32), user_code: 'OLD-CODE', verification_uri: 'https://microsoft.com/devicelogin' } });
+  deviceRuns[0].resolve({ status: 200, body: { device_code: 'o'.repeat(32), user_code: 'OLD0-CODE', verification_uri: 'https://microsoft.com/devicelogin' } });
   await nextTurn();
   assert.equal(deviceRequests, 2);
   assert.equal(credential.authStatus().state, 'requesting_device_code');
   assert.deepEqual(callbacks, []);
-  deviceRuns[1].resolve({ status: 200, body: { device_code: 'n'.repeat(32), user_code: 'NEW-CODE', verification_uri: 'https://microsoft.com/devicelogin' } });
+  deviceRuns[1].resolve({ status: 200, body: { device_code: 'n'.repeat(32), user_code: 'NEW0-CODE', verification_uri: 'https://microsoft.com/devicelogin' } });
   await nextTurn();
   assert.equal(credential.authStatus().state, 'awaiting_user');
-  assert.deepEqual(callbacks, ['NEW-CODE']);
+  assert.deepEqual(callbacks, ['NEW0-CODE']);
   credential.cancel(); sleepGate.resolve();
   assert.deepEqual(await Promise.all([oldRun, coalescedRun, freshRun]), ['provider_cancelled', 'provider_cancelled', 'provider_cancelled']);
   assert.equal(credential.authStatus().state, 'idle');
@@ -171,7 +171,7 @@ test('same credential cancel detaches the old run and late device/sleep work can
 test('late abort-insensitive token completion cannot authenticate or clear a newer run', async () => {
   const oldToken = deferred(); const sleepGates = []; let deviceRequests = 0; let tokenRequests = 0;
   const transport = { request: async request => {
-    if (request.path.endsWith('/devicecode')) { deviceRequests += 1; return { status: 200, body: { device_code: `device-${deviceRequests}`, user_code: `CODE-${deviceRequests}`, verification_uri: 'https://microsoft.com/devicelogin' } }; }
+    if (request.path.endsWith('/devicecode')) { deviceRequests += 1; return { status: 200, body: { device_code: `device-${deviceRequests}`, user_code: `CODE-000${deviceRequests}`, verification_uri: 'https://microsoft.com/devicelogin' } }; }
     tokenRequests += 1; return oldToken.promise;
   } };
   const credential = new MicrosoftDeviceCodeCredential({ tenant: 'organizations', clientId, scopes: ['User.Read'], transport, sleep: async () => { const gate = deferred(); sleepGates.push(gate); return gate.promise; } });
@@ -197,7 +197,7 @@ test('authenticated Graph clear removes token, auth fingerprint projection, prom
   const transport = { request: async request => {
     if (request.path.endsWith('/devicecode')) return { status: 200, body: { device_code: 'c'.repeat(32), user_code: 'CLEAR-CODE', verification_uri: 'https://microsoft.com/devicelogin' } };
     if (request.path.endsWith('/token')) return { status: 200, body: { access_token: 'z'.repeat(32), expires_in: 3600, scope: 'User.Read Mail.Read' } };
-    return { status: 200, body: { id: 'clear-account' } };
+    return { status: 200, body: { id: '89abcdef-0123-4567-89ab-cdef01234567' } };
   } };
   const grants = new OperatorGrantStore();
   const provider = new MicrosoftGraphProvider({ enabled: true, permissionProfile: 'full_access', tenant: 'organizations', clientId, scopes: ['User.Read', 'Mail.Read'], transport, grantStore: grants, sleep: async () => {} });
@@ -217,6 +217,22 @@ test('authenticated Graph clear removes token, auth fingerprint projection, prom
   assert.equal(grants.get('microsoft.graph.mail'), null);
   assert.equal(grants.get('microsoft.graph.teams'), null);
   await assert.rejects(() => provider.credentialSource.getAccessToken(), error => error.code === 'provider_unauthorized');
+});
+
+test('Graph account verification rejects noncanonical /me IDs before any account fingerprint is issued', async () => {
+  for (const invalidId of ['                ', 'bad\u0000id', 'arbitrary-account-id']) {
+    const transport = { request: async request => {
+      if (request.path.endsWith('/devicecode')) return { status: 200, body: { device_code: 'v'.repeat(32), user_code: 'VALID-0001', verification_uri: 'https://microsoft.com/devicelogin' } };
+      if (request.path.endsWith('/token')) return { status: 200, body: { access_token: 'w'.repeat(32), expires_in: 3600, scope: 'User.Read' } };
+      return { status: 200, body: { id: invalidId } };
+    } };
+    const provider = new MicrosoftGraphProvider({ enabled: true, tenant: 'organizations', clientId, scopes: ['User.Read'], transport, sleep: async () => {} });
+    await assert.rejects(() => provider.startAuth(), error => error.code === 'provider_unauthorized');
+    assert.equal(provider.authStatus().state, 'idle');
+    assert.equal(provider.authStatus().accountVerified, false);
+    assert.equal(provider.authStatus().accountFingerprint, null);
+    assert.equal(provider.credentialSource.cached, null);
+  }
 });
 
 test('host Graph auth controls expose bounded prompt state but no credential material', async t => {
@@ -312,6 +328,28 @@ test('HostServer applies the same explicit auth projection to status and every c
   for (const action of ['start', 'cancel', 'clear']) {
     const response = await fetch(`${getterAddress.url}/api/provider-auth/microsoft_graph/${action}`, { method: 'POST', headers: getterHeaders, body: '{}' });
     assert.equal(response.status, 409); assertNoCredentialValues(await response.json(), [getterSentinel]);
+  }
+});
+
+test('auth projection drops every secret-shaped user code on every public auth endpoint', async t => {
+  const sentinels = ['KNOWN-ACCESS-TOKEN', 'KNOWN-DEVICE-CODE', clientId, 'KNOWN-FINGERPRINT', 'raw provider error text'];
+  let currentCode = sentinels[0];
+  const control = { configured: true, start: () => {}, status: () => ({ state: 'awaiting_user', accountVerified: false, prompt: { userCode: currentCode, verificationUri: 'https://microsoft.com/devicelogin' } }), cancel: () => {}, clear: () => {} };
+  const host = new HostServer({ controller: { cancelActive() {} }, engine: { async shutdown() {} }, providerAuth: () => ({ microsoft_graph: control }) });
+  const address = await host.listen(0); t.after(() => host.close());
+  const headers = authHeaders(address);
+  for (const sentinel of sentinels) {
+    currentCode = sentinel;
+    const get = await fetch(`${address.url}/api/provider-auth/microsoft_graph`, { headers });
+    const getBody = await get.json();
+    assert.equal(getBody.microsoft_graph.prompt, null);
+    assertNoCredentialValues(getBody, sentinels);
+    for (const action of ['start', 'cancel', 'clear']) {
+      const response = await fetch(`${address.url}/api/provider-auth/microsoft_graph/${action}`, { method: 'POST', headers, body: '{}' });
+      const body = await response.json();
+      assert.equal(body.status.prompt, null);
+      assertNoCredentialValues(body, sentinels);
+    }
   }
 });
 
