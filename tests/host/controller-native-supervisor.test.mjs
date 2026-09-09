@@ -143,6 +143,21 @@ test('unavailable journal never advertises a native action even with falsified m
   assert.equal(advertised[0].some(item => item.function?.name === 'process.run_allowlisted'), false);
 });
 
+test('malformed or hostile journal health is a finite unavailable refusal', async () => {
+  const healthValues = [null, { state: 'blocked', error: 'raw provider failure' }, { state: 'blocked', error: `action_journal_${'x'.repeat(97)}` }];
+  for (const [index, health] of healthValues.entries()) {
+    const journal = new MockJournal({ healthState: 'blocked' }); journal.health = () => health;
+    const controller = new ConversationController({ engine: engineFor('process.run_allowlisted', {}), actionJournal: journal, toolRegistry: { 'process.run_allowlisted': tool('process.run_allowlisted', 'process_execution', async () => { throw new Error('preview must not run'); }) } });
+    const result = await runAsPlatform('win32', () => controller.runTurn({ sessionId: `ses_health_${index}`, requestId: `req_health_${index}`, message: 'run it' }));
+    assert.equal(result.error, 'action_journal_unavailable');
+  }
+  const throwing = new MockJournal({ healthState: 'blocked' });
+  const controller = new ConversationController({ engine: engineFor('process.run_allowlisted', {}), actionJournal: throwing, toolRegistry: { 'process.run_allowlisted': tool('process.run_allowlisted', 'process_execution', async () => { throw new Error('preview must not run'); }) } });
+  Object.defineProperty(throwing, 'health', { get() { throw new Error('health getter sentinel'); } });
+  const result = await runAsPlatform('win32', () => controller.runTurn({ sessionId: 'ses_health_getter', requestId: 'req_health_getter', message: 'run it' }));
+  assert.equal(result.error, 'action_journal_unavailable');
+});
+
 test('registry snapshots defeat post-admission mutation and public map replacement', async () => {
   let executions = 0; const journal = new MockJournal({ nativeOnly: false });
   const mutable = tool('test.write', 'create', async () => { executions++; return makeToolResult({ id: 'call_native_01', name: 'test.write', status: 'ok', text: '{}' }); });

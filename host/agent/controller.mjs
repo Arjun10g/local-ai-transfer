@@ -160,8 +160,15 @@ export function requiresDurableAction(tool) {
   return false;
 }
 
-function journalReady(journal) {
-  try { return journal?.health?.().state === 'ready'; } catch { return false; }
+const JOURNAL_FAILURE_CODE = /^action_journal_[a-z0-9_]{1,96}$/u;
+function journalStatus(journal) {
+  try {
+    if (!journal || typeof journal.health !== 'function') return { ready: false, code: 'action_journal_unavailable' };
+    const health = journal.health();
+    if (!health || typeof health !== 'object' || Array.isArray(health) || typeof health.state !== 'string') return { ready: false, code: 'action_journal_unavailable' };
+    if (health.state === 'ready') return { ready: health.error === null, code: health.error === null ? null : 'action_journal_unavailable' };
+    return { ready: false, code: typeof health.error === 'string' && JOURNAL_FAILURE_CODE.test(health.error) ? health.error : 'action_journal_unavailable' };
+  } catch { return { ready: false, code: 'action_journal_unavailable' }; }
 }
 
 const TOOL_DESCRIPTOR_FIELDS = Object.freeze(['name', 'version', 'description', 'risk_tier', 'side_effect', 'network', 'data_egress', 'requires_confirmation', 'timeout_ms', 'output_limit', 'parameters', 'input_schema', 'authorize', 'preview', 'confirmationRequired', 'execute']);
@@ -276,7 +283,7 @@ export class ConversationController {
       while (true) {
         if (controller.signal.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' });
         session.state = calls ? 'CONTINUING_MODEL' : 'INFERENCING'; emit('message.started', { mode, state: session.state, continuation: calls > 0 });
-        const ready = journalReady(this.actionJournal);
+        const ready = journalStatus(this.actionJournal).ready;
         const tools = modelToolDefinitions(new Map([...this.#tools].filter(([name, tool]) => {
           const nativeOwned = nativeSupervisorOwnerFor(name, tool, process.platform) !== null;
           return nativeOwned ? ready : !requiresDurableAction(tool) || ready;
@@ -294,7 +301,8 @@ export class ConversationController {
         const tool = this.#tools.get(call.name); if (!tool) throw Object.assign(new Error('unknown_tool'), { code: 'unknown_tool' });
         validateToolArgumentShape(tool, call);
         const nativeDispatchOwner = nativeSupervisorOwnerFor(tool.name, tool, process.platform);
-        if ((nativeDispatchOwner !== null || requiresDurableAction(tool)) && !journalReady(this.actionJournal)) throw Object.assign(new Error('durable action journal is not configured'), { code: 'action_journal_unavailable' });
+        const admissionJournal = journalStatus(this.actionJournal);
+        if ((nativeDispatchOwner !== null || requiresDurableAction(tool)) && !admissionJournal.ready) throw Object.assign(new Error('durable action journal is unavailable'), { code: admissionJournal.code });
         let preview;
         if (tool.preview) preview = await invokeWithTimeout(tool, tool.preview, call, controller.signal);
         emit('tool.proposed', { call: publicToolCall(call), ...(preview === undefined ? {} : { preview }) });
@@ -309,7 +317,8 @@ export class ConversationController {
           else { preview = await invokeWithTimeout(tool, tool.preview, { ...call, authorization: { kind: 'user_confirmation' }, preview_authorized: true }, controller.signal); emit('tool.proposed', { call: publicToolCall(call), preview }); }
         }
         if (nativeDispatchOwner !== null || requiresDurableAction(tool)) {
-          if (!journalReady(this.actionJournal)) throw Object.assign(new Error('durable action journal is not configured'), { code: 'action_journal_unavailable' });
+          const dispatchJournal = journalStatus(this.actionJournal);
+          if (!dispatchJournal.ready) throw Object.assign(new Error('durable action journal is unavailable'), { code: dispatchJournal.code });
           const binding = createActionBinding({ requestId, callId: call.id, toolName: call.name, arguments: call.arguments, preview });
           const receipt = await this.actionJournal.prepare({ requestId, callId: call.id, toolName: call.name, riskTier: tool.risk_tier, sideEffect: tool.side_effect, argumentsDigest: binding.argumentsDigest, previewDigest: binding.previewDigest, operationDigest: binding.operationDigest });
           const dispatchOwner = nativeDispatchOwner;
