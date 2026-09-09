@@ -14,7 +14,7 @@
     "signature": {"$ref": "#/$defs/signature"}
   },
   "$defs": {
-    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "not": {"const": "0000000000000000000000000000000000000000000000000000000000000000"}},
     "revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "asciiId": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_.:-]+$"},
     "artifact": {
@@ -71,7 +71,7 @@
       "properties": {
         "algorithm": {"const": "ed25519"},
         "key_id": {"$ref": "#/$defs/asciiId"},
-        "signature_base64": {"type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[A-Za-z0-9+/]+={0,2}$"},
+        "signature_base64": {"type": "string", "minLength": 88, "maxLength": 88, "pattern": "^[A-Za-z0-9+/]+={0,2}$"},
         "payload_sha256": {"$ref": "#/$defs/sha256"}
       }
     }

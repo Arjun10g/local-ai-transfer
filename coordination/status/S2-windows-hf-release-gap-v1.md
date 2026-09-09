@@ -35,7 +35,7 @@ outside this source-only slice.
 
 ## Evidence
 
-- Selected handoff/release/model static suite: 58/58 (including 21 handoff
+- Selected handoff/release/model static suite: 60/60 (including 23 handoff
   cases; counts are not summed across suites).
 - JSON schema and Python AST checks pass; native code was not compiled.
 - Safe QA inventory: 58 discovered, 0 missing, 0 unknown; plan remains

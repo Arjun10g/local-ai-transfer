@@ -23,6 +23,7 @@ from typing import Any, Callable
 MAX_HANDOFF_BYTES = 64 * 1024
 MAX_JSON_DEPTH = 8
 SIGNATURE_BYTES = 64
+SIGNATURE_BASE64_CHARS = 88
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 REVISION = re.compile(r"^[0-9a-f]{40}$")
 ASCII_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
@@ -103,20 +104,28 @@ def load_handoff(path: Path) -> dict[str, Any]:
     try:
         fd = os.open(path, os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0))
         opened = os.fstat(fd)
-        identity = lambda value: (value.st_dev, value.st_ino, value.st_mode, value.st_nlink, value.st_size)
+        identity = lambda value: (
+            value.st_dev, value.st_ino, value.st_mode, value.st_nlink, value.st_size,
+            getattr(value, "st_mtime_ns", value.st_mtime), getattr(value, "st_ctime_ns", value.st_ctime),
+        )
         if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1 or opened.st_size > MAX_HANDOFF_BYTES:
             raise HandoffError("handoff file identity or size is unsafe")
         before = path.stat()
         if identity(before) != identity(opened) or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
             raise HandoffError("handoff identity changed before bounded read")
+        opening_size = opened.st_size
+        if opening_size == 0:
+            raise HandoffError("handoff is empty")
         chunks: list[bytes] = []
         total = 0
-        while total <= MAX_HANDOFF_BYTES:
-            chunk = os.read(fd, MAX_HANDOFF_BYTES + 1 - total)
+        while total < opening_size:
+            chunk = os.read(fd, opening_size - total)
             if not chunk:
-                break
+                raise HandoffError("handoff truncated during bounded read")
             chunks.append(chunk)
             total += len(chunk)
+        if os.read(fd, 1):
+            raise HandoffError("handoff grew during bounded read")
         after = os.fstat(fd)
     except HandoffError:
         failed = True
@@ -136,6 +145,7 @@ def load_handoff(path: Path) -> dict[str, Any]:
         not stat.S_ISREG(after.st_mode)
         or after.st_nlink != 1
         or identity(before) != identity(after)
+        or total != opening_size
         or len(data) > MAX_HANDOFF_BYTES
     ):
         raise HandoffError("handoff changed during bounded read")
@@ -217,14 +227,16 @@ def validate_handoff(value: Any) -> dict[str, Any]:
     if signature["algorithm"] != "ed25519" or not isinstance(signature["key_id"], str) or ASCII_ID.fullmatch(signature["key_id"]) is None:
         raise HandoffError("signature identity is invalid")
     encoded = signature["signature_base64"]
-    if not isinstance(encoded, str) or not 1 <= len(encoded) <= 512:
+    if not isinstance(encoded, str) or len(encoded) != SIGNATURE_BASE64_CHARS:
         raise HandoffError("signature encoding is invalid")
     try:
         detached = base64.b64decode(encoded.encode("ascii"), validate=True)
     except (UnicodeEncodeError, binascii.Error, ValueError) as exc:
         raise HandoffError("signature encoding is invalid") from exc
     if len(detached) != SIGNATURE_BYTES:
-        raise HandoffError("signature exceeds bound")
+        raise HandoffError("signature encoding length is invalid")
+    if base64.b64encode(detached).decode("ascii") != encoded:
+        raise HandoffError("signature encoding is not canonical")
     payload = _canonical_payload(root)
     if hashlib.sha256(payload).hexdigest() != signature["payload_sha256"]:
         raise HandoffError("signed payload digest mismatch")

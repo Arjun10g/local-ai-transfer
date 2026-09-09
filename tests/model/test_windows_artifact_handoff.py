@@ -57,6 +57,15 @@ class WindowsArtifactHandoffTests(unittest.TestCase):
         schema = json.loads((ROOT / "contracts/windows-release-artifact-handoff/v1.0.0.json").read_text(encoding="utf-8"))
         self.assertEqual([], schema_errors(handoff(), schema))
 
+    def test_schema_and_validator_reject_zero_receipt_and_wrong_signature_length(self):
+        schema = json.loads((ROOT / "contracts/windows-release-artifact-handoff/v1.0.0.json").read_text(encoding="utf-8"))
+        value = handoff(); value["evidence"]["model_receipt_sha256"] = "0" * 64
+        self.assertTrue(schema_errors(value, schema))
+        with self.assertRaises(module.HandoffError): module.validate_handoff(value)
+        value = handoff(); value["signature"]["signature_base64"] = value["signature"]["signature_base64"][:-4]
+        self.assertTrue(schema_errors(value, schema))
+        with self.assertRaises(module.HandoffError): module.validate_handoff(value)
+
     def test_exact_approved_artifact_fields_and_independent_payload_digest(self):
         value = handoff()
         self.assertEqual({
@@ -113,7 +122,7 @@ class WindowsArtifactHandoffTests(unittest.TestCase):
         value = handoff(); value["signature"]["signature_base64"] = "not*base64"
         with self.assertRaisesRegex(module.HandoffError, "signature encoding"): module.validate_handoff(value)
         value = handoff(); value["signature"]["signature_base64"] = base64.b64encode(b"short").decode("ascii")
-        with self.assertRaisesRegex(module.HandoffError, "signature exceeds"): module.validate_handoff(value)
+        with self.assertRaisesRegex(module.HandoffError, "signature encoding"): module.validate_handoff(value)
 
     def test_rejects_model_metadata_variants(self):
         for key, bad in ((
@@ -183,6 +192,34 @@ class WindowsArtifactHandoffTests(unittest.TestCase):
                     module.load_handoff(path)
             with mock.patch.object(module.os, "close", side_effect=OSError("sensitive fd")):
                 with self.assertRaisesRegex(module.HandoffError, "close failed"):
+                    module.load_handoff(path)
+
+    def test_load_rejects_same_inode_truncate_valid_prefix_restore_invalid_suffix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.json"
+            valid = json.dumps(handoff(), separators=(",", ":")).encode("utf-8")
+            raw = valid + b" " * 16
+            path.write_bytes(raw)
+            original_read = module.os.read
+            first = True
+
+            def mutate_after_partial_read(fd, count):
+                nonlocal first
+                if first:
+                    first = False
+                    chunk = original_read(fd, 1)
+                    with path.open("r+b") as handle:
+                        handle.truncate(len(valid))
+                        handle.flush()
+                        handle.truncate(len(raw))
+                        handle.seek(len(valid))
+                        handle.write(b"X" * 16)
+                        handle.flush()
+                    return chunk
+                return original_read(fd, count)
+
+            with mock.patch.object(module.os, "read", side_effect=mutate_after_partial_read):
+                with self.assertRaisesRegex(module.HandoffError, "changed during"):
                     module.load_handoff(path)
 
     def test_cli_is_sanitized_and_refuses_without_external_trust(self):

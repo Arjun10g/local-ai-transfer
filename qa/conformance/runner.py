@@ -105,6 +105,8 @@ def schema_errors(value: Any, schema: dict[str, Any], path: str = "$", root: dic
     errors: list[str] = []
     if "const" in schema and value != schema["const"]:
         errors.append(f"{path}:const")
+    if "not" in schema and not schema_errors(value, schema["not"], path, root):
+        errors.append(f"{path}:not")
     if "enum" in schema and value not in schema["enum"]:
         errors.append(f"{path}:enum")
     types = schema.get("type")
