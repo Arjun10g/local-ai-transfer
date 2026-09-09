@@ -30,9 +30,9 @@ Add mocked behavioral coverage for Microsoft Graph production composition, journ
 
 ## Evidence
 
-- Commit: `48c4889dc31f6da34aae7a56d07fbb7c3f7eb984` (auth repair; this status correction is included in the final follow-up tip)
+- Commit: final repair tip reported with this packet
 - Commands: `node --test tests/host/graph-production-composition-restart.test.mjs`; selected Graph/host/controller/security Node inventory; `python3 scripts/test/run_qa.py`; `git diff --check`
-- Tests: New auth/composition suite 9/9; selected relevant Graph/host/controller/security inventory 153/153 after the auth-run and projection repair; QA safe inventory recognizes the test and remains BLOCKED by safe-mode mandatory-suite skips
+- Tests: New auth/composition suite 9/9; selected relevant Graph/host/controller/security inventory 153/153 after the auth-run and projection repair; hostile serialized-output and importable bootstrap assertions are included. QA safe inventory recognizes the test and remains BLOCKED by safe-mode mandatory-suite skips
 - Machine: Not applicable
 - Artifact/index: None
 - Metrics: No live/provider/model/build execution; hidden durable-write case recorded zero transport/token access; late auth completions recorded no stale prompt/cache/callback mutation
@@ -45,6 +45,8 @@ Add mocked behavioral coverage for Microsoft Graph production composition, journ
 - Host auth responses were checked for credential-like fields and bounded prompt fields across status/start/cancel/clear.
 - Auth runs are identity-bound: cancellation detaches the old run immediately, and stale device/sleep/token completions cannot mutate a replacement run.
 - Public host auth status/control responses expose only `state`, bounded prompt fields, and `account_verified`; the full fingerprint remains internal for account/grant binding.
+- The launcher now exposes an importable composition seam that builds the actual registry/controller/HostServer graph without listening; production defaults still select concrete engines and no credential/transport injection is wired through configuration.
+- `account_verified` is emitted only from the provider's canonical identity match; arbitrary nonempty or malformed fingerprint values remain unverified.
 - Durable Graph writes remain unavailable without a bound ActionJournal; existing Teams/send and other post-dispatch ambiguity paths remain at-most-once/manual-reconciliation cases and are not reopened or replayed here.
 
 ## Blockers

@@ -38,6 +38,9 @@ initiated and concurrent starts share one device-code flow; `cancel` aborts it a
 responses are explicitly projected to `state`, bounded `prompt.userCode` and
 `prompt.verificationUri`, and `account_verified`; they contain no access token,
 device code, tenant, client ID, scopes, account fingerprint, or provider fields.
+The boolean is provider-issued only after the device-auth provider has derived
+and matched its canonical account identity; arbitrary or malformed fingerprints
+cannot make it true.
 
 The native loopback transport accepts only numeric `127.0.0.1` client
 endpoints. It requires HTTP/1.1, a loopback `Host`, bounded unique headers,

@@ -7,12 +7,14 @@ import { readGraphReadAttestation } from '../../host/providers/microsoft-graph-r
 import { ConversationController } from '../../host/agent/controller.mjs';
 import { HostServer } from '../../host/server/host-server.mjs';
 import { mergeConfig } from '../../host/agent/config.mjs';
+import { createHostComposition } from '../../lae-host.mjs';
 
 const clientId = '00001111-aaaa-2222-bbbb-3333cccc4444';
 const call = (name, arguments_, id) => ({ id: id ?? `call_${name.replaceAll('.', '_')}`, name, arguments: arguments_ });
 const json = result => JSON.parse(result.content[0].text);
 const authHeaders = address => ({ authorization: `Bearer ${address.token}`, 'content-type': 'application/json' });
 const assertNoCredentialFields = value => assert.doesNotMatch(JSON.stringify(value), /"(?:access_token|device_code|client_id|tenant|scopes|accountFingerprint|raw_error)"\s*:/iu);
+const assertNoCredentialValues = (value, secrets) => { const serialized = JSON.stringify(value); for (const secret of secrets) assert.equal(serialized.includes(secret), false, 'public auth output contains a private value'); assertNoCredentialFields(value); };
 function deferred() { let resolve; let reject; const promise = new Promise((resolvePromise, rejectPromise) => { resolve = resolvePromise; reject = rejectPromise; }); return { promise, resolve, reject }; }
 const nextTurn = () => new Promise(resolve => setImmediate(resolve));
 
@@ -27,21 +29,24 @@ function fakeGraphProvider({ requests = [], response, grantStore } = {}) {
   return { provider, transport };
 }
 
-test('production Graph composition has no credential or transport injection path', async () => {
-  const launcher = await readFile(new URL('../../lae-host.mjs', import.meta.url), 'utf8');
+test('production Graph composition has no credential or transport injection path', async t => {
   const hostApi = JSON.parse(await readFile(new URL('../../contracts/host-api/contract.json', import.meta.url), 'utf8'));
   const ui = await readFile(new URL('../../ui/app.js', import.meta.url), 'utf8');
-  assert.match(launcher, /createExternalToolRegistry\(\{ config: config\.providers, workspaceRoots: config\.workspace_roots, graph: \{ grantStore \} \}\)/u);
-  assert.doesNotMatch(launcher, /createExternalToolRegistry\(\{[^}]*credentialSource|createExternalToolRegistry\(\{[^}]*transport/su);
   assert.deepEqual(hostApi.exact_bodies.provider_auth_microsoft_graph.public_status_fields, ['state', 'prompt', 'account_verified']);
   assert.deepEqual(hostApi.exact_bodies.provider_auth_microsoft_graph.public_prompt_fields, ['userCode', 'verificationUri']);
   assert.equal(hostApi.exact_bodies.provider_auth_microsoft_graph.public_status_excludes.includes('accountFingerprint'), true);
   assert.match(ui, /account_verified/); assert.doesNotMatch(ui, /accountFingerprint/);
 
   const graphConfig = { enabled: true, tenant: 'organizations', client_id: clientId, scopes: ['User.Read', 'Mail.Read'] };
-  const registry = createExternalToolRegistry({ config: { microsoft_graph: graphConfig } });
-  assert.equal(registry.providerAuthStatus().microsoft_graph.state, 'idle');
-  assert.deepEqual(registry.providerStatus(), { microsoft_graph: 'ready', copilot: 'disabled', browser_actions: 'disabled' });
+  let engineShutdowns = 0;
+  const composition = await createHostComposition({ fileConfig: { providers: { microsoft_graph: graphConfig } }, env: { LAE_ENGINE_MODE: 'fixture' }, engineFactory: async () => ({ async *generate() {}, async shutdown() { engineShutdowns += 1; } }) });
+  t.after(() => composition.host.close());
+  assert.equal(composition.host instanceof HostServer, true);
+  assert.equal(composition.externalTools.providerAuthStatus().microsoft_graph.state, 'idle');
+  assert.deepEqual(composition.externalTools.providerStatus(), { microsoft_graph: 'ready', copilot: 'disabled', browser_actions: 'disabled' });
+  assert.equal(engineShutdowns, 0);
+  assert.equal(composition.host.server, null);
+  assert.equal(Object.hasOwn(composition.externalTools.providerAuthStatus().microsoft_graph, 'accountFingerprint'), true);
   for (const key of ['token', 'access_token', 'credential_source', 'transport', 'auth_transport']) {
     assert.throws(() => mergeConfig({ providers: { microsoft_graph: { [key]: 'opaque' } } }), /unknown key/u);
   }
@@ -201,8 +206,12 @@ test('authenticated Graph clear removes token, auth fingerprint projection, prom
   for (const capability of ['microsoft.graph.mail', 'microsoft.graph.teams']) grants.grant({ capability, provider: 'microsoft_graph', accountFingerprint: fingerprint });
   assert.equal(provider.authStatus().state, 'authenticated');
   assert.equal(provider.authStatus().accountFingerprint, fingerprint);
+  assert.equal(provider.authStatus().accountVerified, true);
+  provider.authenticatedAccountFingerprint = 'opaque-account';
+  assert.equal(provider.authStatus().accountVerified, false);
+  provider.authenticatedAccountFingerprint = fingerprint;
   provider.clearAuth();
-  assert.deepEqual(provider.authStatus(), { state: 'idle', prompt: null, accountFingerprint: null });
+  assert.deepEqual(provider.authStatus(), { state: 'idle', prompt: null, accountFingerprint: null, accountVerified: false });
   assert.equal(provider.credentialSource.authStatus().state, 'idle');
   assert.equal(provider.credentialSource.cached, null);
   assert.equal(grants.get('microsoft.graph.mail'), null);
@@ -250,7 +259,8 @@ test('host Graph auth controls expose bounded prompt state but no credential mat
 });
 
 test('HostServer applies the same explicit auth projection to status and every control response', async t => {
-  const raw = { state: 'authenticated', accountFingerprint: 'opaque-account', prompt: { userCode: 'SAFE-CODE', verificationUri: 'https://microsoft.com/devicelogin', expiresAt: 123 }, access_token: 'secret', device_code: 'secret', arbitrary: 'must-drop' };
+  const secrets = ['KNOWN-ACCESS-TOKEN', 'KNOWN-DEVICE-CODE', clientId, 'KNOWN-FINGERPRINT', 'raw provider error text'];
+  const raw = { state: 'authenticated', accountFingerprint: 'KNOWN-FINGERPRINT', accountVerified: false, prompt: { userCode: 'SAFE-CODE', verificationUri: 'https://microsoft.com/devicelogin', expiresAt: 123 }, access_token: 'KNOWN-ACCESS-TOKEN', device_code: 'KNOWN-DEVICE-CODE', renamed: { bearer: 'KNOWN-ACCESS-TOKEN', client: clientId, nested: ['KNOWN-DEVICE-CODE', 'KNOWN-FINGERPRINT'] }, raw_error: 'raw provider error text', arbitrary: 'must-drop' };
   const control = { configured: true, start: () => {}, status: () => raw, cancel: () => {}, clear: () => {} };
   const host = new HostServer({ controller: { cancelActive() {} }, engine: { async shutdown() {} }, providerAuth: () => ({ microsoft_graph: control }) });
   const address = await host.listen(0); t.after(() => host.close());
@@ -258,13 +268,26 @@ test('HostServer applies the same explicit auth projection to status and every c
   const get = await fetch(`${address.url}/api/provider-auth/microsoft_graph`, { headers });
   const getBody = await get.json();
   assert.deepEqual(Object.keys(getBody.microsoft_graph).sort(), ['account_verified', 'prompt', 'state']);
-  assert.equal(getBody.microsoft_graph.account_verified, true);
+  assert.equal(getBody.microsoft_graph.account_verified, false);
+  assertNoCredentialValues(getBody, secrets);
   for (const action of ['start', 'cancel', 'clear']) {
     const response = await fetch(`${address.url}/api/provider-auth/microsoft_graph/${action}`, { method: 'POST', headers, body: '{}' });
     const body = await response.json();
     assert.deepEqual(Object.keys(body.status).sort(), ['account_verified', 'prompt', 'state']);
-    assert.equal(body.status.account_verified, true);
-    assertNoCredentialFields(body);
+    assert.equal(body.status.account_verified, false);
+    assertNoCredentialValues(body, secrets);
+  }
+
+  const rawError = 'raw provider error text';
+  const failingControl = { configured: true, start: () => { throw Object.assign(new Error(rawError), { code: rawError }); }, status: () => { throw Object.assign(new Error(rawError), { code: rawError }); }, cancel: () => { throw Object.assign(new Error(rawError), { code: rawError }); }, clear: () => { throw Object.assign(new Error(rawError), { code: rawError }); } };
+  const failingHost = new HostServer({ controller: { cancelActive() {} }, engine: { async shutdown() {} }, providerAuth: () => ({ microsoft_graph: failingControl }) });
+  const failingAddress = await failingHost.listen(0); t.after(() => failingHost.close());
+  const failingHeaders = authHeaders(failingAddress);
+  const failingGet = await fetch(`${failingAddress.url}/api/provider-auth/microsoft_graph`, { headers: failingHeaders });
+  assertNoCredentialValues(await failingGet.json(), [rawError]);
+  for (const action of ['start', 'cancel', 'clear']) {
+    const response = await fetch(`${failingAddress.url}/api/provider-auth/microsoft_graph/${action}`, { method: 'POST', headers: failingHeaders, body: '{}' });
+    assertNoCredentialValues(await response.json(), [rawError]);
   }
 });
 
