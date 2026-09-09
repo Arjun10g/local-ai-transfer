@@ -4,7 +4,8 @@ import { chmod, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createLocalToolRegistry } from '../../host/tools/local/index.mjs';
-import { createExternalToolRegistry } from '../../host/providers/index.mjs';
+import { createExternalToolRegistry, MicrosoftGraphProvider } from '../../host/providers/index.mjs';
+import { createMicrosoftGraphTools } from '../../host/providers/microsoft-graph.mjs';
 import { ConversationController, modelToolDefinitions } from '../../host/agent/controller.mjs';
 import { HostServer } from '../../host/server/host-server.mjs';
 import { makeToolResult } from '../../host/agent/tool-envelope.mjs';
@@ -86,19 +87,19 @@ test('production registries advertise only immutable configured capabilities', (
       browser_actions: { enabled: true, executable: '/approved/chrome', allowlist: ['/approved/chrome'] }
     }
   });
-  assert.deepEqual(Object.keys(externalConfigured).sort(), ['browser.follow_link', 'browser.inspect_links', 'browser.inspect_page', 'browser.session_close', 'browser.session_start', 'coding.copilot_ask', 'mail.list_messages', 'mail.read_message'].sort());
+  assert.deepEqual(Object.keys(externalConfigured).sort(), ['browser.follow_link', 'browser.inspect_links', 'browser.inspect_page', 'browser.session_close', 'browser.session_start', 'mail.list_messages', 'mail.read_message', 'mail.search_messages'].sort());
   assert.equal(externalConfigured.providerAuthControl().microsoft_graph.configured, true);
   assert.equal(externalConfigured.providerAuthControl().microsoft_graph.status().state, 'idle');
-  assert.deepEqual(externalConfigured.providerStatus(), { microsoft_graph: 'ready', copilot: 'ready', browser_actions: 'unverified' });
+  assert.deepEqual(externalConfigured.providerStatus(), { microsoft_graph: 'ready', copilot: 'unconfigured', browser_actions: 'unverified' });
   assert.equal(Object.isFrozen(externalConfigured.capabilitySnapshot.providers.microsoft_graph.advertised_tools), true);
   assert.equal(Object.hasOwn(externalConfigured, 'mail.create_draft'), false, 'scope-insufficient Graph writes stay hidden');
   assert.equal(Object.hasOwn(externalConfigured, 'browser.fill_field'), false, 'browser mutations stay hidden without the safe-actions gate');
 
   const windowsExternal = createExternalToolRegistry({
-    workspaceRoots: [{ ...configuredWorkspace(), path: 'C:\\approved\\workspace' }],
+    workspaceRoots: [{ ...configuredWorkspace(), path: '/approved/workspace' }],
     config: {
-      copilot: { enabled: true, executable: 'C:\\approved\\copilot.exe', allowlist: ['C:\\approved\\copilot.exe'], version: '1.2.3' },
-      browser_actions: { enabled: true, executable: 'C:\\approved\\chrome.exe', allowlist: ['C:\\approved\\chrome.exe'] }
+      copilot: { enabled: true, executable: '/approved/copilot.exe', allowlist: ['/approved/copilot.exe'], version: '1.2.3' },
+      browser_actions: { enabled: true, executable: '/approved/chrome.exe', allowlist: ['/approved/chrome.exe'] }
     },
     copilot: { platform: 'win32' }, browser: { platform: 'win32' }
   });
@@ -106,8 +107,8 @@ test('production registries advertise only immutable configured capabilities', (
   assert.deepEqual(windowsExternal.providerStatus(), { microsoft_graph: 'disabled', copilot: 'unconfigured', browser_actions: 'unconfigured' });
 
   const mockedWindowsExternal = createExternalToolRegistry({
-    copilot: { enabled: true, executable: 'C:\\approved\\copilot.exe', allowlist: ['C:\\approved\\copilot.exe'], version: '1.2.3', versionCheck: async () => true, readContext: async () => ({ text: '', files: [] }), platform: 'win32', testOnly: true },
-    browser: { enabled: true, executable: 'C:\\approved\\chrome.exe', allowlist: ['C:\\approved\\chrome.exe'], platform: 'win32', testOnly: true }
+    copilot: { enabled: true, executable: '/approved/copilot.exe', allowlist: ['/approved/copilot.exe'], version: '1.2.3', versionCheck: async () => true, readContext: async () => ({ text: '', files: [] }), platform: 'win32', testOnly: true },
+    browser: { enabled: true, executable: '/approved/chrome.exe', allowlist: ['/approved/chrome.exe'], platform: 'win32', testOnly: true }
   });
   assert.equal(Object.hasOwn(mockedWindowsExternal, 'coding.copilot_ask'), true, 'explicit test-only mocks retain a Windows unit-test seam');
   assert.equal(Object.hasOwn(mockedWindowsExternal, 'browser.session_start'), true, 'explicit test-only mocks retain a Windows unit-test seam');
@@ -118,11 +119,25 @@ test('production registries advertise only immutable configured capabilities', (
 
 test('mocked HostServer drives validated read and confirmed mutation through model continuation', async t => {
   const observations = { advertised: [], readPreviews: 0, readExecutions: 0, draftPreviews: 0, draftExecutions: 0, authorization: null, continuations: [] };
+  const graph = new MicrosoftGraphProvider({
+    enabled: true,
+    permissionProfile: 'ask_before_writes',
+    credentialSource: { getAccessToken: async () => 'synthetic-token' },
+    accountFingerprint: 'acct-vertical',
+    testOnly: true,
+    transport: { request: async () => ({ status: 200, body: {
+      id: 'message-1', receivedDateTime: '2026-09-05T12:34:56Z',
+      from: { emailAddress: { name: 'Sender', address: 'sender@example.com' } },
+      subject: 'Status', isRead: false, importance: 'normal',
+      body: { contentType: 'html', content: '<p>Meeting Friday</p>' },
+    } }) },
+  });
+  const attestedRead = createMicrosoftGraphTools(graph)['mail.read_message'];
   const readTool = {
     name: 'mail.read_message', description: 'Read one synthetic message.', risk_tier: 'T1', side_effect: 'read_mail', requires_confirmation: false, timeout_ms: 1000,
     parameters: { type: 'object', additionalProperties: false, required: ['message_id'], properties: { message_id: { type: 'string', maxLength: 64 } } },
     preview: async call => { observations.readPreviews += 1; assert.equal(typeof call.arguments.message_id, 'string'); return { provider: 'mock_mail', message_id: call.arguments.message_id }; },
-    execute: async call => { observations.readExecutions += 1; assert.equal(call.authorization, undefined); return makeToolResult({ id: call.id, name: call.name, text: JSON.stringify({ subject: 'Synthetic', body: 'Meeting Friday' }) }); }
+    execute: async call => { observations.readExecutions += 1; assert.equal(call.authorization, undefined); return attestedRead.execute(call); }
   };
   const draftTool = {
     name: 'mail.create_draft', description: 'Create one synthetic draft.', risk_tier: 'T2', side_effect: 'create_draft', requires_confirmation: true, timeout_ms: 1000,

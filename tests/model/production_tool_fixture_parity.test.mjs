@@ -21,7 +21,7 @@ test('schema catalogs are pure definitions and are rejected as execution registr
   }
   assert.throws(
     () => new ConversationController({ engine: { async *generate() {} }, toolRegistry: catalog }),
-    /must provide its matching name and execute function/u
+    /tool descriptor field execute is required/u
   );
 });
 
