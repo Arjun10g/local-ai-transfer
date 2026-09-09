@@ -23,6 +23,16 @@ const EFFECT_TIERS = Object.freeze({
   process_execution: ['T3'], cloud_inference: ['T3'], send_mail: ['T3'], send_teams: ['T3'], browser_input: ['T3'], browser_activation: ['T3']
 });
 const RECONCILIATION_REQUIRED_EFFECTS = new Set(['create_draft', 'send_mail', 'modify_mail', 'send_teams', 'browser_navigation', 'browser_input', 'browser_activation', 'cloud_inference']);
+// Windows process/application mutation belongs to the future native
+// supervisor.  This is derived from the trusted tool definition and platform,
+// never from model arguments, caller metadata, or a provider response.
+export const NATIVE_SUPERVISOR_DISPATCH_OWNER = 'native_supervisor';
+export const NATIVE_SUPERVISOR_HANDOFF_VERSION = 'native-supervisor-handoff.v1';
+const NATIVE_SUPERVISOR_TOOL_NAMES = new Set(['app.open', 'process.run_allowlisted']);
+const JOURNAL_RECEIPT_DIGEST = /^[a-f0-9]{64}$/u;
+const exactAuthorizationReadback = (receipt, operationId) => receipt?.operation_id === operationId && receipt?.state === 'authorized' && receipt?.sequence === 1 && JOURNAL_RECEIPT_DIGEST.test(receipt?.receipt_hash ?? '');
+const nativeSupervisorOwnerFor = (tool, platform) => platform === 'win32' && NATIVE_SUPERVISOR_TOOL_NAMES.has(tool?.name)
+  ? NATIVE_SUPERVISOR_DISPATCH_OWNER : null;
 const BROWSER_TOOL_NAMES = new Set(['browser.session_start', 'browser.inspect_links', 'browser.inspect_page', 'browser.follow_link', 'browser.fill_field', 'browser.activate_control', 'browser.session_close']);
 const COPILOT_TOOL_NAMES = new Set(['coding.copilot_ask']);
 const BROWSER_PROOFS = new Set(['session_started', 'navigation_verified', 'input_verified', 'activation_verified']);
@@ -169,12 +179,12 @@ async function invokeWithTimeout(tool, operation, call, signal) {
 }
 
 export class ConversationController {
-  constructor({ engine, maxToolCalls = 8, confirmationTimeoutMs = 30000, maxSessions = 4, maxHistoryMessages = 64, maxHistoryBytes = 262144, toolRegistry, actionJournal } = {}) {
+  constructor({ engine, maxToolCalls = 8, confirmationTimeoutMs = 30000, maxSessions = 4, maxHistoryMessages = 64, maxHistoryBytes = 262144, toolRegistry, actionJournal, platform = process.platform } = {}) {
     if (!engine?.generate) throw new TypeError('engine.generate is required');
     if (!Number.isInteger(maxSessions) || maxSessions < 1) throw new TypeError('maxSessions must be positive');
     if (!Number.isInteger(maxHistoryMessages) || maxHistoryMessages < 1 || !Number.isInteger(maxHistoryBytes) || maxHistoryBytes < 1024) throw new TypeError('history limits are invalid');
     if (actionJournal !== undefined && (!actionJournal || typeof actionJournal.health !== 'function' || typeof actionJournal.prepare !== 'function' || typeof actionJournal.authorize !== 'function' || typeof actionJournal.dispatch !== 'function' || typeof actionJournal.acknowledge !== 'function' || typeof actionJournal.beginReconciliation !== 'function' || typeof actionJournal.complete !== 'function' || typeof actionJournal.cancel !== 'function' || typeof actionJournal.failDefinitive !== 'function' || typeof actionJournal.markUnknown !== 'function')) throw new TypeError('actionJournal does not implement the durable transition contract');
-    this.engine = engine; this.maxToolCalls = maxToolCalls; this.confirmationTimeoutMs = confirmationTimeoutMs; this.maxSessions = maxSessions; this.maxHistoryMessages = maxHistoryMessages; this.maxHistoryBytes = maxHistoryBytes; this.actionJournal = actionJournal; this.clock = 0;
+    this.engine = engine; this.maxToolCalls = maxToolCalls; this.confirmationTimeoutMs = confirmationTimeoutMs; this.maxSessions = maxSessions; this.maxHistoryMessages = maxHistoryMessages; this.maxHistoryBytes = maxHistoryBytes; this.actionJournal = actionJournal; this.platform = platform; this.clock = 0;
     this.sessions = new Map(); this.active = null; this.pending = new Map();
     this.tools = new Map([[timeNowDefinition.name, { ...timeNowDefinition, execute: ({ id, arguments: args }) => timeNowTool({ id, arguments: args }) }], ...executionRegistryEntries(toolRegistry)]);
   }
@@ -250,7 +260,37 @@ export class ConversationController {
           if (!this.actionJournal) throw Object.assign(new Error('durable action journal is not configured'), { code: 'action_journal_unavailable' });
           const binding = createActionBinding({ requestId, callId: call.id, toolName: call.name, arguments: call.arguments, preview });
           const receipt = await this.actionJournal.prepare({ requestId, callId: call.id, toolName: call.name, riskTier: tool.risk_tier, sideEffect: tool.side_effect, argumentsDigest: binding.argumentsDigest, previewDigest: binding.previewDigest, operationDigest: binding.operationDigest });
-          activeJournalOperation = { id: receipt.operation_id, dispatched: false, reconcile: RECONCILIATION_REQUIRED_EFFECTS.has(tool.side_effect), operationDigest: binding.operationDigest, argumentsDigest: binding.argumentsDigest, previewDigest: binding.previewDigest };
+          const dispatchOwner = nativeSupervisorOwnerFor(tool, this.platform);
+          activeJournalOperation = {
+            id: receipt.operation_id,
+            dispatched: false,
+            reconcile: RECONCILIATION_REQUIRED_EFFECTS.has(tool.side_effect),
+            operationDigest: binding.operationDigest,
+            argumentsDigest: binding.argumentsDigest,
+            previewDigest: binding.previewDigest,
+            dispatchOwner,
+            // This handoff record is controller-internal and is never sent to
+            // a Node provider.  The native bridge is absent in this slice, so
+            // it remains an unaccepted, pre-dispatch description.
+            nativeSupervisorHandoff: dispatchOwner === NATIVE_SUPERVISOR_DISPATCH_OWNER ? {
+              version: NATIVE_SUPERVISOR_HANDOFF_VERSION,
+              journal_dispatch_owner: NATIVE_SUPERVISOR_DISPATCH_OWNER,
+              operation_id: receipt.operation_id,
+              request_ref: binding.requestRef,
+              call_ref: binding.callRef,
+              tool: tool.name,
+              risk: tool.risk_tier,
+              side_effect: tool.side_effect,
+              args_digest: binding.argumentsDigest,
+              preview_digest: binding.previewDigest,
+              operation_digest: binding.operationDigest,
+              authorization_kind: null,
+              authorized_sequence: null,
+              authorized_receipt_digest: null,
+              authorized_event_digest: null,
+              accepted: false,
+            } : null,
+          };
         }
         const requiresConfirmation = !previewAccessDenied && (typeof tool.confirmationRequired === 'function' ? await tool.confirmationRequired(call, { preview }) : Boolean(tool.requires_confirmation));
         if (requiresConfirmation) {
@@ -264,7 +304,29 @@ export class ConversationController {
         if (activeJournalOperation && !approved) { await this.actionJournal.cancel(activeJournalOperation.id); activeJournalOperation = null; }
         else if (activeJournalOperation) {
           if (controller.signal.aborted) { await this.actionJournal.cancel(activeJournalOperation.id, 'request_cancelled'); activeJournalOperation = null; throw Object.assign(new Error('cancelled'), { code: 'cancelled' }); }
-          await this.actionJournal.authorize(activeJournalOperation.id, authorization.kind); await this.actionJournal.dispatch(activeJournalOperation.id); activeJournalOperation.dispatched = true;
+          const authorized = await this.actionJournal.authorize(activeJournalOperation.id, authorization.kind);
+          if (activeJournalOperation.dispatchOwner === NATIVE_SUPERVISOR_DISPATCH_OWNER) {
+            // There is currently no native owner bridge or proof authority.
+            // Close the authorized operation before any handoff, dispatch, or
+            // provider call.  The failure is provably pre-dispatch, so the
+            // ordinary journal's definitive-failure transition is valid.
+            const handoff = activeJournalOperation.nativeSupervisorHandoff;
+            if (handoff) {
+              const readbackValid = exactAuthorizationReadback(authorized, activeJournalOperation.id);
+              handoff.authorization_kind = readbackValid ? authorization.kind : null;
+              handoff.authorized_sequence = readbackValid ? 1 : null;
+              handoff.authorized_receipt_digest = readbackValid ? authorized.receipt_hash : null;
+              // The JS journal has no separately verified native event proof.
+              // Do not duplicate its receipt hash into that field: until a
+              // future native verifier supplies both proofs, this remains an
+              // unaccepted description and never crosses a bridge.
+              handoff.authorized_event_digest = null;
+            }
+            try { await this.actionJournal.failDefinitive(activeJournalOperation.id, 'pre_dispatch_failure'); }
+            finally { activeJournalOperation = null; }
+            throw Object.assign(new Error('native_supervisor_unavailable'), { code: 'native_supervisor_unavailable' });
+          }
+          await this.actionJournal.dispatch(activeJournalOperation.id); activeJournalOperation.dispatched = true;
         }
         session.state = 'TOOL_RUNNING'; emit('tool.started', { call: publicToolCall(call), approved, authorization: authorization.kind });
         let result;

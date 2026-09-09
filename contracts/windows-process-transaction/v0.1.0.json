@@ -32,6 +32,21 @@
       "destroy JournalAuthorityOwner"
     ]
   },
+  "controller_handoff": {
+    "version": "native-supervisor-handoff.v1",
+    "journal_dispatch_owner": "native_supervisor",
+    "owned_actions": ["app.open", "process.run_allowlisted"],
+    "caller_override": false,
+    "accepted_by_native_bridge": false,
+    "controller_mutations_after_accept": [],
+    "binding_fields": [
+      "version", "journal_dispatch_owner", "operation_id", "request_ref", "call_ref",
+      "tool", "risk", "side_effect", "args_digest", "preview_digest", "operation_digest",
+      "authorization_kind", "authorized_sequence", "authorized_receipt_digest",
+      "authorized_event_digest"
+    ],
+    "pre_handoff_refusal": "failed_definitive only when no dispatch or handoff was accepted"
+  },
   "binding": [
     "request_ref", "call_ref", "tool", "risk", "side_effect",
     "args_digest", "preview_digest", "operation_digest",
