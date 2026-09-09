@@ -35,6 +35,10 @@ constexpr DWORD kPrivateAccess = FILE_ALL_ACCESS;
 constexpr char kProtocol[] = "lae.action-journal.v0.1.0";
 constexpr char kHashDomain[] = "lae.action-journal.container.v0.1.0";
 constexpr char kHeaderLabel[] = "header";
+constexpr char kDescriptorWalHeader[] =
+    "{\"format\":\"lae-action-journal-wal\",\"version\":2}\n";
+constexpr std::size_t kDescriptorWalHeaderBytes =
+    sizeof(kDescriptorWalHeader) - 1;
 constexpr std::array<std::uint8_t, 16> kHeaderMagic = {
     'L', 'A', 'E', 'J', 'R', 'N', 'L', 'C',
     'O', 'N', 'T', 'A', 'I', 'N', 'E', 'R'};
@@ -708,6 +712,45 @@ bool expected_identity_valid(const StorageIdentity& value) {
          !all_zero(value.container_id.data(), value.container_id.size());
 }
 
+bool expected_identity_valid(const DescriptorWalIdentity& value) {
+  return value.volume_serial != 0 &&
+         !all_zero(value.file_id.data(), value.file_id.size());
+}
+
+bool same_identity(const FileIdentity& left,
+                   const DescriptorWalIdentity& right) noexcept {
+  return left.volume_serial == right.volume_serial &&
+         equal_bytes(left.file_id.data(), right.file_id.data(),
+                     left.file_id.size());
+}
+
+StorageStatus descriptor_wal_shape(HANDLE handle, std::uint64_t& size) {
+  StorageStatus status = file_shape(handle, 0, false);
+  if (status != StorageStatus::kOkOpened) return status;
+  FILE_STANDARD_INFO standard{};
+  if (!GetFileInformationByHandleEx(handle, FileStandardInfo, &standard,
+                                    sizeof(standard)) ||
+      standard.EndOfFile.QuadPart < 0)
+    return StorageStatus::kIoFailed;
+  size = static_cast<std::uint64_t>(standard.EndOfFile.QuadPart);
+  return size <= kDescriptorWalMaxBytes ? StorageStatus::kOkOpened
+                                        : StorageStatus::kSizeMismatch;
+}
+
+StorageStatus validate_descriptor_wal_prefix(HANDLE handle,
+                                             std::uint64_t size) {
+  const std::size_t count = static_cast<std::size_t>(
+      std::min<std::uint64_t>(size, kDescriptorWalHeaderBytes));
+  std::array<std::uint8_t, kDescriptorWalHeaderBytes> observed{};
+  if (count != 0 && !read_exact(handle, 0, observed.data(), count))
+    return StorageStatus::kIoFailed;
+  if (!equal_bytes(observed.data(),
+                   reinterpret_cast<const std::uint8_t*>(kDescriptorWalHeader),
+                   count))
+    return StorageStatus::kContainerCorruptHeader;
+  return StorageStatus::kOkOpened;
+}
+
 }  // namespace
 
 struct JournalStorageLease::Impl {
@@ -732,6 +775,81 @@ HANDLE JournalStorageLease::retained_file_handle() const noexcept {
   return valid() ? impl_->file.get() : INVALID_HANDLE_VALUE;
 }
 void JournalStorageLease::reset() noexcept { impl_.reset(); }
+
+struct DescriptorWalHandoff::Impl { UniqueHandle handle; };
+
+DescriptorWalHandoff::DescriptorWalHandoff() noexcept = default;
+DescriptorWalHandoff::~DescriptorWalHandoff() = default;
+DescriptorWalHandoff::DescriptorWalHandoff(DescriptorWalHandoff&&) noexcept = default;
+DescriptorWalHandoff& DescriptorWalHandoff::operator=(DescriptorWalHandoff&&) noexcept = default;
+bool DescriptorWalHandoff::valid() const noexcept {
+  if (!impl_ || !impl_->handle) return false;
+  DWORD flags = 0;
+  return GetHandleInformation(impl_->handle.get(), &flags) != FALSE &&
+         (flags & HANDLE_FLAG_INHERIT) != 0;
+}
+HANDLE DescriptorWalHandoff::take_inheritable_handle() noexcept {
+  return valid() ? impl_->handle.release() : INVALID_HANDLE_VALUE;
+}
+void DescriptorWalHandoff::reset() noexcept { impl_.reset(); }
+
+struct DescriptorWalLease::Impl {
+  UniqueHandle file;
+  UniqueHandle path_reopen;
+  UniqueHandle volume;
+  std::vector<HeldDirectory> directories;
+  FileIdentity identity;
+  CurrentUser user;
+  std::uint64_t size = 0;
+  bool handoff_prepared = false;
+};
+
+DescriptorWalLease::DescriptorWalLease() noexcept = default;
+DescriptorWalLease::~DescriptorWalLease() = default;
+DescriptorWalLease::DescriptorWalLease(DescriptorWalLease&&) noexcept = default;
+DescriptorWalLease& DescriptorWalLease::operator=(DescriptorWalLease&&) noexcept = default;
+bool DescriptorWalLease::valid() const noexcept {
+  return impl_ && impl_->file && impl_->path_reopen &&
+         !impl_->directories.empty();
+}
+void DescriptorWalLease::reset() noexcept { impl_.reset(); }
+
+StorageStatus DescriptorWalLease::prepare_inheritable_handoff(
+    DescriptorWalHandoff& output) noexcept {
+  output.reset();
+  try {
+    if (!valid() || impl_->handoff_prepared) return StorageStatus::kInvalidRequest;
+    DWORD source_flags = 0;
+    FileIdentity identity;
+    std::uint64_t size = 0;
+    if (!GetHandleInformation(impl_->file.get(), &source_flags) ||
+        (source_flags & HANDLE_FLAG_INHERIT) != 0 ||
+        !get_identity(impl_->file.get(), identity) ||
+        !same_identity(identity, impl_->identity) ||
+        descriptor_wal_shape(impl_->file.get(), size) != StorageStatus::kOkOpened ||
+        size != impl_->size ||
+        validate_descriptor_wal_prefix(impl_->file.get(), size) != StorageStatus::kOkOpened ||
+        !private_security(impl_->file.get(), impl_->user.sid) ||
+        !directories_stable(impl_->directories, impl_->user.sid))
+      return StorageStatus::kIdentityMismatch;
+    HANDLE duplicate = INVALID_HANDLE_VALUE;
+    if (!DuplicateHandle(GetCurrentProcess(), impl_->file.get(),
+                         GetCurrentProcess(), &duplicate, 0, TRUE,
+                         DUPLICATE_SAME_ACCESS))
+      return StorageStatus::kIoFailed;
+    auto candidate = std::make_unique<DescriptorWalHandoff::Impl>();
+    candidate->handle.reset(duplicate);
+    DWORD duplicate_flags = 0;
+    if (!GetHandleInformation(candidate->handle.get(), &duplicate_flags) ||
+        (duplicate_flags & HANDLE_FLAG_INHERIT) == 0)
+      return StorageStatus::kIoFailed;
+    impl_->handoff_prepared = true;
+    output.impl_ = std::move(candidate);
+    return StorageStatus::kOkOpened;
+  } catch (...) {
+    return StorageStatus::kInternal;
+  }
+}
 
 const char* status_name(StorageStatus status) noexcept {
   switch (status) {
@@ -915,6 +1033,160 @@ StorageStatus acquire_storage(const StorageRequest& request,
     return success;
   } catch (const std::bad_alloc&) {
     return fail(StorageStatus::kInternal);
+  } catch (...) {
+    return fail(StorageStatus::kInternal);
+  }
+}
+
+StorageStatus acquire_descriptor_wal(const DescriptorWalRequest& request,
+                                     DescriptorWalLease& lease,
+                                     DescriptorWalReceipt& receipt) noexcept {
+  lease.reset();
+  receipt = {};
+  auto fail = [&receipt](StorageStatus status) {
+    receipt.status = status_name(status);
+    return status;
+  };
+  try {
+    const bool create = request.mode == OpenMode::kCreateNew;
+    const bool open = request.mode == OpenMode::kOpenExisting;
+    if ((!create && !open) || (create && request.has_expected_identity) ||
+        (open && (!request.has_expected_identity ||
+                  !expected_identity_valid(request.expected_identity))))
+      return fail(StorageStatus::kInvalidRequest);
+
+    std::wstring directory;
+    wchar_t root[4]{};
+    if (!canonical_directory(request.absolute_directory, directory, root) ||
+        directory.size() + 1 + (std::size(kDescriptorWalLeafName) - 1) >
+            kMaxPathCharacters)
+      return fail(StorageStatus::kUnsafePath);
+    const std::wstring path = directory + L"\\" + kDescriptorWalLeafName;
+
+    auto candidate = std::make_unique<DescriptorWalLease::Impl>();
+    if (!current_user(candidate->user))
+      return fail(StorageStatus::kSecurityUnavailable);
+    FileIdentity directory_volume;
+    if (!acquire_directories(directory, candidate->user.sid,
+                             candidate->directories, directory_volume))
+      return fail(StorageStatus::kPrivateDirectoryRequired);
+
+    DWORD filesystem_serial = 0;
+    std::string filesystem;
+    StorageStatus status = filesystem_policy(
+        candidate->directories.back().handle.get(), root, candidate->volume,
+        filesystem, filesystem_serial);
+    if (status != StorageStatus::kOkOpened) return fail(status);
+    if (static_cast<DWORD>(directory_volume.volume_serial) != filesystem_serial)
+      return fail(StorageStatus::kIdentityMismatch);
+
+    PrivateSecurityDescriptor security;
+    if (!build_private_security(candidate->user.sid, security))
+      return fail(StorageStatus::kSecurityUnavailable);
+    if (!directories_stable(candidate->directories, candidate->user.sid))
+      return fail(StorageStatus::kIdentityMismatch);
+    HANDLE raw = CreateFileW(
+        path.c_str(), GENERIC_READ | GENERIC_WRITE | READ_CONTROL, kFileShare,
+        create ? &security.attributes : nullptr,
+        create ? CREATE_NEW : OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT |
+            FILE_FLAG_WRITE_THROUGH,
+        nullptr);
+    if (raw == INVALID_HANDLE_VALUE) return fail(open_error(create));
+    candidate->file.reset(raw);
+    DWORD source_flags = 0;
+    if (!GetHandleInformation(candidate->file.get(), &source_flags) ||
+        (source_flags & HANDLE_FLAG_INHERIT) != 0)
+      return fail(StorageStatus::kSecurityUnavailable);
+
+    status = descriptor_wal_shape(candidate->file.get(), candidate->size);
+    if (status != StorageStatus::kOkOpened) return fail(status);
+    if ((create && candidate->size != 0) ||
+        !private_security(candidate->file.get(), candidate->user.sid) ||
+        !get_identity(candidate->file.get(), candidate->identity) ||
+        candidate->identity.volume_serial != directory_volume.volume_serial)
+      return fail(StorageStatus::kIdentityMismatch);
+    if (open && !same_identity(candidate->identity,
+                               request.expected_identity))
+      return fail(StorageStatus::kIdentityMismatch);
+
+    std::wstring observed_path;
+    if (!final_path(candidate->file.get(), observed_path) ||
+        !equal_path(path, observed_path))
+      return fail(StorageStatus::kIdentityMismatch);
+    DWORD leaf_serial = 0;
+    std::string leaf_filesystem;
+    status = validate_volume(candidate->file.get(), candidate->volume.get(), root,
+                             filesystem_serial, true, leaf_filesystem,
+                             leaf_serial);
+    if (status != StorageStatus::kOkOpened || leaf_filesystem != filesystem)
+      return fail(status == StorageStatus::kOkOpened
+                      ? StorageStatus::kIdentityMismatch : status);
+
+    if (create) {
+      if (!write_exact(candidate->file.get(), 0,
+                       reinterpret_cast<const std::uint8_t*>(kDescriptorWalHeader),
+                       kDescriptorWalHeaderBytes) ||
+          !FlushFileBuffers(candidate->file.get()))
+        return fail(StorageStatus::kGenesisIncomplete);
+      candidate->size = kDescriptorWalHeaderBytes;
+      std::array<std::uint8_t, kDescriptorWalHeaderBytes> readback{};
+      if (!read_exact(candidate->file.get(), 0, readback.data(), readback.size()) ||
+          !equal_bytes(readback.data(),
+                       reinterpret_cast<const std::uint8_t*>(kDescriptorWalHeader),
+                       readback.size()))
+        return fail(StorageStatus::kGenesisIncomplete);
+    } else {
+      status = validate_descriptor_wal_prefix(candidate->file.get(),
+                                              candidate->size);
+      if (status != StorageStatus::kOkOpened) return fail(status);
+    }
+
+    status = descriptor_wal_shape(candidate->file.get(), candidate->size);
+    FileIdentity final_identity;
+    if (status != StorageStatus::kOkOpened ||
+        !get_identity(candidate->file.get(), final_identity) ||
+        !same_identity(final_identity, candidate->identity) ||
+        !private_security(candidate->file.get(), candidate->user.sid) ||
+        !directories_stable(candidate->directories, candidate->user.sid))
+      return fail(StorageStatus::kIdentityMismatch);
+
+    HANDLE reopen = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES | READ_CONTROL,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT,
+                                nullptr);
+    if (reopen == INVALID_HANDLE_VALUE)
+      return fail(StorageStatus::kReopenIdentityMismatch);
+    candidate->path_reopen.reset(reopen);
+    FileIdentity reopened_identity;
+    std::wstring reopened_path;
+    std::uint64_t reopened_size = 0;
+    if (descriptor_wal_shape(candidate->path_reopen.get(), reopened_size) !=
+            StorageStatus::kOkOpened ||
+        reopened_size != candidate->size ||
+        !get_identity(candidate->path_reopen.get(), reopened_identity) ||
+        !same_identity(reopened_identity, candidate->identity) ||
+        !final_path(candidate->path_reopen.get(), reopened_path) ||
+        !equal_path(reopened_path, path) ||
+        !private_security(candidate->path_reopen.get(), candidate->user.sid))
+      return fail(StorageStatus::kReopenIdentityMismatch);
+
+    receipt.abi_version = kStorageAbiVersion;
+    receipt.status = status_name(create ? StorageStatus::kOkCreated
+                                        : StorageStatus::kOkOpened);
+    receipt.wal_bytes = candidate->size;
+    receipt.volume_serial_hex = hex_u64(candidate->identity.volume_serial);
+    receipt.file_id_hex = hex(candidate->identity.file_id.data(),
+                             candidate->identity.file_id.size());
+    receipt.filesystem = filesystem;
+    receipt.dacl_profile = "current_user_only_protected_v1";
+    receipt.identity_reopened = true;
+    receipt.exclusive_writer_lease = true;
+    receipt.descriptor_bridge_available = false;
+    const StorageStatus success = create ? StorageStatus::kOkCreated
+                                         : StorageStatus::kOkOpened;
+    lease.impl_ = std::move(candidate);
+    return success;
   } catch (...) {
     return fail(StorageStatus::kInternal);
   }

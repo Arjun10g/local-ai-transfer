@@ -71,6 +71,7 @@ TEST_INVENTORY = {
     "tests/native/real_model_smoke.py": "real_model",
     "tests/native/runtime_tests.cpp": "native_build",
     "tests/native/test_windows_action_journal_storage_static.py": "native_static",
+    "tests/native/test_windows_descriptor_journal_bootstrap_static.py": "native_static",
     "tests/native/test_windows_action_journal_helper_static.py": "native_static",
     "tests/native/test_windows_action_journal_owner_static.py": "native_static",
     "tests/native/test_windows_process_dispatch_lease_static.py": "native_static",
