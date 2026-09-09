@@ -88,15 +88,21 @@ export class HostServer {
   async close() {
     if (this.closePromise) return this.closePromise;
     this.closePromise = (async () => {
-      this.operatorGrants?.revokeAll?.(); this.controller.cancelActive?.();
-      try {
-        await this.providerShutdown?.();
-        if (this.server) {
-          const server = this.server;
-          await new Promise((resolve, reject) => { server.close(error => error ? reject(error) : resolve()); });
-          this.server = null;
-        }
-      } finally { await this.engine?.shutdown?.(); }
+      let failed = false;
+      const attempt = async action => { try { await action?.(); } catch { failed = true; } };
+      await attempt(() => this.operatorGrants?.revokeAll?.());
+      await attempt(() => this.controller.cancelActive?.());
+      await attempt(() => this.providerShutdown?.());
+      const server = this.server; this.server = null; this.port = null;
+      if (server) await attempt(() => new Promise((resolve, reject) => {
+        try {
+          server.close(error => {
+            if (error) { server.closeAllConnections?.(); reject(error); } else resolve();
+          });
+        } catch (error) { server.closeAllConnections?.(); reject(error); }
+      }));
+      await attempt(() => this.engine?.shutdown?.());
+      if (failed) throw Object.assign(new Error('host_shutdown_failed'), { code: 'host_shutdown_failed' });
     })();
     return this.closePromise;
   }
@@ -176,7 +182,7 @@ export class HostServer {
       }
       const confirmation = path.match(/^\/api\/tool-confirmations\/([A-Za-z0-9_-]{8,96})$/);
       if (req.method === 'POST' && confirmation) { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); const input = exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), ['approved', 'request_id', 'call_id'], ['approved', 'request_id', 'call_id']); if (typeof input.approved !== 'boolean' || typeof input.request_id !== 'string' || !OPAQUE_ID.test(input.request_id) || typeof input.call_id !== 'string' || !OPAQUE_ID.test(input.call_id)) return json(res, 400, { error: 'invalid_request_body' }); const accepted = this.controller.confirm(confirmation[1], input.approved, { requestId: input.request_id, callId: input.call_id }); return json(res, accepted ? 200 : 404, { accepted }); }
-      if (req.method === 'POST' && path === '/api/shutdown') { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), []); json(res, 200, { shutting_down: true }); setImmediate(() => this.close()); return; }
+      if (req.method === 'POST' && path === '/api/shutdown') { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), []); json(res, 200, { shutting_down: true }); setImmediate(() => { void this.close().catch(() => {}); }); return; }
       return json(res, 404, { error: 'not_found' });
     } catch (error) { if (res.headersSent) return this.fail(res, error); const code = error.code ?? (error instanceof TypeError ? 'invalid_request_body' : 'request_failed'); return json(res, errorStatus(code), { error: code }); }
   }

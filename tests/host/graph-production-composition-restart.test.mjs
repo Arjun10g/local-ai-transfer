@@ -295,6 +295,25 @@ test('HostServer closes an unlistened composition once and bootstrap cleans fail
   assert.equal(cleanup, 1);
 });
 
+test('HostServer close isolates provider/server/engine failures and never retries cleanup', async () => {
+  let providerShutdowns = 0; let engineShutdowns = 0; let cancellations = 0;
+  const host = new HostServer({ controller: { cancelActive() { cancellations += 1; } }, engine: { async shutdown() { engineShutdowns += 1; } }, providerShutdown: async () => { providerShutdowns += 1; throw new Error('provider shutdown sentinel'); } });
+  const address = await host.listen(0);
+  await assert.rejects(() => host.close(), error => error.code === 'host_shutdown_failed');
+  assert.equal(providerShutdowns, 1); assert.equal(cancellations, 1); assert.equal(engineShutdowns, 1); assert.equal(host.server, null);
+  await assert.rejects(() => fetch(`${address.url}/healthz`));
+  await assert.rejects(() => host.close(), error => error.code === 'host_shutdown_failed');
+  assert.equal(providerShutdowns, 1); assert.equal(engineShutdowns, 1);
+
+  let closeCalls = 0; let forcedConnections = 0; let providerFailures = 0; let engineFailures = 0;
+  const failingHost = new HostServer({ controller: { cancelActive() { throw new Error('cancel sentinel'); } }, engine: { async shutdown() { engineFailures += 1; throw new Error('engine sentinel'); } }, providerShutdown: async () => { providerFailures += 1; throw new Error('provider sentinel'); } });
+  failingHost.server = { close(callback) { closeCalls += 1; callback(new Error('server sentinel')); }, closeAllConnections() { forcedConnections += 1; } };
+  await assert.rejects(() => failingHost.close(), error => error.code === 'host_shutdown_failed');
+  assert.equal(closeCalls, 1); assert.equal(forcedConnections, 1); assert.equal(providerFailures, 1); assert.equal(engineFailures, 1); assert.equal(failingHost.server, null);
+  await assert.rejects(() => failingHost.close(), error => error.code === 'host_shutdown_failed');
+  assert.equal(closeCalls, 1); assert.equal(providerFailures, 1); assert.equal(engineFailures, 1);
+});
+
 test('authenticated Graph clear removes token, auth fingerprint projection, prompt, and grants', async () => {
   const transport = { request: async request => {
     if (request.path.endsWith('/devicecode')) return { status: 200, body: { device_code: 'c'.repeat(32), user_code: 'CLEAR-CODE', verification_uri: 'https://microsoft.com/devicelogin' } };

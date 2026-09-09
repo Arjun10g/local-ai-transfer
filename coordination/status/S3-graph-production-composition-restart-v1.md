@@ -5,7 +5,7 @@
 - **Role:** Agent/Tools
 - **Timestamp (UTC):** 2026-09-08
 - **Branch/worktree:** `luna/graph-production-composition-restart-v1` / `wt-graph-production-composition-restart-v1`
-- **Current phase:** Phase 6 final auth-boundary amendment
+- **Current phase:** Phase 6 cleanup-order amendment
 - **Primary task ID:** Graph production-composition/restart refusal test slice
 - **Secondary task ID, if any:** None
 - **Task state:** READY_FOR_REVIEW
@@ -32,7 +32,7 @@ Add mocked behavioral coverage for Microsoft Graph production composition, journ
 
 - Commit: final repair tip reported with this packet
 - Commands: `node --test tests/host/graph-production-composition-restart.test.mjs`; selected Graph/host/controller/security Node inventory; `python3 scripts/test/run_qa.py --root . --output - --skip-native`; `git diff --check`
-- Tests: Focused Graph auth/composition suite 17/17; selected relevant Graph/host/controller/security inventory 153/153; hostile serialized-output, importable bootstrap, all four Graph mutation pre-preview, provider `/me` race, and lifecycle assertions are included. QA safe inventory discovers 55 test files and 61 result records (1 PASS, 60 SKIP), with status BLOCKED by safe-mode mandatory-suite skips
+- Tests: Focused Graph auth/composition suite 18/18; selected relevant Graph/host/controller/security inventory 153/153; hostile serialized-output, importable bootstrap, all four Graph mutation pre-preview, provider `/me` race, and failure-isolated lifecycle assertions are included. QA safe inventory discovers 55 test files and 61 result records (1 PASS, 60 SKIP), with status BLOCKED by safe-mode mandatory-suite skips
 - Machine: Not applicable
 - Artifact/index: None
 - Metrics: No live/provider/model/build execution; hidden durable-write case recorded zero transport/token access; late auth completions recorded no stale prompt/cache/callback mutation
@@ -54,12 +54,13 @@ Add mocked behavioral coverage for Microsoft Graph production composition, journ
 - Durable Graph writes remain unavailable without a bound ActionJournal; existing Teams/send and other post-dispatch ambiguity paths remain at-most-once/manual-reconciliation cases and are not reopened or replayed here.
 - Controller admission checks journal readiness before any durable-tool preview, authorization, or provider callback; all Graph mutation names are tested at zero token/transport calls when absent or unhealthy.
 - Host close is idempotent and shuts down an unlistened engine; bootstrap closes a composition if listen fails.
+- Host close now attempts revoke/cancel, provider shutdown, server closure, and engine shutdown independently exactly once; failures return only a finite `host_shutdown_failed` code after all attempts.
 
 ## Blockers
 
-- Fact/evidence: No blocker remains in the bounded auth/controller lifecycle under abort-insensitive mocked device, sleep, token, and `/me` completions.
+- Fact/evidence: No blocker remains in the bounded auth/controller/cleanup lifecycle under abort-insensitive mocked device, sleep, token, `/me`, provider-shutdown, server-close, and engine-shutdown failures.
 - Impact: Live readiness remains unavailable by design; safe QA remains BLOCKED because mandatory suites and target/provider/model/native evidence are not executed in safe mode.
-- What was tried: Deterministic same-instance coalescing, cancel→immediate restart, late completion in both identity orders plus old rejection/unauthorized, clear/revocation, all Graph mutation pre-preview, and unlistened/listen-failure cleanup tests.
+- What was tried: Deterministic same-instance coalescing, cancel→immediate restart, late completion in both identity orders plus old rejection/unauthorized, clear/revocation, all Graph mutation pre-preview, unlistened/listen-failure cleanup, listened provider-failure cleanup, and injected server/engine failure tests.
 - Proposed workaround: None; retain explicit ActionJournal, credential, target, and live-provider gates.
 - Decision/asset needed: Parent review of the committed candidate.
 - Owner: S3
