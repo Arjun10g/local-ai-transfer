@@ -17,7 +17,9 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <utility>
 
 namespace lae::windows_supervisor {
 
@@ -163,6 +165,32 @@ class LaunchAuthority final {
     bool identity_verified = false;
   };
 
+  // Only a private issuer can assemble this fully typed set of already
+  // verified values. It contains owning handles, never borrowed raw handles.
+  struct MintedParts final {
+    HandleIdentity executable;
+    HandleIdentity executable_parent_directory;
+    HandleIdentity working_directory;
+    HandleIdentity token;
+    HandleIdentity job;
+    HandleIdentity cancellation_event;
+    FileIdentity executable_file;
+    FileIdentity working_directory_file;
+    std::array<std::uint8_t, 16> operation_id{};
+    std::array<std::uint8_t, 16> nonce{};
+    std::uint64_t generation = 0;
+    std::array<std::uint8_t, 32> environment_digest{};
+    bool containment_ready = false;
+    bool kill_on_job_close = false;
+    bool active_process_zero_on_terminal = false;
+    bool no_ambient_handle_inheritance = false;
+    bool least_privilege_token = false;
+    bool fixed_environment_allowlist = false;
+    bool issuer_bound_to_supervisor = false;
+    bool cancellation_owner_is_supervisor = false;
+    std::unique_ptr<CancellationState> cancellation_state;
+  };
+
   // Read-only admission validation runs before ProcessLaunchAuthority is
   // consumed. The source-only false gate prevents any authority admission.
   bool valid_for_admission() const noexcept {
@@ -192,9 +220,25 @@ class LaunchAuthority final {
         issuer_bound_to_supervisor_ && cancellation_owner_is_supervisor_;
   }
 
-  // No production source currently calls this private constructor. The
-  // issuer would fill every field only after descriptor/handle validation.
-  LaunchAuthority() = default;
+  explicit LaunchAuthority(MintedParts&& parts) noexcept
+      : executable_(std::move(parts.executable)),
+        executable_parent_directory_(std::move(parts.executable_parent_directory)),
+        working_directory_(std::move(parts.working_directory)),
+        token_(std::move(parts.token)), job_(std::move(parts.job)),
+        cancellation_event_(std::move(parts.cancellation_event)),
+        executable_file_(std::move(parts.executable_file)),
+        working_directory_file_(std::move(parts.working_directory_file)),
+        operation_id_(parts.operation_id), nonce_(parts.nonce),
+        generation_(parts.generation), environment_digest_(parts.environment_digest),
+        containment_ready_(parts.containment_ready),
+        kill_on_job_close_(parts.kill_on_job_close),
+        active_process_zero_on_terminal_(parts.active_process_zero_on_terminal),
+        no_ambient_handle_inheritance_(parts.no_ambient_handle_inheritance),
+        least_privilege_token_(parts.least_privilege_token),
+        fixed_environment_allowlist_(parts.fixed_environment_allowlist),
+        issuer_bound_to_supervisor_(parts.issuer_bound_to_supervisor),
+        cancellation_owner_is_supervisor_(parts.cancellation_owner_is_supervisor),
+        cancellation_state_(std::move(parts.cancellation_state)) {}
 
   template <std::size_t N>
   static bool nonzero(const std::array<std::uint8_t, N>& value) noexcept {
@@ -247,7 +291,15 @@ class LaunchAuthorityIssuer final {
   friend class LaunchAuthority;
   friend struct SupervisorState;
   LaunchAuthorityIssuer() = delete;
-  static LaunchAuthority issue() noexcept { return LaunchAuthority(); }
+  static std::optional<LaunchAuthority> issue(
+      LaunchAuthority::MintedParts&& parts) noexcept {
+    try {
+      LaunchAuthority authority(std::move(parts));
+      return std::optional<LaunchAuthority>(std::move(authority));
+    } catch (...) {
+      return std::nullopt;
+    }
+  }
 };
 
 }  // namespace lae::windows_supervisor

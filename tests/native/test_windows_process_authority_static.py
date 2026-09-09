@@ -106,6 +106,15 @@ class WindowsProcessAuthorityStaticTests(unittest.TestCase):
         self.assertTrue(activation["activation_requires_all"])
         self.assertTrue(activation["activation_refusal_is_sticky"])
         self.assertFalse(activation["nested_job_policy"])
+        authority = contract["authority_object"]
+        self.assertEqual(authority["type"], "private noncopyable RAII LaunchAuthority")
+        self.assertEqual(authority["issuer"], "private LaunchAuthorityIssuer only")
+        self.assertEqual(authority["handle_owner"],
+                         "UniqueHandle closes each owning HANDLE exactly once")
+        self.assertTrue(authority["move_only"])
+        self.assertFalse(authority["public_raw_handle_accessor"])
+        self.assertEqual(authority["operation_identity"],
+                         ["operation_id_128", "generation_uint64", "nonce_128"])
 
     def test_identity_contract_requires_handles_and_rechecks(self):
         identity = self.contract["identity_pinned_handles"]
@@ -166,6 +175,8 @@ class WindowsProcessAuthorityStaticTests(unittest.TestCase):
             "kUnknownManual", "class LaunchAuthority final",
             "LaunchAuthority(const LaunchAuthority&) = delete",
             "class LaunchAuthorityIssuer final", "LaunchAuthorityIssuer() = delete",
+            "struct MintedParts final", "explicit LaunchAuthority(MintedParts&& parts)",
+            "std::optional<LaunchAuthority> issue", "return std::nullopt",
             "std::wstring canonical_absolute_path",
             "operation_id_", "generation_", "nonce_", "volume_serial",
             "file_id", "sha256", "token_", "job_", "cancellation_event_",
