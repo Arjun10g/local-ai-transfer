@@ -82,6 +82,8 @@ class CancellationState final {
   bool begin(std::uint64_t generation) noexcept {
     if (generation == 0) return false;
     std::lock_guard<std::mutex> lock(mutex_);
+    if (state_ == RunState::kRunning || state_ == RunState::kCancelRequested)
+      return false;
     active_generation_ = generation;
     state_ = RunState::kRunning;
     return true;
@@ -103,6 +105,16 @@ class CancellationState final {
       return false;
     }
     state_ = RunState::kComplete;
+    return true;
+  }
+
+  bool finish_bounded_cancel_join(std::uint64_t generation,
+                                  bool active_process_zero) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (active_generation_ != generation || state_ != RunState::kCancelRequested ||
+        !active_process_zero)
+      return false;
+    state_ = RunState::kUnknownManual;
     return true;
   }
 
@@ -138,6 +150,12 @@ class LaunchAuthority final {
   }
   bool complete_run(std::uint64_t generation) noexcept {
     return cancellation_state_ != nullptr && cancellation_state_->complete(generation);
+  }
+  bool finish_bounded_cancel_join(std::uint64_t generation,
+                                  bool active_process_zero) noexcept {
+    return cancellation_state_ != nullptr &&
+        cancellation_state_->finish_bounded_cancel_join(generation,
+                                                        active_process_zero);
   }
   void mark_orphaned() noexcept {
     if (cancellation_state_ != nullptr) cancellation_state_->orphan();

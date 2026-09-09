@@ -74,6 +74,12 @@ class CancellationModel:
         if self.active is not None and self.state == "running":
             self.state = "cancelled"
 
+    def finish_cancel_join(self, active_process_zero):
+        if self.state != "cancelled" or not active_process_zero:
+            return False
+        self.state = "unknown_manual"
+        return True
+
     def complete(self, generation):
         if generation != self.active:
             return False
@@ -195,7 +201,9 @@ class WindowsProcessAuthorityStaticTests(unittest.TestCase):
         for token in (
             "cancellation_state_", "cancellation_state_->begin",
             "cancellation_state_->request_cancel", "cancellation_state_->complete",
-            "cancellation_state_->orphan", "std::lock_guard<std::mutex>",
+            "cancellation_state_->finish_bounded_cancel_join",
+            "cancellation_state_->orphan", "finish_bounded_cancel_join",
+            "std::lock_guard<std::mutex>",
             "active_generation_ != generation", "state_ = RunState::kUnknownManual",
             "kill_on_job_close_", "active_process_zero_on_terminal_",
         ):
@@ -248,6 +256,7 @@ class WindowsProcessAuthorityStaticTests(unittest.TestCase):
         model = CancellationModel()
         old_generation = model.start()
         model.cancel()
+        self.assertTrue(model.finish_cancel_join(active_process_zero=True))
         new_generation = model.start()
         self.assertNotEqual(old_generation, new_generation)
         self.assertFalse(model.complete(old_generation))
@@ -260,6 +269,9 @@ class WindowsProcessAuthorityStaticTests(unittest.TestCase):
         model = CancellationModel()
         generation = model.start()
         model.cancel()
+        self.assertFalse(model.finish_cancel_join(active_process_zero=False))
+        self.assertEqual(model.state, "cancelled")
+        self.assertTrue(model.finish_cancel_join(active_process_zero=True))
         self.assertFalse(model.complete(generation))
         self.assertEqual(model.state, "unknown_manual")
         self.assertEqual(model.retry_calls, 0)
