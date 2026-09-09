@@ -2,11 +2,13 @@
 
 ## Current governance reconciliation — 2026-09-08
 
-- Exact source baseline is `main@2ad3006d684a8b36bfb4f4827855165d470cb877`.
+- Exact source baseline is `main@ec84d9eb36a45ab3756ed7a78970d86fd94ac58d`.
   Accepted source merges are owner authority `7128278`, event cap `12e722a`,
   current 33-tool/37-case evaluation profile `b13deb5` with `max_cases=64`
   ceiling semantics, ledger preflight `83cffab` plus display-prefix fix
-  `089d05d`, and phase-2a single-owner topology `2ad3006` from `03885df`.
+  `089d05d`, phase-2a single-owner topology `2ad3006` from `03885df`, strict
+  J1M lifecycle test sync `0bbfc77`, and phase-3 controller arbitration
+  `71537d0` after two final source accepts.
 - Remote execution remains false; only two no-model canary probes are allowed.
   The lease has no proof issuer or success/runtime wiring. External salvage is
   unavailable, and legacy lifecycle is non-green. Read-only ledger preflight is
@@ -16,10 +18,18 @@
   incidents require adjudication. No genesis, spend authorization, or
   provider execution is implied. Bookkeeping is not spend authorization.
 - Phase-2a single-owner topology is merged at `2ad3006` from `03885df`; two
-  independent audits and post-merge source integration passed. Legacy parallel
-  journal types are removed and tracked tickets/exact IDs are present, but the
-  proof issuer, process mutation, product activation, and compile/live/target
-  evidence remain absent. Phase-2b is design-only/in progress.
+  independent audits and post-merge source integration passed. Phase-3
+  controller arbitration is merged at `71537d0` after two final source
+  accepts, but remains inert with no native bridge, proof issuer, live process,
+  or product activation. Legacy parallel journal types are removed and tracked
+  tickets/exact IDs are present; phase-2b is design-only/in progress.
+- The strict lifecycle sync `0bbfc77` records 117 lifecycle tests plus
+  separately scoped related audit evidence. Final post-merge checks report
+  broad Node 343/342/0/1 TODO and independent Node 187/186/0/1 same TODO (the
+  parent-directory replacement race limitation), Python 241/241, and a
+  passing diff check. QA discovered 54 tests with 0 missing/unknown, 1
+  skeleton pass, 59 safe-mode skips, and 60 expected release blockers;
+  overall QA remains `BLOCKED` and no readiness claim follows.
 - Historical evaluation figures 13/32 and 28/32/11/34 are retained as
   separate historical evidence, not current acceptance. Credentials require
   source-side rotation/revocation. Release/full access remains `BLOCKED` /

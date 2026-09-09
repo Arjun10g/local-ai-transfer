@@ -2,7 +2,7 @@
 
 ## Current governance snapshot — 2026-09-08
 
-- Exact baseline is `main@2ad3006d684a8b36bfb4f4827855165d470cb877`; production
+- Exact baseline is `main@ec84d9eb36a45ab3756ed7a78970d86fd94ac58d`; production
   ActionJournal authority/transport remains unavailable and overall state is
   `NOT_READY`.
 - Owner authority `7128278` and event-cap alignment `12e722a` are source-merged;
@@ -10,7 +10,9 @@
   lease `5bef3cd` is also merged but has no proof issuer, process mutation,
   product activation, or success/runtime wiring. These are not compile/live/
   production/target evidence. Ledger preflight and prefix fix are merged at
-  `83cffab` and `089d05d`, with 31/31 postmerge integration.
+  `83cffab` and `089d05d`, with 31/31 postmerge integration. Strict lifecycle
+  test sync `0bbfc77` records 117 lifecycle tests plus separately scoped
+  related audit evidence.
 - Remote execution remains false; its inert hardening `a9d2388` allows only two
   no-model canary probes, with no fall-through/direct execution. External
   salvage is unavailable. Read-only ledger preflight is source-merged by
@@ -20,11 +22,15 @@
   adjudication. No genesis, spend authorization, or provider execution is
   supplied. Credentials require rotation/revocation. No gate advances.
 - Phase-2a is merged at `2ad3006` from `03885df`; two independent audits and
-  postmerge source integration passed. Legacy parallel journal types are
-  removed, but proof issuer, process mutation, product activation, and
-  compile/live/target evidence remain absent. Phase-2b is design-only/in
-  progress. Postmerge scoped evidence is 250/250 targeted Python, 4/4 parity,
-  32/32 evaluator, and QA 53/53 blocked; counts are not combined.
+  postmerge source integration passed. Phase-3 controller arbitration is merged
+  at `71537d0` after two final source accepts, but remains inert with no native
+  bridge, proof issuer, live process, or product activation. Legacy parallel
+  journal types are removed. Phase-2b is design-only/in progress. The
+  final postmerge checks report broad Node 343/342/0/1 TODO and independent Node
+  187/186/0/1 same TODO (parent-directory replacement race limitation), Python
+  241/241, and diff-check pass. QA discovered 54 with 0 missing/unknown, 1
+  skeleton pass, 59 safe-mode skips, and 60 expected release blockers; overall
+  QA remains `BLOCKED`. No compile/live/provider/model/target claim follows.
 
 ## HISTORICAL / SUPERSEDED governance snapshot — 2026-09-05
 

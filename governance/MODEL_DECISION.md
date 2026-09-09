@@ -2,7 +2,7 @@
 
 ## Current governance truth — 2026-09-08
 
-- Source baseline is exact `main@2ad3006d684a8b36bfb4f4827855165d470cb877`.
+- Source baseline is exact `main@ec84d9eb36a45ab3756ed7a78970d86fd94ac58d`.
 - The current production evaluation fixture/profile is 33 tools and 37 cases;
   `max_cases=64` is a ceiling, not a request to trim. Historical 13/32 and
   28/32/11/34 profile/results remain separate and are not current acceptance.
@@ -19,11 +19,18 @@
   No genesis, spend authorization, or provider execution is supplied. Phase-2a
   single-owner topology is merged at `2ad3006` from `03885df`; two independent
   audits and postmerge source integration passed, with legacy parallel journal
-  types removed and exact IDs/tracked tickets retained. Phase-2b is design-only/
-  in progress, not source-accepted. Postmerge scoped evidence is 250/250
-  targeted Python, 4/4 parity, 32/32 evaluator, and QA 53/53 blocked; counts
-  are not summed with unrelated or overlapping evidence. Bookkeeping is not
-  spend authorization. Credentials require source-side rotation/revocation.
+  types removed and exact IDs/tracked tickets retained. Phase-3 controller
+  arbitration is merged at `71537d0` after two final source accepts, but remains
+  inert with no native bridge, proof issuer, process mutation, product
+  activation, or live process. Phase-2b is design-only/in progress, not
+  source-accepted. Strict lifecycle sync `0bbfc77` records 117 lifecycle tests
+  plus separately scoped related audit evidence. Final checks report broad Node
+  343/342/0/1 TODO and independent Node 187/186/0/1 same TODO (parent-directory
+  replacement race), Python 241/241, and diff-check pass. QA discovered 54
+  with 0 missing/unknown, 1 skeleton pass, 59 safe-mode skips, and 60 expected
+  release blockers; overall QA remains `BLOCKED` and no full suite is green.
+  Bookkeeping is not spend authorization. Credentials require source-side
+  rotation/revocation.
 - The model-family/quantization decision below remains accepted only as a
   technical choice. No compile, model-load, provider, Windows-target, target,
   or production acceptance is claimed; release/full access remains blocked.

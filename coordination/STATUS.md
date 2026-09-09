@@ -2,7 +2,7 @@
 
 ## Current governance snapshot — 2026-09-08
 
-- Authoritative source baseline: `main@2ad3006d684a8b36bfb4f4827855165d470cb877`.
+- Authoritative source baseline: `main@ec84d9eb36a45ab3756ed7a78970d86fd94ac58d`.
 - Overall release/full-access state remains `BLOCKED` / `NOT_READY`. No compile,
   live-provider, model-load, Windows-target, production, or target evidence is
   claimed by this documentation refresh.
@@ -11,8 +11,10 @@
   profile `b13deb5` (current fixture identity: 33 tools, 37 cases,
   `max_cases=64` as a ceiling, never a trimming instruction); ledger preflight
   `83cffab` with display-prefix fix `089d05d`; and phase-2a single-owner
-  topology `2ad3006` from `03885df`. These source facts do not add runtime
-  wiring or gate approval.
+  topology `2ad3006` from `03885df`; strict J1M lifecycle test sync `0bbfc77`;
+  and phase-3 controller arbitration `71537d0` after the `356b97b` and
+  `4f8162e` source repairs. These source facts do not add runtime wiring or
+  gate approval.
 - Historical evaluation identities remain historical and are not combined:
   13/32 and 28/32/11/34 are prior profiles/results, not current acceptance.
   Remote execution remains false; the canary is limited to two no-model probes
@@ -27,14 +29,21 @@
   spend authorization. Source-side credential rotation/revocation remains
   required.
 - Phase-2a single-owner topology is source-merged by `2ad3006` from `03885df`;
-  two independent audits and post-merge source integration passed. Legacy
-  parallel journal types are removed, tracked tickets and exact IDs are
-  present, but the proof issuer, process mutation, product activation, and
-  compile/live/target evidence remain absent. Phase-2b is design-only and in
-  progress, not source-accepted.
-- Post-merge evidence is scoped separately: 250/250 targeted Python checks,
-  4/4 parity checks, 32/32 evaluator checks, and QA inventory 53/53; QA remains
-  blocked. These counts are not combined with unrelated or overlapping evidence.
+  two independent audits and post-merge source integration passed. Phase-3
+  controller arbitration is also source-merged at `71537d0` after two final
+  source accepts, but remains inert with no native bridge, proof issuer, live
+  process, or product activation. Legacy parallel journal types are removed,
+  tracked tickets and exact IDs are present, and phase-2b remains design-only
+  and in progress, not source-accepted.
+- The merged lifecycle sync records 117 lifecycle tests plus separately scoped
+  related audit evidence in its status packet; no remote/provider/model/live
+  action is implied. Final post-merge checks report broad Node 343 total/342
+  passed/0 failed/1 known TODO and independent Node 187 total/186 passed/0
+  failed/1 same TODO (the parent-directory replacement race limitation), plus
+  Python 241/241 and a passing diff check. QA discovered 54 tests with 0
+  missing/unknown, 1 skeleton pass, 59 safe-mode skips, and 60 expected
+  release blockers; overall QA remains `BLOCKED`. These counts are separately
+  scoped and do not imply compile/live/provider/model/target readiness.
 - Missing hardware receipt/device identity, approved artifact custody, native
   compile evidence, provider/account approval, and target acceptance remain
   release gates.

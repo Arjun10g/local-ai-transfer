@@ -2,7 +2,7 @@
 
 ## Historical-status banner — superseded 2026-09-08
 
-This packet predates the current `main@2ad3006` truth refresh. Its 28-tool
+This packet predates the current `main@ec84d9e` truth refresh. Its 28-tool
 catalogue and interval claims are historical. The current evaluation fixture
 identity is 33 tools and 37 cases with `max_cases=64` ceiling semantics; this
 does not authorize runtime advertisement, live provider use, compile, or target
@@ -16,8 +16,15 @@ authorization, or provider execution is supplied. Prefix fix `089d05d` and
 parse-refused/unavailable under unsafe permissions. Phase-2a single-owner
 topology is merged at `2ad3006` from `03885df` with two independent audits and
 postmerge integration passed; proof issuer, process mutation, product
-activation, and compile/live/target evidence remain absent. Phase-2b is
-design-only/in progress.
+activation, and compile/live/target evidence remain absent. Phase-3 controller
+arbitration is merged at `71537d0` after two final source accepts, but remains
+inert with no native bridge, proof issuer, or live process. Strict lifecycle
+sync `0bbfc77` records 117 lifecycle tests plus separately scoped related audit
+evidence. Final checks report broad Node 343/342/0/1 TODO and independent Node
+187/186/0/1 same TODO (parent-directory replacement race), Python 241/241, and
+diff-check pass. QA discovered 54 with 0 missing/unknown, 1 skeleton pass, 59
+safe-mode skips, and 60 expected release blockers; overall QA remains
+`BLOCKED`. Phase-2b is design-only/in progress.
 
 - **Session:** S3
 - **Required model:** GPT-5.6 Luna

@@ -7,7 +7,7 @@ not a release or live-readiness approval. `PENDING_INDEPENDENT_AUDIT` and
 retains a historical task without making it current authority;
 `BLOCKED_BELOW_GATE` records evidence that failed or cannot satisfy its gate.
 
-Current claims are reconciled to exact `main@2ad3006d684a8b36bfb4f4827855165d470cb877`.
+Current claims are reconciled to exact `main@ec84d9eb36a45ab3756ed7a78970d86fd94ac58d`.
 The current evaluation profile identity is 33 tools/37 cases with
 `max_cases=64` ceiling semantics. Historical 13/32 and 28/32/11/34 results
 remain separate. Remote execution is false; only two no-model canary probes
@@ -85,3 +85,5 @@ target execution; bookkeeping is not spend authorization.
 | QA-REMOTE-CANARY-INERT | S3 | `main` | MERGED_SOURCE_PENDING_GATE | QA-REMOTE-001, QA-REMOTE-002 | S0, S4 | inert remote hardening merge `a9d2388`; exactly two no-model probes, no fall-through/direct execution; remote execution remains false |
 | LEDGER-MIGRATION-PREFLIGHT | S2 | `main` (merged from `luna/ledger-migration-preflight-mainline-v2`) | MERGED_SOURCE_PENDING_GATE | SOL-003, B-006 | S0, S4 | read-only preflight source `b777b54`, display-prefix fix `310fd1d`, merge `83cffab` plus `089d05d`; post-merge 31/31 source integration checks passed, but `SAFE_TO_MIGRATE_NOW=NO`, current evidence is parse-refused/unavailable, orphan receipts/unmatched incidents require adjudication, and no genesis/spend-authority/provider claim is permitted |
 | SUPERVISOR-TOPOLOGY-PHASE2A | S1 | `main` (merged from `luna/design-a-supervisor-single-owner-v1`) | MERGED_SOURCE_PENDING_GATE | B-005-SOURCE, SOL-003 | S0, S4 | source `03885df`, merge `2ad3006`; two independent audits and post-merge source integration passed; legacy parallel journal removed, tracked tickets and exact IDs present, but proof issuer/process mutation/product activation and compile/live/target evidence remain absent; phase-2b is design-only/in progress |
+| J1M-STRICT-LIFECYCLE-SYNC | S2 | `main` (merged from `luna/j1m-strict-lifecycle-test-sync-v1`) | MERGED_SOURCE_PENDING_GATE | SOL-003, MODEL-006 | S0, S4 | source `f0ea73a`, merge `0bbfc77`; 117 lifecycle tests plus separately scoped related audit evidence; no remote/provider/model/live execution or readiness approval |
+| CONTROLLER-ARBITRATION-PHASE3 | S3 | `main` (merged from `luna/design-a-controller-arbitration-v1`) | MERGED_SOURCE_PENDING_GATE | SUPERVISOR-TOPOLOGY-PHASE2A, SOL-003 | S0, S4 | source `356b97b`, repairs `4f8162e`/`71537d0`; two final source accepts; inert controller arbitration with no native bridge, proof issuer, live process, or product activation; final broad Node 343/342/0/1 TODO, independent Node 187/186/0/1 same TODO, Python 241/241, and QA 54 discovered/0 missing-unknown/1 skeleton pass/59 skips/60 blockers remain separate and overall blocked |
