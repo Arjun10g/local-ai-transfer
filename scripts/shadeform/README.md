@@ -43,10 +43,13 @@ The script deliberately does not invent rates. A catalogue profile must supply
 The read-only preflight's project-root `.env` input is not the credential-file
 layout for provider mutations. Mutation and recovery commands default to
 `.secrets/shadeform.env`. The `.secrets/` directory is ignored by Git and must
-already be a current-user, non-symlink directory with exact mode `0700`; the
-projected file is created once with exact mode `0600`. The migration helper
-deliberately does not create or chmod the directory, overwrite an existing
-destination, or relax these checks.
+already be a non-symlink directory owned by the effective user (including root
+when the process runs as root), with no group or world permission bits. Mode
+`0700` is the recommended writable setup for projection; mode `0500` is also
+safe for read-only loading of an existing file. The projected file is created
+once with exact mode `0600`. The migration helper deliberately does not create
+or chmod the directory, overwrite an existing destination, or relax these
+checks.
 
 From the repository root, prepare the directory and perform the offline,
 one-way projection explicitly:
@@ -62,9 +65,10 @@ python3 scripts/shadeform/migrate_env.py \
 `chmod` when `.secrets` already exists. The migration command independently
 revalidates the complete path and refuses links or unsafe metadata. Do not use project-root `.env`
 for a mutation command: a normal mode-`0755` repository root is intentionally
-too broad to be the direct parent of credential material. An explicit
+too broad to be the direct parent of credential material. Any group or world
+permission bit causes refusal, including modes `0710` or `0755`. An explicit
 `--env-file` override is permitted only when its direct parent satisfies the
-same mode-`0700`, current-user, non-symlink contract.
+same ownership, non-symlink, and zero-group/world-bits contract.
 
 ## Remote external-tools QA runner
 

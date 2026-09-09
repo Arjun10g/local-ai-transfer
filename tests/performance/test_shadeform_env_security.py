@@ -102,12 +102,27 @@ class ShadeformMutationEnvironmentTests(unittest.TestCase):
             with self.assertRaisesRegex(sf.ShadeformError, "owner-private"):
                 sf.load_env(self.env)
 
-    def test_rejects_parent_mode_and_missing_capability(self) -> None:
+    def test_loader_accepts_owner_only_0500_and_0700_parent_modes(self) -> None:
         self.write_env("SHADEFORM_API_KEY=fixture\n")
-        self.root.chmod(0o750)
-        with self.assertRaisesRegex(sf.ShadeformError, "owner-private"):
-            sf.load_env(self.env)
-        self.root.chmod(0o700)
+        try:
+            for mode in (0o500, 0o700):
+                with self.subTest(mode=oct(mode)):
+                    self.root.chmod(mode)
+                    self.assertEqual(sf.load_env(self.env), {"SHADEFORM_API_KEY": "fixture"})
+        finally:
+            self.root.chmod(0o700)
+
+    def test_loader_refuses_every_group_or_world_parent_bit_and_missing_capability(self) -> None:
+        self.write_env("SHADEFORM_API_KEY=fixture\n")
+        try:
+            for exposed_bits in range(1, 0o100):
+                mode = 0o700 | exposed_bits
+                with self.subTest(mode=oct(mode)):
+                    self.root.chmod(mode)
+                    with self.assertRaisesRegex(sf.ShadeformError, "owner-private"):
+                        sf.load_env(self.env)
+        finally:
+            self.root.chmod(0o700)
         with mock.patch.object(sf, "OPEN_SUPPORTS_DIR_FD", False):
             with self.assertRaisesRegex(sf.ShadeformError, "handle-relative"):
                 sf.load_env(self.env)
@@ -248,11 +263,16 @@ class ShadeformMutationEnvironmentTests(unittest.TestCase):
         with self.assertRaises(sf.ShadeformError):
             sf.project_mutation_env(self.env, destination)
 
-    def test_project_root_env_is_refused_but_private_secrets_layout_is_accepted(self) -> None:
+    def test_normal_0755_project_root_env_is_refused_but_private_layout_is_accepted(self) -> None:
         self._write_donor("SHADEFORM_API_KEY=api\nSHADEFORM_SSH=ssh\n")
         repository = self.root / "repository"
         repository.mkdir(mode=0o755)
         root_env = repository / ".env"
+        root_env.write_text("SHADEFORM_API_KEY=api\nSHADEFORM_SSH=ssh\n", encoding="utf-8")
+        root_env.chmod(0o600)
+        with self.assertRaisesRegex(sf.ShadeformError, "owner-private"):
+            sf.load_env(root_env)
+        root_env.unlink()
         with self.assertRaisesRegex(sf.ShadeformError, "owner-private"):
             sf.project_mutation_env(self.env, root_env)
         self.assertFalse(root_env.exists())
@@ -265,22 +285,60 @@ class ShadeformMutationEnvironmentTests(unittest.TestCase):
         self.assertEqual(protected_env.stat().st_mode & 0o777, 0o600)
         self.assertEqual(set(sf.load_env(protected_env)), {"SHADEFORM_API_KEY", "SHADEFORM_SSH"})
 
-    def test_mutation_entrypoints_default_to_ignored_private_layout(self) -> None:
+    def test_explicit_override_uses_the_same_owner_only_parent_contract(self) -> None:
+        override_directory = self.root / "operator-override"
+        override_directory.mkdir(mode=0o700)
+        override = override_directory / "custom-shadeform.env"
+        override.write_text("SHADEFORM_API_KEY=api\nSHADEFORM_SSH=ssh\n", encoding="utf-8")
+        override.chmod(0o600)
+        try:
+            override_directory.chmod(0o500)
+            self.assertEqual(set(sf.load_env(override)), {"SHADEFORM_API_KEY", "SHADEFORM_SSH"})
+            for exposed_mode in (0o710, 0o755):
+                with self.subTest(mode=oct(exposed_mode)):
+                    override_directory.chmod(exposed_mode)
+                    with self.assertRaisesRegex(sf.ShadeformError, "owner-private"):
+                        sf.load_env(override)
+        finally:
+            override_directory.chmod(0o700)
+
+    def test_mutation_entrypoints_default_to_ignored_owner_only_layout(self) -> None:
         self.assertEqual(sf.MUTATION_ENV_FILE, sf.ROOT / ".secrets" / "shadeform.env")
         ignored = (sf.ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
         self.assertIn(".secrets/", ignored)
         instructions = (sf.ROOT / "scripts/shadeform/README.md").read_text(encoding="utf-8")
         self.assertIn("mkdir -m 700 .secrets", instructions)
         self.assertNotIn("chmod 700 .secrets", instructions)
-        for relative in (
-            "scripts/j1m_orchestrator.py",
-            "scripts/shadeform_teardown.py",
-            "scripts/shadeform_watchdog.py",
-            "scripts/shadeform/remote_external_tools.py",
-        ):
+        self.assertIn("recommended writable setup", instructions)
+        self.assertIn("mode `0500`", instructions)
+        self.assertIn("`0710` or `0755`", instructions)
+        self.assertNotIn("exact mode `0700`", instructions)
+        expected_defaults = {
+            "scripts/j1m_orchestrator.py": "sf.MUTATION_ENV_FILE",
+            "scripts/shadeform_teardown.py": "shadeform.MUTATION_ENV_FILE",
+            "scripts/shadeform_watchdog.py": "shadeform.MUTATION_ENV_FILE",
+            "scripts/shadeform/remote_external_tools.py": "shadeform.MUTATION_ENV_FILE",
+        }
+        for relative, expected_default in expected_defaults.items():
             source = (sf.ROOT / relative).read_text(encoding="utf-8")
-            self.assertIn("MUTATION_ENV_FILE", source, relative)
             self.assertNotIn('ROOT / ".env"', source, relative)
+            tree = ast.parse(source, filename=relative)
+            defaults = []
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "add_argument"
+                    and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value == "--env-file"
+                ):
+                    defaults.extend(
+                        ast.unparse(keyword.value)
+                        for keyword in node.keywords
+                        if keyword.arg == "default"
+                    )
+            self.assertEqual(defaults, [expected_default], relative)
 
     def test_projection_refuses_ancestor_change_and_missing_capability(self) -> None:
         self._write_donor("SHADEFORM_API_KEY=api\nSHADEFORM_SSH=ssh\n")

@@ -24,7 +24,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source", type=Path, required=True, help="mixed donor dotenv path")
     parser.add_argument(
         "--destination", type=Path, required=True,
-        help="new dotenv path beneath an existing current-user mode-0700 directory",
+        help=(
+            "new dotenv path beneath an existing effective-user-owned directory "
+            "with no group/world permission bits (mode 0700 recommended for projection)"
+        ),
     )
     args = parser.parse_args(argv)
     try:
