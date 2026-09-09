@@ -344,8 +344,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.instance_id is not None and args.instance_id != record.instance_id:
             return 1
         exact_instance_id = record.instance_id
+        from scripts import shadeform_lifecycle as shadeform
         teardown_argv = [
-            sys.executable, str(ROOT / "scripts" / "shadeform_teardown.py"),
+            shadeform._verified_python_executable(), str(ROOT / "scripts" / "shadeform_teardown.py"),
             "--phase-id", args.phase_id, "--instance-id", exact_instance_id,
             "--env-file", str(args.env_file),
         ]
@@ -354,7 +355,9 @@ def main(argv: list[str] | None = None) -> int:
         remaining = hard_deadline - time.monotonic()
         if remaining <= 0:
             return 1
-        result = subprocess.run(teardown_argv, timeout=remaining)
+        result = subprocess.run(
+            teardown_argv, timeout=remaining, env=shadeform._secure_subprocess_env(),
+        )
         result_code = result.returncode
     finally:
         if identity_alive(args.launcher_pid, args.launcher_start_marker):

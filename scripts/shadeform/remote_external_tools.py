@@ -896,7 +896,7 @@ def execute(args: argparse.Namespace) -> dict[str, object]:
             watchdog_seconds = _remaining_before_cleanup(execution_deadline)
             expected_instance_name = shadeform.owned_instance_name(args.run_id, nonce)
             watchdog_command = [
-                sys.executable, str(ROOT / "scripts" / "shadeform_watchdog.py"),
+                shadeform._verified_python_executable(), str(ROOT / "scripts" / "shadeform_watchdog.py"),
                 "--phase-id", args.phase_id, "--launcher-pid", str(launcher_pid),
                 "--max-seconds", str(watchdog_seconds), "--deadline-epoch", str(execution_deadline_epoch),
                 "--provider-delete-deadline-epoch", str(provider_deadline_epoch),
@@ -1220,7 +1220,7 @@ def self_test() -> None:
     bootstrap = _remote_bootstrap_commands(str(plan["remote_root"]), "runner")
     assert bootstrap[0] == ["sudo", "mkdir", "-p", "/scratch"]
     assert bootstrap[-1][-1].endswith("/node/bin/node")
-    transport = run_argv([sys.executable, "-c", "print('transport-ok')"], timeout=5, capture_stdout=True)
+    transport = run_argv([shadeform._verified_python_executable(), "-c", "print('transport-ok')"], timeout=5, capture_stdout=True)
     assert transport["status"] == "completed" and transport["exit_code"] == 0 and transport["stdout"] == "transport-ok\n"
     valid_receipt = json.dumps({
         "schema_version": "remote-external-tools-qa.v1", "run_id": "self-test",

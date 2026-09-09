@@ -188,6 +188,16 @@ def lifecycle_execute_isolation(lifecycle_module, *, prefix="lifecycle-execute-"
             stack.enter_context(mock.patch.object(lifecycle_module, "MARKDOWN_LEDGER", paths.markdown_ledger))
             stack.enter_context(mock.patch.object(lifecycle_module, "COST_LEDGER", paths.cost_ledger))
             stack.enter_context(mock.patch.object(lifecycle_module, "INCIDENTS", paths.incidents))
+            # Execute tests are process-boundary probes with Popen forbidden;
+            # give them a fixed safe absolute fixture so they cannot depend on
+            # the developer's interpreter installation or its ancestor modes.
+            stack.enter_context(
+                mock.patch.object(
+                    lifecycle_module,
+                    "_verified_python_executable",
+                    return_value="/usr/bin/python3",
+                )
+            )
             stack.enter_context(guard.patches())
             lifecycle_module.initialize_cost_ledger_genesis(
                 program=lifecycle_module.COST_LEDGER_PROGRAM,

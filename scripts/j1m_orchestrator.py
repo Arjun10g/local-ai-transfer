@@ -222,7 +222,10 @@ def _tool_eval_contract() -> dict[str, Any]:
 def _remote(command: list[str], *, timeout: float) -> dict[str, Any]:
     j1m_runner.validate_persisted_argv(command)
     try:
-        result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(
+            command, check=False, capture_output=True, text=True, timeout=timeout,
+            env=sf._secure_subprocess_env(),
+        )
     except subprocess.TimeoutExpired as exc:
         try:
             stderr_tail = _redacted_output_tail(exc.stderr)
@@ -1044,7 +1047,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 raise TimeoutError("insufficient deadline for pre-create recovery watchdog")
             expected_instance_name = sf.owned_instance_name(run_id, nonce)
             watchdog_command = [
-                os.sys.executable, str(ROOT / "scripts" / "shadeform_watchdog.py"),
+                sf._verified_python_executable(), str(ROOT / "scripts" / "shadeform_watchdog.py"),
                 "--phase-id", phase_id, "--launcher-pid", str(launcher_pid),
                 "--max-seconds", str(watchdog_seconds),
                 "--deadline-epoch", str(time.time() + execution_deadline - time.monotonic()),
@@ -1060,7 +1063,10 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             ]
             if launcher_start_marker is not None:
                 watchdog_command.extend(["--launcher-start-marker", launcher_start_marker])
-            watchdog = subprocess.Popen(watchdog_command)
+            watchdog = subprocess.Popen(
+                watchdog_command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, env=sf._secure_subprocess_env(),
+            )
             lifecycle["watchdog_pid"] = watchdog.pid
             try:
                 sf.preflight_legacy_deletion_evidence(phase_id)
