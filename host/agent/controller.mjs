@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { types as utilTypes } from 'node:util';
 import { makeEvent } from './assistant-events.mjs';
 import { makeToolResult, parseToolCall, validateToolResult, EnvelopeError } from './tool-envelope.mjs';
 import { ACTION_JOURNAL_HEALTH_ERRORS, createActionBinding } from './action-journal.mjs';
@@ -165,7 +166,7 @@ function journalStatus(journal) {
   try {
     if (!journal || typeof journal.health !== 'function') return { ready: false, code: 'action_journal_unavailable' };
     const health = journal.health();
-    if (!health || typeof health !== 'object' || Array.isArray(health) || Object.getPrototypeOf(health) !== Object.prototype) return { ready: false, code: 'action_journal_unavailable' };
+    if (!health || typeof health !== 'object' || Array.isArray(health) || utilTypes.isProxy(health) || Object.getPrototypeOf(health) !== Object.prototype) return { ready: false, code: 'action_journal_unavailable' };
     const keys = Reflect.ownKeys(health); if (keys.length !== 2 || !keys.includes('state') || !keys.includes('error')) return { ready: false, code: 'action_journal_unavailable' };
     const stateDescriptor = Object.getOwnPropertyDescriptor(health, 'state'); const errorDescriptor = Object.getOwnPropertyDescriptor(health, 'error');
     if (!stateDescriptor || !errorDescriptor || !Object.hasOwn(stateDescriptor, 'value') || !Object.hasOwn(errorDescriptor, 'value') || stateDescriptor.get !== undefined || stateDescriptor.set !== undefined || errorDescriptor.get !== undefined || errorDescriptor.set !== undefined) return { ready: false, code: 'action_journal_unavailable' };

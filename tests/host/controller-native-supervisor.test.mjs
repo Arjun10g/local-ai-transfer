@@ -170,6 +170,13 @@ test('malformed or hostile journal health is a finite unavailable refusal', asyn
   const proxyController = new ConversationController({ engine: engineFor('process.run_allowlisted', {}), actionJournal: proxyJournal, toolRegistry: { 'process.run_allowlisted': tool('process.run_allowlisted', 'process_execution', async () => { throw new Error('preview must not run'); }) } });
   const proxied = await runAsPlatform('win32', () => proxyController.runTurn({ sessionId: 'ses_health_proxy', requestId: 'req_health_proxy', message: 'run it' }));
   assert.equal(proxied.error, 'action_journal_unavailable');
+
+  for (const [index, [health, label]] of [[0, [{ state: 'ready', error: null }, 'ready']], [1, [{ state: 'blocked', error: 'action_journal_platform_unavailable' }, 'blocked']]]) {
+    let executions = 0; const transparent = new MockJournal({ healthState: 'blocked' }); transparent.health = () => new Proxy(health, {});
+    const transparentController = new ConversationController({ engine: engineFor('process.run_allowlisted', {}), actionJournal: transparent, toolRegistry: { 'process.run_allowlisted': tool('process.run_allowlisted', 'process_execution', async () => { executions += 1; }) } });
+    const transparentResult = await runAsPlatform('win32', () => transparentController.runTurn({ sessionId: `ses_health_transparent_${index}`, requestId: `req_health_transparent_${index}`, message: 'run it' }));
+    assert.equal(transparentResult.error, 'action_journal_unavailable', label); assert.equal(executions, 0, label); assert.deepEqual(transparent.calls, []);
+  }
 });
 
 test('journal health preserves every exact contract diagnostic and nothing else', async () => {
