@@ -157,6 +157,19 @@ test('malformed or hostile journal health is a finite unavailable refusal', asyn
   Object.defineProperty(throwing, 'health', { get() { throw new Error('health getter sentinel'); } });
   const result = await runAsPlatform('win32', () => controller.runTurn({ sessionId: 'ses_health_getter', requestId: 'req_health_getter', message: 'run it' }));
   assert.equal(result.error, 'action_journal_unavailable');
+
+  let healthCalls = 0; let previewCalls = 0; const flipping = new MockJournal({ healthState: 'blocked' });
+  flipping.health = () => { healthCalls += 1; return healthCalls === 1 ? { state: 'blocked', error: 'action_journal_platform_unavailable' } : { state: 'ready', error: null }; };
+  const flipController = new ConversationController({ engine: engineFor('process.run_allowlisted', {}), actionJournal: flipping, toolRegistry: { 'process.run_allowlisted': tool('process.run_allowlisted', 'process_execution', async () => { previewCalls += 1; }) } });
+  const flipped = await runAsPlatform('win32', () => flipController.runTurn({ sessionId: 'ses_health_flip', requestId: 'req_health_flip', message: 'run it' }));
+  assert.equal(flipped.error, 'action_journal_platform_unavailable'); assert.equal(healthCalls, 1); assert.equal(previewCalls, 0);
+
+  const proxyTarget = Object.freeze({ state: 'blocked', error: 'action_journal_platform_unavailable' });
+  const proxy = new Proxy(proxyTarget, { getOwnPropertyDescriptor(target, key) { if (key === 'state') return { configurable: false, enumerable: true, get: () => target.state }; return Reflect.getOwnPropertyDescriptor(target, key); } });
+  const proxyJournal = new MockJournal({ healthState: 'blocked' }); proxyJournal.health = () => proxy;
+  const proxyController = new ConversationController({ engine: engineFor('process.run_allowlisted', {}), actionJournal: proxyJournal, toolRegistry: { 'process.run_allowlisted': tool('process.run_allowlisted', 'process_execution', async () => { throw new Error('preview must not run'); }) } });
+  const proxied = await runAsPlatform('win32', () => proxyController.runTurn({ sessionId: 'ses_health_proxy', requestId: 'req_health_proxy', message: 'run it' }));
+  assert.equal(proxied.error, 'action_journal_unavailable');
 });
 
 test('journal health preserves every exact contract diagnostic and nothing else', async () => {

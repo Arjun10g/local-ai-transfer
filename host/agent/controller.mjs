@@ -165,9 +165,14 @@ function journalStatus(journal) {
   try {
     if (!journal || typeof journal.health !== 'function') return { ready: false, code: 'action_journal_unavailable' };
     const health = journal.health();
-    if (!health || typeof health !== 'object' || Array.isArray(health) || typeof health.state !== 'string') return { ready: false, code: 'action_journal_unavailable' };
-    if (health.state === 'ready') return { ready: health.error === null, code: health.error === null ? null : 'action_journal_unavailable' };
-    return { ready: false, code: typeof health.error === 'string' && JOURNAL_FAILURE_CODES.has(health.error) ? health.error : 'action_journal_unavailable' };
+    if (!health || typeof health !== 'object' || Array.isArray(health) || Object.getPrototypeOf(health) !== Object.prototype) return { ready: false, code: 'action_journal_unavailable' };
+    const keys = Reflect.ownKeys(health); if (keys.length !== 2 || !keys.includes('state') || !keys.includes('error')) return { ready: false, code: 'action_journal_unavailable' };
+    const stateDescriptor = Object.getOwnPropertyDescriptor(health, 'state'); const errorDescriptor = Object.getOwnPropertyDescriptor(health, 'error');
+    if (!stateDescriptor || !errorDescriptor || !Object.hasOwn(stateDescriptor, 'value') || !Object.hasOwn(errorDescriptor, 'value') || stateDescriptor.get !== undefined || stateDescriptor.set !== undefined || errorDescriptor.get !== undefined || errorDescriptor.set !== undefined) return { ready: false, code: 'action_journal_unavailable' };
+    const state = stateDescriptor.value; const error = errorDescriptor.value;
+    if (typeof state !== 'string') return { ready: false, code: 'action_journal_unavailable' };
+    if (state === 'ready') return { ready: error === null, code: error === null ? null : 'action_journal_unavailable' };
+    return { ready: false, code: typeof error === 'string' && JOURNAL_FAILURE_CODES.has(error) ? error : 'action_journal_unavailable' };
   } catch { return { ready: false, code: 'action_journal_unavailable' }; }
 }
 
@@ -283,7 +288,7 @@ export class ConversationController {
       while (true) {
         if (controller.signal.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' });
         session.state = calls ? 'CONTINUING_MODEL' : 'INFERENCING'; emit('message.started', { mode, state: session.state, continuation: calls > 0 });
-        const ready = journalStatus(this.actionJournal).ready;
+        const journal = journalStatus(this.actionJournal); const ready = journal.ready;
         const tools = modelToolDefinitions(new Map([...this.#tools].filter(([name, tool]) => {
           const nativeOwned = nativeSupervisorOwnerFor(name, tool, process.platform) !== null;
           return nativeOwned ? ready : !requiresDurableAction(tool) || ready;
@@ -301,8 +306,7 @@ export class ConversationController {
         const tool = this.#tools.get(call.name); if (!tool) throw Object.assign(new Error('unknown_tool'), { code: 'unknown_tool' });
         validateToolArgumentShape(tool, call);
         const nativeDispatchOwner = nativeSupervisorOwnerFor(tool.name, tool, process.platform);
-        const admissionJournal = journalStatus(this.actionJournal);
-        if ((nativeDispatchOwner !== null || requiresDurableAction(tool)) && !admissionJournal.ready) throw Object.assign(new Error('durable action journal is unavailable'), { code: admissionJournal.code });
+        if ((nativeDispatchOwner !== null || requiresDurableAction(tool)) && !journal.ready) throw Object.assign(new Error('durable action journal is unavailable'), { code: journal.code });
         let preview;
         if (tool.preview) preview = await invokeWithTimeout(tool, tool.preview, call, controller.signal);
         emit('tool.proposed', { call: publicToolCall(call), ...(preview === undefined ? {} : { preview }) });
@@ -317,8 +321,7 @@ export class ConversationController {
           else { preview = await invokeWithTimeout(tool, tool.preview, { ...call, authorization: { kind: 'user_confirmation' }, preview_authorized: true }, controller.signal); emit('tool.proposed', { call: publicToolCall(call), preview }); }
         }
         if (nativeDispatchOwner !== null || requiresDurableAction(tool)) {
-          const dispatchJournal = journalStatus(this.actionJournal);
-          if (!dispatchJournal.ready) throw Object.assign(new Error('durable action journal is unavailable'), { code: dispatchJournal.code });
+          if (!journal.ready) throw Object.assign(new Error('durable action journal is unavailable'), { code: journal.code });
           const binding = createActionBinding({ requestId, callId: call.id, toolName: call.name, arguments: call.arguments, preview });
           const receipt = await this.actionJournal.prepare({ requestId, callId: call.id, toolName: call.name, riskTier: tool.risk_tier, sideEffect: tool.side_effect, argumentsDigest: binding.argumentsDigest, previewDigest: binding.previewDigest, operationDigest: binding.operationDigest });
           const dispatchOwner = nativeDispatchOwner;

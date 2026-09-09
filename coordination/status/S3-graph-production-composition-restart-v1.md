@@ -32,7 +32,7 @@ Add mocked behavioral coverage for Microsoft Graph production composition, journ
 
 - Commit: final repair tip reported with this packet
 - Commands: `node --test tests/host/graph-production-composition-restart.test.mjs`; selected Graph/host/controller/security Node inventory; `python3 scripts/test/run_qa.py --root . --output - --skip-native`; `git diff --check`
-- Tests: Focused Graph auth/composition suite 18/18; selected action-journal/controller/Graph regression set 54/54 (the broader Graph/host/controller/security inventory remains 153/153); hostile serialized-output, importable bootstrap, all four Graph mutation pre-preview, provider `/me` race, failure-isolated lifecycle, exact health-diagnostic allowlist parity, and malformed/throwing journal-health assertions are included. QA safe inventory discovers 55 test files and 61 result records (1 PASS, 60 SKIP), with status BLOCKED by safe-mode mandatory-suite skips
+- Tests: Focused Graph auth/composition suite 18/18; selected action-journal/controller/Graph regression set 54/54 (the broader Graph/host/controller/security inventory remains 153/153); hostile serialized-output, importable bootstrap, all four Graph mutation pre-preview, provider `/me` race, failure-isolated lifecycle, exact health-diagnostic allowlist parity, one-shot health snapshot, and malformed/throwing/accessor/proxy journal-health assertions are included. QA safe inventory discovers 55 test files and 61 result records (1 PASS, 60 SKIP), with status BLOCKED by safe-mode mandatory-suite skips
 - Machine: Not applicable
 - Artifact/index: None
 - Metrics: No live/provider/model/build execution; hidden durable-write case recorded zero transport/token access; late auth completions recorded no stale prompt/cache/callback mutation
@@ -54,6 +54,7 @@ Add mocked behavioral coverage for Microsoft Graph production composition, journ
 - Durable Graph writes remain unavailable without a bound ActionJournal; existing Teams/send and other post-dispatch ambiguity paths remain at-most-once/manual-reconciliation cases and are not reopened or replayed here.
 - Controller admission checks journal readiness before any durable-tool preview, authorization, or provider callback; all Graph mutation names are tested at zero token/transport calls when absent or unhealthy.
 - Journal health diagnostics preserve only bounded canonical `action_journal_*` failure codes; missing, malformed, throwing, or noncanonical health is a finite unavailable refusal.
+- Journal health is read once into a local plain-data snapshot per controller turn iteration; subsequent admission checks cannot observe a mutating or inconsistent health object.
 - Host close is idempotent and shuts down an unlistened engine; bootstrap closes a composition if listen fails.
 - Host close now attempts revoke/cancel, provider shutdown, server closure, and engine shutdown independently exactly once; failures return only a finite `host_shutdown_failed` code after all attempts.
 
