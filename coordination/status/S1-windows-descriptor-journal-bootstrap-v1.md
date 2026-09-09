@@ -48,11 +48,12 @@ activating or packaging native code or asserting Windows/production evidence.
 
 ## Evidence
 
-- Commits: claim `06e045e`; implementation `e5b707f`.
+- Commits: claim `06e045e`; implementation `e5b707f`; atomic duplicate
+  ownership repair `97a9d7d`.
 - `python3 -m unittest discover -s tests/native -p
-  'test_windows_*static.py'`: PASS, 236/236.
+  'test_windows_*static.py'`: PASS, 237/237 after repair.
 - `python3 -m unittest tests.qa.test_safe_runner`: PASS, 20/20.
-- Focused bootstrap/storage/harness/inventory command: PASS, 39/39.
+- Focused bootstrap/storage/harness/inventory command: PASS, 40/40 after repair.
 - `node --test tests/host/descriptor-action-journal.test.mjs
   tests/host/action-journal-protocol.test.mjs`: PASS, 63/63.
 - `python3 scripts/test/run_qa.py --root . --skip-native`: expected `BLOCKED`;
@@ -71,6 +72,11 @@ activating or packaging native code or asserting Windows/production evidence.
 - A Win32 `HANDLE` is not a child-process CRT descriptor. This slice prepares
   an inheritable duplicate but deliberately does not serialize it as
   `LAE_ACTION_JOURNAL_FD`, launch a process, or claim Node compatibility.
+- Repair: the handoff destination and its `UniqueHandle` now allocate before
+  `DuplicateHandle`, and the API writes the result directly into RAII-owned
+  storage. Allocation failure occurs before handle creation; API/flag refusal
+  destroys the owner and closes once; only successful transfer marks the lease
+  one-shot. All failure outcomes remain retry-safe.
 
 ## Blockers
 
