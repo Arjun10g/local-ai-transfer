@@ -145,6 +145,11 @@ class CheckoutPathGuard:
                 return original_builtin_open(file, *args, **kwargs)
 
             stack.enter_context(mock.patch("os.open", new=guarded_os_open))
+            # Keep the descriptor capability probe truthful after wrapping
+            # os.open for checkout-path isolation.
+            supported_dir_fd = set(os.supports_dir_fd)
+            supported_dir_fd.add(guarded_os_open)
+            stack.enter_context(mock.patch.object(os, "supports_dir_fd", supported_dir_fd))
             stack.enter_context(mock.patch("os.replace", new=guarded_os_replace))
             stack.enter_context(mock.patch("builtins.open", new=guarded_builtin_open))
             yield self

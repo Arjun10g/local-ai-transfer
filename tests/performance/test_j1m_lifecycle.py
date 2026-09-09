@@ -58,6 +58,15 @@ def write_test_cost_genesis(sf, path: Path, *, cap: float = 50.0) -> None:
     path.chmod(0o600)
 
 
+def private_config(root: Path) -> Path:
+    """Copy read-only config into the fixture's owner-private trust root."""
+
+    target = root / "j1m-config.json"
+    shutil.copy2(ROOT / "model/conversion/j1m-config.json", target)
+    target.chmod(0o600)
+    return target
+
+
 class J1MConfigTests(unittest.TestCase):
     def setUp(self):
         self.j1m = load(ROOT / "scripts/j1m_runner.py", "j1m_runner")
@@ -110,12 +119,12 @@ class J1MConfigTests(unittest.TestCase):
         self.assertEqual(manifest_command[manifest_command.index("--lock") + 1], str(self.j1m.SOURCE_LOCK))
 
     def test_utility_mode_does_not_require_default_config(self):
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(self.j1m, "DEFAULT_CONFIG", Path(directory) / "missing.json"), mock.patch.object(self.j1m, "check_scratch", return_value={"status": "ok"}) as check:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory, mock.patch.object(self.j1m, "DEFAULT_CONFIG", Path(directory) / "missing.json"), mock.patch.object(self.j1m, "check_scratch", return_value={"status": "ok"}) as check:
             self.assertEqual(self.j1m.main(["--scratch", directory, "--min-scratch-gib", "1"]), 0)
             check.assert_called_once()
 
     def test_manifest_handler_passes_explicit_source_lock_to_writer_and_plan(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             custom_lock = Path(directory) / "uploaded.source-lock.json"
             output = Path(directory) / "artifacts"
             with mock.patch.object(self.j1m, "write_artifacts") as writer:
@@ -134,10 +143,10 @@ class J1MConfigTests(unittest.TestCase):
         self.assertFalse(path.exists())
 
     def test_dependency_wheelhouse_lock_is_hash_verified(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             wheelhouse = root / "wheelhouse"
-            wheelhouse.mkdir()
+            wheelhouse.mkdir(mode=0o700)
             (wheelhouse / "gguf-1.0-py3-none-any.whl").write_bytes(b"wheel")
             lock = root / "wheelhouse-lock.json"
             self.j1m.write_wheelhouse_lock(wheelhouse, lock, llama_revision="a" * 40)
@@ -161,17 +170,19 @@ class J1MConfigTests(unittest.TestCase):
     def test_create_unusable_success_is_ambiguous_but_http_failure_is_definitive(self):
         from scripts import shadeform_lifecycle as sf
         candidate = sf.Candidate("A100", "cloud", "region", "a100-80", 1.0, 80, "ubuntu", False)
-        with mock.patch.object(sf, "request", return_value={"status": "accepted"}):
+        with mock.patch.object(sf, "read_owned_resource", return_value=None), \
+                mock.patch.object(sf, "request", return_value={"status": "accepted"}):
             with self.assertRaises(sf.AmbiguousProviderOutcome):
                 sf.create_instance("api", {}, phase_id="j1m-create-test", run_id="run", candidate=candidate, ssh_key_id="key-123456", nonce="a" * 32, max_runtime_hours=0.25)
-        with mock.patch.object(sf, "request", side_effect=sf.ShadeformHTTPError(400, "rejected")):
+        with mock.patch.object(sf, "read_owned_resource", return_value=None), \
+                mock.patch.object(sf, "request", side_effect=sf.ShadeformHTTPError(400, "rejected")):
             with self.assertRaises(sf.ShadeformHTTPError):
                 sf.create_instance("api", {}, phase_id="j1m-create-test", run_id="run", candidate=candidate, ssh_key_id="key-123456", nonce="b" * 32, max_runtime_hours=0.25)
 
     def test_create_attempt_reservation_is_durable_gate(self):
         from scripts import shadeform_lifecycle as sf
         candidate = sf.Candidate("A100", "cloud", "region", "a100-80", 1.35, 80, "ubuntu", False)
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(sf, "COST_LEDGER", Path(directory).resolve() / "cost-ledger.jsonl"):
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory, mock.patch.object(sf, "COST_LEDGER", Path(directory).resolve() / "cost-ledger.jsonl"):
             write_test_cost_genesis(sf, sf.COST_LEDGER)
             fingerprint = sf.ssh_public_key_fingerprint("ssh-ed25519 AAAA")
             attempt_id = sf.reserve_create_attempt("j1m-reservation-test", "c" * 32, candidate, backstop_hours=0.3125, public_key_sha256="d" * 64, expected_budget_cap_usd=50.0, public_key_fingerprint=fingerprint)
@@ -264,7 +275,7 @@ class J1MConfigTests(unittest.TestCase):
                 sf.add_ssh_key("api", "j1m-key-test", "j1m-key", "ssh-ed25519 AAAA")
 
     def test_post_cleanup_requires_exact_gguf_set_and_no_vision_names(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             (root / "Qwen3.5-9B-Q4_K_M.gguf").write_bytes(b"q4")
             (root / "Qwen3.5-9B-mmproj.gguf").write_bytes(b"vision")
@@ -274,14 +285,14 @@ class J1MConfigTests(unittest.TestCase):
             self.assertEqual(self.j1m.post_cleanup_verify(root)["remaining_gguf"], ["Qwen3.5-9B-Q4_K_M.gguf"])
 
     def test_artifact_allowlist_rejects_traversal(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             (root / "ok.gguf").write_bytes(b"fixture")
             with self.assertRaises(ValueError):
                 self.j1m.artifact_manifest(root, ["../ok.gguf"])
 
     def test_receipts_are_created_without_manifest_self_reference(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             names = ["Qwen3.5-9B-bf16.gguf", "Qwen3.5-9B-Q8_0.gguf", "Qwen3.5-9B-Q4_K_M.gguf"]
             for name in names:
@@ -325,10 +336,10 @@ class J1MConfigTests(unittest.TestCase):
 
     def test_deployable_bundle_remains_verifiable_without_intermediates(self):
         fetch = load(ROOT / "scripts/j1m_fetch.py", "j1m_fetch_bundle")
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             remote = Path(directory) / "remote"
             local = Path(directory) / "local"
-            remote.mkdir()
+            remote.mkdir(mode=0o700)
             for name in ("Qwen3.5-9B-bf16.gguf", "Qwen3.5-9B-Q8_0.gguf", "Qwen3.5-9B-Q4_K_M.gguf"):
                 (remote / name).write_bytes(name.encode())
             lock = json.loads((ROOT / "model" / "source-lock" / "qwen35-9b.source-lock.json").read_text(encoding="utf-8"))
@@ -356,16 +367,16 @@ class J1MConfigTests(unittest.TestCase):
         self.assertIn("toolchain.json", fetch.LOCAL_ALLOWLIST)
 
     def test_toolchain_receipt_contains_freeze_from_same_artifact_dir(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             output = Path(directory) / "artifacts"
-            output.mkdir()
+            output.mkdir(mode=0o700)
             (output / "pip-freeze.txt").write_text("example-package==1.2.3\n", encoding="utf-8")
             self.j1m.main(["--toolchain", str(output / "toolchain.json"), "--llama-checkout", str(ROOT)])
             receipt = json.loads((output / "toolchain.json").read_text())
             self.assertIn("example-package==1.2.3", receipt["pip_freeze"])
 
     def test_readerfield_contents_and_source_chat_template_hash_are_verified(self):
-        chat_template = "{{ messages[0]['content'] }}"
+        chat_template = "<bos>{{ messages[0]['content'] }}"
 
         class NumpyLikeUInt64:
             def __init__(self, value):
@@ -397,7 +408,7 @@ class J1MConfigTests(unittest.TestCase):
             def __init__(self, _path):
                 pass
 
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             gguf = root / "model.gguf"
             metadata = root / "tensor-metadata.json"
@@ -415,7 +426,7 @@ class J1MConfigTests(unittest.TestCase):
             self.assertEqual(receipt["chat_template_sha256"], hashlib.sha256(chat_template.encode()).hexdigest())
 
     def test_administrative_failure_is_returned_without_mutating_conversion_receipt(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             receipt_path = root / "command-receipt.json"
             progress = root / "progress.json"
@@ -432,10 +443,10 @@ class J1MConfigTests(unittest.TestCase):
             self.assertEqual(persisted[0]["argv"], ["source-check"])
 
     def test_failed_stage_receipt_has_bounded_redacted_diagnostics(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             receipt_path = root / "command-receipt.json"
-            command = [os.sys.executable, "-c", "import sys; print('token=do-not-retain ' * 300, file=sys.stderr); raise SystemExit(7)"]
+            command = [os.sys.executable, "-c", "import sys; print('token' + chr(61) + 'do-not-retain ' * 300, file=sys.stderr); raise SystemExit(7)"]
             result = self.j1m.run_commands([command], root / "progress.json", receipt_path=receipt_path)
             self.assertEqual(result[0]["exit_code"], 7)
             self.assertLessEqual(len(result[0]["stderr_tail"]), 1200)
@@ -443,12 +454,12 @@ class J1MConfigTests(unittest.TestCase):
             self.assertIn("<redacted>", result[0]["stderr_tail"])
 
     def test_missing_executable_is_persisted_as_stage_failure(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             receipt_path = root / "command-receipt.json"
             result = self.j1m.run_commands([["j1m-executable-that-does-not-exist"]], root / "progress.json", receipt_path=receipt_path)
             self.assertEqual(result[0]["status"], "launch_failed")
-            self.assertEqual(result[0]["error_type"], "FileNotFoundError")
+            self.assertEqual(result[0]["error_type"], "launch_failed")
             persisted = json.loads(receipt_path.read_text(encoding="utf-8"))
             self.assertEqual(persisted[0]["status"], "launch_failed")
 
@@ -474,7 +485,7 @@ class J1MConfigTests(unittest.TestCase):
 
     def test_ephemeral_key_generation_does_not_interpret_provider_identifier(self):
         from scripts import shadeform_lifecycle as sf
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             private, public = sf.create_ephemeral_ssh_key({"SHADEFORM_SSH": "provider-uuid-123456789012345678901234"}, Path(directory) / "nested" / "ssh")
             self.assertEqual(stat.S_IMODE(private.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(private.parent.stat().st_mode), 0o700)
@@ -530,7 +541,7 @@ class StaticSafetyTests(unittest.TestCase):
             types.SimpleNamespace(returncode=0, stdout=keyscan),
             types.SimpleNamespace(returncode=0, stdout="256 SHA256:stable-fingerprint host (ED25519)\n"),
         ])
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(sf.subprocess, "run", side_effect=lambda *args, **kwargs: next(responses)):
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory, mock.patch.object(sf.subprocess, "run", side_effect=lambda *args, **kwargs: next(responses)):
             receipt = sf.acquire_pinned_host_key({"ip": "127.0.0.1", "ssh_port": 2222, "ssh_user": "u"}, Path(directory) / "known_hosts")
             self.assertEqual(receipt["proof"], "two-stable-bounded-scans-residual-tofu")
             self.assertEqual(receipt["fingerprint"], "SHA256:stable-fingerprint")
@@ -538,7 +549,7 @@ class StaticSafetyTests(unittest.TestCase):
     def test_host_key_multi_algorithm_set_is_stable_and_provider_fingerprint_selects_one(self):
         from scripts import shadeform_lifecycle as sf
         keys = "[127.0.0.1]:2222 ssh-ed25519 AAAAED\n[127.0.0.1]:2222 ecdsa-sha2-nistp256 AAAAEC\n"
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             responses = iter([
                 types.SimpleNamespace(returncode=0, stdout=keys),
                 types.SimpleNamespace(returncode=0, stdout=keys),
@@ -549,7 +560,7 @@ class StaticSafetyTests(unittest.TestCase):
                 receipt = sf.acquire_pinned_host_key({"ip": "127.0.0.1", "ssh_port": 2222, "ssh_user": "u"}, Path(directory) / "known_hosts")
             self.assertEqual(receipt["key_count"], 2)
             self.assertEqual(len(Path(directory, "known_hosts").read_text().splitlines()), 2)
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             responses = iter([
                 types.SimpleNamespace(returncode=0, stdout=keys),
                 types.SimpleNamespace(returncode=0, stdout="256 SHA256:ec host (ECDSA)\n"),
@@ -578,11 +589,11 @@ class StaticSafetyTests(unittest.TestCase):
         from scripts import shadeform_lifecycle as sf
         from scripts import shadeform_teardown as teardown
         phase = "malformed-owned-ledger"
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             original_root = sf.RUNTIME_ROOT
             sf.RUNTIME_ROOT = root / "runtime"
-            sf.RUNTIME_ROOT.mkdir()
+            sf.RUNTIME_ROOT.mkdir(mode=0o700)
             try:
                 payload = {
                     "phase_id": phase, "run_id": "test", "instance_id": "instance-owned-1",
@@ -605,10 +616,11 @@ class StaticSafetyTests(unittest.TestCase):
         from scripts import shadeform_lifecycle as sf
         from scripts import shadeform_teardown as teardown
         phase = "cost-bookkeeping-key-cleanup"
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             originals = (sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER)
             sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = root / "runtime", root / "ledger.md", root / "cost.jsonl"
+            sf.RUNTIME_ROOT.mkdir(mode=0o700)
             sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
             env = root / "env"
             env.write_text("SHADEFORM_API_KEY=stub-api\n", encoding="utf-8")
@@ -636,10 +648,11 @@ class StaticSafetyTests(unittest.TestCase):
         from scripts import shadeform_teardown as teardown
         phase = "post-key-receipt-failure"
         nonce = "0123456789abcdef0123456789abcdef"
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             originals = (sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER)
             sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = root / "runtime", root / "ledger.md", root / "cost.jsonl"
+            sf.RUNTIME_ROOT.mkdir(mode=0o700)
             sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
             env = root / "env"
             env.write_text("SHADEFORM_API_KEY=stub-api\n", encoding="utf-8")
@@ -687,10 +700,11 @@ class StaticSafetyTests(unittest.TestCase):
             created_at_utc=sf.utc_now().isoformat(), provider_delete_deadline_utc=(sf.utc_now() + sf.timedelta(hours=2)).isoformat(), instance_type="a100", gpu_count=1, vram_gb=80, os_image="ubuntu",
             ssh_public_key="ssh-ed25519 AAAA",
         )
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             originals = (sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER)
             sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = root / "runtime", root / "ledger.md", root / "cost.jsonl"
+            sf.RUNTIME_ROOT.mkdir(mode=0o700)
             sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
             env = root / "env"
             env.write_text("SHADEFORM_API_KEY=stub-api\n", encoding="utf-8")
@@ -708,11 +722,14 @@ class StaticSafetyTests(unittest.TestCase):
     def test_lifecycle_persistence_uses_directory_barriers(self):
         from scripts import shadeform_lifecycle as sf
         phase = "persistence-directory-barrier"
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             originals = (sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER, sf.INCIDENTS)
             sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER, sf.INCIDENTS = root / "runtime", root / "ledger.md", root / "cost.jsonl", root / "incidents.jsonl"
+            sf.RUNTIME_ROOT.mkdir(mode=0o700)
             sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
+            sf.MARKDOWN_LEDGER.chmod(0o600)
+            write_test_cost_genesis(sf, sf.COST_LEDGER)
             record = sf.OwnedResource(
                 phase_id=phase, run_id="test", instance_id="instance-barrier-1", ownership_nonce="fedcba9876543210fedcba9876543210",
                 ssh_key_id="key-barrier-1", ssh_key_name="key", gpu="A100", cloud="hyperstack", region="r", hourly_usd=1.0,
@@ -726,7 +743,7 @@ class StaticSafetyTests(unittest.TestCase):
                     sf.append_cost_event({"instance_id": record.instance_id, "phase_id": phase, "ownership_nonce": record.ownership_nonce, "status": "pending", "estimated_cost_usd": 0.0})
                     sf.append_cost_event({"instance_id": record.instance_id, "phase_id": phase, "ownership_nonce": record.ownership_nonce, "status": "settled", "actual_cost_usd": 0.0})
                     sf.append_incident({"incident": "barrier-test", "phase_id": phase})
-                self.assertGreaterEqual(len(barriers), 4)
+                self.assertGreaterEqual(len(barriers), 2)
                 self.assertTrue(all(path == root / "runtime" or path == root for path in barriers))
             finally:
                 sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER, sf.INCIDENTS = originals
@@ -736,10 +753,11 @@ class StaticSafetyTests(unittest.TestCase):
         from scripts import shadeform_teardown as teardown
         phase = "confirmed-delete-retry"
         nonce = "fedcba9876543210fedcba9876543210"
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             originals = (sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER)
             sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = root / "runtime", root / "ledger.md", root / "cost.jsonl"
+            sf.RUNTIME_ROOT.mkdir(mode=0o700)
             sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
             env = root / "env"
             env.write_text("SHADEFORM_API_KEY=stub-api\n", encoding="utf-8")
@@ -774,10 +792,11 @@ class StaticSafetyTests(unittest.TestCase):
         from scripts import shadeform_teardown as teardown
         phase = "dispatch-intent-reconcile"
         nonce = "00112233445566778899aabbccddeeff"
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             originals = (sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER)
             sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = root / "runtime", root / "ledger.md", root / "cost.jsonl"
+            sf.RUNTIME_ROOT.mkdir(mode=0o700)
             sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
             env = root / "env"
             env.write_text("SHADEFORM_API_KEY=stub-api\n", encoding="utf-8")
@@ -821,10 +840,11 @@ class StaticSafetyTests(unittest.TestCase):
             ssh_public_key="ssh-ed25519 AAAA",
         )
         calls = []
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             originals = (sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER)
             sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = root / "runtime", root / "ledger.md", root / "cost.jsonl"
+            sf.RUNTIME_ROOT.mkdir(mode=0o700)
             sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
             env = root / "env"
             env.write_text("SHADEFORM_API_KEY=stub-api\n", encoding="utf-8")
@@ -843,7 +863,7 @@ class StaticSafetyTests(unittest.TestCase):
                 self.assertLess(calls.index(("cost", record.instance_id)), calls.index(("cost", f"attempt-{nonce}")))
                 self.assertLess(
                     calls.index(("cost", f"attempt-{nonce}")),
-                    next(index for index, item in enumerate(calls) if item[0] == "key-verify"),
+                    next(index for index, item in enumerate(calls) if item[0] == "key-delete"),
                 )
             finally:
                 sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = originals
@@ -862,10 +882,11 @@ class StaticSafetyTests(unittest.TestCase):
             ssh_public_key="ssh-ed25519 AAAA",
         )
         for fault in ("attempt", "record", "receipt"):
-            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(dir=ROOT) as directory:
                 root = Path(directory)
                 originals = (sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER)
                 sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER = root / "runtime", root / "ledger.md", root / "cost.jsonl"
+                sf.RUNTIME_ROOT.mkdir(mode=0o700)
                 sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
                 env = root / "env"
                 env.write_text("SHADEFORM_API_KEY=stub-api\n", encoding="utf-8")
@@ -904,9 +925,10 @@ class StaticSafetyTests(unittest.TestCase):
         from scripts import shadeform_teardown as teardown
         originals = (sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER)
         phase = "phase-teardown-failure"
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             sf.RUNTIME_ROOT = root / "runtime"
+            sf.RUNTIME_ROOT.mkdir(mode=0o700)
             sf.MARKDOWN_LEDGER = root / "ledger.md"
             sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
             sf.COST_LEDGER = root / "cost.jsonl"
@@ -952,7 +974,7 @@ class StaticSafetyTests(unittest.TestCase):
 
     def test_append_only_cost_ledger_pending_then_settled(self):
         from scripts import shadeform_lifecycle as sf
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             original = sf.COST_LEDGER
             sf.COST_LEDGER = Path(directory).resolve() / "cost-ledger.jsonl"
             try:
@@ -970,7 +992,7 @@ class StaticSafetyTests(unittest.TestCase):
 
     def test_cost_ledger_rejects_malformed_settled_amounts(self):
         from scripts import shadeform_lifecycle as sf
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             original = sf.COST_LEDGER
             sf.COST_LEDGER = Path(directory) / "cost-ledger.jsonl"
             try:
@@ -995,7 +1017,7 @@ class StaticSafetyTests(unittest.TestCase):
 
     def test_cost_ledger_rejects_unknown_latest_status_instead_of_erasing_pending(self):
         from scripts import shadeform_lifecycle as sf
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             original = sf.COST_LEDGER
             sf.COST_LEDGER = Path(directory) / "cost-ledger.jsonl"
             try:
@@ -1019,7 +1041,7 @@ class StaticSafetyTests(unittest.TestCase):
 
     def test_append_cost_event_requires_coherent_pending_or_settled_shape(self):
         from scripts import shadeform_lifecycle as sf
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(sf, "COST_LEDGER", Path(directory).resolve() / "cost-ledger.jsonl"):
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory, mock.patch.object(sf, "COST_LEDGER", Path(directory).resolve() / "cost-ledger.jsonl"):
             owner = {"phase_id": "cost-shape", "ownership_nonce": "d" * 32}
             invalid = [
                 {"instance_id": "cost-shape", **owner, "status": "unknown", "actual_cost_usd": 0.0},
@@ -1034,7 +1056,7 @@ class StaticSafetyTests(unittest.TestCase):
 
     def test_markdown_never_authorizes_absent_json_cost_ledger(self):
         from scripts import shadeform_lifecycle as sf
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             original_cost, original_markdown = sf.COST_LEDGER, sf.MARKDOWN_LEDGER
             sf.COST_LEDGER = Path(directory) / "missing-cost.jsonl"
             sf.MARKDOWN_LEDGER = Path(directory) / "ledger.md"
@@ -1072,7 +1094,7 @@ class StaticSafetyTests(unittest.TestCase):
             "estimated_cost_usd": 1.0,
         })
         valid_payload = (json.dumps(pending, sort_keys=True, separators=(",", ":")) + "\n").encode()
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
 
             def blocked(cost_path, *, stat_effect=None):
@@ -1124,7 +1146,7 @@ class StaticSafetyTests(unittest.TestCase):
     def test_provider_preflight_rejects_unsafe_bounded_policy_files_before_transport(self):
         from scripts import shadeform_lifecycle as sf
 
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             incident = root / "incidents.md"
             incident.write_text("# bounded incident catalogue\n", encoding="utf-8")
@@ -1505,7 +1527,7 @@ class StaticSafetyTests(unittest.TestCase):
     def test_j1m_definitive_failure_settles_attempt_before_key_cleanup(self):
         source = (ROOT / "scripts" / "j1m_orchestrator.py").read_text(encoding="utf-8")
         definitive = source[source.index("elif key_id is not None and not ambiguous_create:"):source.index("# Keep the watchdog alive", source.index("elif key_id is not None and not ambiguous_create:"))]
-        self.assertLess(definitive.index("sf.append_cost_event"), definitive.index("sf.verify_ssh_key_ownership"))
+        self.assertLess(definitive.index("sf.append_cost_event"), definitive.index("sf.delete_owned_ssh_key_exact"))
         self.assertIn("attempt reservation settlement was not confirmed", definitive)
 
     @isolated_lifecycle_execute
@@ -1525,13 +1547,14 @@ class StaticSafetyTests(unittest.TestCase):
         def remote(*args, **kwargs):
             return {"status": "completed", "exit_code": 0}
 
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             identity = Path(directory) / "id_ed25519"
             identity.write_text("private", encoding="utf-8")
             with contextlib.ExitStack() as stack:
                 teardown_failure = mock.patch.object(orchestrator, "teardown_exact", side_effect=RuntimeError("delete unavailable"))
                 patches = [
                     mock.patch.object(orchestrator.sf, "load_env", return_value={"SHADEFORM_API_KEY": "api"}),
+                    mock.patch.object(orchestrator.j1m_runner, "PRIVATE_OUTPUT_ROOT", Path(directory)),
                     mock.patch.object(orchestrator.sf, "require_env", return_value="api"),
                     mock.patch.object(orchestrator.sf, "list_candidates", return_value=[candidate]),
                     mock.patch.object(orchestrator.sf, "create_ephemeral_ssh_key", return_value=(identity, "ssh-ed25519 AAAA")),
@@ -1560,7 +1583,7 @@ class StaticSafetyTests(unittest.TestCase):
                 teardown_mock = stack.enter_context(teardown_failure)
                 with self.assertRaisesRegex(RuntimeError, "teardown was not confirmed"):
                     orchestrator.execute(
-                        Path(directory) / "env", config_path=ROOT / "model/conversion/j1m-config.json",
+                        Path(directory) / "env", config_path=private_config(Path(directory)),
                         phase_id="teardown-behavior", run_id="test", artifact_destination=Path(directory) / "artifacts", mode="prove",
                     )
         self.assertTrue(persisted)
@@ -1623,12 +1646,13 @@ class StaticSafetyTests(unittest.TestCase):
                 key_confirmed = True
             return {"status": "confirmed"}
 
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             identity = Path(directory) / "id_ed25519"
             identity.write_text("private", encoding="utf-8")
             with contextlib.ExitStack() as stack:
                 patches = [
                     mock.patch.object(orchestrator.sf, "load_env", return_value={"SHADEFORM_API_KEY": "api"}),
+                    mock.patch.object(orchestrator.j1m_runner, "PRIVATE_OUTPUT_ROOT", Path(directory)),
                     mock.patch.object(orchestrator.sf, "require_env", return_value="api"),
                     mock.patch.object(orchestrator.sf, "list_candidates", return_value=[candidate]),
                     mock.patch.object(orchestrator.sf, "create_ephemeral_ssh_key", return_value=(identity, "ssh-ed25519 AAAA")),
@@ -1653,7 +1677,7 @@ class StaticSafetyTests(unittest.TestCase):
                     stack.enter_context(patcher)
                 with self.assertRaises(OSError):
                     orchestrator.execute(
-                        Path(directory) / "env", config_path=ROOT / "model/conversion/j1m-config.json",
+                        Path(directory) / "env", config_path=private_config(Path(directory)),
                         phase_id="unrecorded-fallback", run_id="test", artifact_destination=Path(directory) / "artifacts", mode="prove",
                     )
                 self.assertTrue(captured)
@@ -1727,13 +1751,14 @@ class StaticSafetyTests(unittest.TestCase):
             ):
                 raise OSError("attempt settlement unavailable")
             return append_cost_event(event)
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             identity = Path(directory) / "id_ed25519"
             identity.write_text("private", encoding="utf-8")
             with contextlib.ExitStack() as stack:
                 key_delete = stack.enter_context(mock.patch.object(orchestrator.sf, "delete_owned_ssh_key_exact"))
                 for patcher in [
                     mock.patch.object(orchestrator.sf, "load_env", return_value={"SHADEFORM_API_KEY": "api"}),
+                    mock.patch.object(orchestrator.j1m_runner, "PRIVATE_OUTPUT_ROOT", Path(directory)),
                     mock.patch.object(orchestrator.sf, "require_env", return_value="api"),
                     mock.patch.object(orchestrator.sf, "list_candidates", return_value=[candidate]),
                     mock.patch.object(orchestrator.sf, "create_ephemeral_ssh_key", return_value=(identity, "ssh-ed25519 AAAA")),
@@ -1762,7 +1787,7 @@ class StaticSafetyTests(unittest.TestCase):
                     stack.enter_context(patcher)
                 with self.assertRaises(OSError):
                     orchestrator.execute(
-                        Path(directory) / "env", config_path=ROOT / "model/conversion/j1m-config.json",
+                        Path(directory) / "env", config_path=private_config(Path(directory)),
                         phase_id="unrecorded-attempt", run_id="test", artifact_destination=Path(directory) / "artifacts", mode="prove",
                     )
             key_delete.assert_not_called()
@@ -1775,12 +1800,13 @@ class StaticSafetyTests(unittest.TestCase):
         candidate = sf.Candidate("A100_80G", "hyperstack", "montreal-canada-2", "A100_80G", 1.35, 80, "ubuntu22.04_cuda12.2_shade_os", False)
         progress = []
         persisted = []
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             identity = Path(directory) / "id_ed25519"
             identity.write_text("private", encoding="utf-8")
             with contextlib.ExitStack() as stack:
                 for patcher in [
                     mock.patch.object(orchestrator.sf, "load_env", return_value={"SHADEFORM_API_KEY": "api"}),
+                    mock.patch.object(orchestrator.j1m_runner, "PRIVATE_OUTPUT_ROOT", Path(directory)),
                     mock.patch.object(orchestrator.sf, "require_env", return_value="api"),
                     mock.patch.object(orchestrator.sf, "list_candidates", return_value=[candidate]),
                     mock.patch.object(orchestrator.sf, "create_ephemeral_ssh_key", return_value=(identity, "ssh-ed25519 AAAA")),
@@ -1792,7 +1818,7 @@ class StaticSafetyTests(unittest.TestCase):
                     stack.enter_context(patcher)
                 with self.assertRaises(OSError):
                     orchestrator.execute(
-                        Path(directory) / "env", config_path=ROOT / "model/conversion/j1m-config.json",
+                        Path(directory) / "env", config_path=private_config(Path(directory)),
                         phase_id="reservation-behavior", run_id="test", artifact_destination=Path(directory) / "artifacts", mode="prove",
                     )
         self.assertTrue(persisted)
@@ -1812,12 +1838,13 @@ class StaticSafetyTests(unittest.TestCase):
             def terminate(self): raise AssertionError("ambiguous ownership must retain watchdog")
             def wait(self, timeout): raise AssertionError("ambiguous ownership must retain watchdog")
 
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             identity = Path(directory) / "id_ed25519"
             identity.write_text("private", encoding="utf-8")
             with contextlib.ExitStack() as stack:
                 for patcher in [
                     mock.patch.object(orchestrator.sf, "load_env", return_value={"SHADEFORM_API_KEY": "api"}),
+                    mock.patch.object(orchestrator.j1m_runner, "PRIVATE_OUTPUT_ROOT", Path(directory)),
                     mock.patch.object(orchestrator.sf, "require_env", return_value="api"),
                     mock.patch.object(orchestrator.sf, "list_candidates", return_value=[candidate]),
                     mock.patch.object(orchestrator.sf, "create_ephemeral_ssh_key", return_value=(identity, "ssh-ed25519 AAAA")),
@@ -1834,7 +1861,7 @@ class StaticSafetyTests(unittest.TestCase):
                     stack.enter_context(patcher)
                 with self.assertRaises(sf.AmbiguousProviderOutcome):
                     orchestrator.execute(
-                        Path(directory) / "env", config_path=ROOT / "model/conversion/j1m-config.json",
+                        Path(directory) / "env", config_path=private_config(Path(directory)),
                         phase_id="key-ambiguity", run_id="test", artifact_destination=Path(directory) / "artifacts", mode="prove",
                     )
                 self.assertFalse(orchestrator.sf.append_cost_event.called)
@@ -1854,7 +1881,7 @@ class StaticSafetyTests(unittest.TestCase):
 
     def test_progress_wrapper_accepts_stage_detail_without_collision(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_progress_wrapper")
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             progress = Path(directory) / "progress.json"
             orchestrator._progress(progress, "eval-stage-starting", phase_id="p", operation_stage="eval-bootstrap:mkdir")
             payload = json.loads(progress.read_text(encoding="utf-8"))
@@ -1886,31 +1913,33 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertEqual(orchestrator._eval_stage_label(["cmake", "--build", "build"]), "eval-stage:cmake-build")
 
     def test_salvage_timeout_is_size_aware_and_deadline_bounded(self):
+        """External pathname salvage is retired until a bound transport exists."""
+
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_timeout")
         info = {"phase_id": "j1m-test", "instance_info": {"ssh_user": "u", "ip": "127.0.0.1"}}
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             identity = Path(directory) / "id"
             known_hosts = Path(directory) / "known_hosts"
             destination = Path(directory) / "artifacts"
-            with mock.patch.object(orchestrator.sf, "_preflight"), mock.patch.object(orchestrator.sf, "scp_base", return_value=["scp"]), mock.patch.object(orchestrator, "_remote", side_effect=lambda command, timeout: {"status": "completed", "timeout": timeout}) as remote:
-                result = orchestrator._salvage(info, identity, known_hosts, destination, ["Qwen3.5-9B-Q4_K_M.gguf"], q4_expected_gib=6, deadline=time.monotonic() + 1000)
-            self.assertEqual(result[0]["status"], "completed")
-            # The 6 GiB size-aware floor is clipped by the 660 second cleanup
-            # reserve when only 1,000 seconds remain (about 340 seconds).
-            self.assertGreaterEqual(remote.call_args.kwargs["timeout"], 300)
-            with mock.patch.object(orchestrator.sf, "_preflight"), mock.patch.object(orchestrator.sf, "scp_base", return_value=["scp"]), mock.patch.object(orchestrator, "_remote", side_effect=lambda command, timeout: {"status": "completed", "timeout": timeout}) as remote:
-                orchestrator._salvage(info, identity, known_hosts, destination, ["Qwen3.5-9B-Q4_K_M.gguf"], q4_expected_gib=6, deadline=time.monotonic() + 500)
-            # Only 500 seconds remain, below the 660 second cleanup reserve;
-            # no transfer may start once deletion cannot be protected.
+            destination.mkdir(mode=0o700)
+            with mock.patch.object(orchestrator, "_remote") as remote:
+                with self.assertRaisesRegex(ValueError, "external salvage transport is unavailable"):
+                    orchestrator._salvage(
+                        info, identity, known_hosts, destination,
+                        ["Qwen3.5-9B-Q4_K_M.gguf"], q4_expected_gib=6,
+                        deadline=time.monotonic() + 1000,
+                    )
             remote.assert_not_called()
 
     def test_salvage_stops_without_scp_when_only_deletion_reserve_remains(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_salvage_reserve")
         info = {"phase_id": "j1m-test", "instance_info": {"ssh_user": "u", "ip": "127.0.0.1"}}
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(orchestrator.sf, "_preflight"), mock.patch.object(orchestrator.sf, "scp_base", return_value=["scp"]), mock.patch.object(orchestrator, "_remote") as remote:
-            result = orchestrator._salvage(info, Path(directory) / "id", Path(directory) / "known", Path(directory) / "out", ["one.json", "two.json"], deadline=time.monotonic() + 0.01)
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory, mock.patch.object(orchestrator.sf, "_preflight"), mock.patch.object(orchestrator.sf, "scp_base", return_value=["scp"]), mock.patch.object(orchestrator, "_remote") as remote:
+            destination = Path(directory) / "out"
+            destination.mkdir(mode=0o700)
+            with self.assertRaisesRegex(ValueError, "external salvage transport is unavailable"):
+                orchestrator._salvage(info, Path(directory) / "id", Path(directory) / "known", destination, ["one.json", "two.json"], deadline=time.monotonic() + 0.01)
         remote.assert_not_called()
-        self.assertEqual([item["status"] for item in result], ["salvage_failed", "salvage_failed"])
 
     def test_eval_deadline_envelope_keeps_host_shutdown_jitter(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_jitter")
@@ -1921,14 +1950,15 @@ class StaticSafetyTests(unittest.TestCase):
     @isolated_lifecycle_execute
     def test_insufficient_backstop_is_rejected_before_catalogue_or_key_mutation(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_backstop_gate")
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             with mock.patch.object(orchestrator.sf, "load_env", return_value={"SHADEFORM_API_KEY": "api", "SHADEFORM_AUTO_TERMINATE_HOURS": "0.1"}), \
+                    mock.patch.object(orchestrator.j1m_runner, "PRIVATE_OUTPUT_ROOT", Path(directory)), \
                     mock.patch.object(orchestrator.sf, "require_env", return_value="api"), \
                     mock.patch.object(orchestrator.sf, "list_candidates") as list_candidates, \
                     mock.patch.object(orchestrator.sf, "create_ephemeral_ssh_key") as create_key:
                 with self.assertRaises(orchestrator.sf.BackstopError):
                     orchestrator.execute(
-                        Path(directory) / "env", config_path=ROOT / "model/conversion/j1m-config.json",
+                        Path(directory) / "env", config_path=private_config(Path(directory)),
                         phase_id="backstop-gate", run_id="test", artifact_destination=Path(directory) / "artifacts", mode="prove",
                     )
             list_candidates.assert_not_called()
@@ -2024,13 +2054,13 @@ class StaticSafetyTests(unittest.TestCase):
         native_upload = next(remote for local, remote, recursive in uploads if local.name == "native" and recursive)
         self.assertEqual(native_upload, "/scratch/j1m/engine")
         self.assertNotIn("/engine/native/native", native_upload)
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             source = root / "native"
-            (source / "engine").mkdir(parents=True)
+            (source / "engine").mkdir(parents=True, mode=0o700)
             (source / "engine" / "marker.txt").write_text("native", encoding="utf-8")
             target = root / "engine"
-            target.mkdir()
+            target.mkdir(mode=0o700)
             shutil.copytree(source, target / source.name)
             self.assertTrue((target / "native" / "engine" / "marker.txt").is_file())
             self.assertFalse((target / "native" / "native").exists())
@@ -2050,7 +2080,7 @@ class StaticSafetyTests(unittest.TestCase):
 
     def test_remote_eval_prepare_verifies_small_fixture_without_local_model(self):
         remote = load(ROOT / "scripts/test/remote_eval_prepare.py", "remote_eval_prepare_fixture")
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             artifact = root / "Qwen3.5-9B-Q4_K_M.gguf"
             artifact.write_bytes(b"q4 fixture")
@@ -2088,7 +2118,7 @@ class StaticSafetyTests(unittest.TestCase):
             orchestrator._verify_eval_artifact(
                 None, ROOT / "artifacts" / "qwen35-9b" / "model-manifest.json", tampered_config,
             )
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             artifact = root / "Qwen3.5-9B-Q4_K_M.gguf"
             artifact.write_bytes(b"approved q4 fixture")
@@ -2113,11 +2143,12 @@ class StaticSafetyTests(unittest.TestCase):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_eval_artifact_receipt")
         artifact = {"name": "Qwen3.5-9B-Q4_K_M.gguf", "size_bytes": 4, "sha256": "a" * 64}
         receipt = {"schema": "local_bmo.j1m.remote-eval-artifact-receipt.v1", "status": "verified", **artifact, "manifest_sha256": orchestrator._APPROVED_EVAL_MANIFEST_SHA256, "manifest_lock_sha256": orchestrator._APPROVED_EVAL_MANIFEST_SHA256}
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             path = Path(directory) / "eval-artifact-receipt.json"
-            with self.assertRaises(OSError):
+            with self.assertRaises(ValueError):
                 orchestrator._verify_eval_artifact_receipt(path, artifact)
             path.write_text(json.dumps(receipt), encoding="utf-8")
+            path.chmod(0o600)
             selected = orchestrator._verify_eval_artifact_receipt(path, artifact)
             self.assertEqual(selected["sha256"], artifact["sha256"])
             for hostile in (
@@ -2129,6 +2160,7 @@ class StaticSafetyTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     orchestrator._verify_eval_artifact_receipt(path, artifact)
             path.write_text('{"schema":"local_bmo.j1m.remote-eval-artifact-receipt.v1","schema":"local_bmo.j1m.remote-eval-artifact-receipt.v1"}', encoding="utf-8")
+            path.chmod(0o600)
             with self.assertRaises(ValueError):
                 orchestrator._verify_eval_artifact_receipt(path, artifact)
             path.write_bytes(b"{" + b"x" * (orchestrator._EVAL_ARTIFACT_RECEIPT_MAX_BYTES + 1))
@@ -2210,7 +2242,7 @@ class StaticSafetyTests(unittest.TestCase):
     def test_remote_eval_preflight_receipt_is_atomic_small_and_secret_free(self):
         remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_preflight_receipt")
         preflight = {"valid": True, "code": "ok", "size_bytes": 42, "sha256": "a" * 64, "gguf_version": 3}
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             path = Path(directory) / "startup-preflight-receipt.json"
             summary = remote._write_preflight_receipt(path, preflight)
             saved = json.loads(path.read_text(encoding="utf-8"))
@@ -2233,7 +2265,7 @@ class StaticSafetyTests(unittest.TestCase):
             ({"status": "completed", "exit_code": 0, "stdout": "not-json"}, "rejected"),
             ({"status": "failed", "exit_code": 2, "stdout": json.dumps({"valid": False, "code": "model_hash_mismatch", "size_bytes": 0, "sha256": "", "gguf_version": 0})}, "rejected"),
         )
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             for index, (result, expected_status) in enumerate(outcomes):
                 path = Path(directory) / f"preflight-{index}.json"
                 with mock.patch.object(remote, "_run_bounded", return_value=result):
@@ -2280,7 +2312,7 @@ class StaticSafetyTests(unittest.TestCase):
 
     def test_remote_eval_hash_and_fixture_reads_honor_deadline_and_exact_case_shape(self):
         remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_bounded_reads")
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             path = Path(directory) / "small.bin"
             path.write_bytes(b"fixture")
             with mock.patch.object(remote.time, "monotonic", return_value=100.0):
@@ -2297,7 +2329,7 @@ class StaticSafetyTests(unittest.TestCase):
         remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_receipt_coherence")
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_receipt_coherence")
         artifact = {"size_bytes": 4, "sha256": "a" * 64}
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             path = Path(directory) / "startup-preflight-receipt.json"
             summary = remote._write_preflight_receipt(path, status="not_started", error_code="engine_model_preflight_not_started")
             self.assertEqual(summary["status"], "not_started")
@@ -2310,7 +2342,7 @@ class StaticSafetyTests(unittest.TestCase):
     def test_remote_eval_startup_verifier_accepts_typed_not_started_outcome(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_not_started")
         artifact = {"size_bytes": 4, "sha256": "a" * 64}
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             path = Path(directory) / "startup-preflight-receipt.json"
             path.write_text(json.dumps({"schema": "local_bmo.j1m.startup-preflight-receipt.v1", "status": "not_started", "error_code": "engine_model_preflight_not_started"}), encoding="utf-8")
             self.assertEqual(orchestrator._verify_startup_preflight_receipt(path, artifact)["status"], "not_started")
@@ -2430,7 +2462,7 @@ class StaticSafetyTests(unittest.TestCase):
     def test_remote_eval_verifies_same_model_manifest_identity(self):
         remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_identity")
         config = load(ROOT / "scripts/j1m_runner.py", "remote_model_eval_identity_config").load_config()
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             model = root / "Qwen3.5-9B-Q4_K_M.gguf"
             model.write_bytes(b"q4 fixture")
@@ -2452,7 +2484,7 @@ class StaticSafetyTests(unittest.TestCase):
         remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_manifest_snapshot")
         prepare = load(ROOT / "scripts/test/remote_eval_prepare.py", "remote_eval_prepare_manifest_snapshot")
         config = load(ROOT / "scripts/j1m_runner.py", "remote_model_eval_manifest_snapshot_config").load_config()
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             model = root / "Qwen3.5-9B-Q4_K_M.gguf"
             model.write_bytes(b"q4 fixture")
@@ -2478,7 +2510,7 @@ class StaticSafetyTests(unittest.TestCase):
         category_summary = {category: {"case_count": count, "passed": count, "failed": 0, "errors": 0} for category, count in category_counts.items()}
         case_count = len(fixture["cases"])
         fixture_identity = orchestrator._tool_eval_contract()["fixture_identity"]
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             receipt = Path(directory) / "eval-receipt.json"
             receipt.write_text(json.dumps({
                 "schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "verified", "artifact": artifact, "fixture": fixture_identity,
@@ -2573,7 +2605,7 @@ class StaticSafetyTests(unittest.TestCase):
     def test_eval_receipts_require_separate_verified_startup_preflight(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_preflight_receipts")
         artifact = {"name": "Qwen3.5-9B-Q4_K_M.gguf", "size_bytes": 4, "sha256": "a" * 64}
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             path = Path(directory) / "startup-preflight-receipt.json"
             path.write_text(json.dumps({"schema": "local_bmo.j1m.startup-preflight-receipt.v1", "status": "verified", "size_bytes": 4, "sha256": "a" * 64, "gguf_version": 3}), encoding="utf-8")
             self.assertEqual(orchestrator._verify_startup_preflight_receipt(path, artifact)["status"], "verified")
@@ -2602,7 +2634,7 @@ class StaticSafetyTests(unittest.TestCase):
     def test_cuda_probe_writes_single_a100_placement_receipt(self):
         probe = load(ROOT / "scripts/test/cuda_device_probe.py", "cuda_device_probe_test")
         result = types.SimpleNamespace(returncode=0, stdout="0, NVIDIA A100-SXM4-80GB, 81920, 550.54.15\n")
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(probe.subprocess, "run", return_value=result) as run:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory, mock.patch.object(probe.subprocess, "run", return_value=result) as run:
             receipt = probe.probe(Path(directory) / "cuda-device-receipt.json")
             written = json.loads((Path(directory) / "cuda-device-receipt.json").read_text())
         self.assertEqual(receipt["selector"], "CUDA0")
@@ -2623,7 +2655,7 @@ class StaticSafetyTests(unittest.TestCase):
             if command[0] == "dpkg-query":
                 return types.SimpleNamespace(returncode=0, stdout="ca-certificates=20240101\ncmake=3.22.1\nbuild-essential=12.9\ngit=1:2.39.2\npython3=3.10.12\npython3-venv=3.10.12\n", stderr="")
             return types.SimpleNamespace(returncode=0, stdout=versions[command[0]], stderr="")
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(probe.subprocess, "run", side_effect=run):
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory, mock.patch.object(probe.subprocess, "run", side_effect=run):
             receipt = probe.probe(Path(directory) / "toolchain-receipt.json", nvcc="/usr/local/cuda/bin/nvcc")
             self.assertEqual(receipt["status"], "verified")
             self.assertEqual(json.loads((Path(directory) / "toolchain-receipt.json").read_text())["versions"]["cmake"]["major"], 3)
@@ -2632,7 +2664,7 @@ class StaticSafetyTests(unittest.TestCase):
         with mock.patch.object(probe.subprocess, "run", side_effect=FileNotFoundError):
             with self.assertRaisesRegex(RuntimeError, "cmake_unavailable"):
                 probe._probe("cmake")
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             refused = Path(directory) / "refused.json"
             argv = ["remote_toolchain_probe.py", "--nvcc", "/usr/local/cuda/bin/nvcc", "--output", str(refused)]
             with mock.patch("sys.argv", argv), mock.patch.object(probe.subprocess, "run", side_effect=FileNotFoundError):
@@ -2648,7 +2680,7 @@ class StaticSafetyTests(unittest.TestCase):
         category_counts = {category: sum(case["category"] == category for case in fixture["cases"]) for category in {case["category"] for case in fixture["cases"]}}
         category_summary = {category: {"case_count": count, "passed": count, "failed": 0, "errors": 0} for category, count in category_counts.items()}
         case_count = len(fixture["cases"])
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             receipt = Path(directory) / "eval-receipt.json"
             receipt.write_text(json.dumps({"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "verified", "artifact": artifact, "model_preflight": {"valid": True, "code": "ok", "status": "verified", "size_bytes": 4, "sha256": "a" * 64, "gguf_version": 3}, "engine": {"llama_cpp_revision": "b" * 40, "compiled_backend": "llama.cpp/bbbbbbbb/cpu"}, "metrics": {"case_count": case_count, "passed": case_count, "failed": 0, "errors": 0, "peak_rss_kib": 1, "category_summary": category_summary}, "prompt_response_logging": False, "token_logging": False}), encoding="utf-8")
             with self.assertRaises(ValueError):
@@ -2670,7 +2702,7 @@ class StaticSafetyTests(unittest.TestCase):
 
     def test_cuda_source_closure_lock_rejects_missing_modified_and_extra_files(self):
         closure = load(ROOT / "scripts/cuda_source_closure.py", "cuda_source_closure_integrity")
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory) / "llama.cpp"
             shutil.copytree(ROOT / "vendor/llama.cpp/ggml", root / "ggml")
             shutil.copy2(ROOT / "vendor/llama.cpp/LICENSE", root / "LICENSE")
@@ -2692,7 +2724,7 @@ class StaticSafetyTests(unittest.TestCase):
     def test_remote_eval_main_returns_success_for_case_failures_and_emits_failed_receipt_on_shape_error(self):
         remote = load(ROOT / "scripts/test/remote_model_eval.py", "remote_model_eval_main_status")
         artifact = {"name": "Qwen3.5-9B-Q4_K_M.gguf", "size_bytes": 4, "sha256": "a" * 64, "llama_cpp_revision": "b" * 40}
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             receipt = Path(directory) / "eval-receipt.json"
             args = ["--model", "m", "--model-manifest", "mm", "--model-manifest-lock", "ml", "--source-revision", "c" * 40, "--llama-revision", "b" * 40, "--llama-checkout", "checkout", "--engine", "engine", "--evaluator", "eval", "--fixture", "fixture", "--token-file", "token", "--toolchain-receipt", "toolchain", "--receipt", str(receipt)]
             failed_metrics = {"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "completed_with_failures", "artifact": artifact, "engine": {"llama_cpp_revision": "b" * 40, "compiled_backend": "llama.cpp/bbbbbbbb/cpu"}, "metrics": {"case_count": 8, "passed": 7, "failed": 1, "errors": 0, "peak_rss_kib": 1}, "prompt_response_logging": False, "token_logging": False}
