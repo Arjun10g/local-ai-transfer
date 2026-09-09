@@ -1,4 +1,4 @@
-import { close as closeDescriptor, constants, fstat, fstatSync, fsync, read, readSync, write } from 'node:fs';
+import { close as closeDescriptor, constants, fstat, fstatSync, fsync, ftruncate, read, readSync, write } from 'node:fs';
 import { lstat, open, readdir, realpath, unlink } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import { isAbsolute, join, resolve } from 'node:path';
@@ -45,7 +45,8 @@ const TRANSITIONS = Object.freeze({
 });
 const EVENT_KEYS = Object.freeze(['version', 'operation_id', 'sequence', 'state', 'timestamp_utc', 'tool_name', 'risk_tier', 'side_effect', 'request_ref', 'call_ref', 'arguments_digest', 'preview_digest', 'operation_digest', 'authorization_kind', 'resolution', 'prev_hash', 'hash']);
 const MAX_FILE_BYTES = ACTION_JOURNAL_LIMITS.max_event_bytes * ACTION_JOURNAL_LIMITS.max_events_per_operation;
-const DESCRIPTOR_WAL_HEADER = '{"format":"lae-action-journal-wal","version":1}\n';
+const DESCRIPTOR_WAL_HEADER = '{"format":"lae-action-journal-wal","version":2}\n';
+const DESCRIPTOR_FRAME_COMMIT = Buffer.from('COMMIT\n', 'ascii');
 const MAX_DESCRIPTOR_WAL_BYTES = 32 * 1024 * 1024;
 
 export class ActionJournalError extends Error {
@@ -132,6 +133,7 @@ function descriptorCall(operation) {
 }
 function descriptorStat(fd) { return descriptorCall(done => fstat(fd, done)); }
 function descriptorSync(fd) { return descriptorCall(done => fsync(fd, done)); }
+function descriptorTruncate(fd, size) { return descriptorCall(done => ftruncate(fd, size, done)); }
 function descriptorClose(fd) { return descriptorCall(done => closeDescriptor(fd, done)); }
 async function descriptorRead(fd, size, position = 0) {
   const buffer = Buffer.alloc(size); let offset = 0;
@@ -160,6 +162,19 @@ function descriptorReadSync(fd, size, position = 0) {
   }
   if (offset !== size) throw new ActionJournalError('action_journal_corrupt');
   return buffer;
+}
+async function descriptorAccessProbe(fd) {
+  // POSIX exposes no fcntl(F_GETFL) through Node. A positional one-byte read
+  // rejects O_WRONLY even for an empty file, while a zero-byte positional write
+  // rejects O_RDONLY without changing bytes, offsets, size, or timestamps.
+  await descriptorCall(done => read(fd, Buffer.alloc(1), 0, 1, 0, error => done(error)));
+  await descriptorCall(done => write(fd, Buffer.alloc(0), 0, 0, 0, error => done(error)));
+}
+function descriptorFrame(event) {
+  const payload = Buffer.from(JSON.stringify(event), 'utf8');
+  const prefix = Buffer.from(`@${payload.length.toString(16).padStart(8, '0')}:`, 'ascii');
+  const seal = Buffer.from(`:${sha256(payload)}:`, 'ascii');
+  return { payloadLength: payload.length, body: Buffer.concat([prefix, payload, seal]), commit: DESCRIPTOR_FRAME_COMMIT, bytes: Buffer.concat([prefix, payload, seal, DESCRIPTOR_FRAME_COMMIT]) };
 }
 
 export class ActionJournal {
@@ -323,24 +338,60 @@ export class DescriptorActionJournal extends ActionJournal {
     try {
       let info = await descriptorStat(this.fd);
       if (!regularFile(info) || !singleLink(info) || !ownedByCurrentUser(info, this.platform) || this.platform !== 'win32' && (info.mode & 0o777) !== 0o600 || info.size < 0 || info.size > MAX_DESCRIPTOR_WAL_BYTES) throw new ActionJournalError('action_journal_permissions_invalid');
+      try { await descriptorAccessProbe(this.fd); } catch { throw new ActionJournalError('action_journal_permissions_invalid'); }
       this.descriptorIdentity = info; this.descriptorSize = info.size;
+      const header = Buffer.from(DESCRIPTOR_WAL_HEADER, 'utf8');
+      if (info.size > 0 && info.size < header.length) {
+        const partialHeader = await descriptorRead(this.fd, info.size);
+        if (!header.subarray(0, info.size).equals(partialHeader)) throw new ActionJournalError('action_journal_corrupt');
+        const before = await descriptorStat(this.fd);
+        if (!sameIdentity(before, this.descriptorIdentity) || before.size !== info.size) throw new ActionJournalError('action_journal_corrupt');
+        await descriptorTruncate(this.fd, 0); await descriptorSync(this.fd); info = await descriptorStat(this.fd);
+        if (!sameIdentity(info, this.descriptorIdentity) || info.size !== 0) throw new ActionJournalError('action_journal_corrupt');
+        this.descriptorIdentity = info; this.descriptorSize = 0;
+      }
       if (info.size === 0) {
-        const header = Buffer.from(DESCRIPTOR_WAL_HEADER, 'utf8');
         await descriptorWrite(this.fd, header, 0); await descriptorSync(this.fd);
         info = await descriptorStat(this.fd);
         if (!sameIdentity(info, this.descriptorIdentity) || !singleLink(info) || info.size !== header.length || !Buffer.from(await descriptorRead(this.fd, header.length)).equals(header)) throw new ActionJournalError('action_journal_corrupt');
         this.descriptorIdentity = info; this.descriptorSize = info.size;
       }
-      const bytes = await descriptorRead(this.fd, this.descriptorSize);
-      this.descriptorDigest = sha256(bytes);
-      const text = bytes.toString('utf8');
-      if (!text.startsWith(DESCRIPTOR_WAL_HEADER) || !text.endsWith('\n')) throw new ActionJournalError('action_journal_corrupt');
-      const body = text.slice(DESCRIPTOR_WAL_HEADER.length, -1);
-      const lines = body === '' ? [] : body.split('\n');
-      if (lines.length > this.maxRecords * ACTION_JOURNAL_LIMITS.max_events_per_operation) throw new ActionJournalError('action_journal_limit_exceeded');
-      for (const line of lines) {
-        if (!line || Buffer.byteLength(line, 'utf8') > ACTION_JOURNAL_LIMITS.max_event_bytes) throw new ActionJournalError('action_journal_corrupt');
-        let parsed; try { parsed = parseStrictJson(line, { maxBytes: ACTION_JOURNAL_LIMITS.max_event_bytes, maxDepth: 2, maxString: 1024, maxArray: 0, maxObject: EVENT_KEYS.length }); } catch { throw new ActionJournalError('action_journal_corrupt'); }
+      let bytes = await descriptorRead(this.fd, this.descriptorSize);
+      if (!bytes.subarray(0, header.length).equals(header)) throw new ActionJournalError('action_journal_corrupt');
+      let offset = header.length; let frames = 0; let recoverAt = null;
+      while (offset < bytes.length) {
+        const remaining = bytes.length - offset;
+        const prefixLength = Math.min(10, remaining);
+        const prefixText = bytes.subarray(offset, offset + prefixLength).toString('ascii');
+        if (remaining < 10) {
+          if (!/^@[0-9a-f]{0,8}$/u.test(prefixText)) throw new ActionJournalError('action_journal_corrupt');
+          recoverAt = offset; break;
+        }
+        if (!/^@[0-9a-f]{8}:$/u.test(prefixText)) throw new ActionJournalError('action_journal_corrupt');
+        const payloadLength = Number.parseInt(prefixText.slice(1, 9), 16);
+        if (!Number.isSafeInteger(payloadLength) || payloadLength < 1 || payloadLength > ACTION_JOURNAL_LIMITS.max_event_bytes) throw new ActionJournalError('action_journal_corrupt');
+        const bodyLength = 10 + payloadLength + 66;
+        const frameLength = bodyLength + DESCRIPTOR_FRAME_COMMIT.length;
+        if (remaining < frameLength) {
+          if (remaining > 10 + payloadLength) {
+            const payload = bytes.subarray(offset + 10, offset + 10 + payloadLength);
+            let partialParsed; const payloadText = payload.toString('utf8');
+            try { partialParsed = parseStrictJson(payloadText, { maxBytes: ACTION_JOURNAL_LIMITS.max_event_bytes, maxDepth: 2, maxString: 1024, maxArray: 0, maxObject: EVENT_KEYS.length }); } catch { throw new ActionJournalError('action_journal_corrupt'); }
+            if (JSON.stringify(partialParsed) !== payloadText) throw new ActionJournalError('action_journal_corrupt');
+            const partialRecord = this.records.get(partialParsed?.operation_id);
+            validateEvent(partialParsed, `${partialParsed?.operation_id}.jsonl`, partialRecord?.events.at(-1));
+            const expectedTail = Buffer.from(`:${sha256(payload)}:COMMIT\n`, 'ascii');
+            const actualTail = bytes.subarray(offset + 10 + payloadLength);
+            if (!expectedTail.subarray(0, actualTail.length).equals(actualTail)) throw new ActionJournalError('action_journal_corrupt');
+          }
+          recoverAt = offset; break;
+        }
+        const payload = bytes.subarray(offset + 10, offset + 10 + payloadLength);
+        const expectedTail = Buffer.from(`:${sha256(payload)}:COMMIT\n`, 'ascii');
+        if (!bytes.subarray(offset + 10 + payloadLength, offset + frameLength).equals(expectedTail)) throw new ActionJournalError('action_journal_corrupt');
+        const payloadText = payload.toString('utf8');
+        let parsed; try { parsed = parseStrictJson(payloadText, { maxBytes: ACTION_JOURNAL_LIMITS.max_event_bytes, maxDepth: 2, maxString: 1024, maxArray: 0, maxObject: EVENT_KEYS.length }); } catch { throw new ActionJournalError('action_journal_corrupt'); }
+        if (JSON.stringify(parsed) !== payloadText) throw new ActionJournalError('action_journal_corrupt');
         if (!OPERATION_ID.test(parsed?.operation_id ?? '')) throw new ActionJournalError('action_journal_corrupt');
         let record = this.records.get(parsed.operation_id);
         const previous = record?.events.at(-1);
@@ -351,7 +402,18 @@ export class DescriptorActionJournal extends ActionJournal {
           this.records.set(event.operation_id, record);
         }
         record.events.push(event); record.state = event.state;
+        frames++; if (frames > this.maxRecords * ACTION_JOURNAL_LIMITS.max_events_per_operation) throw new ActionJournalError('action_journal_limit_exceeded');
+        offset += frameLength;
       }
+      if (recoverAt !== null) {
+        const before = await descriptorStat(this.fd);
+        if (!sameIdentity(before, this.descriptorIdentity) || !singleLink(before) || before.size !== bytes.length || !Buffer.from(await descriptorRead(this.fd, bytes.length)).equals(bytes)) throw new ActionJournalError('action_journal_corrupt');
+        await descriptorTruncate(this.fd, recoverAt); await descriptorSync(this.fd);
+        const after = await descriptorStat(this.fd);
+        if (!sameIdentity(after, this.descriptorIdentity) || !singleLink(after) || after.size !== recoverAt) throw new ActionJournalError('action_journal_corrupt');
+        bytes = await descriptorRead(this.fd, recoverAt); info = after; this.descriptorIdentity = after; this.descriptorSize = after.size;
+      }
+      this.descriptorDigest = sha256(bytes);
       if (activeCount(this.records) > this.maxActive) throw new ActionJournalError('action_journal_limit_exceeded');
       this.healthState = 'ready'; this.failureCode = null;
       for (const record of [...this.records.values()]) {
@@ -390,16 +452,19 @@ export class DescriptorActionJournal extends ActionJournal {
     const auth = authorizationKind ?? previous?.authorization_kind ?? null;
     if (state === 'authorized' && !AUTHORIZATION.has(auth) || state !== 'prepared' && auth === null && !['cancelled', 'failed_definitive'].includes(state) || resolution !== null && !RESOLUTIONS.has(resolution)) throw new ActionJournalError('action_journal_invalid_transition');
     const payload = { version: VERSION, operation_id: operationId, sequence: record.events.length, state, timestamp_utc: this._timestamp(), tool_name: record.tool_name, risk_tier: record.risk_tier, side_effect: record.side_effect, request_ref: record.request_ref, call_ref: record.call_ref, arguments_digest: record.arguments_digest, preview_digest: record.preview_digest, operation_digest: record.operation_digest, authorization_kind: auth, resolution, prev_hash: previous?.hash ?? ZERO_HASH };
-    const event = { ...payload, hash: sha256(JSON.stringify(payload)) }; const bytes = Buffer.from(`${JSON.stringify(event)}\n`, 'utf8');
-    if (bytes.length - 1 > ACTION_JOURNAL_LIMITS.max_event_bytes || record.events.length >= ACTION_JOURNAL_LIMITS.max_events_per_operation || this.descriptorSize + bytes.length > MAX_DESCRIPTOR_WAL_BYTES) throw new ActionJournalError('action_journal_limit_exceeded');
+    const event = { ...payload, hash: sha256(JSON.stringify(payload)) }; const frame = descriptorFrame(event);
+    if (frame.payloadLength > ACTION_JOURNAL_LIMITS.max_event_bytes || record.events.length >= ACTION_JOURNAL_LIMITS.max_events_per_operation || this.descriptorSize + frame.bytes.length > MAX_DESCRIPTOR_WAL_BYTES) throw new ActionJournalError('action_journal_limit_exceeded');
     try {
       await this._verifyDescriptorLocked();
       await this.fault?.({ phase: 'before_append', operation_id: operationId, state });
-      const position = this.descriptorSize; await descriptorWrite(this.fd, bytes, position);
+      const position = this.descriptorSize; await descriptorWrite(this.fd, frame.body, position);
       await this.fault?.({ phase: 'after_append_before_sync', operation_id: operationId, state }); await descriptorSync(this.fd);
+      await this.fault?.({ phase: 'after_body_fsync', operation_id: operationId, state });
+      await descriptorWrite(this.fd, frame.commit, position + frame.body.length);
+      await this.fault?.({ phase: 'after_commit_before_sync', operation_id: operationId, state }); await descriptorSync(this.fd);
       const after = await descriptorStat(this.fd);
-      if (!sameIdentity(after, this.descriptorIdentity) || !singleLink(after) || after.size !== position + bytes.length) throw new ActionJournalError('action_journal_corrupt');
-      const readback = await descriptorRead(this.fd, bytes.length, position); if (!readback.equals(bytes)) throw new ActionJournalError('action_journal_corrupt');
+      if (!sameIdentity(after, this.descriptorIdentity) || !singleLink(after) || after.size !== position + frame.bytes.length) throw new ActionJournalError('action_journal_corrupt');
+      const readback = await descriptorRead(this.fd, frame.bytes.length, position); if (!readback.equals(frame.bytes)) throw new ActionJournalError('action_journal_corrupt');
       this.descriptorIdentity = after; this.descriptorSize = after.size; this.descriptorDigest = sha256(await descriptorRead(this.fd, after.size));
       await this.fault?.({ phase: 'after_fsync', operation_id: operationId, state });
       record.events.push(event); record.state = state; record.identity = after; record.size = after.size; return publicRecord(record);

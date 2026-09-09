@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { chmod, link, mkdtemp, open, readFile, rm, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -65,10 +66,42 @@ test('descriptor WAL persists only digest-bound events and reopens from the same
   assert.deepEqual(journal.health(), { state: 'ready', error: null });
   const receipt = await dispatch(journal); await journal.acknowledge(receipt.operation_id); await journal.complete(receipt.operation_id);
   const first = await journal.detail(receipt.operation_id); assert.deepEqual(first.events.map(event => event.state), ['prepared', 'authorized', 'dispatching', 'acknowledged', 'completed']);
-  const raw = await readFile(store.path, 'utf8'); assert.match(raw, /^\{"format":"lae-action-journal-wal","version":1\}\n/u);
+  const raw = await readFile(store.path, 'utf8'); assert.match(raw, /^\{"format":"lae-action-journal-wal","version":2\}\n/u);
   for (const forbidden of [SECRET, REQUEST, CALL, 'a@example.com']) assert.equal(raw.includes(forbidden), false, forbidden);
   await journal.close(); const reopened = await store.openJournal();
   assert.deepEqual(reopened.health(), { state: 'ready', error: null }); assert.equal((await reopened.detail(receipt.operation_id)).receipt_hash, first.receipt_hash);
+});
+
+test('descriptor access probes reject read-only and write-only handles without changing bytes', async t => {
+  if (process.platform === 'win32') return t.skip('POSIX descriptor access-mode probe');
+  for (const [name, flags] of [['read-only', constants.O_RDONLY], ['write-only', constants.O_WRONLY]]) await t.test(name, async t => {
+    const directory = await mkdtemp(join(tmpdir(), 'lae-descriptor-access-')); const path = join(directory, 'journal.wal');
+    const original = Buffer.from(`unchanged-${name}`, 'utf8'); await writeFile(path, original, { mode: 0o600 });
+    const handle = await open(path, flags); t.after(async () => { await handle.close().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+    const journal = await DescriptorActionJournal.open({ fd: handle.fd });
+    assert.deepEqual(journal.health(), { state: 'blocked', error: 'action_journal_permissions_invalid' });
+    assert.deepEqual(await readFile(path), original); await journal.close(); assert.deepEqual(await readFile(path), original);
+  });
+});
+
+test('only an exact incomplete final frame is truncated; complete or noncanonical corruption blocks', async t => {
+  for (const damage of ['partial-payload', 'partial-commit', 'complete-checksum', 'noncanonical']) await t.test(damage, async t => {
+    const store = await wal(t); const journal = await store.openJournal(); await journal.prepare(journalInput()); await journal.close();
+    const raw = await readFile(store.path); const headerLength = raw.indexOf(0x0a) + 1; const payloadLength = Number.parseInt(raw.subarray(headerLength + 1, headerLength + 9).toString('ascii'), 16);
+    if (damage === 'partial-payload') await truncate(store.path, headerLength + 10 + Math.floor(payloadLength / 2));
+    else if (damage === 'partial-commit') await truncate(store.path, raw.length - 3);
+    else if (damage === 'complete-checksum') { raw[headerLength + 10] ^= 1; await writeFile(store.path, raw); }
+    else {
+      const payload = raw.subarray(headerLength + 10, headerLength + 10 + payloadLength).toString('utf8').replace(',"operation_id"', ', "operation_id"');
+      assert.notEqual(payload.length, payloadLength);
+      const payloadBytes = Buffer.from(payload, 'utf8'); const prefix = Buffer.from(`@${payloadBytes.length.toString(16).padStart(8, '0')}:`); const checksum = createHash('sha256').update(payloadBytes).digest('hex');
+      await writeFile(store.path, Buffer.concat([raw.subarray(0, headerLength), prefix, payloadBytes, Buffer.from(`:${checksum}:COMMIT\n`)]));
+    }
+    const reopened = await store.openJournal();
+    if (damage.startsWith('partial-')) {
+      assert.deepEqual(reopened.health(), { state: 'ready', error: null }); assert.equal((await reopened.summary()).records.length, 0); assert.equal((await readFile(store.path)).length, headerLength);
+    } else assert.deepEqual(reopened.health(), { state: 'blocked', error: 'action_journal_corrupt' });
+  });
 });
 
 test('restart cancels pre-dispatch work, tombstones dispatched work, and never manufactures completion', async t => {
@@ -84,14 +117,14 @@ test('restart cancels pre-dispatch work, tombstones dispatched work, and never m
 });
 
 test('dispatch crash boundaries are old-or-tombstoned and never permit replay', async t => {
-  for (const phase of ['before_append', 'after_append_before_sync', 'after_fsync']) await t.test(phase, async t => {
+  for (const phase of ['before_append', 'after_append_before_sync', 'after_body_fsync', 'after_commit_before_sync', 'after_fsync']) await t.test(phase, async t => {
     let armed = true; const store = await wal(t, { fault: ({ phase: actual, state }) => { if (armed && state === 'dispatching' && actual === phase) { armed = false; throw new Error('crash'); } } });
     const journal = await store.openJournal(); const receipt = await journal.prepare(journalInput()); await journal.authorize(receipt.operation_id, 'user_confirmation');
     await assert.rejects(journal.dispatch(receipt.operation_id), error => ['action_journal_write_failed', 'action_journal_corrupt'].includes(error?.code));
     await journal.close(); const reopened = await store.openJournal({ fault: undefined });
     const state = (await reopened.detail(receipt.operation_id)).state;
     assert.ok(['cancelled', 'unknown_manual'].includes(state), state);
-    if (phase === 'before_append') assert.equal(state, 'cancelled');
+    if (['before_append', 'after_append_before_sync', 'after_body_fsync'].includes(phase)) assert.equal(state, 'cancelled');
     else await assert.rejects(reopened.prepare(journalInput({ requestId: 'request_descriptor09', callId: 'call_descriptor009' })), error => ['action_journal_duplicate_active', 'action_journal_limit_exceeded'].includes(error?.code));
   });
 });
@@ -113,10 +146,10 @@ test('descriptor corruption blocks a durable tool before its preview callback', 
   assert.deepEqual(journal.health(), { state: 'blocked', error: 'action_journal_corrupt' });
 });
 
-test('truncation, tampering, permissive mode, and hard links block descriptor startup', async t => {
-  for (const damage of ['truncate', 'tamper', 'mode', 'link']) await t.test(damage, async t => {
+test('invalid framing, tampering, permissive mode, and hard links block descriptor startup', async t => {
+  for (const damage of ['framing', 'tamper', 'mode', 'link']) await t.test(damage, async t => {
     const store = await wal(t); const journal = await store.openJournal(); await journal.prepare(journalInput()); await journal.close();
-    if (damage === 'truncate') { const raw = await readFile(store.path); await truncate(store.path, raw.length - 1); }
+    if (damage === 'framing') { const raw = await readFile(store.path); raw[raw.indexOf(0x0a) + 2] = 'z'.charCodeAt(0); await writeFile(store.path, raw); }
     else if (damage === 'tamper') { const raw = await readFile(store.path, 'utf8'); await writeFile(store.path, raw.replace(/"hash":"[a-f0-9]{64}"/u, `"hash":"${'f'.repeat(64)}"`)); }
     else if (damage === 'mode') await chmod(store.path, 0o644);
     else await link(store.path, join(store.path, '..', 'journal-link.wal'));
@@ -165,6 +198,16 @@ test('production composition accepts only an exact inherited descriptor and owns
   let engineStarts = 0;
   await assert.rejects(createHostComposition({ env: { LAE_ACTION_JOURNAL_FD: 'invalid' }, engineFactory: async () => { engineStarts++; return {}; } }), /invalid LAE_ACTION_JOURNAL_FD/u);
   assert.equal(engineStarts, 0);
+});
+
+test('composition rollback closes an owned journal and isolates engine cleanup failure', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'lae-composition-rollback-')); const path = join(directory, 'journal.wal'); const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR, 0o600);
+  t.after(async () => { await handle.close().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  const env = new Proxy({ LAE_ACTION_JOURNAL_FD: String(handle.fd) }, { get(target, key, receiver) { if (key === 'SystemRoot') throw new Error('late construction failure'); return Reflect.get(target, key, receiver); } });
+  let shutdowns = 0;
+  await assert.rejects(createHostComposition({ env, engineFactory: async () => ({ shutdown: async () => { shutdowns++; throw new Error('engine shutdown failure'); } }) }), /late construction failure/u);
+  assert.equal(shutdowns, 1); await assert.rejects(handle.stat(), error => error?.code === 'EBADF');
+  assert.match(await readFile(path, 'utf8'), /^\{"format":"lae-action-journal-wal","version":2\}\n/u);
 });
 
 test('host shutdown isolates journal close failure and still closes engine exactly once', async () => {

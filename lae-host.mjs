@@ -40,21 +40,28 @@ export async function createHostComposition({ fileConfig = {}, env = process.env
   if (mode === 'fixture' && (endpoint || token)) throw new Error('native engine settings supplied while fixture mode is selected');
   const config = mergeConfig({ ...fileConfig, engine: { ...(fileConfig.engine ?? {}), mode } });
   if (mode === 'native' && (!model || !backend)) throw new Error('native engine model and backend must be explicit in config or environment');
-  const engine = engineFactory ? await engineFactory() : mode === 'native' ? new NativeEngineClient({ endpoint, token, model, backend, timeoutMs: requestTimeoutMs }) : new FixtureEngineClient();
-  if (mode === 'native') await engine.waitReady();
-  const grantStore = new OperatorGrantStore();
-  const operatorGrants = new OperatorGrantControl({ store: grantStore, bindings: buildOperatorGrantBindings(config) });
-  const externalTools = createExternalToolRegistry({ config: config.providers, workspaceRoots: config.workspace_roots, graph: { grantStore } });
-  const processEnvironment = Object.fromEntries(['SystemRoot', 'WINDIR'].filter(key => typeof env[key] === 'string').map(key => [key, env[key]]));
-  let actionJournal;
-  if (journalDescriptor !== undefined) actionJournal = await DescriptorActionJournal.open({ fd: journalDescriptor, ownsDescriptor: true });
-  else if (journalDirectory !== undefined) actionJournal = await ActionJournal.open({ directory: journalDirectory });
-  const localTools = createLocalToolRegistry({ workspaces: config.workspace_roots, applications: config.applications, process_actions: config.process_actions, processEnvironment, networkProvider: config.network.provider, grantControl: operatorGrants });
-  const localCapabilities = localTools.capabilitySnapshot;
-  const toolRegistry = { ...localTools, ...externalTools };
-  const controller = new ConversationController({ engine, actionJournal, toolRegistry });
-  const host = new HostServer({ controller, engine, config, providers: externalTools.providerStatus, providerAuth: externalTools.providerAuthControl, providerShutdown: externalTools.shutdown, operatorGrants, actionJournal, localCapabilities });
-  return { config, mode, engine, grantStore, operatorGrants, externalTools, localTools, toolRegistry, controller, host, actionJournal };
+  let engine; let operatorGrants; let externalTools; let actionJournal;
+  try {
+    engine = engineFactory ? await engineFactory() : mode === 'native' ? new NativeEngineClient({ endpoint, token, model, backend, timeoutMs: requestTimeoutMs }) : new FixtureEngineClient();
+    if (mode === 'native') await engine.waitReady();
+    const grantStore = new OperatorGrantStore();
+    operatorGrants = new OperatorGrantControl({ store: grantStore, bindings: buildOperatorGrantBindings(config) });
+    externalTools = createExternalToolRegistry({ config: config.providers, workspaceRoots: config.workspace_roots, graph: { grantStore } });
+    if (journalDescriptor !== undefined) actionJournal = await DescriptorActionJournal.open({ fd: journalDescriptor, ownsDescriptor: true });
+    else if (journalDirectory !== undefined) actionJournal = await ActionJournal.open({ directory: journalDirectory });
+    const processEnvironment = Object.fromEntries(['SystemRoot', 'WINDIR'].filter(key => typeof env[key] === 'string').map(key => [key, env[key]]));
+    const localTools = createLocalToolRegistry({ workspaces: config.workspace_roots, applications: config.applications, process_actions: config.process_actions, processEnvironment, networkProvider: config.network.provider, grantControl: operatorGrants });
+    const localCapabilities = localTools.capabilitySnapshot;
+    const toolRegistry = { ...localTools, ...externalTools };
+    const controller = new ConversationController({ engine, actionJournal, toolRegistry });
+    const host = new HostServer({ controller, engine, config, providers: externalTools.providerStatus, providerAuth: externalTools.providerAuthControl, providerShutdown: externalTools.shutdown, operatorGrants, actionJournal, localCapabilities });
+    return { config, mode, engine, grantStore, operatorGrants, externalTools, localTools, toolRegistry, controller, host, actionJournal };
+  } catch (error) {
+    for (const cleanup of [() => operatorGrants?.revokeAll?.(), () => externalTools?.shutdown?.(), () => actionJournal?.close?.(), () => engine?.shutdown?.()]) {
+      try { await cleanup(); } catch {}
+    }
+    throw error;
+  }
 }
 
 export async function bootstrap({ fileConfig, env = process.env, compositionFactory = createHostComposition } = {}) {
