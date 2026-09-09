@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { FixtureEngineClient } from './host/engine/fixture-engine.mjs';
 import { NativeEngineClient } from './host/engine/native-engine-client.mjs';
 import { ConversationController } from './host/agent/controller.mjs';
-import { ActionJournal } from './host/agent/action-journal.mjs';
+import { ActionJournal, DescriptorActionJournal } from './host/agent/action-journal.mjs';
 import { HostServer } from './host/server/host-server.mjs';
 import { mergeConfig } from './host/agent/config.mjs';
 import { createLocalToolRegistry } from './host/tools/local/index.mjs';
@@ -19,6 +19,14 @@ async function loadFileConfig(env) {
 
 /** Build production wiring without binding a socket or starting a request. */
 export async function createHostComposition({ fileConfig = {}, env = process.env, engineFactory } = {}) {
+  const journalDirectory = env.LAE_ACTION_JOURNAL_DIR;
+  const journalDescriptorText = env.LAE_ACTION_JOURNAL_FD;
+  if (journalDirectory !== undefined && journalDescriptorText !== undefined) throw new Error('action journal directory and descriptor are mutually exclusive');
+  let journalDescriptor;
+  if (journalDescriptorText !== undefined) {
+    if (typeof journalDescriptorText !== 'string' || !/^(?:[3-9]|[1-9]\d+)$/u.test(journalDescriptorText)) throw new Error('invalid LAE_ACTION_JOURNAL_FD');
+    journalDescriptor = Number(journalDescriptorText); if (!Number.isSafeInteger(journalDescriptor) || journalDescriptor > 0x7fffffff) throw new Error('invalid LAE_ACTION_JOURNAL_FD');
+  }
   const configuredMode = fileConfig.engine?.mode;
   const envMode = env.LAE_ENGINE_MODE;
   if (envMode && !['fixture', 'native'].includes(envMode)) throw new Error('invalid LAE_ENGINE_MODE; expected fixture or native');
@@ -38,7 +46,9 @@ export async function createHostComposition({ fileConfig = {}, env = process.env
   const operatorGrants = new OperatorGrantControl({ store: grantStore, bindings: buildOperatorGrantBindings(config) });
   const externalTools = createExternalToolRegistry({ config: config.providers, workspaceRoots: config.workspace_roots, graph: { grantStore } });
   const processEnvironment = Object.fromEntries(['SystemRoot', 'WINDIR'].filter(key => typeof env[key] === 'string').map(key => [key, env[key]]));
-  const actionJournal = env.LAE_ACTION_JOURNAL_DIR ? await ActionJournal.open({ directory: env.LAE_ACTION_JOURNAL_DIR }) : undefined;
+  let actionJournal;
+  if (journalDescriptor !== undefined) actionJournal = await DescriptorActionJournal.open({ fd: journalDescriptor, ownsDescriptor: true });
+  else if (journalDirectory !== undefined) actionJournal = await ActionJournal.open({ directory: journalDirectory });
   const localTools = createLocalToolRegistry({ workspaces: config.workspace_roots, applications: config.applications, process_actions: config.process_actions, processEnvironment, networkProvider: config.network.provider, grantControl: operatorGrants });
   const localCapabilities = localTools.capabilitySnapshot;
   const toolRegistry = { ...localTools, ...externalTools };

@@ -49,6 +49,7 @@ TEST_INVENTORY = {
     "tests/host/native-action-journal-client.test.mjs": "host_fixture",
     "tests/host/copilot-acp-hardening.test.mjs": "provider_fixture",
     "tests/host/controller-native-supervisor.test.mjs": "static",
+    "tests/host/descriptor-action-journal.test.mjs": "provider_fixture",
     "tests/host/external-tools.test.mjs": "provider_fixture",
     "tests/host/graph-read-tools.test.mjs": "provider_fixture",
     "tests/host/graph-production-composition-restart.test.mjs": "provider_fixture",

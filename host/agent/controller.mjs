@@ -443,12 +443,19 @@ export class ConversationController {
           strictModelResult = activeJournalOperation.reconcile === true;
           modelBinding = activeJournalOperation;
           if (result.status === 'ok') {
-            await this.#journalMethods.acknowledge(activeJournalOperation.id);
             if (activeJournalOperation.reconcile && !providerAttestationMatches(result, activeJournalOperation, call)) {
+              // A provider-shaped payload is not an acknowledgement.  Install
+              // only the durable dispatch tombstone before entering recovery;
+              // otherwise a crash could persist a false provider acknowledgement.
               await this.#journalMethods.beginReconciliation(activeJournalOperation.id);
               const responseDigest = digestEvidence({ status: result.status, content: result.content.map(item => ({ type: item.type, text_digest: digestEvidence(item.text) })) });
               result = makeToolResult({ id: call.id, name: call.name, status: 'failed', text: JSON.stringify({ code: 'action_completion_unverified', operation_id: activeJournalOperation.id, state: 'reconciling', completion: 'controller_acknowledged', provider_completion: 'unverified', evidence: { operation_digest: activeJournalOperation.operationDigest, preview_digest: activeJournalOperation.previewDigest, resource_digest: null, response_digest: responseDigest, arguments_digest: activeJournalOperation.argumentsDigest } }) });
             } else {
+              // For Graph/browser/Copilot mutations, this transition occurs
+              // only after the provider module's private, exact operation-bound
+              // attestation has been validated above.  The acknowledged record
+              // is therefore the durable provider-proof recovery boundary.
+              await this.#journalMethods.acknowledge(activeJournalOperation.id);
               await this.#journalMethods.complete(activeJournalOperation.id);
               controllerVerified = activeJournalOperation.reconcile === true;
             }

@@ -102,6 +102,7 @@ export class HostServer {
           });
         } catch (error) { server.closeAllConnections?.(); reject(error); }
       }));
+      await attempt(() => this.actionJournal?.close?.());
       await attempt(() => this.engine?.shutdown?.());
       if (failed) throw Object.assign(new Error('host_shutdown_failed'), { code: 'host_shutdown_failed' });
     })();
