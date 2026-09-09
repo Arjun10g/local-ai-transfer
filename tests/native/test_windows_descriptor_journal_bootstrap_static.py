@@ -37,6 +37,24 @@ def modeled_reopen(data: bytes, *, identity_matches: bool = True) -> str:
     return "ok_opened"
 
 
+def modeled_handoff(*, allocation_ok=True, duplicate_ok=True, flag_ok=True):
+    """Fault-order model: a duplicate is always born inside its RAII owner."""
+    state = {"live": 0, "closed": 0, "transferred": 0, "one_shot": False}
+    if not allocation_ok:
+        return "internal", state
+    if not duplicate_ok:
+        return "io_failed", state
+    state["live"] = 1
+    if not flag_ok:
+        state["live"] = 0
+        state["closed"] = 1
+        return "io_failed", state
+    state["live"] = 0
+    state["transferred"] = 1
+    state["one_shot"] = True
+    return "ok_opened", state
+
+
 class WindowsDescriptorJournalBootstrapStaticTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -130,6 +148,37 @@ class WindowsDescriptorJournalBootstrapStaticTests(unittest.TestCase):
         self.assertEqual(handoff.count("DuplicateHandle("), 1)
         self.assertIn("bInheritHandle = FALSE", self.cpp)
         self.assertIn("take_inheritable_handle", self.hpp)
+
+    def test_duplicate_is_born_owned_and_allocation_failure_is_retry_safe(self):
+        handoff = re.search(
+            r"StorageStatus DescriptorWalLease::prepare_inheritable_handoff\(.+?\n\}",
+            self.cpp,
+            re.S,
+        ).group(0)
+        allocation = handoff.index("std::make_unique<DescriptorWalHandoff::Impl>()")
+        duplicate = handoff.index("DuplicateHandle(")
+        mark_one_shot = handoff.index("impl_->handoff_prepared = true")
+        transfer = handoff.index("output.impl_ = std::move(candidate)")
+        self.assertLess(allocation, duplicate)
+        self.assertLess(duplicate, mark_one_shot)
+        self.assertLess(mark_one_shot, transfer)
+        call = handoff[duplicate : handoff.index("return StorageStatus::kIoFailed", duplicate)]
+        self.assertIn("candidate->handle.put()", call)
+        self.assertNotRegex(handoff[duplicate:transfer], r"\b(new|make_unique|resize|reserve)\b")
+        self.assertIn("HANDLE* put() noexcept", self.cpp)
+
+        status, state = modeled_handoff(allocation_ok=False)
+        self.assertEqual((status, state["live"], state["closed"], state["one_shot"]),
+                         ("internal", 0, 0, False))
+        status, state = modeled_handoff(duplicate_ok=False)
+        self.assertEqual((status, state["live"], state["closed"], state["one_shot"]),
+                         ("io_failed", 0, 0, False))
+        status, state = modeled_handoff(flag_ok=False)
+        self.assertEqual((status, state["live"], state["closed"], state["one_shot"]),
+                         ("io_failed", 0, 1, False))
+        status, state = modeled_handoff()
+        self.assertEqual((status, state["live"], state["transferred"], state["one_shot"]),
+                         ("ok_opened", 0, 1, True))
 
     def test_receipt_cannot_disclose_handle_or_claim_bridge_availability(self):
         receipt = re.search(r"struct DescriptorWalReceipt \{(.+?)\n\};", self.hpp, re.S).group(1)

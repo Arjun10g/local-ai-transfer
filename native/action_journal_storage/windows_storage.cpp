@@ -64,6 +64,12 @@ class UniqueHandle final {
     value_ = INVALID_HANDLE_VALUE;
     return value;
   }
+  // Supplies storage already governed by this RAII object to Win32 out-handle
+  // APIs. On API success there is no interval in which the HANDLE is raw.
+  HANDLE* put() noexcept {
+    reset();
+    return &value_;
+  }
   void reset(HANDLE value = INVALID_HANDLE_VALUE) noexcept {
     if (*this) CloseHandle(value_);
     value_ = value;
@@ -832,13 +838,14 @@ StorageStatus DescriptorWalLease::prepare_inheritable_handoff(
         !private_security(impl_->file.get(), impl_->user.sid) ||
         !directories_stable(impl_->directories, impl_->user.sid))
       return StorageStatus::kIdentityMismatch;
-    HANDLE duplicate = INVALID_HANDLE_VALUE;
+    // Allocate the destination owner before obtaining the privileged handle.
+    // DuplicateHandle writes directly into RAII storage, so allocation failure
+    // occurs before duplication and every later refusal closes exactly once.
+    auto candidate = std::make_unique<DescriptorWalHandoff::Impl>();
     if (!DuplicateHandle(GetCurrentProcess(), impl_->file.get(),
-                         GetCurrentProcess(), &duplicate, 0, TRUE,
+                         GetCurrentProcess(), candidate->handle.put(), 0, TRUE,
                          DUPLICATE_SAME_ACCESS))
       return StorageStatus::kIoFailed;
-    auto candidate = std::make_unique<DescriptorWalHandoff::Impl>();
-    candidate->handle.reset(duplicate);
     DWORD duplicate_flags = 0;
     if (!GetHandleInformation(candidate->handle.get(), &duplicate_flags) ||
         (duplicate_flags & HANDLE_FLAG_INHERIT) == 0)
