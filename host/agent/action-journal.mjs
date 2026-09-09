@@ -1,4 +1,4 @@
-import { constants } from 'node:fs';
+import { close as closeDescriptor, constants, fstat, fstatSync, fsync, ftruncate, read, readSync, write } from 'node:fs';
 import { lstat, open, readdir, realpath, unlink } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import { isAbsolute, join, resolve } from 'node:path';
@@ -45,6 +45,11 @@ const TRANSITIONS = Object.freeze({
 });
 const EVENT_KEYS = Object.freeze(['version', 'operation_id', 'sequence', 'state', 'timestamp_utc', 'tool_name', 'risk_tier', 'side_effect', 'request_ref', 'call_ref', 'arguments_digest', 'preview_digest', 'operation_digest', 'authorization_kind', 'resolution', 'prev_hash', 'hash']);
 const MAX_FILE_BYTES = ACTION_JOURNAL_LIMITS.max_event_bytes * ACTION_JOURNAL_LIMITS.max_events_per_operation;
+const DESCRIPTOR_WAL_HEADER = '{"format":"lae-action-journal-wal","version":2}\n';
+const DESCRIPTOR_FRAME_MAGIC = '@LAE2:';
+const DESCRIPTOR_FRAME_HEADER_BYTES = 145;
+const DESCRIPTOR_FRAME_COMMIT = Buffer.from(':COMMIT\n', 'ascii');
+const MAX_DESCRIPTOR_WAL_BYTES = 32 * 1024 * 1024;
 
 export class ActionJournalError extends Error {
   constructor(code, message = code) { super(message); this.name = 'ActionJournalError'; this.code = code; }
@@ -94,6 +99,7 @@ function eventPayload(event) {
     authorization_kind: event.authorization_kind, resolution: event.resolution, prev_hash: event.prev_hash
   };
 }
+function canonicalEventText(event) { return JSON.stringify(Object.fromEntries(EVENT_KEYS.map(key => [key, event[key]]))); }
 function validateEvent(event, filename, previous) {
   if (!exactKeys(event) || event.version !== VERSION || !OPERATION_ID.test(event.operation_id) || filename !== `${event.operation_id}.jsonl` || !Number.isInteger(event.sequence) || event.sequence < 0 || event.sequence >= ACTION_JOURNAL_LIMITS.max_events_per_operation || !ACTION_STATES.includes(event.state) || !isoTimestamp(event.timestamp_utc) || !TOOL_NAME.test(event.tool_name) || !RISK.has(event.risk_tier) || !SIDE_EFFECT.test(event.side_effect) || !HASH.test(event.request_ref) || !HASH.test(event.call_ref) || !HASH.test(event.arguments_digest) || !HASH.test(event.preview_digest) || !HASH.test(event.operation_digest) || event.authorization_kind !== null && !AUTHORIZATION.has(event.authorization_kind) || event.resolution !== null && !RESOLUTIONS.has(event.resolution) || !HASH.test(event.prev_hash) || !HASH.test(event.hash)) throw new ActionJournalError('action_journal_corrupt');
   if (event.hash !== sha256(JSON.stringify(eventPayload(event)))) throw new ActionJournalError('action_journal_corrupt');
@@ -123,6 +129,69 @@ async function readBoundedFile(path) {
     if (!sameIdentity(before, after) || !singleLink(after) || after.size !== before.size || offset !== before.size) throw new ActionJournalError('action_journal_corrupt');
     return { text: buffer.subarray(0, offset).toString('utf8'), identity: after, size: after.size };
   } finally { await handle.close(); }
+}
+
+function descriptorCall(operation) {
+  return new Promise((resolvePromise, rejectPromise) => operation((error, value) => error ? rejectPromise(error) : resolvePromise(value)));
+}
+function descriptorStat(fd) { return descriptorCall(done => fstat(fd, done)); }
+function descriptorSync(fd) { return descriptorCall(done => fsync(fd, done)); }
+function descriptorTruncate(fd, size) { return descriptorCall(done => ftruncate(fd, size, done)); }
+function descriptorClose(fd) { return descriptorCall(done => closeDescriptor(fd, done)); }
+async function descriptorRead(fd, size, position = 0) {
+  const buffer = Buffer.alloc(size); let offset = 0;
+  while (offset < size) {
+    const bytesRead = await descriptorCall(done => read(fd, buffer, offset, size - offset, position + offset, (error, count) => done(error, count)));
+    if (!bytesRead) break;
+    offset += bytesRead;
+  }
+  if (offset !== size) throw new ActionJournalError('action_journal_corrupt');
+  return buffer;
+}
+async function descriptorWrite(fd, bytes, position) {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const bytesWritten = await descriptorCall(done => write(fd, bytes, offset, bytes.length - offset, position + offset, (error, count) => done(error, count)));
+    if (!bytesWritten) throw new ActionJournalError('action_journal_write_failed');
+    offset += bytesWritten;
+  }
+}
+function descriptorReadSync(fd, size, position = 0) {
+  const buffer = Buffer.alloc(size); let offset = 0;
+  while (offset < size) {
+    const bytesRead = readSync(fd, buffer, offset, size - offset, position + offset);
+    if (!bytesRead) break;
+    offset += bytesRead;
+  }
+  if (offset !== size) throw new ActionJournalError('action_journal_corrupt');
+  return buffer;
+}
+async function descriptorAccessProbe(fd) {
+  // POSIX exposes no fcntl(F_GETFL) through Node. A positional one-byte read
+  // rejects O_WRONLY even for an empty file, while a zero-byte positional write
+  // rejects O_RDONLY without changing bytes, offsets, size, or timestamps.
+  await descriptorCall(done => read(fd, Buffer.alloc(1), 0, 1, 0, error => done(error)));
+  await descriptorCall(done => write(fd, Buffer.alloc(0), 0, 0, 0, error => done(error)));
+}
+function descriptorFrame(event) {
+  const payload = Buffer.from(canonicalEventText(event), 'utf8');
+  const lengthHex = payload.length.toString(16).padStart(8, '0'); const payloadDigest = sha256(payload);
+  const unsignedHeader = `${DESCRIPTOR_FRAME_MAGIC}${lengthHex}:${payloadDigest}:`;
+  const header = Buffer.from(`${unsignedHeader}${sha256(Buffer.from(unsignedHeader, 'ascii'))}:`, 'ascii');
+  if (header.length !== DESCRIPTOR_FRAME_HEADER_BYTES) throw new ActionJournalError('action_journal_invalid_record');
+  return { payloadLength: payload.length, body: Buffer.concat([header, payload]), commit: DESCRIPTOR_FRAME_COMMIT, bytes: Buffer.concat([header, payload, DESCRIPTOR_FRAME_COMMIT]) };
+}
+function descriptorHeaderPrefixValid(bytes) {
+  const text = bytes.toString('latin1');
+  if (text.length <= DESCRIPTOR_FRAME_MAGIC.length) return DESCRIPTOR_FRAME_MAGIC.startsWith(text);
+  if (!text.startsWith(DESCRIPTOR_FRAME_MAGIC)) return false;
+  for (let index = DESCRIPTOR_FRAME_MAGIC.length; index < Math.min(text.length, 14); index++) if (!/[0-9a-f]/u.test(text[index])) return false;
+  if (text.length > 14 && text[14] !== ':') return false;
+  for (let index = 15; index < Math.min(text.length, 79); index++) if (!/[0-9a-f]/u.test(text[index])) return false;
+  if (text.length > 79 && text[79] !== ':') return false;
+  for (let index = 80; index < Math.min(text.length, 144); index++) if (!/[0-9a-f]/u.test(text[index])) return false;
+  if (text.length > 144 && text[144] !== ':') return false;
+  return text.length <= DESCRIPTOR_FRAME_HEADER_BYTES;
 }
 
 export class ActionJournal {
@@ -261,4 +330,181 @@ export class ActionJournal {
     });
   }
   async reconcile() { throw new ActionJournalError('action_reconciliation_unavailable'); }
+}
+
+/**
+ * Append-only ActionJournal over an already-open local file descriptor.
+ *
+ * The descriptor is the authority: this class never resolves, opens, renames,
+ * or unlinks a pathname.  A production launcher/native supervisor must create
+ * or reopen the owner-private file, durably publish it, enforce a single writer,
+ * and pass the descriptor as an inherited child handle.  Supplying only a path
+ * remains deliberately unsupported by the production composition. Frame and
+ * chain SHA-256 values detect corruption; they provide no external authenticity
+ * or anti-rollback guarantee without that separate trusted owner/anchor.
+ */
+export class DescriptorActionJournal extends ActionJournal {
+  constructor({ fd, ownsDescriptor = false, platform = process.platform, ...options } = {}) {
+    if (!Number.isSafeInteger(fd) || fd < 3 || fd > 0x7fffffff) throw new TypeError('action journal descriptor is invalid');
+    if (typeof ownsDescriptor !== 'boolean') throw new TypeError('action journal descriptor ownership is invalid');
+    super({ directory: platform === 'win32' ? 'C:\\descriptor\\journal' : '/descriptor/journal', platform, testOnly: true, ...options });
+    this.fd = fd; this.ownsDescriptor = ownsDescriptor; this.testOnly = false; this.directory = null;
+    this.descriptorIdentity = null; this.descriptorSize = 0; this.descriptorDigest = null; this.closePromise = null; this.closed = false;
+  }
+  static async open(options) { const journal = new DescriptorActionJournal(options); await journal.initialize(); return journal; }
+  async initialize() {
+    if (this.healthState !== 'uninitialized') return this;
+    try {
+      let info = await descriptorStat(this.fd);
+      if (!regularFile(info) || !singleLink(info) || !ownedByCurrentUser(info, this.platform) || this.platform !== 'win32' && (info.mode & 0o777) !== 0o600 || info.size < 0 || info.size > MAX_DESCRIPTOR_WAL_BYTES) throw new ActionJournalError('action_journal_permissions_invalid');
+      try { await descriptorAccessProbe(this.fd); } catch { throw new ActionJournalError('action_journal_permissions_invalid'); }
+      this.descriptorIdentity = info; this.descriptorSize = info.size;
+      const header = Buffer.from(DESCRIPTOR_WAL_HEADER, 'utf8');
+      if (info.size > 0 && info.size < header.length) {
+        const partialHeader = await descriptorRead(this.fd, info.size);
+        if (!header.subarray(0, info.size).equals(partialHeader)) throw new ActionJournalError('action_journal_corrupt');
+        const before = await descriptorStat(this.fd);
+        if (!sameIdentity(before, this.descriptorIdentity) || before.size !== info.size) throw new ActionJournalError('action_journal_corrupt');
+        await descriptorTruncate(this.fd, 0); await descriptorSync(this.fd); info = await descriptorStat(this.fd);
+        if (!sameIdentity(info, this.descriptorIdentity) || info.size !== 0) throw new ActionJournalError('action_journal_corrupt');
+        this.descriptorIdentity = info; this.descriptorSize = 0;
+      }
+      if (info.size === 0) {
+        await descriptorWrite(this.fd, header, 0); await descriptorSync(this.fd);
+        info = await descriptorStat(this.fd);
+        if (!sameIdentity(info, this.descriptorIdentity) || !singleLink(info) || info.size !== header.length || !Buffer.from(await descriptorRead(this.fd, header.length)).equals(header)) throw new ActionJournalError('action_journal_corrupt');
+        this.descriptorIdentity = info; this.descriptorSize = info.size;
+      }
+      let bytes = await descriptorRead(this.fd, this.descriptorSize);
+      if (!bytes.subarray(0, header.length).equals(header)) throw new ActionJournalError('action_journal_corrupt');
+      let offset = header.length; let frames = 0; let recoverAt = null;
+      while (offset < bytes.length) {
+        const remaining = bytes.length - offset;
+        if (remaining < DESCRIPTOR_FRAME_HEADER_BYTES) {
+          if (!descriptorHeaderPrefixValid(bytes.subarray(offset))) throw new ActionJournalError('action_journal_corrupt');
+          recoverAt = offset; break;
+        }
+        const frameHeader = bytes.subarray(offset, offset + DESCRIPTOR_FRAME_HEADER_BYTES);
+        const headerText = frameHeader.toString('latin1');
+        const headerMatch = /^@LAE2:([0-9a-f]{8}):([0-9a-f]{64}):([0-9a-f]{64}):$/u.exec(headerText);
+        if (!headerMatch) throw new ActionJournalError('action_journal_corrupt');
+        const [, lengthHex, payloadDigest, headerDigest] = headerMatch;
+        const unsignedHeader = `${DESCRIPTOR_FRAME_MAGIC}${lengthHex}:${payloadDigest}:`;
+        if (sha256(Buffer.from(unsignedHeader, 'ascii')) !== headerDigest) throw new ActionJournalError('action_journal_corrupt');
+        const payloadLength = Number.parseInt(lengthHex, 16);
+        if (!Number.isSafeInteger(payloadLength) || payloadLength < 1 || payloadLength > ACTION_JOURNAL_LIMITS.max_event_bytes) throw new ActionJournalError('action_journal_corrupt');
+        const frameLength = DESCRIPTOR_FRAME_HEADER_BYTES + payloadLength + DESCRIPTOR_FRAME_COMMIT.length;
+        if (remaining < frameLength) {
+          if (bytes.subarray(offset).subarray(-DESCRIPTOR_FRAME_COMMIT.length).equals(DESCRIPTOR_FRAME_COMMIT)) throw new ActionJournalError('action_journal_corrupt');
+          if (remaining >= DESCRIPTOR_FRAME_HEADER_BYTES + payloadLength) {
+            const payload = bytes.subarray(offset + DESCRIPTOR_FRAME_HEADER_BYTES, offset + DESCRIPTOR_FRAME_HEADER_BYTES + payloadLength);
+            if (sha256(payload) !== payloadDigest) throw new ActionJournalError('action_journal_corrupt');
+            let partialParsed; const payloadText = payload.toString('utf8');
+            try { partialParsed = parseStrictJson(payloadText, { maxBytes: ACTION_JOURNAL_LIMITS.max_event_bytes, maxDepth: 2, maxString: 1024, maxArray: 0, maxObject: EVENT_KEYS.length }); } catch { throw new ActionJournalError('action_journal_corrupt'); }
+            const partialRecord = this.records.get(partialParsed?.operation_id);
+            const partialEvent = validateEvent(partialParsed, `${partialParsed?.operation_id}.jsonl`, partialRecord?.events.at(-1));
+            if (canonicalEventText(partialEvent) !== payloadText) throw new ActionJournalError('action_journal_corrupt');
+            const actualCommit = bytes.subarray(offset + DESCRIPTOR_FRAME_HEADER_BYTES + payloadLength);
+            if (!DESCRIPTOR_FRAME_COMMIT.subarray(0, actualCommit.length).equals(actualCommit)) throw new ActionJournalError('action_journal_corrupt');
+          }
+          recoverAt = offset; break;
+        }
+        const payload = bytes.subarray(offset + DESCRIPTOR_FRAME_HEADER_BYTES, offset + DESCRIPTOR_FRAME_HEADER_BYTES + payloadLength);
+        if (sha256(payload) !== payloadDigest || !bytes.subarray(offset + DESCRIPTOR_FRAME_HEADER_BYTES + payloadLength, offset + frameLength).equals(DESCRIPTOR_FRAME_COMMIT)) throw new ActionJournalError('action_journal_corrupt');
+        const payloadText = payload.toString('utf8');
+        let parsed; try { parsed = parseStrictJson(payloadText, { maxBytes: ACTION_JOURNAL_LIMITS.max_event_bytes, maxDepth: 2, maxString: 1024, maxArray: 0, maxObject: EVENT_KEYS.length }); } catch { throw new ActionJournalError('action_journal_corrupt'); }
+        if (!OPERATION_ID.test(parsed?.operation_id ?? '')) throw new ActionJournalError('action_journal_corrupt');
+        let record = this.records.get(parsed.operation_id);
+        const previous = record?.events.at(-1);
+        const event = validateEvent(parsed, `${parsed.operation_id}.jsonl`, previous);
+        if (canonicalEventText(event) !== payloadText) throw new ActionJournalError('action_journal_corrupt');
+        if (!record) {
+          if (this.records.size >= this.maxRecords) throw new ActionJournalError('action_journal_limit_exceeded');
+          record = { operation_id: event.operation_id, tool_name: event.tool_name, risk_tier: event.risk_tier, side_effect: event.side_effect, request_ref: event.request_ref, call_ref: event.call_ref, arguments_digest: event.arguments_digest, preview_digest: event.preview_digest, operation_digest: event.operation_digest, state: event.state, events: [], identity: this.descriptorIdentity, size: this.descriptorSize };
+          this.records.set(event.operation_id, record);
+        }
+        record.events.push(event); record.state = event.state;
+        frames++; if (frames > this.maxRecords * ACTION_JOURNAL_LIMITS.max_events_per_operation) throw new ActionJournalError('action_journal_limit_exceeded');
+        offset += frameLength;
+      }
+      if (recoverAt !== null) {
+        const before = await descriptorStat(this.fd);
+        if (!sameIdentity(before, this.descriptorIdentity) || !singleLink(before) || before.size !== bytes.length || !Buffer.from(await descriptorRead(this.fd, bytes.length)).equals(bytes)) throw new ActionJournalError('action_journal_corrupt');
+        await descriptorTruncate(this.fd, recoverAt); await descriptorSync(this.fd);
+        const after = await descriptorStat(this.fd);
+        if (!sameIdentity(after, this.descriptorIdentity) || !singleLink(after) || after.size !== recoverAt) throw new ActionJournalError('action_journal_corrupt');
+        bytes = await descriptorRead(this.fd, recoverAt); info = after; this.descriptorIdentity = after; this.descriptorSize = after.size;
+      }
+      this.descriptorDigest = sha256(bytes);
+      if (activeCount(this.records) > this.maxActive) throw new ActionJournalError('action_journal_limit_exceeded');
+      this.healthState = 'ready'; this.failureCode = null;
+      for (const record of [...this.records.values()]) {
+        if (record.state === 'prepared' || record.state === 'authorized') await this._appendLocked(record.operation_id, 'cancelled', { resolution: 'startup_recovery' });
+        else if (record.state === 'dispatching') await this._appendLocked(record.operation_id, 'unknown_manual', { resolution: 'dispatch_ambiguous' });
+      }
+      return this;
+    } catch (error) {
+      const code = error instanceof ActionJournalError ? error.code : 'action_journal_corrupt'; this.records.clear(); this._block(code); return this;
+    }
+  }
+  async _verifyDirectoryLocked() { return this._verifyDescriptorLocked(); }
+  health() {
+    if (this.healthState === 'ready') {
+      try {
+        const info = fstatSync(this.fd);
+        if (!regularFile(info) || !singleLink(info) || !sameIdentity(info, this.descriptorIdentity) || info.size !== this.descriptorSize || !ownedByCurrentUser(info, this.platform) || this.platform !== 'win32' && (info.mode & 0o777) !== 0o600) throw new ActionJournalError('action_journal_permissions_invalid');
+        if (this.descriptorDigest === null || sha256(descriptorReadSync(this.fd, this.descriptorSize)) !== this.descriptorDigest) throw new ActionJournalError('action_journal_corrupt');
+      } catch (error) {
+        this._block(error instanceof ActionJournalError ? error.code : 'action_journal_unavailable');
+      }
+    }
+    return super.health();
+  }
+  async _verifyDescriptorLocked() {
+    if (this.closed) throw new ActionJournalError('action_journal_close_requested');
+    const info = await descriptorStat(this.fd);
+    if (!regularFile(info) || !singleLink(info) || !sameIdentity(info, this.descriptorIdentity) || info.size !== this.descriptorSize || !ownedByCurrentUser(info, this.platform) || this.platform !== 'win32' && (info.mode & 0o777) !== 0o600) throw new ActionJournalError('action_journal_permissions_invalid');
+    const bytes = await descriptorRead(this.fd, this.descriptorSize);
+    if (this.descriptorDigest === null || sha256(bytes) !== this.descriptorDigest) throw new ActionJournalError('action_journal_corrupt');
+    return info;
+  }
+  async _appendLocked(operationId, state, { authorizationKind, resolution = null } = {}) {
+    this._assertHealthy(); const record = this.records.get(operationId); if (!record || !OPERATION_ID.test(operationId)) throw new ActionJournalError('action_journal_not_found');
+    const previous = record.events.at(-1); if (!previous && state !== 'prepared' || previous && !TRANSITIONS[previous.state]?.has(state)) throw new ActionJournalError('action_journal_invalid_transition');
+    const auth = authorizationKind ?? previous?.authorization_kind ?? null;
+    if (state === 'authorized' && !AUTHORIZATION.has(auth) || state !== 'prepared' && auth === null && !['cancelled', 'failed_definitive'].includes(state) || resolution !== null && !RESOLUTIONS.has(resolution)) throw new ActionJournalError('action_journal_invalid_transition');
+    const payload = { version: VERSION, operation_id: operationId, sequence: record.events.length, state, timestamp_utc: this._timestamp(), tool_name: record.tool_name, risk_tier: record.risk_tier, side_effect: record.side_effect, request_ref: record.request_ref, call_ref: record.call_ref, arguments_digest: record.arguments_digest, preview_digest: record.preview_digest, operation_digest: record.operation_digest, authorization_kind: auth, resolution, prev_hash: previous?.hash ?? ZERO_HASH };
+    const event = { ...payload, hash: sha256(JSON.stringify(payload)) }; const frame = descriptorFrame(event);
+    if (frame.payloadLength > ACTION_JOURNAL_LIMITS.max_event_bytes || record.events.length >= ACTION_JOURNAL_LIMITS.max_events_per_operation || this.descriptorSize + frame.bytes.length > MAX_DESCRIPTOR_WAL_BYTES) throw new ActionJournalError('action_journal_limit_exceeded');
+    try {
+      await this._verifyDescriptorLocked();
+      await this.fault?.({ phase: 'before_append', operation_id: operationId, state });
+      const position = this.descriptorSize; await descriptorWrite(this.fd, frame.body, position);
+      await this.fault?.({ phase: 'after_append_before_sync', operation_id: operationId, state }); await descriptorSync(this.fd);
+      await this.fault?.({ phase: 'after_body_fsync', operation_id: operationId, state });
+      await descriptorWrite(this.fd, frame.commit, position + frame.body.length);
+      await this.fault?.({ phase: 'after_commit_before_sync', operation_id: operationId, state }); await descriptorSync(this.fd);
+      const after = await descriptorStat(this.fd);
+      if (!sameIdentity(after, this.descriptorIdentity) || !singleLink(after) || after.size !== position + frame.bytes.length) throw new ActionJournalError('action_journal_corrupt');
+      const readback = await descriptorRead(this.fd, frame.bytes.length, position); if (!readback.equals(frame.bytes)) throw new ActionJournalError('action_journal_corrupt');
+      this.descriptorIdentity = after; this.descriptorSize = after.size; this.descriptorDigest = sha256(await descriptorRead(this.fd, after.size));
+      await this.fault?.({ phase: 'after_fsync', operation_id: operationId, state });
+      record.events.push(event); record.state = state; record.identity = after; record.size = after.size; return publicRecord(record);
+    } catch (error) {
+      const code = error instanceof ActionJournalError ? error.code : 'action_journal_write_failed'; this._block(code); throw new ActionJournalError(code);
+    }
+  }
+  async _pruneTerminalLocked(reserve = 0) {
+    await this._verifyDescriptorLocked();
+    if (reserve > 0) {
+      const terminal = [...this.records.values()].filter(record => TERMINAL.has(record.state)).length;
+      if (terminal >= this.maxTerminalRecords || this.records.size + reserve > this.maxRecords) throw new ActionJournalError('action_journal_limit_exceeded');
+    }
+  }
+  close() {
+    if (this.closePromise) return this.closePromise;
+    this.closed = true; this._block('action_journal_close_requested');
+    this.closePromise = this.tail.catch(() => {}).then(async () => { if (this.ownsDescriptor) await descriptorClose(this.fd); });
+    return this.closePromise;
+  }
 }
