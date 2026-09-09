@@ -42,6 +42,7 @@ class ShadeformTeardownDurabilityTests(unittest.TestCase):
         )
         self.env_file = self.root / "env"
         self.env_file.write_text("SHADEFORM_API_KEY=fixture-only\n", encoding="utf-8")
+        self.env_file.chmod(0o600)
 
     def tearDown(self) -> None:
         sf.RUNTIME_ROOT, sf.MARKDOWN_LEDGER, sf.COST_LEDGER, sf.INCIDENTS = self.originals

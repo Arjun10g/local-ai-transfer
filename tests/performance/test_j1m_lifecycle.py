@@ -624,6 +624,7 @@ class StaticSafetyTests(unittest.TestCase):
             sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
             env = root / "env"
             env.write_text("SHADEFORM_API_KEY=stub-api\n", encoding="utf-8")
+            env.chmod(0o600)
             sf.write_owned_resource(sf.OwnedResource(
                 phase_id=phase, run_id="test", instance_id="instance-cost-1", ownership_nonce="0123456789abcdef0123456789abcdef",
                 ssh_key_id="key-cost-1", ssh_key_name="key", gpu="A100", cloud="hyperstack", region="r", hourly_usd=1.0,
@@ -656,6 +657,7 @@ class StaticSafetyTests(unittest.TestCase):
             sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
             env = root / "env"
             env.write_text("SHADEFORM_API_KEY=stub-api\n", encoding="utf-8")
+            env.chmod(0o600)
             record = sf.OwnedResource(
                 phase_id=phase, run_id="test", instance_id="instance-post-receipt-1", ownership_nonce=nonce,
                 ssh_key_id="key-post-receipt-1", ssh_key_name="key", gpu="A100", cloud="hyperstack", region="r",
@@ -708,6 +710,7 @@ class StaticSafetyTests(unittest.TestCase):
             sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
             env = root / "env"
             env.write_text("SHADEFORM_API_KEY=stub-api\n", encoding="utf-8")
+            env.chmod(0o600)
             try:
                 sf.write_owned_resource(record)
                 with mock.patch.object(teardown.shadeform, "verify_owned_instance_before_delete", return_value={}), \
@@ -761,6 +764,7 @@ class StaticSafetyTests(unittest.TestCase):
             sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
             env = root / "env"
             env.write_text("SHADEFORM_API_KEY=stub-api\n", encoding="utf-8")
+            env.chmod(0o600)
             record = sf.OwnedResource(
                 phase_id=phase, run_id="test", instance_id="instance-retry-1", ownership_nonce=nonce,
                 ssh_key_id="key-retry-1", ssh_key_name="key", gpu="A100", cloud="hyperstack", region="r",
@@ -800,6 +804,7 @@ class StaticSafetyTests(unittest.TestCase):
             sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
             env = root / "env"
             env.write_text("SHADEFORM_API_KEY=stub-api\n", encoding="utf-8")
+            env.chmod(0o600)
             record = sf.OwnedResource(
                 phase_id=phase, run_id="test", instance_id="instance-dispatch-1", ownership_nonce=nonce,
                 ssh_key_id="key-dispatch-1", ssh_key_name="key", gpu="A100", cloud="hyperstack", region="r",
@@ -848,6 +853,7 @@ class StaticSafetyTests(unittest.TestCase):
             sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
             env = root / "env"
             env.write_text("SHADEFORM_API_KEY=stub-api\n", encoding="utf-8")
+            env.chmod(0o600)
             try:
                 with mock.patch.object(teardown.shadeform, "read_owned_resource", return_value=record), \
                         mock.patch.object(teardown.shadeform, "verify_owned_instance_before_delete", return_value={}), \
@@ -890,6 +896,7 @@ class StaticSafetyTests(unittest.TestCase):
                 sf.MARKDOWN_LEDGER.write_text(sf.LEDGER_HEADER + "\n", encoding="utf-8")
                 env = root / "env"
                 env.write_text("SHADEFORM_API_KEY=stub-api\n", encoding="utf-8")
+                env.chmod(0o600)
                 append_calls = []
                 try:
                     def append_cost(event):
@@ -934,6 +941,7 @@ class StaticSafetyTests(unittest.TestCase):
             sf.COST_LEDGER = root / "cost.jsonl"
             env = root / "env"
             env.write_text("SHADEFORM_API_KEY=stub-api\n", encoding="utf-8")
+            env.chmod(0o600)
             bad_destination = root / "destination-file"
             bad_destination.write_text("not a directory", encoding="utf-8")
             salvage_source = root / "receipt.json"

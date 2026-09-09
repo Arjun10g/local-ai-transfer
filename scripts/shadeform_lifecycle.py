@@ -68,6 +68,10 @@ MAX_COST_EVENT_BYTES = 65_536
 MAX_MARKDOWN_LEDGER_BYTES = 1_048_576
 MAX_INCIDENT_CATALOG_BYTES = 1_048_576
 MAX_INCIDENT_EVIDENCE_BYTES = 1_048_576
+MAX_MUTATION_ENV_BYTES = 16 * 1024
+MAX_MUTATION_ENV_LINES = 128
+MAX_MUTATION_ENV_LINE_BYTES = 4096
+MAX_MUTATION_ENV_VALUE_CHARS = 2048
 OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 STAT_SUPPORTS_DIR_FD = os.stat in os.supports_dir_fd
 COST_EVENT_FIELDS = frozenset({
@@ -88,6 +92,30 @@ COST_GENESIS_FIELDS = frozenset({
 # in this repository, because a preflight that depends on a file outside the
 # checkout is a preflight that silently stops happening.
 INCIDENT_LOG = ROOT / "docs" / "90_operations" / "SHADEFORM_FAILURE_MODES.md"
+
+# This is intentionally narrower than the read-only preflight's catalogue
+# policy.  Mutation callers may consume only keys used by the lifecycle and
+# its reviewed external-tools gate.  In particular, a typo or a legacy key
+# must not silently become part of the provider request.
+MUTATION_ENV_KEYS = frozenset({
+    "SHADEFORM_API_KEY",
+    "SHADEFORM_SSH",
+    "SHADEFORM_MAX_TOTAL_COST_USD",
+    "SHADEFORM_GPU_TYPES",
+    "SHADEFORM_CLOUD",
+    "SHADEFORM_EXCLUDED_CLOUDS",
+    "SHADEFORM_REGION",
+    "SHADEFORM_GPU_COUNT",
+    "SHADEFORM_MAX_HOURLY_COST_USD",
+    "SHADEFORM_IMAGE",
+    "SHADEFORM_AUTO_TERMINATE_HOURS",
+    "SHADEFORM_QA_APPROVED_GPU",
+    "SHADEFORM_QA_APPROVED_CLOUD",
+    "SHADEFORM_QA_APPROVED_REGION",
+    "SHADEFORM_QA_APPROVED_INSTANCE_TYPE",
+    "SOL_SHADEFORM_REVIEWED",
+    "SOL_REMOTE_EXTERNAL_TOOLS_REVIEWED",
+})
 
 RESOURCE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{5,127}$")
 PHASE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
@@ -199,24 +227,103 @@ def utc_now() -> datetime:
 
 
 def load_env(path: Path) -> dict[str, str]:
-    """Load simple dotenv entries without mutating or printing the process environment."""
+    """Load an owner-private, descriptor-bound mutation environment.
 
-    result: dict[str, str] = {}
-    if not path.is_file():
-        raise ShadeformError(f"environment file does not exist: {path}")
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
+    Read-only catalogue planning intentionally uses the separate, less
+    privileged ``readonly_preflight.parse_env`` parser.  Every provider
+    mutation/recovery caller in this module family comes through this stricter
+    loader: the file and its canonical parent are opened by descriptor, the
+    file identity is checked before and after the bounded read, and the
+    assignment grammar is exact.  No value is included in an exception.
+    """
+
+    try:
+        requested = Path(os.path.abspath(os.fspath(path)))
+    except (TypeError, ValueError, OSError) as exc:
+        raise ShadeformError("environment file path is invalid") from exc
+    parent_descriptor = _open_private_canonical_parent(
+        requested, label="environment file",
+    )
+    descriptor = -1
+    try:
+        fcntl.flock(parent_descriptor, fcntl.LOCK_SH)
+        try:
+            descriptor = os.open(
+                requested.name, os.O_RDONLY | os.O_NOFOLLOW,
+                dir_fd=parent_descriptor,
+            )
+        except FileNotFoundError as exc:
+            raise ShadeformError("environment file is unavailable") from exc
+        except OSError as exc:
+            raise ShadeformError("environment file no-follow open failed") from exc
+        fcntl.flock(descriptor, fcntl.LOCK_SH)
+        raw = _read_private_file_at(
+            descriptor,
+            parent_descriptor=parent_descriptor,
+            path=requested,
+            limit=MAX_MUTATION_ENV_BYTES,
+            label="environment file",
+        )
+        return _parse_mutation_env(raw)
+    except ShadeformError:
+        raise
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ShadeformError("environment file is invalid") from exc
+    finally:
+        if descriptor >= 0:
+            with contextlib.suppress(OSError):
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+        with contextlib.suppress(OSError):
+            fcntl.flock(parent_descriptor, fcntl.LOCK_UN)
+        os.close(parent_descriptor)
+
+
+def _parse_mutation_env(raw: bytes) -> dict[str, str]:
+    """Parse the bounded canonical dotenv grammar used by mutation paths."""
+
+    if not isinstance(raw, bytes) or not raw or not raw.endswith(b"\n"):
+        raise ShadeformError("environment file must be a complete bounded text file")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ShadeformError("environment file encoding is invalid") from exc
+    if "\r" in text or "\x00" in text:
+        raise ShadeformError("environment file contains invalid control data")
+    lines = text.split("\n")[:-1]
+    if len(lines) > MAX_MUTATION_ENV_LINES:
+        raise ShadeformError("environment file has too many lines")
+    values: dict[str, str] = {}
+    for line in lines:
+        if len(line.encode("utf-8")) > MAX_MUTATION_ENV_LINE_BYTES:
+            raise ShadeformError("environment file line exceeds its bound")
+        if not line or line.startswith("#"):
             continue
+        if "=" not in line:
+            raise ShadeformError("environment file assignment is malformed")
         key, value = line.split("=", 1)
-        key = key.removeprefix("export ").strip()
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) is None:
-            continue
-        value = value.strip()
-        if len(value) > 1 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        if (
+            key not in MUTATION_ENV_KEYS
+            or re.fullmatch(r"[A-Z][A-Z0-9_]*", key) is None
+            or key in values
+        ):
+            raise ShadeformError("environment file key is unknown or duplicated")
+        if len(value) > MAX_MUTATION_ENV_VALUE_CHARS:
+            raise ShadeformError("environment file value exceeds its bound")
+        if value != value.strip():
+            raise ShadeformError("environment file value has noncanonical whitespace")
+        if len(value) >= 2 and value[0] in {"'", '"'}:
+            if value[-1] != value[0] or len(value) == 2:
+                raise ShadeformError("environment file quoting is malformed")
             value = value[1:-1]
-        result[key] = value
-    return result
+            if value[0].isspace() or value[-1].isspace():
+                raise ShadeformError("environment file quoted value has noncanonical whitespace")
+        elif value[:1] in {"'", '"'} or value[-1:] in {"'", '"'}:
+            raise ShadeformError("environment file quoting is malformed")
+        if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+            raise ShadeformError("environment file value contains control data")
+        values[key] = value
+    return values
 
 
 def require_env(env: dict[str, str], name: str) -> str:
