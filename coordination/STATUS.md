@@ -1,42 +1,60 @@
 # Program Status
 
-## Current governance snapshot — 2026-09-08
+## Current governance snapshot — 2026-09-09
 
-- Audited integrated source baseline: `d195235b6a370d377785b6340b15ebc8e47585e3`;
-  this documentation refresh is a descendant and must not be treated as a
-  self-referential source hash. Overall release/full-access state remains
-  `BLOCKED` / `NOT_READY`.
-- The integrated source contains the doubly accepted Graph composition/auth and
-  restart hardening (`55c8a75`), strict Shadeform mutation-env projection and
-  minimized subprocesses (`e3b7238`), and the manual Graph journal-resolution
-  guard (`48312bf`, integrated by `d195235`). Graph auth composition/read paths
-  are source-present but not live-proven; writes without a healthy production
-  ActionJournal refuse before preview, and manual Graph resolution remains
-  blocked without provider proof.
+- Audited integrated source baseline: exact `main@6e0d12c0023068456b97fc9c857a3538ca612421`.
+  This documentation descendant is not a self-referential source hash. Overall
+  release/full-access state remains `BLOCKED` / `NOT_READY`; no phase or release
+  gate is advanced.
+- Protected Shadeform mutation-environment source is merged through accepted
+  `c8c28a9`. Mutation commands default to ignored
+  `.secrets/shadeform.env`; the operator must first create a nonsymlink,
+  real-UID-owned parent with no group/world permission bits (`0700`
+  recommended for projection, `0500` accepted for loading). The projection is
+  one-way and create-once at mode `0600`. A normal project-root `.env` remains
+  intentionally refused for mutations, and no secret or provider execution is
+  accepted by this source/setup work.
+- Metadata-only Windows/HF artifact-handoff source is accepted at `c2801ec` and
+  merged by `e2e5156`. It validates the fixed external model identity, bounded
+  receipt digests, package exclusion, canonical signed payload, and detached
+  signature shape. The public validator has no trust anchor and always returns
+  `REFUSED_NOT_ACTIVATED`; no real signed artifact, model bytes, custody,
+  Windows verifier activation, or release acceptance exists.
+- The inherited-descriptor ActionJournal WAL is accepted at `2dda060` and
+  merged by `6e0d12c`. It supplies canonical integrity-bound frames, ordered
+  replay, two-stage fsync commit, exact incomplete-tail recovery, provider-
+  private proof ordering, restart tombstones, and failure-isolated cleanup.
+  It does not supply the native secure descriptor owner/publication boundary,
+  cross-process single-writer exclusion, authenticity/anti-rollback anchor,
+  compaction, or automatic provider reconciliation. Graph mutations therefore
+  remain unavailable for production use and ambiguous outcomes remain
+  unresolved rather than retried or manufactured as success.
+- Current evidence for the integrated delta is separately scoped: focused
+  journal/Graph Node 210 discovered, 209 passed, 0 failed, 1 existing TODO;
+  handoff/release 63/63; env 26/26; QA-runner unit checks 27/27; conformance
+  11/11. Static inventory records 152 tracked JSON files, of which 151 are
+  strict-valid and one is an intentional duplicate-key hostile fixture; the
+  host import graph is 29 modules/71 relative edges/0 cycles. Safe QA discovers
+  59 tests with 0 missing/unknown and 65 records (1 PASS/64 expected SKIP), so
+  overall QA remains `BLOCKED`.
+- The broader Node 350 total/349 passed/0 failed/0 skipped/1 known TODO and
+  Python 663/663 across 30/33 safe files are historical evidence from
+  `d195235b6a370d377785b6340b15ebc8e47585e3`, not current `6e0d12c` proof.
+  Historical evaluation results 13/32 and 28/32/11/34 also remain separate and
+  do not establish model/tool acceptance.
 - Current evaluation identity remains 33 tools/37 cases with `max_cases=64`
-  ceiling semantics. Historical 13/32 and 28/32/11/34 results remain separate.
-  Remote execution is false; only two no-model canary probes are permitted,
-  with no fall-through or direct execution.
-- Production ActionJournal transport/proof authority remains unavailable.
-  External salvage is unavailable and legacy lifecycle is non-green. Ledger
-  preflight remains `SAFE_TO_MIGRATE_NOW=NO`; current evidence is
-  parse-refused/unavailable, with no genesis or spend authorization, and orphan
-  receipts/unmatched incidents require adjudication. Bookkeeping is not spend
-  authorization. Previously exposed credentials require rotation/revocation.
-- Source-only evidence is bounded and separately scoped: Node 350 total,
-  349 passed, 0 failed, 0 skipped, 1 known TODO; Python 663/663 with 0
-  failures/errors/skips across 30/33 safe files; JSON 151/151; import graph
-  28 modules, 63 relative edges, 0 cycles. QA discovers 57 tests with 0
-  missing/unknown and 63 records (1 PASS, 62 expected SKIP); overall QA remains
-  `BLOCKED`. These figures are not compile, live-provider, model, Windows,
-  production, or target evidence.
-- Missing hardware fields, approved HF artifact custody/model-quality evidence,
-  native compile and Windows process/broker evidence, provider/account consent,
-  production bridge/proof adapter/tombstones, and target acceptance remain
-  release gates.
+  ceiling semantics. Remote execution is false; only two no-model canary probes
+  are permitted, with no fall-through or direct execution. External salvage is
+  unavailable, legacy lifecycle is non-green, and ledger preflight remains
+  `SAFE_TO_MIGRATE_NOW=NO`; bookkeeping is not spend authorization.
+- Previously exposed credentials, including the leaked HF token, require
+  source-side rotation/revocation before reuse. Missing real signed artifact
+  custody and model-quality evidence, provider accounts/consent, native
+  compile/secure owner/broker evidence, exact Windows hardware/backend receipt,
+  live tool evidence, and target acceptance remain release gates.
 
 The older status bullets below are retained as historical interval evidence and
-are superseded wherever they state a pre-`a9d2388` current baseline.
+are superseded by the 2026-09-09 snapshot wherever they state current truth.
 
 - Overall release/full-access state: `BLOCKED` / `NOT_READY`
 - Authoritative source baseline: `main@fa5aa38c806ba98d269ce304325e178416584bbe`
@@ -56,7 +74,7 @@ are superseded wherever they state a pre-`a9d2388` current baseline.
   approval reference remain unset.
 - Backend ladder: CPU mandatory; Vulkan candidate; SYCL experimental
 - Critical path: contracts → fixture vertical slice → controlled model artifact → real CPU slice → tools → hardening/release
-- Shadeform policy: project `.env`, ownership-bound lifecycle, read-only catalogue before create, cost preflight, provider backstop longer than run, salvage before teardown, no idle instance
+- Shadeform policy: mutation credentials use protected `.secrets/shadeform.env`; the read-only catalogue may separately accept an explicit project-root `.env`. Lifecycle remains ownership-bound with read-only catalogue before create, cost preflight, provider backstop longer than run, salvage before teardown, and no idle instance
 - Known target: Dell Intel Core Ultra 7 vPro Enterprise-class platform; integrated `Intel Graphics` only, driver `32.0.101.8247`, 32 GB memory reported at 5600 MT/s, motherboard `039NNG A00`. Exact CPU SKU, GPU PNP/device ID/shared memory, OS/Vulkan facts, and measured available-memory topology still require the read-only receipt, so accelerated target promotion and final Phase 8 acceptance cannot yet be claimed
 - Security note: `coordination/SECURITY_INCIDENTS.md` records the legacy reference credential exposure and SI-002's stopped local transfer incident; both require source-side credential rotation/revocation. No credential value, URL, or secret is recorded here.
 
@@ -65,10 +83,21 @@ are superseded wherever they state a pre-`a9d2388` current baseline.
 - Source state is tracked independently from evidence and release approval. A
   merged implementation is not a runtime receipt, an independent audit, or a
   gate approval; no Phase gate is advanced by this refresh.
-- TOOL-032's durable action-journal source is merged on `main` from
-  `55f3dfd` (implementation) through `65decba` (merge). Its production
-  store is deliberately unavailable, so journal-dependent production actions
-  remain hidden/refused.
+- TOOL-032's action-journal core is merged from `55f3dfd` by `65decba`; the
+  inherited-descriptor WAL is accepted at `2dda060` and integrated by
+  `6e0d12c`. The WAL removes post-bootstrap pathname lookup and provides
+  bounded durable integrity/recovery semantics, but production remains blocked
+  until a native secure descriptor owner supplies durable publication,
+  single-writer exclusion, and anti-rollback authority, and provider recovery
+  can reconcile ambiguous outcomes.
+- The protected Shadeform mutation-env layout is source-accepted at `c8c28a9`.
+  It requires explicit owner-private `.secrets/` setup and does not authorize a
+  provider mutation, credential use, remote run, or spend.
+- The Windows artifact-handoff contract/validator is accepted at `c2801ec` and
+  integrated by `e2e5156`. Its public path is deliberately activation-refused;
+  real signed receipts, an approved external trust anchor, custody, Windows
+  verifier integration, model verification/load, and release acceptance remain
+  absent.
 - Eight independently source-reviewed Windows/runtime boundaries are on `main`:
   inert Windows read-only filesystem source by `1741c86`, inert hardware-
   attestor source by `e579d49`, inert journal-helper/transport source by
@@ -93,10 +122,11 @@ are superseded wherever they state a pre-`a9d2388` current baseline.
   neither predecessor nor either merged source confers an executable capability.
 - The inert Win32 journal-storage boundary is source-merged from `d0ed670` by
   `3d46ccb`; the journal container source is source-merged by `16b4b0e`.
-  Even with the inert helper source merged by `645f348` and the test-only
-  client merged by `4b8e737`, the production ActionJournal store/transport
-  remains unavailable because there is no activated trusted supervisor,
-  production transport/import, package wiring, compile, or target evidence.
+  Even with the inert helper source merged by `645f348`, test-only client
+  merged by `4b8e737`, and descriptor WAL merged by `6e0d12c`, the native
+  secure owner, production bridge/package wiring, compile, authenticity/
+  anti-rollback, single-writer, compaction, provider-reconciliation, and target
+  evidence remain absent.
 - The external lifecycle hardening is source-merged at `91de464`. Remote
   execution remains disabled by the source guard (`REMOTE_EXECUTION_ENABLED=False`),
   and no approved/committed cost-ledger genesis or new provider run is claimed.
