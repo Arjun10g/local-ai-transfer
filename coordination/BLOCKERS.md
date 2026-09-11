@@ -71,8 +71,12 @@
   `receipt_json_number_lexical`, `receipt_receipt_schema_invalid`,
   `display_incomplete_against_ledger`, `display_malformed_rows`. These are
   pre-existing defects newly surfaced for the adjudicator, not regressions, and
-  `evidence_complete` remains false. Revisiting the literal requires its own
-  ADR and is tracked as `LEDGER-GENESIS-001`.
+  `evidence_complete` remains false. `LEDGER-GENESIS-001` has since been
+  **executed** by Sol (see B-004), which unblocked the runs by archiving the
+  legacy ledger and creating a canonical genesis beside it — but it did **not**
+  change this literal, which is still `False` in source, and it did not close
+  the incidents-schema findings. A genesis does not retroactively validate the
+  legacy rows. Revisiting the literal still requires its own ADR.
 - **B-004's prescribed non-A100 canary is unexecutable by the code, and Sol
   accepted a recorded deviation.** `execute()` refuses canary mode outright
   (`scripts/j1m_orchestrator.py:2023`, "no-model remote canary execution
@@ -98,9 +102,12 @@
   `experiments/` moved 0755 → 0700 and 22 `*.deletion-receipt.json` files
   0644 → 0600; content byte-identical, zero git diff, because directory modes
   are untracked and the files are gitignored. 0600 is the mode the lifecycle
-  itself writes and validates for receipts. `experiments/runtime/cost-ledger.jsonl`
-  settles at USD 6.767912 across 108 rows and 43 distinct identities, with a
-  pending-owner count of exactly zero. The single orphan receipt
+  itself writes and validates for receipts. The **legacy** ledger settled at
+  USD 6.767912 across 108 rows and 43 distinct identities; it has since been
+  archived and superseded by the executed genesis recorded in B-004, so
+  `experiments/runtime/cost-ledger.jsonl` is now the sole genesis event
+  carrying that figure forward as `prior_settled_spend_usd`. The single orphan
+  receipt
   `j1m-loopback-no-orphan` / `instance-loopback-1` (`actual_cost_usd` 7.1e-05)
   is adjudicated by Sol as a non-billable loopback test artifact; the other 21
   receipts all match a ledger group. No tooling command exists to apply that
@@ -369,10 +376,77 @@
 - Fact (spend, 2026-09-11, refresh v6): spend authorization now exists and is
   bounded by ADR-0005 — standing user authorization, program hard cap USD 50,
   per-run caps recorded per run (`remote-eval-20260911-b`: USD 10.00 / 4 h).
-  The first attempt (`remote-eval-20260911-a`) stopped pre-spend at USD 0.00
-  with no instance created. Cumulative settled spend remains USD 6.767912 with
-  zero pending reservations. Authorized spend is not evidence and does not
-  close this blocker.
+  Authorized spend is not evidence and does not close this blocker.
+- Fact (launch state, 2026-09-11, refresh v6): **no run has executed.**
+  `remote-eval-20260911-a` stopped pre-spend at USD 0.00 with no instance
+  created. `remote-eval-20260911-b` is `PENDING — launch-ready, awaiting
+  operator permission`: it reached a launch-ready state and was then blocked at
+  the tool layer by the Claude Code auto-mode permission classifier, a
+  **harness control and not a project gate**. No project refusal, blocker, or
+  policy stopped it, and the lane declined to re-shape or route around the
+  denial. A human approval is required. USD 0.00 spent, no instance created,
+  `.secrets/j1m/` empty with zero residue, no reservation row; the destination
+  `artifacts/qwen35-9b/remote-eval-20260911-b/` exists at 0700 and is empty.
+  There is no score, no oracle delta, no retention ratio, and no remote hash
+  verification. B-004's activation-reliability question is therefore still
+  untested.
+- Fact (pre-spend refusals, 2026-09-11, refresh v6): three launch attempts of
+  `--mode eval --evaluate-comparators q8 --execute` returned typed
+  `input_rejected` before any provider call, each traced by stepping the
+  pre-spend gates in isolation, all at USD 0.00. (1) **Staging** — the recorded
+  command used a relative `--artifact-destination`, which
+  `prepare_artifact_destination` (`scripts/j1m_orchestrator.py:408`) refuses
+  because it computes `relative_to(j1m_runner.PRIVATE_OUTPUT_ROOT)` against the
+  absolute repository root. Not a code defect; refusing an ambiguous
+  destination before anything is billable is correct and must not be loosened.
+  Ergonomic follow-up `J1M-CLI-RELATIVE-DESTINATION-001`. (2) **Provider
+  backstop** — `SHADEFORM_AUTO_TERMINATE_HOURS=2` against a 1.94 h plan gives
+  1.03x headroom where `scripts/shadeform_lifecycle.py:190` requires
+  `MIN_BACKSTOP_MARGIN = 1.10`, refused as a typed `BackstopError`
+  (`:3374-3386`). Sol raised the ceiling to 3 — a deliberate decision, which is
+  how the code itself frames it at `:3384` — putting the worst case at
+  3 h × USD 1.35 = USD 4.05, inside the USD 10.00 run cap. Key names only; no
+  value is reproduced. (3) **Legacy cost ledger** — `sf.list_candidates`
+  validates the ledger against `local_bmo.shadeform.cost-event.v2` (`:80`) and
+  the 108-line 2026-09-04 file failed canonicalization at line 1 with
+  `stored cost event is not canonical` (`:1989`). This blocked **every** run,
+  and it is the concrete, reproducible form of the abstract
+  `SAFE_TO_MIGRATE_NOW` / `legacy_schema_or_owner_binding_missing` blocker this
+  file had been carrying in the abstract.
+- Fact (cost-ledger genesis executed, 2026-09-11, refresh v6): the legacy
+  ledger — sha256
+  `756daa504fc9a1af40f32ce4af777935fb0bcdd00b01a1ad8688ab2c02f4c692`, 108 lines
+  holding 43 settled rows summing USD 6.767912 plus 65 pending rows across 22
+  pending-only owners whose instances already hold deletion receipts, which Sol
+  adjudicated as historical stale estimates and non-billable — was moved to
+  `experiments/runtime/legacy/cost-ledger.legacy-20260904.jsonl` (0600 in a
+  0700 directory) and copied to
+  `archive/worktree-runtime-state-20260911/main-cost-ledger.legacy-20260904.jsonl`
+  with `SHA256SUMS.ledger`. `scripts/shadeform/initialize_cost_ledger.py` then
+  ran with `--program local-bmo-shadeform --currency USD --budget-cap-usd 50
+  --prior-settled-spend-usd 6.767912 --current-pending-owner-count 0`, the two
+  required evidence digests, and the reviewed-genesis confirmation, returning
+  `status: created`. Verified read-only here: the legacy file hashes to exactly
+  that sha256 at 108 lines, and the new `experiments/runtime/cost-ledger.jsonl`
+  is 438 bytes, one line, mode 0600. After genesis, `list_candidates` returned
+  9 candidates with exactly one matching the pinned target (hyperstack /
+  montreal-canada-2 / A100_80G / USD 1.35 per hour), and
+  `create_ephemeral_ssh_key` plus `assert_persisted_argv_handle` passed with
+  the key directory destroyed afterwards. **Residual, explicitly not closed:**
+  the preflight's hardcoded literal `"safe_to_migrate_now": False`
+  (`scripts/shadeform_ledger_migration_preflight.py:1110`) is unchanged in
+  source and the incidents-schema findings stand. A genesis does not
+  retroactively validate the legacy rows; it archives them and starts a
+  canonical ledger beside them. Revisiting the literal still requires its own
+  ADR.
+- Fact (dry-run gaps, 2026-09-11, refresh v6): the offline gate passed at 142
+  argv / 0 refused while two of the three blockers above stood, because it
+  exercises a fake environment and a fake ledger. It checks neither the real
+  environment's backstop against the configured runtime
+  (`J1M-DRYRUN-REAL-ENV-BACKSTOP-001`) nor the real ledger's canonical validity
+  (`J1M-DRYRUN-LEDGER-VALIDITY-001`). Either would have caught its blocker
+  offline, before a launch attempt and at zero cost. A gate PASS proves the
+  argv surface, not the environment the run will meet.
 - Needed from: S2 candidate plan, S4 lifecycle review, and S0 authorization.
 - State: OPEN; does not block local mocked/source hardening.
 - Source/evidence correction: lifecycle authority hardening is source-merged

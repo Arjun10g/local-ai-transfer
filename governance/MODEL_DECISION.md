@@ -57,6 +57,39 @@
   per-run caps recorded per run (`remote-eval-20260911-b`: USD 10.00 / 4 h).
   The lifecycle sequence is unchanged and still fail-closed at every step.
   Authorized spend is not evidence and is not gate approval.
+- **No run has executed, so the shipping-profile score is still unknown.**
+  `remote-eval-20260911-b` is `PENDING — launch-ready, awaiting operator
+  permission`: it reached a launch-ready state on 2026-09-11 and was blocked at
+  the tool layer by the Claude Code auto-mode permission classifier, a harness
+  control rather than a project gate. USD 0.00 spent, no instance created,
+  `.secrets/j1m/` empty. There is no score, no oracle delta, no retention
+  ratio, and no remote hash re-verification of the Q4 identity — the recorded
+  identity figures remain static file inspection only. Three earlier attempts
+  returned typed `input_rejected` before any provider call: a relative
+  `--artifact-destination` refused by `prepare_artifact_destination`
+  (`scripts/j1m_orchestrator.py:408`), a provider backstop at 1.03x against the
+  required `MIN_BACKSTOP_MARGIN = 1.10`
+  (`scripts/shadeform_lifecycle.py:190`, refused at `:3374-3386`), and the
+  legacy cost ledger failing canonical validation against
+  `local_bmo.shadeform.cost-event.v2` at line 1
+  (`stored cost event is not canonical`, `:1989`) — the last of which blocked
+  every run.
+- **Reviewed cost-ledger genesis executed.** The legacy ledger (sha256
+  `756daa504fc9a1af40f32ce4af777935fb0bcdd00b01a1ad8688ab2c02f4c692`, 108
+  lines: 43 settled rows summing USD 6.767912, plus 65 pending rows across 22
+  pending-only owners whose instances already hold deletion receipts,
+  adjudicated by Sol as historical stale estimates and non-billable) was
+  archived to `experiments/runtime/legacy/` at 0600 in a 0700 directory and
+  copied into `archive/worktree-runtime-state-20260911/` with
+  `SHA256SUMS.ledger`; `scripts/shadeform/initialize_cost_ledger.py` then
+  returned `status: created` for a program cap of USD 50 with
+  `prior_settled_spend_usd` 6.767912 and a pending-owner count of zero.
+  Verified read-only: the legacy file hashes to that exact digest at 108 lines,
+  and the new ledger is 438 bytes, one line, mode 0600. Residual, not closed:
+  the preflight's hardcoded `"safe_to_migrate_now": False`
+  (`scripts/shadeform_ledger_migration_preflight.py:1110`) is unchanged and the
+  incidents-schema findings stand. A genesis does not retroactively validate
+  the legacy rows.
 - **Quality corpus: authored and merged**, superseding the v5 "not authored"
   statement. 1,336 cases across 13 categories, reproduced in this worktree at
   exit 0 in both validator modes, against a 1,180 floor and a 1,298 target.

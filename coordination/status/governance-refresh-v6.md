@@ -8,7 +8,8 @@
 - **Current phase:** Source-hardening governance reconciliation; formal gates unchanged
 - **Primary task ID:** GOV-TRUTH-008
 - **Secondary task ID, if any:** none
-- **Task state:** READY_FOR_REVIEW (Phase A complete; Phase B pending Sol's run results)
+- **Task state:** READY_FOR_REVIEW (Phase A and Phase B complete; the run's
+  numbers will be a separate addendum when the run executes)
 - **Last merged `main` commit:** `1e341e9145394f4ece2005058fe80f0a1270c470`
 - **Audited integrated source baseline:** exact
   `main@f89c1684ea051e1c9c92f944cb080d424a086f55` (the last source merge)
@@ -20,11 +21,13 @@ and release-gate records to `main` after a large integration interval, and
 record the Sol decisions and factual corrections established on 2026-09-11.
 This is a docs-only interval; it advances no gate.
 
-The interval is deliberately split. **Phase A (this packet)** covers everything
-independent of the live evaluation run. **Phase B** folds in the results of
-`remote-eval-20260911-b` once Sol relays them. Every current-truth file carries
-an explicit PENDING marker for that run so no reader can mistake its absence
-for a negative result.
+The interval was worked in two phases. **Phase A** covered everything
+independent of the evaluation run. **Phase B** was expected to fold in that
+run's results; instead it records why there are none. The run has **not
+executed**, so every current-truth file carries an explicit
+`PENDING — launch-ready, awaiting operator permission` marker rather than a
+result, and no reader can mistake its absence for a negative result. The run's
+numbers will be a separate addendum when they exist.
 
 ## Base and scope
 
@@ -37,7 +40,7 @@ for a negative result.
   flips) and this refresh are documentation descendants, not self-referential
   source hashes. The previous baseline `263f114` and the v5 snapshots are
   retained and retitled historical/superseded.
-- Files changed in Phase A: `coordination/STATUS.md`,
+- Files changed across Phase A and Phase B: `coordination/STATUS.md`,
   `coordination/RELEASE_GATES.md`, `coordination/BLOCKERS.md`,
   `coordination/TASK_CLAIMS.md`, `coordination/POLICY_STATUS.md`,
   `coordination/DECISIONS.md`, `governance/MODEL_DECISION.md`,
@@ -92,12 +95,32 @@ All from the worktree root, and all offline:
 - Host import graph over `lae-host.mjs` plus `host/**/*.mjs`, by the v4/v5
   method
 - `git worktree list`, `git for-each-ref refs/heads`, `git log --first-parent`
+- Phase B, read-only verification only, no contents of `.secrets/*` read or
+  printed: `shasum -a 256` and `wc -l` over the archived legacy ledger,
+  `ls -la` metadata (size and mode) over the new ledger, the legacy directory,
+  the archive copy, `.secrets/j1m/` and the run-b destination, and source reads
+  of `prepare_artifact_destination`, `MIN_BACKSTOP_MARGIN`, the cost-event
+  schema constant and canonicalization refusal, and the genesis script's
+  argparse surface
 - `git diff --stat`, `git diff --check`, and `git rev-parse --verify` on every
   SHA written into these documents
 
-No provider, network, orchestrator, lifecycle, ssh, or model command was run,
-and nothing under `main`'s `.secrets/`, `artifacts/`, `experiments/` or `out/`
-was read or modified.
+No provider, network, orchestrator, lifecycle, ssh, model, or ledger-mutating
+command was run, and nothing under `main` was modified.
+
+Stated precisely, because Phase A and Phase B differ here. During Phase A,
+while a launch was believed to be in flight, nothing under `main`'s
+`.secrets/`, `artifacts/`, `experiments/` or `out/` was read at all. During
+Phase B, verifying the genesis and launch state required **read-only metadata**
+from three of those: `shasum -a 256` and `wc -l` over the archived legacy
+ledger, `ls` size and mode over the new ledger and the legacy directory, an
+`ls -A` listing of `.secrets/j1m/` to confirm it is empty, and an `ls` of the
+run-b destination to confirm it exists at 0700 and is empty. **No file content
+under `.secrets/` was read, printed, or reproduced anywhere**, no ledger row was
+printed, and nothing was written, moved, or deleted. The one local mutation
+this session made at any point was `chmod 700` on its **own** worktree's
+`artifacts` and `artifacts/qwen35-9b`, the documented operator precondition for
+the dry-run gate; it is invisible to git, and `main`'s tree was never touched.
 
 ## Evidence
 
@@ -244,6 +267,12 @@ Exact numbers, reproduced in this worktree on 2026-09-11:
   `UNCLAIMED` follow-ups, `COMPARATOR-BF16-ARM-001` (S2) and
   `LEDGER-GENESIS-001` (S4). `POLICY-DOC-PROCESS-TOOL-001` was **not** added,
   because its precondition did not hold: M6(a) was fixed in this refresh.
+  In Phase B, `LEDGER-GENESIS-001` moved to `DONE_OPERATOR_ACTION` — a state
+  defined in this refresh's claims vocabulary for operator/Sol action completed
+  outside source, explicitly not a gate approval — and three further `UNCLAIMED`
+  rows were added: `J1M-CLI-RELATIVE-DESTINATION-001`,
+  `J1M-DRYRUN-REAL-ENV-BACKSTOP-001` and `J1M-DRYRUN-LEDGER-VALIDITY-001`, all
+  S4.
 
 ## Findings and changed assumptions
 
@@ -387,6 +416,139 @@ because a current-truth document that repeated them would be wrong.
   occurrences added by this refresh are statements of the prohibition itself,
   not measurements.
 
+## Phase B — the run did not execute
+
+Phase B was scoped to fold in the results of `remote-eval-20260911-b`. There
+are none. What follows is the record of why, verified read-only in the tree.
+
+### Launch state
+
+`remote-eval-20260911-b` is **`PENDING — launch-ready, awaiting operator
+permission`**. It passed its pre-spend gates and was then blocked at the tool
+layer by the Claude Code auto-mode permission classifier. That is a **harness
+control, not a project gate**: nothing in this repository refused it, no
+blocker fired, and no policy stopped it. The lane declined to re-shape, wrap,
+or route around the denial, which is the correct response to a control whose
+purpose is to hold a billable cloud-provisioning command for a human. **A human
+approval is required.**
+
+Verified state, all read-only, no contents of `.secrets/*` printed or
+inspected:
+
+| Check | Result |
+|---|---|
+| Spend | **USD 0.00** |
+| Instance created | **none**; no teardown applicable |
+| `.secrets/j1m/` | **empty** — zero residue, key directory destroyed |
+| `artifacts/qwen35-9b/remote-eval-20260911-b/` | exists, mode **0700**, **0 entries** |
+| Score / oracle delta / retention ratio | **none** |
+| Remote hash re-verification of the Q4 identity | **none** — recorded identity figures remain static file inspection |
+
+### Three pre-spend refusals, traced by stepping the gates in isolation
+
+All three returned typed `input_rejected` before any provider call, at USD 0.00.
+
+1. **Staging — a relative `--artifact-destination`.** Verified:
+   `prepare_artifact_destination` (`scripts/j1m_orchestrator.py:408`) computes
+   `Path(destination).relative_to(j1m_runner.PRIVATE_OUTPUT_ROOT)`, and since
+   that root is the absolute repository root a relative operand raises
+   `ValueError`, surfaced as
+   `artifact destination must live under the trusted output root`.
+   **This is not a code defect.** Refusing an ambiguous destination before
+   anything is billable is correct and must not be loosened. It is worth noting
+   that the launch command recorded in the run-b summary §5 and in its
+   `commands.txt:24` still reads
+   `--artifact-destination artifacts/qwen35-9b/remote-eval-20260911-b` — the
+   relative form that caused this refusal — so the ready command must have an
+   absolute destination substituted before it is run. Ergonomic follow-up:
+   `J1M-CLI-RELATIVE-DESTINATION-001` (UNCLAIMED, S4).
+2. **Provider backstop.** `.secrets/shadeform.env` carried
+   `SHADEFORM_AUTO_TERMINATE_HOURS=2` against a 1.94 h eval plan. Verified:
+   `scripts/shadeform_lifecycle.py:190` sets `MIN_BACKSTOP_MARGIN = 1.10` and
+   `:3374` refuses when `hours < runtime_hours * MIN_BACKSTOP_MARGIN`; 2 / 1.94
+   is 1.03x, below 1.10x, raising `BackstopError` (`:3379-3386`). Sol raised the
+   ceiling to 3, which the code itself frames as the right kind of act —
+   `:3384` calls it "a standing safety limit, so this is a decision, not a knob
+   to turn to make a run fit". Worst case becomes 3 h × USD 1.35 = **USD 4.05**,
+   inside the USD 10.00 run cap. **Key names only are recorded anywhere in this
+   refresh; no value from that file was read, printed, or reproduced.**
+3. **Legacy cost ledger.** Verified: `sf.list_candidates` validates
+   `experiments/runtime/cost-ledger.jsonl` against
+   `local_bmo.shadeform.cost-event.v2` (`scripts/shadeform_lifecycle.py:80`),
+   and the 108-line 2026-09-04 ledger failed canonicalization at line 1 with
+   `stored cost event is not canonical` (`:1989`). **This blocked every run.**
+   It is the concrete, reproducible form of the abstract `SAFE_TO_MIGRATE_NOW`
+   / `legacy_schema_or_owner_binding_missing` condition that governance had
+   been carrying without a mechanism — and it was discoverable offline, at zero
+   cost, at any point.
+
+### Reviewed cost-ledger genesis, executed
+
+`LEDGER-GENESIS-001`, which Phase A had recorded as `UNCLAIMED`, was executed
+by Sol the same day and is now `DONE_OPERATOR_ACTION` — a state **defined in
+this refresh** in the claims-file vocabulary paragraph, for an operator or Sol
+action completed outside source that no commit can carry, and which is
+explicitly not a gate approval.
+
+The legacy ledger — sha256
+`756daa504fc9a1af40f32ce4af777935fb0bcdd00b01a1ad8688ab2c02f4c692`, 108 lines
+holding **43 settled rows summing USD 6.767912** plus **65 pending rows across
+22 pending-only owners** whose instances already hold deletion receipts, which
+Sol adjudicated as historical stale estimates and non-billable — was moved to
+`experiments/runtime/legacy/cost-ledger.legacy-20260904.jsonl` at 0600 inside a
+0700 directory, and copied to
+`archive/worktree-runtime-state-20260911/main-cost-ledger.legacy-20260904.jsonl`
+with `SHA256SUMS.ledger`. `scripts/shadeform/initialize_cost_ledger.py` then
+ran with `--program local-bmo-shadeform --currency USD --budget-cap-usd 50
+--prior-settled-spend-usd 6.767912 --current-pending-owner-count 0`, the two
+required evidence digests, and the reviewed-genesis confirmation, returning
+**`status: created`**.
+
+Reproduced read-only in this refresh, without printing any ledger content:
+
+- the archived legacy file hashes to **exactly**
+  `756daa504fc9a1af40f32ce4af777935fb0bcdd00b01a1ad8688ab2c02f4c692` at **108
+  lines**;
+- the new `experiments/runtime/cost-ledger.jsonl` is **438 bytes, 1 line** —
+  the sole genesis event — at mode **0600**;
+- `experiments/runtime/legacy/` is mode **0700** and its ledger copy is
+  **0600**;
+- all eight `initialize_cost_ledger.py` flags used exist in its argparse
+  surface (`scripts/shadeform/initialize_cost_ledger.py:24-31`).
+
+**Residual, explicitly not closed.** The migration preflight's hardcoded
+literal `"safe_to_migrate_now": False`
+(`scripts/shadeform_ledger_migration_preflight.py:1110`) is unchanged in
+source, and the incidents-schema findings stand. **A genesis does not
+retroactively validate the legacy rows**; it archives them and starts a
+canonical ledger beside them. Revisiting the literal still requires its own
+ADR. This is recorded in B-004, `MODEL_DECISION.md`, `STATUS.md`, `S0.md`,
+ADR-0005 and the claims row, in that same shape, so the executed action cannot
+be misread as closing the source defect.
+
+### Gates that passed after genesis
+
+`list_candidates` (read-only) returned **9 candidates**, exactly **one**
+matching the pinned target — hyperstack / montreal-canada-2 / A100_80G /
+USD 1.35 per hour. `create_ephemeral_ssh_key` and
+`assert_persisted_argv_handle` both passed, and the ephemeral key directory was
+destroyed leaving **zero residue**, which the empty `.secrets/j1m/` confirms.
+Nothing beyond the read-only catalogue query contacted a provider.
+
+### Two dry-run gaps, recorded as follow-ups
+
+The offline gate passed at **142 argv / 0 refused** while two of the three
+blockers above stood. It exercises a fake environment and a fake ledger, so it
+checked neither the real environment's backstop against the configured runtime
+(`J1M-DRYRUN-REAL-ENV-BACKSTOP-001`, UNCLAIMED, S4) nor the real ledger's
+canonical validity (`J1M-DRYRUN-LEDGER-VALIDITY-001`, UNCLAIMED, S4). **Either
+check would have caught its blocker offline, before a launch attempt, at zero
+cost.** That is the honest limit of the gate as it stands: a PASS proves the
+argv surface, not the environment the run will actually meet, and ADR-0005's
+validation section now says so. Both follow-ups are scoped read-only — validate
+and report, never rewrite the real ledger, never adjust the real ceiling, and
+never read a secret value.
+
 ## Blockers
 
 - No blocker prevents this docs-only reconciliation. Existing model, provider,
@@ -398,8 +560,16 @@ because a current-truth document that repeated them would be wrong.
   `REMOTE_EXECUTION_ENABLED` conflation and the Hugging Face rotation claim —
   does not close it, because what actually blocks B-006 is the absence of a
   score. Both `State:` lines are unchanged.
-- New follow-ups recorded as `UNCLAIMED`, neither gate-advancing:
-  `COMPARATOR-BF16-ARM-001` and `LEDGER-GENESIS-001`.
+- New follow-ups recorded as `UNCLAIMED`, none gate-advancing:
+  `COMPARATOR-BF16-ARM-001`, `J1M-CLI-RELATIVE-DESTINATION-001`,
+  `J1M-DRYRUN-REAL-ENV-BACKSTOP-001` and `J1M-DRYRUN-LEDGER-VALIDITY-001`.
+  `LEDGER-GENESIS-001` was added as `UNCLAIMED` in Phase A and is
+  `DONE_OPERATOR_ACTION` by the end of Phase B, with its source residual named
+  rather than closed.
+- **The only thing now blocking a measurement is a human permission decision**,
+  not a project gate. Every project-side pre-spend gate passes. That is worth
+  stating plainly because it is the first time in this program's record that
+  the obstacle has been outside the repository rather than inside it.
 - Open items carried from the merged reviews: the dry-run pre-launch gate is
   stateful and stale key-root residue makes it fail while its own detail line
   reports removal, which the reviewer recommends fixing before the first live
@@ -416,20 +586,36 @@ because a current-truth document that repeated them would be wrong.
 
 ## Next bounded action
 
-**Phase B, on Sol's message only.** Fold the `remote-eval-20260911-b` results
-into the PENDING markers in `STATUS.md`, `RELEASE_GATES.md`, `BLOCKERS.md`,
-`coordination/status/S0.md` and this packet; record the actual cost against the
-recorded USD 10.00 / 4 h caps and against the ADR-0005 program cap; record the
-receipts and any score as **evidence**, leaving every gate state to a separate
-Sol gate decision. No live, model, provider, native, browser, or target run
-follows from this task, and this session will launch nothing.
+This refresh is complete and `READY_FOR_REVIEW`. The next action is not this
+session's: **a human decides whether to approve the launch** of
+`remote-eval-20260911-b`, whose command is ready in the run-b summary §5 —
+substituting an absolute `--artifact-destination`, since the recorded form is
+relative and would be refused pre-spend.
+
+When the run executes, its numbers arrive as a **separate addendum**, not as an
+edit to this packet's evidence: the actual cost against the recorded USD 10.00
+/ 4 h caps and the ADR-0005 program cap, the salvaged receipts, and any score —
+all recorded as evidence, with every gate state left to a separate Sol gate
+decision. This session launches nothing and has spent nothing.
 
 ## Sol action requested
 
-Review and merge; no gate change is requested and none is implied. Two items
-need a Sol decision beyond the merge: whether `contracts/engine-api`'s declared
-`max_tokens: 64` should be reconciled to the engine's enforced `1..256` by an
-interface change request now or deferred with the deep-mode budgets, and who
-owns `LEDGER-GENESIS-001`, whose central obstacle — the hardcoded
-`"safe_to_migrate_now": False` — requires its own ADR rather than a code edit.
-Only Sol may merge or alter a phase or release gate.
+Review and merge; no gate change is requested and none is implied. Four items
+need a Sol decision beyond the merge:
+
+1. Whether `contracts/engine-api`'s declared `max_tokens: 64` is reconciled to
+   the engine's enforced `1..256` by an interface change request now, or
+   deferred together with the aspirational deep-mode budgets.
+2. Owners for the three new dry-run and CLI follow-ups, since two of them
+   (`J1M-DRYRUN-REAL-ENV-BACKSTOP-001`, `J1M-DRYRUN-LEDGER-VALIDITY-001`) would
+   have prevented two of the three pre-spend refusals recorded above and are
+   cheap, offline, and read-only by design.
+3. Whether the hardcoded `"safe_to_migrate_now": False` now gets its own ADR,
+   given that the genesis has been executed around it and the literal is the
+   last piece of that blocker still in source.
+4. Confirmation that `DONE_OPERATOR_ACTION`, defined in this refresh, is the
+   vocabulary Sol wants for operator actions completed outside source; it is
+   deliberately not an approval state.
+
+Only Sol may merge or alter a phase or release gate, and nothing here requests
+either.

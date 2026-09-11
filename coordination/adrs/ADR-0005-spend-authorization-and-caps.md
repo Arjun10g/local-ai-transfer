@@ -242,6 +242,86 @@ that would otherwise have been discovered by paying for them.
   §Decision item 4; or the ledger-genesis ADR that `LEDGER-GENESIS-001`
   requires.
 
+## Execution record — 2026-09-11
+
+Appended to this ADR because the cost-ledger genesis is the act that made its
+program cap operative, and because the launch outcome is part of the honest
+record of what this authorization has and has not produced.
+
+### Cost-ledger genesis executed (`LEDGER-GENESIS-001` → `DONE_OPERATOR_ACTION`)
+
+The "Negative / accepted trade-offs" note above said this ADR does not resolve
+the genesis question. Sol resolved it the same day, by operator action outside
+source.
+
+The legacy ledger — sha256
+`756daa504fc9a1af40f32ce4af777935fb0bcdd00b01a1ad8688ab2c02f4c692`, 108 lines
+holding 43 settled rows summing USD 6.767912 plus 65 pending rows across 22
+pending-only owners whose instances already hold deletion receipts, which Sol
+adjudicated as historical stale estimates and non-billable — was moved to
+`experiments/runtime/legacy/cost-ledger.legacy-20260904.jsonl` at mode 0600
+inside a 0700 directory, and copied to
+`archive/worktree-runtime-state-20260911/main-cost-ledger.legacy-20260904.jsonl`
+alongside `SHA256SUMS.ledger`. `scripts/shadeform/initialize_cost_ledger.py`
+then ran with `--program local-bmo-shadeform --currency USD --budget-cap-usd 50
+--prior-settled-spend-usd 6.767912 --current-pending-owner-count 0`, the two
+required evidence digests, and the reviewed-genesis confirmation, returning
+`status: created`.
+
+Verified read-only while recording this: the archived legacy file hashes to
+exactly that sha256 at 108 lines, and the new
+`experiments/runtime/cost-ledger.jsonl` is 438 bytes, one line — the sole
+genesis event — at mode 0600.
+
+This is what made the USD 50 cap of §Decision item 2 real rather than declared:
+the genesis carries it as `budget_cap_usd`, so the whole-project control that
+candidate selection already enforces now has a canonical ledger to subtract
+from.
+
+It also removed the blocker that had stopped **every** run. `sf.list_candidates`
+validates the ledger against `local_bmo.shadeform.cost-event.v2`
+(`scripts/shadeform_lifecycle.py:80`), and the 2026-09-04 file failed
+canonicalization at line 1 with `stored cost event is not canonical` (`:1989`).
+That was the concrete, reproducible form of the abstract `SAFE_TO_MIGRATE_NOW`
+/ `legacy_schema_or_owner_binding_missing` condition governance had been
+carrying without a mechanism.
+
+**Residual, explicitly not closed.** The migration preflight's hardcoded
+literal `"safe_to_migrate_now": False`
+(`scripts/shadeform_ledger_migration_preflight.py:1110`) is unchanged in
+source, and the incidents-schema findings stand. A genesis does not
+retroactively validate the legacy rows; it archives them and starts a canonical
+ledger beside them. Revisiting the literal still requires its own ADR, exactly
+as the trade-off note above states.
+
+### What this authorization has produced so far: nothing billable
+
+No run has executed under it. `remote-eval-20260911-a` stopped pre-spend at
+USD 0.00. `remote-eval-20260911-b` is **launch-ready and awaiting operator
+permission**: it passed its pre-spend gates and was then blocked at the tool
+layer by the Claude Code auto-mode permission classifier — a harness control,
+not a project gate and not a refusal by anything in this repository. The lane
+declined to re-shape or route around that denial, which is the correct response
+to a control whose whole purpose is to hold a billable provisioning command for
+a human. Cumulative spend under this ADR is **USD 0.00**, no instance has been
+created, and `.secrets/j1m/` holds zero residue.
+
+Three earlier attempts returned typed `input_rejected` before any provider
+call, all at USD 0.00: a relative `--artifact-destination`, correctly refused
+by `prepare_artifact_destination`; a provider backstop giving 1.03x headroom
+against the required `MIN_BACKSTOP_MARGIN` of 1.10, which Sol resolved by
+deliberately raising `SHADEFORM_AUTO_TERMINATE_HOURS` to 3 — worst case
+3 h × USD 1.35 = USD 4.05, inside this run's recorded USD 10.00 cap — rather
+than by shortening the run to fit; and the ledger blocker resolved above.
+
+One honest limitation of the validation regime in §Validation: the offline
+dry-run gate passed at 142 argv / 0 refused while two of those three blockers
+stood, because it exercises a fake environment and a fake ledger rather than
+the real ones. Closing that is tracked as
+`J1M-DRYRUN-REAL-ENV-BACKSTOP-001` and `J1M-DRYRUN-LEDGER-VALIDITY-001`. Until
+they land, a passing gate proves the argv surface, not the environment the run
+will actually meet, and the §Validation precondition should be read that way.
+
 ## Approval
 
 - **Sol:** accepted 2026-09-11. Decision made by S0 Sol on the user's standing
@@ -249,4 +329,6 @@ that would otherwise have been discovered by paying for them.
   is the ratifying act.
 - **Affected Luna acknowledgements:** S2 and S4 pending. Recording this ADR
   confers no capability and advances no gate; release/full access remains
-  `BLOCKED` / `NOT_READY`.
+  `BLOCKED` / `NOT_READY`. The executed genesis above is an operator action,
+  not a gate approval, and the launch permission that run b still needs is the
+  user's to give.
