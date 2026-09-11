@@ -1,0 +1,400 @@
+# Comparator evaluation design — MODEL-COMPARATOR-EVAL-001
+
+Status: source design for an S2 slice. Nothing in this document authorizes
+spend, a provider call, a model download, or a gate flip. No cap in
+`model/conversion/j1m-config.json` is raised by the slice it describes.
+
+## 1. Problem
+
+`execution/ACCEPTANCE_CRITERIA.md` §11 requires that the controlled Q4_K_M
+artifact "retains ≥95% of the same-source Q8/higher-precision aggregate" and
+that "no critical category drops >8 absolute points".
+`model/quality-eval/quality-fixture-spec.json` `comparison` fixes the method:
+`quality_comparator: same-source-q8-or-higher`, `bootstrap_resamples: 10000`,
+`confidence: 0.95`, `non_inferiority_margin_points: 2`,
+`critical_category_max_drop_points: 8`.
+
+`governance/MODEL_DECISION.md` records that this criterion "currently has no
+reachable reference artifact": `Qwen3.5-9B-bf16.gguf` and
+`Qwen3.5-9B-Q8_0.gguf` survive only as hashes in
+`artifacts/qwen35-9b/scan-receipt.json`, and
+`artifacts/qwen35-9b/post-cleanup-receipt.json` records the Q4 as the only
+remaining GGUF.
+
+That record understates what the lane already does. The remote `--mode eval`
+lane **rebuilds both comparators on every run**:
+`scripts/j1m_runner.py` `command_plan` emits
+
+```
+convert_hf_to_gguf.py … --outfile …/Qwen3.5-9B-bf16.gguf  --outtype bf16 --no-mtp
+convert_hf_to_gguf.py … --outfile …/Qwen3.5-9B-Q8_0.gguf  --outtype q8_0 --no-mtp
+llama-quantize            …/Qwen3.5-9B-bf16.gguf  …/Qwen3.5-9B-Q4_K_M.gguf Q4_K_M
+```
+
+and `scripts/j1m_orchestrator.py` `_eval_remote_commands` invokes exactly that
+plan (`j1m_runner.py --run`) as an eval stage. The conversion cost of the
+comparators is therefore **already paid on every eval run**. What is missing is
+only (a) keeping them alive past the `rm -f` stage, (b) evaluating them, and
+(c) salvaging their receipts. This slice adds those three things behind a
+default-OFF flag.
+
+## 2. Four constraints that shape the design
+
+### 2.1 The product engine physically cannot load a comparator
+
+`native/model_validation/model_validator.hpp` compiles the product identity in:
+
+```
+kProductModelFilename = "Qwen3.5-9B-Q4_K_M.gguf"
+kProductModelSizeBytes = 5629109088
+kProductModelSha256    = "c654bc40…68873b"
+kProductModelId        = "qwen35-9b-q4-k-m"
+```
+
+`native/main.cpp` states it in the usage text: "model filename, size, SHA-256,
+GGUF metadata, and tensor profile are compiled product identity and cannot be
+supplied by callers". Both `verify-model` and `serve` go through
+`validate_product_model_file`, and `model_validator.cpp` additionally refuses
+any tensor profile that is not F32/Q4_K/Q6_K
+(`model_quantization_profile_mismatch`, `model_tensor_profile_mismatch`).
+
+**This is a correct gate and this slice does not touch it.** The consequence is
+that a comparator can only be served by a different host process.
+
+### 2.2 The only legitimate alternative host is the pinned upstream oracle
+
+The project already names one: `model/quality-eval/quality-fixture-spec.json`
+`comparison.runtime_oracle = "pinned-upstream-same-artifact"`, and
+`governance/MODEL_DECISION.md` defines the two comparisons as
+(1) runtime parity — product engine vs pinned upstream on the *same* Q4 bytes —
+and (2) quantization retention — Q4 vs Q8/higher on the *same* runtime.
+
+So the comparator phase serves **every** arm with `llama-server` built from
+`config["llama_cpp"]["checkout"]` at the pinned revision
+`3581ba0cf591b3f772fbb002de0f70e294bc0396` — the same revision the product
+engine embeds, already revision-verified by the existing `--verify-llama`
+stage inside `j1m_runner --run`.
+
+`native/CMakeLists.txt` sets `LLAMA_BUILD_SERVER OFF … FORCE`, so the product
+build tree cannot emit `llama-server`. The comparator phase therefore
+configures a **separate** build tree (`{remote_root}/oracle-build`) from the
+already-present pinned checkout. The product configure/build commands are
+byte-unchanged.
+
+Arms, in fixed order:
+
+| Arm | Weights | Role |
+|---|---|---|
+| `q4_k_m` | `Qwen3.5-9B-Q4_K_M.gguf` | oracle baseline; retention numerator; also gives §11 MUST 1 a reference |
+| `q8_0` | `Qwen3.5-9B-Q8_0.gguf` | retention denominator (`same-source-q8-or-higher`) |
+| `bf16` | `Qwen3.5-9B-bf16.gguf` | higher-precision denominator; only when explicitly requested |
+
+Running `q4_k_m` on the oracle is not optional: retention is only meaningful
+when the runtime is held constant. The product-engine Q4 receipt
+(`eval-receipt.json`) is untouched and is recorded in the comparison receipt as
+`product_engine_reference`, used **only** for the runtime-parity delta, never
+as the retention numerator.
+
+### 2.3 The comparators are deleted before any evaluation
+
+`command_plan` ends with `rm -f …bf16.gguf …Q8_0.gguf`, then `--post-cleanup`,
+then `--manifest`. Those three stages run inside the `j1m_runner --run` eval
+stage, long before `remote_model_eval.py`.
+
+`command_plan` gains a keyword-only `retain_comparators: bool = False`. When
+true, the final three stages are **moved**, not removed, into
+`comparator_cleanup_plan()`, which the orchestrator appends as the **last**
+eval stages. Cleanup, `post-cleanup-receipt.json` and `manifest.json` still
+happen on the normal path; they simply happen after the comparator phase.
+
+Invariant, pinned by test:
+
+```
+command_plan(c) == command_plan(c, retain_comparators=True) + comparator_cleanup_plan(c)
+```
+
+so the shipped plan is byte-identical when the flag is absent.
+
+Disk: `resources.expected_peak_gib = 58` already describes the pre-cleanup
+peak, when bf16 (17.92 GB) + Q8_0 (9.53 GB) + Q4 (5.63 GB) + the HF source are
+all resident simultaneously. Holding that peak longer does not raise it.
+`required_scratch_gib = 70` is unchanged.
+
+### 2.4 The eval clock has 339 seconds of static slack
+
+`_eval_deadline_ceiling` sums worst-case stage budgets:
+
+```
+activation 600 + host_key 165 + fixed_setup 510 + bootstrap 420
++ small_uploads 420 + post_upload 4050              = 6165 s work
++ cleanup_reserve 480                               = 6645 s ceiling
+run_seconds = 1.94 h                                = 6984 s
+static slack                                        =  339 s
+```
+
+A comparator phase cannot fit that worst case, and this slice **does not raise
+`runtime_hours`, `provider_backstop_hours`, `external_watchdog_seconds`,
+`host_shutdown_delay_minutes`, `active_cost_usd`, or
+`budget_policy.project_total_usd`.**
+
+The resolution is that the comparator phase is *opportunistic and
+runtime-bounded*, not statically budgeted:
+
+- Comparator stages are **excluded** from `_eval_deadline_ceiling`'s sum, so
+  that function returns the same numbers it does today and a comparator request
+  can never make a run refuse to start.
+- Immediately after the Q4 eval stage completes, and **before the first
+  comparator stage**, the orchestrator computes
+  `available = execution_deadline − now − cleanup_reserve − _DELETION_RESERVE_SECONDS`
+  and refuses the whole phase if `available < required`.
+- Every comparator stage is additionally wrapped in
+  `_eval_timeout(execution_deadline, budget)`, which already refuses to hand
+  out a timeout that would cross the provider clock.
+
+Empirically the four complete historical runs (`h`/`i`/`j`/`k`, settled
+$0.4997/$0.5264/$0.5152/$0.5221 at $1.35/hr) finished in about 22–24 minutes of
+a 116-minute cap, so a real run reaches the comparator gate with roughly 90
+minutes of authorized clock left. When it does not, the phase is skipped with a
+typed reason and the Q4 result is unaffected.
+
+## 3. Budget and cost
+
+Defaults, expressed in minutes in the CLI and stored in seconds in the receipt:
+
+| Bound | Default | Basis |
+|---|---:|---|
+| `comparator_setup_budget_seconds` | 1500 | one-time oracle configure (180) + `llama-server` CUDA build (1200) + margin |
+| `comparator_budget_seconds` (per arm) | 720 | the existing `stage_budgets_seconds.evaluation` 480 + 240 s server start/model load |
+
+Required clock and projected marginal metered cost at $1.35/hr:
+
+| Request | Arms | Required | Marginal cost |
+|---|---:|---:|---:|
+| `q8` | `q4_k_m`, `q8_0` | 1500 + 2×720 = **2940 s** (49 min) | **$1.10** |
+| `q8,bf16` | `q4_k_m`, `q8_0`, `bf16` | 1500 + 3×720 = **3660 s** (61 min) | **$1.37** |
+
+The marginal cost is **projected metered time, not new authority.** The phase
+runs strictly inside `execution_deadline`, which is derived from the already
+approved `modes.eval` clocks, so `active_cost_usd` (2.619),
+`provider_backstop_cost_usd` (3.2738) and `budget_policy.project_total_usd`
+(50.0) are all unchanged. The figure is recorded so a reviewer can see what
+share of the authorized window the phase consumes.
+
+Fail-closed reasons, all typed and all recorded in `comparison-receipt.json`:
+
+| Reason | Meaning |
+|---|---|
+| `comparator_not_requested` | flag absent (the default) |
+| `comparator_clock_insufficient` | `available < required` at the pre-phase check |
+| `comparator_stage_failed` | an oracle build or arm evaluation stage did not complete |
+| `comparator_receipt_missing` | the arm receipt was not salvaged before teardown |
+| `comparator_receipt_invalid` | the arm receipt failed schema/identity verification |
+| `comparator_artifact_identity_mismatch` | the rebuilt comparator did not re-hash to the anchored identity |
+| `comparator_baseline_missing` | the oracle `q4_k_m` arm is absent, so no retention denominatorable comparison exists |
+
+## 4. Artifact identity anchor
+
+There is no approved manifest for the comparators —
+`artifacts/qwen35-9b/model-manifest.json` describes only the Q4. The anchor is
+the checked-in `artifacts/qwen35-9b/scan-receipt.json`
+(SHA-256 `0857899bf86527702743dd12b62ae5740cbb27fae2005da7066d1070cb341066`,
+708 bytes), which records the exact 2026-09-04 comparator identities:
+
+| Name | Size | SHA-256 |
+|---|---:|---|
+| `Qwen3.5-9B-bf16.gguf` | 17,920,697,184 | `3781359159dcec91e8f57820f63ffa6ec32b6f0c94b38bfb16c9fe0d50561316` |
+| `Qwen3.5-9B-Q8_0.gguf` | 9,527,501,664 | `516a12b01fda7a9a204b71a9917e3b5b0c4efbbd8f6e6f4f6b78e4ff699cf0db` |
+| `Qwen3.5-9B-Q4_K_M.gguf` | 5,629,109,088 | `c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b` |
+
+The digest is pinned in source as `_APPROVED_SCAN_RECEIPT_SHA256`, in the same
+shape as the existing `_APPROVED_EVAL_MANIFEST_SHA256` trust anchor, so a
+caller cannot substitute an arbitrary scan receipt through configuration. The
+scan receipt is uploaded **only** when comparators are requested.
+
+`remote_comparator_eval.py` re-hashes the freshly rebuilt comparator and
+refuses unless name, size and SHA-256 match the anchor exactly. Byte-exact
+reproduction from the pinned source revision is therefore the acceptance
+condition; any drift refuses with `comparator_artifact_identity_mismatch`
+rather than silently evaluating unknown bytes.
+
+## 5. Evaluation contract held constant
+
+Every arm uses:
+
+- the same fixture file `tests/model/production_tool_call_eval.json`, SHA-256
+  `c75af5200b76a504e6b603183ffcf1cbeedb93db18ec544683044b8cc9b8ac6c`,
+  33 tools / 37 cases, categories
+  `tool_selection 18, confirmation_sensitive 15, schema_edge 1,
+  prompt_injection 1, abstention 1, no_tool 1`;
+- the same evaluator `scripts/test/evaluate_tool_calls.py`, unmodified;
+- the same limits: `context_tokens 8192`, `max_output_tokens 256`,
+  `temperature 0`, `max_cases 64` as a ceiling with 37 actual cases;
+- the same `--gpu-layers 99` full offload on the same A100-80G device receipt;
+- a fresh server process per arm — recorded as
+  `cache_state: "cold_process_fresh_server_per_arm"`;
+- `sample_count = 37`, one pass per case, no repetition.
+
+The Q4 path through `remote_model_eval.py` and `lae-engine` is **not touched**.
+Its argv, its evaluator invocation, its scoring and its receipt schema are
+byte-identical whether or not comparators are requested.
+
+## 6. Receipts
+
+### 6.1 Per-arm: `comparator-receipt-<arm>.json` (remote, then salvaged)
+
+`schema: local_bmo.j1m.comparator-eval-receipt.v1`
+
+```
+status               verified | completed_with_failures | failed
+arm                  q4_k_m | q8_0 | bf16
+artifact             {name, size_bytes, sha256, quantization}
+anchor               {scan_receipt_sha256}
+fixture              the full fixture identity block (sha256, limits, tool_names, …)
+host                 {kind: "pinned-upstream-llama-server", llama_cpp_revision, backend, gpu_layers}
+settings             {context_tokens, output_reserve_tokens, temperature, max_cases}
+cache_state          "cold_process_fresh_server_per_arm"
+sample_count         37
+metrics              {case_count, passed, failed, errors, peak_rss_kib, category_summary,
+                      canary, error_diagnostics, quality_diagnostics}
+timings              {server_ready_ms, evaluation_ms, total_ms}
+prompt_response_logging  false
+token_logging            false
+```
+
+### 6.2 Aggregate: `comparison-receipt.json` (local, stdlib, no network)
+
+`schema: local_bmo.j1m.comparison-receipt.v1`. Computed by
+`scripts/test/compare_model_quality.py` during salvage, before teardown, from
+the salvaged per-arm receipts. Required keys:
+
+```
+schema, status, generated_at_utc, fixture_sha256, case_count,
+critical_category_policy, gate, baseline, comparisons, skipped,
+product_engine_reference
+```
+
+`gate` records the spec constants verbatim:
+`{retention_min_percent: 95.0, non_inferiority_margin_points: 2,
+critical_category_max_drop_points: 8, bootstrap_resamples: 10000,
+confidence: 0.95, seed: 20260911}`.
+
+Each entry of `comparisons` carries:
+
+```
+comparator, baseline_score_points, comparator_score_points,
+retention_percent, retention_verdict,
+aggregate_delta_points, category_deltas, category_drop_max_points,
+critical_category_verdict,
+bootstrap {resamples, confidence, seed, method, pairing,
+           delta_ci_lower_points, delta_ci_upper_points,
+           non_inferiority_verdict},
+verdict
+```
+
+`verdict` is `pass` only when retention, critical-category and
+non-inferiority verdicts are all `pass`; anything else, including any
+undefined quantity, is `fail`.
+
+## 7. Comparison mathematics
+
+Score of an arm is `passed / case_count × 100` points. An `error` case counts
+as not passed, exactly as the evaluator's own totals do.
+
+**Retention** — `retention_percent = 100 × score(q4_k_m) / score(comparator)`.
+Gate: `≥ 95.0`. When the comparator score is `0`, retention is undefined; the
+receipt records `retention_percent: null` with
+`retention_verdict: "fail"` and reason `retention_undefined_zero_reference`
+(fail-closed, never a silent pass).
+
+**Category deltas** — per category
+`delta_c = score_c(q4_k_m) − score_c(comparator)` in points, where
+`score_c = passed_c / case_count_c × 100`. `category_drop_max_points` is the
+largest observed drop, `max(0, max_c(−delta_c))`. Gate: `≤ 8`.
+
+**Critical categories** — `governance/MODEL_DECISION.md` names the critical set
+in prose ("tool argument integrity, safety boundary following, file-edit
+fidelity, instruction following, state isolation"), which does not map
+one-to-one onto the fixture's six categories. Rather than invent a mapping,
+this slice applies the ≤8-point rule to **every** category and records
+`critical_category_policy: "all_categories_conservative"`. This is strictly
+stricter than any subset, so it cannot let a genuine critical regression
+through. Sol may narrow it later by recording an explicit mapping; the receipt
+field exists so that change is visible. Note that `schema_edge`,
+`prompt_injection`, `abstention` and `no_tool` each hold a single case, so a
+single flip is a 100-point category delta; per-category `case_count` is
+recorded alongside every delta so a reviewer can see that.
+
+**Bootstrap non-inferiority** — `random.Random(20260911)`, 10,000 resamples,
+95% percentile interval, stratified by category. Each resample draws, for each
+category and independently for each arm, `case_count_c` indicators with
+replacement from that arm's own indicator multiset for that category, then
+recomputes the overall score difference `score(q4_k_m) − score(comparator)` in
+points. The interval is the 2.5th/97.5th percentiles of the 10,000 deltas,
+using the nearest-rank convention on the sorted list.
+Verdict: `pass` iff `delta_ci_lower_points ≥ −2`.
+
+*Pairing limitation, recorded in the receipt.* The evaluator's remote-safe
+contract (`aggregate_result` in `scripts/test/evaluate_tool_calls.py`)
+deliberately returns only aggregate and per-category counts, not per-case
+records, so the salvaged receipts do not permit pairing the same case across
+two arms. The bootstrap is therefore unpaired-stratified, recorded as
+`pairing: "unpaired_stratified_by_category"`. An unpaired interval is wider
+than the paired interval for positively correlated arms, so the verdict is
+conservative. A paired interval would need a bounded per-case pass-indicator
+vector added to the evaluator contract; that is a separate slice and is
+deliberately not done here, because it would change the Q4 receipt schema.
+
+Determinism is a tested property: the same inputs and seed produce the same
+interval on every run, and the seed is recorded in the receipt.
+
+## 8. Salvage and teardown
+
+`config.artifacts.eval_fetch_allowlist` is unchanged on disk. The orchestrator
+computes the effective allowlist at runtime: the shipped five names, plus, only
+when comparators were requested and only for the arms actually requested,
+`comparator-receipt-q4_k_m.json`, `comparator-receipt-q8_0.json`,
+`comparator-receipt-bf16.json` and `scan-receipt.json`.
+
+**Only receipts are salvaged. No comparator weights are ever fetched.** The
+allowlist mechanism is name-based and the model filenames are not in it;
+`_salvage` refuses anything not named in the list.
+
+`comparison-receipt.json` is produced locally in `artifact_destination`
+during the existing salvage block, before the teardown call, so it exists on
+every exit path including failure. If the per-arm receipts were not salvaged —
+which is the current state of the source, because `_salvage` still raises
+`external salvage transport is unavailable in this source slice` — the
+comparison receipt is written with `status: "skipped"` and the typed reason.
+It never fabricates a number it did not read.
+
+Teardown, `SOL_J1M_REVIEWED`, the watchdog, the host shutdown backstop, the
+no-orphan backstop, exact deletion and cost settlement are all untouched.
+
+## 9. What this slice does not do
+
+- It does not run anything. No provider call, no model, no network, no
+  credential, no new dependency.
+- It does not raise any cap, budget, timeout, or hours figure.
+- It does not change the product engine, its compiled identity, its CMake, or
+  the Q4 evaluation path.
+- It does not author the quality corpus (`MODEL-QUALITY-CORPUS-001`); the
+  comparator arms score the 33-tool/37-case tool-call profile, which is the
+  fixture the ≥95% criterion will be read against first.
+- It does not by itself satisfy §11. It makes the reference *reachable*; a
+  reviewed run, with Sol's spend authorization, produces the numbers.
+
+## 10. Open items for review
+
+1. The static worst case does not fit (§2.4). Sol may either accept the
+   opportunistic runtime gate as designed, or authorize a `modes.eval` clock
+   increase — `runtime_hours` 1.94 → ~2.8 with the dependent
+   `host_shutdown_delay_minutes`, `external_watchdog_seconds` and
+   `provider_backstop_hours` raised in step — which is a cap change and is
+   deliberately **not** made here.
+2. The critical-category mapping (§7) is conservative-by-default and wants an
+   explicit Sol-recorded mapping.
+3. A paired bootstrap needs a bounded per-case indicator vector in the
+   evaluator contract (§7).
+4. `_salvage` is inert in current source, so no receipt of any kind can be
+   fetched yet. The comparator phase degrades to a typed skip until that
+   transport lands.
