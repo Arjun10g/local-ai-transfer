@@ -327,12 +327,18 @@ class ComparatorFlagTests(unittest.TestCase):
         self.assertEqual(self.orchestrator._comparator_selection(None), ())
         self.assertEqual(self.orchestrator._comparator_selection("q8"), ("q8_0",))
         self.assertEqual(self.orchestrator._comparator_selection("q8,bf16"), ("q8_0", "bf16"))
-        for rejected in ("bf16", "q8,q8", "q4", "q8, bf16", "Q8", "q8;bf16", "x" * 64):
+        self.assertEqual(self.orchestrator._comparator_selection("q4-oracle"), ("q4_k_m",))
+        for rejected in ("bf16", "q8,q8", "q4", "q8, bf16", "Q8", "q8;bf16", "q4_oracle", "x" * 64):
             with self.assertRaises(ValueError):
                 self.orchestrator._comparator_selection(rejected)
         self.assertEqual(self.orchestrator._comparator_arms(()), ())
         # Retention needs a same-runtime Q4 arm, so it is always added.
         self.assertEqual(self.orchestrator._comparator_arms(("q8_0",)), ("q4_k_m", "q8_0"))
+        # The oracle request is exactly one arm, never a duplicated baseline,
+        # and it contributes no denominator.
+        self.assertEqual(self.orchestrator._comparator_arms(("q4_k_m",)), ("q4_k_m",))
+        self.assertEqual(self.orchestrator._comparator_comparators(("q4_k_m",)), ())
+        self.assertEqual(self.orchestrator._comparator_comparators(("q8_0", "bf16")), ("q8_0", "bf16"))
 
     def test_plan_without_the_flag_is_identical_to_the_plan_with_it_absent(self):
         def plan(argv):
@@ -347,13 +353,18 @@ class ComparatorFlagTests(unittest.TestCase):
             baseline = plan(["--mode", mode])
             explicit = plan(["--mode", mode, "--evaluate-comparators", ""])
             self.assertEqual(baseline, explicit, mode)
-        requested = plan(["--mode", "eval", "--evaluate-comparators", "q8"])
         default = plan(["--mode", "eval"])
-        self.assertEqual(set(requested) - set(default), {"comparator_phase", "comparator_fetch_allowlist"})
-        for key in default:
-            self.assertEqual(default[key], requested[key], key)
-        self.assertEqual(requested["comparator_phase"]["status"], "refused")
-        self.assertEqual(requested["comparator_phase"]["reason"], "comparator_engine_unavailable")
+        for selection in ("q4-oracle", "q8", "q8,bf16"):
+            requested = plan(["--mode", "eval", "--evaluate-comparators", selection])
+            self.assertEqual(set(requested) - set(default), {
+                "comparator_phase", "comparator_fetch_allowlist",
+                "comparator_commands", "comparator_cleanup_commands"}, selection)
+            for key in default:
+                self.assertEqual(default[key], requested[key], (selection, key))
+            # The engine exists now, so a plan without a live clock is
+            # planned rather than refused; the flag is still default OFF.
+            self.assertEqual(requested["comparator_phase"]["status"], "planned", selection)
+            self.assertNotIn("reason", requested["comparator_phase"])
 
     def test_remote_commands_and_uploads_are_untouched(self):
         commands = self.orchestrator._eval_remote_commands(self.config, "/scratch/j1m")
@@ -431,9 +442,13 @@ class ComparatorBudgetTests(unittest.TestCase):
     def test_skip_reason_vocabularies_are_the_same_closed_set(self):
         self.assertEqual(self.orchestrator._COMPARATOR_SKIP_REASONS, comparison.SKIP_REASONS)
 
-    def test_phase_refuses_while_no_comparator_engine_exists(self):
-        self.assertFalse(self.orchestrator._COMPARATOR_ENGINE_AVAILABLE)
-        phase = self.orchestrator._comparator_phase(self.config, ("q8_0",))
+    def test_phase_is_available_but_still_refuses_when_the_engine_is_absent(self):
+        # COMPARATOR-ENGINE-001 supplies the host, so the flag is live; the
+        # typed pre-spend refusal must still exist for anyone who turns it off.
+        self.assertTrue(self.orchestrator._COMPARATOR_ENGINE_AVAILABLE)
+        self.assertEqual(self.orchestrator._comparator_phase(self.config, ("q8_0",))["status"], "planned")
+        with mock.patch.object(self.orchestrator, "_COMPARATOR_ENGINE_AVAILABLE", False):
+            phase = self.orchestrator._comparator_phase(self.config, ("q8_0",))
         self.assertEqual(phase["status"], "refused")
         self.assertEqual(phase["reason"], "comparator_engine_unavailable")
         self.assertIn(phase["reason"], self.orchestrator._COMPARATOR_SKIP_REASONS)
@@ -443,22 +458,21 @@ class ComparatorBudgetTests(unittest.TestCase):
 
     def test_budget_check_refuses_when_the_remaining_clock_is_short(self):
         import time
-        with mock.patch.object(self.orchestrator, "_COMPARATOR_ENGINE_AVAILABLE", True):
-            required = self.orchestrator._comparator_budget(self.config, ("q8_0",))["required_seconds"]
-            reserved = (float(self.config["modes"]["eval"]["stage_budgets_seconds"]["cleanup_reserve"])
-                        + self.orchestrator._DELETION_RESERVE_SECONDS)
-            short = self.orchestrator._comparator_phase(
-                self.config, ("q8_0",),
-                execution_deadline=time.monotonic() + reserved + required - 60.0)
-            self.assertEqual(short["status"], "refused")
-            self.assertEqual(short["reason"], "comparator_clock_insufficient")
-            self.assertLess(short["available_seconds"], required)
-            ample = self.orchestrator._comparator_phase(
-                self.config, ("q8_0",),
-                execution_deadline=time.monotonic() + reserved + required + 600.0)
-            self.assertEqual(ample["status"], "approved")
-            self.assertNotIn("reason", ample)
-            self.assertGreaterEqual(ample["available_seconds"], required)
+        required = self.orchestrator._comparator_budget(self.config, ("q8_0",))["required_seconds"]
+        reserved = (float(self.config["modes"]["eval"]["stage_budgets_seconds"]["cleanup_reserve"])
+                    + self.orchestrator._DELETION_RESERVE_SECONDS)
+        short = self.orchestrator._comparator_phase(
+            self.config, ("q8_0",),
+            execution_deadline=time.monotonic() + reserved + required - 60.0)
+        self.assertEqual(short["status"], "refused")
+        self.assertEqual(short["reason"], "comparator_clock_insufficient")
+        self.assertLess(short["available_seconds"], required)
+        ample = self.orchestrator._comparator_phase(
+            self.config, ("q8_0",),
+            execution_deadline=time.monotonic() + reserved + required + 600.0)
+        self.assertEqual(ample["status"], "approved")
+        self.assertNotIn("reason", ample)
+        self.assertGreaterEqual(ample["available_seconds"], required)
 
     @isolated_lifecycle_execute
     def test_execute_refuses_comparators_before_any_provider_access(self):
@@ -470,12 +484,14 @@ class ComparatorBudgetTests(unittest.TestCase):
                     mock.patch.object(self.orchestrator.sf, "load_env") as load_env, \
                     mock.patch.object(self.orchestrator.sf, "list_candidates") as list_candidates, \
                     mock.patch.object(self.orchestrator.sf, "create_ephemeral_ssh_key") as create_key:
-                with self.assertRaises(ValueError):
-                    self.orchestrator.execute(
-                        Path(directory) / "env", config_path=config_path,
-                        phase_id="comparator-gate", run_id="test",
-                        artifact_destination=Path(directory) / "artifacts",
-                        mode="eval", evaluate_comparators="q8")
+                # An engine-unavailable build still refuses before any spend.
+                with mock.patch.object(self.orchestrator, "_COMPARATOR_ENGINE_AVAILABLE", False):
+                    with self.assertRaises(ValueError):
+                        self.orchestrator.execute(
+                            Path(directory) / "env", config_path=config_path,
+                            phase_id="comparator-gate", run_id="test",
+                            artifact_destination=Path(directory) / "artifacts",
+                            mode="eval", evaluate_comparators="q8")
                 # Refused outside eval before even the deletion preflight.
                 with self.assertRaises(ValueError):
                     self.orchestrator.execute(
