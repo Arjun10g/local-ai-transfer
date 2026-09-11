@@ -1,29 +1,42 @@
 # Blockers
 
-## Current governance reconciliation — 2026-09-11
+## Current governance reconciliation — 2026-09-11 (refresh v5)
 
 - Exact audited integrated source baseline is
-  `main@7239b7e1a6a512cabf9e5ab18ba463a7fac351fc`, the last source merge. The
-  docs descendant `6c3a125749581554b88ade018181f61667990ac8` and this refresh
-  are documentation descendants, not self-hashes. Release/full access remains
-  `BLOCKED` / `NOT_READY`.
+  `main@263f11413d1746044a6cc13062ad2b1f821c4d11`, the last source merge. The
+  docs descendants `335211f5ce7cdb230c75c8ba14f7cf31ce43f69f` and
+  `1b22a40e21dce0ebc903bc3c2024ab162adc2d56` and this refresh are
+  documentation descendants, not self-hashes. The previous baseline `7239b7e`
+  is historical and superseded. Release/full access remains `BLOCKED` /
+  `NOT_READY`, and no blocker state below changes.
+- Two slices were integrated this interval, each independently S0/S4
+  source-reviewed and returning `ACCEPT_FOR_MERGE` on the first pass with
+  NOTE/MINOR findings only: the frozen descriptor WAL contract (`9f136a0`,
+  merged `237d59b`) and the Graph sent-mail proof projection repair
+  (`26beb82`, merged `263f114`). Neither adds compile, live, provider,
+  production, Windows, or target evidence.
+- The descriptor WAL contract freezes
+  `contracts/action-journal-descriptor-wal/v0.1.0`, the separate contract
+  ADR-0004 requires for the dormant v2 boundary, statically bound to the C++
+  and Node constants (48-byte header, 32 MiB) and to the derived v2 status set
+  (26 v2 codes against 25 v1, with `v1 ∪ v2 ∪ {platform_unavailable}` equal to
+  the 30-code storage set — Sol accepted that corrected invariant because
+  `platform_unavailable` is declared but emitted by no function body).
+  `contracts/action-journal-storage/v0.1.0.json` is byte-identical to `main`.
+  Review item R4 is closed as a documented, test-pinned accepted limitation:
+  Win32 cannot narrow an open handle's access, and `ReOpenFile` with reduced
+  access collides with the retained handle's exclusive `FILE_SHARE_READ`
+  reservation. No C++/Node/CMake/package change; the boundary stays
+  uncompiled and unlinked.
 - Protected `.secrets/shadeform.env` projection/setup source (`c8c28a9`), the
   metadata-only Windows/HF artifact handoff (`c2801ec`, merged by `e2e5156`),
   and the inherited-descriptor ActionJournal WAL (`2dda060`, merged by
   `6e0d12c`) remain source-present. They do not establish credential approval,
   provider execution, signed artifact custody/trust, native Windows authority,
   production activation, or target readiness.
-- Three slices were integrated this interval, each independently S0/S4
-  source-reviewed with one repair round and a re-review returning
-  `ACCEPT_FOR_MERGE`: Graph restart reconciliation (`4280e95`, merged
-  `61c9475`), the dormant Windows descriptor journal bootstrap (`e4ca09b`,
-  merged `4de01f7`), and the dormant Windows process authority contract and
-  `LaunchAuthority` (`cfe8136`, merged `7239b7e`). None adds compile, live,
-  provider, production, Windows, or target evidence, and no blocker state below
-  changes.
-- The WAL has descriptor-bound durable integrity/recovery behavior. The new
-  bootstrap adds a dormant, uncompiled Win32 secure create/trusted reopen,
-  single-writer lease, and one-shot non-inheritable handoff for
+- The WAL has descriptor-bound durable integrity/recovery behavior, and the
+  earlier bootstrap adds a dormant, uncompiled Win32 secure create/trusted
+  reopen, single-writer lease, and one-shot non-inheritable handoff for
   `action-journal-v2.wal`, but native secure owner publication, an
   authenticity/anti-rollback anchor, compaction, a reviewed launcher, and the
   HANDLE-to-CRT child bridge are still absent. The artifact handoff's public
@@ -32,25 +45,35 @@
   narrow restart path remains fail-closed.
 - ICR-RUN-WDJB-001 is Sol-approved as an additive source-only extension: four
   additive status codes in `contracts/action-journal-storage/v0.1.0.json` with
-  version `0.1.0` retained, merged at `4de01f7`, generalized by ADR-0004.
-  Independent source review is complete; formal gate approval is still
-  required.
-- Current reproduced evidence is `npm test` 426 tests/424 pass/0 fail/0
-  cancelled/1 skipped/1 todo; Windows native static
-  `Ran 289 tests` OK; QA safe-runner `Ran 20 tests` OK. Static inventory is 153
-  tracked JSON files (152 strict-valid under a duplicate-key-rejecting parser
-  plus one intentional hostile fixture) and a host import graph of 29
-  modules/67 unique relative import edges/0 unresolved/0 cycles. QA has 62
-  discovered, 0 missing/unknown, and 68 records (1 PASS/67 expected SKIP);
-  overall QA remains `BLOCKED`. The prior `6e0d12c` focused numbers (Node
-  210/209, handoff/release 63/63, env 26/26, QA-runner 27/27, conformance
-  11/11, JSON 152/151, imports 29/71, QA 59 discovered/65 records) are
-  historical.
+  version `0.1.0` retained, merged at `4de01f7`, generalized by ADR-0004, and
+  now carrying a dated note recording that the separate-contract alternative
+  was taken. Independent source review is complete; formal gate approval is
+  still required.
+- Current reproduced evidence is `npm test` 432 tests/430 pass/0 fail/0
+  cancelled/1 skipped/1 todo; native static `Ran 309 tests` OK, of which the
+  narrower Windows-only pattern is `Ran 289 tests` OK — 309 is 289 plus the 20
+  tests of the new descriptor-WAL contract suite; QA safe-runner `Ran 20
+  tests` OK. Static inventory is 154 tracked JSON files (153 strict-valid
+  under a duplicate-key-rejecting parser plus one intentional hostile fixture)
+  and a host import graph of 29 modules/67 unique relative import edges/0
+  unresolved/0 cycles. QA has 64 discovered, 0 missing/unknown, and 70 records
+  (1 PASS/69 expected SKIP); overall QA remains `BLOCKED`. The prior `7239b7e`
+  numbers (Node 426/424, native static 289, JSON 153/152, QA 62 discovered/68
+  records) and the older `6e0d12c` focused numbers (Node 210/209,
+  handoff/release 63/63, env 26/26, QA-runner 27/27, conformance 11/11, JSON
+  152/151, imports 29/71, QA 59 discovered/65 records) are historical.
 - Broader Node 350/349/0/0/1 TODO and Python 663/663 across 30/33 safe files
-  are explicitly historical `d195235` evidence, not current `7239b7e` proof.
+  are explicitly historical `d195235` evidence, not current `263f114` proof.
   Remote execution remains false, ledger migration remains
   `SAFE_TO_MIGRATE_NOW=NO`, and previously exposed credentials—including the
   leaked HF token—require source-side rotation/revocation before reuse.
+- Repository housekeeping, recorded for traceability and advancing nothing: on
+  2026-09-11 Sol had 112 worktrees inventoried and 103 clean, stale worktree
+  directories removed, with no branch ref deleted (120 `luna/*` before and
+  after) and `git worktree prune` not yet run. Nine were kept — 2 lanes active
+  at the time, 6 holding ignored `experiments/runtime/` state not recoverable
+  from git, and 1 (`wt-model-performance`) holding a `.env` — and those 7 need
+  an operator decision. No secret was read or printed.
 
 ## B-001 — Exact target receipt incomplete
 
@@ -100,9 +123,27 @@
   the emergency stop; manual
   `POST .../reconcile` remains HTTP 501; `reconciling` records still have no
   automatic resolution path and accumulate against the 256-record active cap;
-  `listSentForDigest` plausibly carries the same collection-projection defect
-  and is tracked as follow-up `GRAPH-SENT-PROOF-PROJECTION`; and no live
-  Microsoft account or provider evidence exists. Browser/Copilot proposal state
+  and no live Microsoft account or provider evidence exists. The
+  `listSentForDigest` collection-projection defect is no longer plausible but
+  confirmed and repaired: at the pristine base it asked a Sent Items
+  collection query for `internetMessageHeaders`, which Graph returns only on
+  single-message projections, so `mail.send_draft` could never complete
+  against a real account (a safe false negative, never a false completion) and
+  a transport fault on that query escalated the record to `unknown_manual`.
+  The repair, accepted at `26beb82` and merged by `263f114`, shares the
+  bounded per-message retrieval: `collectMailProof` issues one folder ID page
+  plus at most `MAX_MAIL_PROOF_CANDIDATES` = 20 exact GETs per call, refuses
+  absent or malformed markers before any request, returns typed inconclusive
+  results instead of throwing, adds a `mail.send_draft` proof deadline with a
+  typed `sent_proof_budget_exhausted` exit, and preserves cancellation. Three
+  limits remain, all pre-existing and unchanged by that slice: the pre-send
+  Sent Items `@odata.nextLink` refusal still blocks every send for a mailbox
+  holding more than 50 sent items (follow-up
+  `GRAPH-SENT-PAGINATION-PRECHECK`); a pre-dispatch provider refusal still
+  lands as `unknown_manual` even though nothing was sent, because the journal
+  cannot distinguish "provider refused before writing" from post-dispatch
+  ambiguity; and three pre-proof requests in the send branch remain uncapped,
+  so the seam is bounded while the tool as a whole is not. Browser/Copilot proposal state
   remains memory-only, and browser/Copilot executable paths are not bound to
   immutable file identity across preview and spawn.
 - Impact: a passing model score or mocked provider run cannot establish safe
@@ -133,6 +174,16 @@
 - Workaround: stop retrying this profile. Use a fresh read-only catalogue, then
   a cheaper non-A100 activation/SSH/CUDA canary with no model download. Only a
   candidate that passes that canary is eligible for the HF-backed evaluator.
+- Fact (cost-planning correction, 2026-09-11): the quality comparators are
+  gone. The Q8_0 and bf16 conversion outputs exist only as hashes in
+  `artifacts/qwen35-9b/scan-receipt.json`, and
+  `artifacts/qwen35-9b/post-cleanup-receipt.json` records `Qwen3.5-9B-Q4_K_M`
+  as the only remaining GGUF. The ≥95% quality-retention gate
+  (`execution/ACCEPTANCE_CRITERIA.md:215`) therefore has no reachable
+  reference artifact, so any future quality run must budget a full Shadeform
+  re-conversion rather than an evaluation alone. Any candidate plan written
+  against this blocker must carry that larger cost, and the decision should be
+  taken before a profile is chosen.
 - Needed from: S2 candidate plan, S4 lifecycle review, and S0 authorization.
 - State: OPEN; does not block local mocked/source hardening.
 - Source/evidence correction: lifecycle authority hardening is source-merged
@@ -204,10 +255,67 @@
 
 ## B-006 — Model/tool quality and artifact acceptance remain below gate
 
-- Fact: the strongest recorded general remote tool evaluation completed at
-  27/34, below its gate. A separate production-profile run completed at 13/32
-  with 19 failures and therefore failed that profile. Subsequent corrected
+- Fact (corrected 2026-09-11): the model has NOT been tested against the
+  profile it must ship against. The strongest recorded general remote tool
+  evaluation completed at 28/34, not 27/34 — the receipt
+  `artifacts/qwen35-9b/remote-eval-20260904-j/eval-receipt.json` is
+  git-tracked and records `metrics.passed = 28` against `metrics.case_count =
+  34` (`metrics.failed = 6`, `metrics.errors = 0`, canary `tool_count = 11`,
+  status `completed_with_failures`). That result is on the retired
+  11-tool/34-case canary fixture, below its gate, and not on the current
+  profile. A separate production-profile run completed at 13/32 with 19
+  failures and therefore failed that profile; it too used a retired fixture,
+  the 28-tool/32-case profile. Both scores date from 2026-09-04 and were
+  measured on CUDA/A100 hardware — never on CPU and never on Intel Vulkan,
+  which are the mandatory and candidate target backends. Subsequent corrected
   attempts did not reach evaluation because provider activation timed out.
+- Fact: the current production profile is 33 tools and 37 cases, fixture
+  `tests/model/production_tool_call_eval.json` with SHA-256
+  `c75af5200b76a504e6b603183ffcf1cbeedb93db18ec544683044b8cc9b8ac6c`. It has
+  NO recorded score. The model's score on the shipping profile is unknown, not
+  merely below gate, and no comparison between the retired-fixture results and
+  this profile is admissible.
+- Fact: the quality comparators were deleted. Q8_0 and bf16 exist only as
+  hashes in `artifacts/qwen35-9b/scan-receipt.json`;
+  `artifacts/qwen35-9b/post-cleanup-receipt.json` records `Qwen3.5-9B-Q4_K_M`
+  as the only remaining GGUF. The ≥95% quality-retention gate
+  (`execution/ACCEPTANCE_CRITERIA.md:215`) consequently has no reachable
+  reference artifact, and any future quality run must budget a full Shadeform
+  re-conversion — a change to B-004 candidate cost planning.
+- Fact: the quality corpus does not exist yet.
+  `model/quality-eval/quality-fixture-spec.json` defines 13 categories whose
+  `minimum_cases` fields total 1,180, and only 3 `fixture_cases` are present.
+  Authoring it needs no model, no spend, and no credential, so it is unblocked
+  and tracked as `UNCLAIMED` task `MODEL-QUALITY-CORPUS-001`.
+- Fact: a local run on 2026-09-11 — a Sol-authorized single development-only
+  exception to the workaround below, granted on the basis that the local bytes
+  were re-verified byte-exact against the pinned identity — ABORTED before any
+  model load, on two independent stop conditions. (1) Host memory: the
+  development host is an 8 GiB Apple M2 MacBook Air with roughly 94% of swap
+  in use and `kern.memorystatus_vm_pressure_level` at WARNING before the run
+  started, against an artifact needing about 5.2 GiB resident. (2) A stale
+  prebuilt engine: `out/build-real/native/lae-engine`, built 2026-09-04, is
+  532 commits behind `fdfed07` with 79 of those touching `native/`, and
+  rejects the current `serve` flags with `unknown argument`. No score was
+  produced, no bytes were loaded, and nothing was bound or downloaded. The one
+  positive result is that the model identity re-verified exactly at
+  5,629,109,088 bytes and SHA-256 `c654bc40…68873b`. The three `real_model`
+  tests fail at argument parsing against the stale binary. Conclusion: no
+  model evidence can be produced on this laptop; a real measurement requires a
+  rebuild from current source on a machine with at least 16 GiB — i.e.
+  Shadeform — once the human-only blockers clear:
+  `REMOTE_EXECUTION_ENABLED = False`
+  (`scripts/shadeform/remote_external_tools.py:85`, enforced at `:804`), no
+  approved cost-ledger genesis (`coordination/POLICY_STATUS.md:19`),
+  `SAFE_TO_MIGRATE_NOW=NO` (`governance/MODEL_DECISION.md`, current-truth
+  section) with the
+  legacy ledger files reported world-readable, an unrotated Hugging Face
+  credential (`coordination/SECURITY_INCIDENTS.md:22`), and B-004's
+  activation-unreliable A100 profile (`coordination/BLOCKERS.md`, B-004). The
+  aborted-run receipt is held at
+  `artifacts/dev-evidence/local-macos-20260911-aborted/README.md`, outside
+  `artifacts/evidence-index/`; it is development evidence only and advances no
+  gate.
 - Fact: the product verifier pins `Qwen3.5-9B-Q4_K_M.gguf` to exactly
   5,629,109,088 bytes and SHA-256
   `c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b`.
