@@ -98,6 +98,24 @@ class WindowsDescriptorJournalBootstrapStaticTests(unittest.TestCase):
         for forbidden in ("DeleteFileW(", "MoveFile", "ReplaceFile", "SetFileInformationByHandle"):
             self.assertNotIn(forbidden, body)
 
+    def test_every_create_file_call_in_this_slice_pins_anonymous_sqos(self):
+        body = self.cpp[self.cpp.index("StorageStatus acquire_descriptor_wal(") :]
+        calls = []
+        for match in re.finditer(r"CreateFileW\(", body):
+            index, depth = match.end(), 1
+            while index < len(body) and depth:
+                if body[index] == "(":
+                    depth += 1
+                elif body[index] == ")":
+                    depth -= 1
+                index += 1
+            self.assertEqual(depth, 0)
+            calls.append(body[match.end() : index - 1])
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            self.assertIn("SECURITY_SQOS_PRESENT", call)
+            self.assertIn("SECURITY_ANONYMOUS", call)
+
     def test_reopen_requires_external_identity_before_any_header_acceptance(self):
         body = self.cpp[self.cpp.index("StorageStatus acquire_descriptor_wal(") :]
         request = body.index("open && (!request.has_expected_identity")

@@ -1097,7 +1097,8 @@ StorageStatus acquire_descriptor_wal(const DescriptorWalRequest& request,
         create ? &security.attributes : nullptr,
         create ? CREATE_NEW : OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT |
-            FILE_FLAG_WRITE_THROUGH,
+            FILE_FLAG_WRITE_THROUGH | SECURITY_SQOS_PRESENT |
+            SECURITY_ANONYMOUS,
         nullptr);
     if (raw == INVALID_HANDLE_VALUE) return fail(open_error(create));
     candidate->file.reset(raw);
@@ -1158,10 +1159,15 @@ StorageStatus acquire_descriptor_wal(const DescriptorWalRequest& request,
         !directories_stable(candidate->directories, candidate->user.sid))
       return fail(StorageStatus::kIdentityMismatch);
 
-    HANDLE reopen = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES | READ_CONTROL,
-                                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                                OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT,
-                                nullptr);
+    // Anonymous SQOS is defence in depth: if path validation ever regressed
+    // and a named-pipe or UNC target reached CreateFileW, an anonymous
+    // impersonation level denies that server any use of this token.
+    HANDLE reopen = CreateFileW(
+        path.c_str(), FILE_READ_ATTRIBUTES | READ_CONTROL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT | SECURITY_SQOS_PRESENT |
+            SECURITY_ANONYMOUS,
+        nullptr);
     if (reopen == INVALID_HANDLE_VALUE)
       return fail(StorageStatus::kReopenIdentityMismatch);
     candidate->path_reopen.reset(reopen);
