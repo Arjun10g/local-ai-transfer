@@ -38,7 +38,9 @@ no gate.
   retitled historical/superseded.
 - Files changed: `coordination/STATUS.md`, `coordination/RELEASE_GATES.md`,
   `coordination/BLOCKERS.md`, `coordination/TASK_CLAIMS.md`,
-  `governance/MODEL_DECISION.md`, `coordination/status/S0.md`, this packet
+  `governance/MODEL_DECISION.md`, `coordination/status/S0.md`,
+  `coordination/status/S2.md` and `coordination/status/S4.md` (the
+  Sol-authorized cross-lane 27/34 correction only), this packet
   (`coordination/status/governance-refresh-v5.md`), and one new receipt file
   `artifacts/dev-evidence/local-macos-20260911-aborted/README.md`. Markdown
   only; no source, test, contract JSON, configuration, script, or `.gitignore`
@@ -237,11 +239,18 @@ Exact numbers, reproduced in this worktree on 2026-09-11:
   "strongest recorded" line), `coordination/BLOCKERS.md` (B-006),
   `coordination/STATUS.md`, `coordination/TASK_CLAIMS.md` (MODEL-006), and
   `coordination/status/S0.md`.
-- **Residual, for Sol to direct.** Two other lanes' own packets still state the
-  superseded figure: `coordination/status/S2.md:74` and
-  `coordination/status/S4.md:113`. They were left untouched because they are
-  those lanes' session records rather than program current-truth files, and
-  they fall outside the file list for this task. S2 and S4 should correct them.
+- **Cross-lane correction, Sol-authorized and applied.** Two other lanes' own
+  packets stated the superseded figure. Sol subsequently authorized the
+  cross-lane edit, so `coordination/status/S2.md` and
+  `coordination/status/S4.md` now carry the verified 28/34 wording with their
+  13/32 statements and surrounding text preserved, each marked "(corrected by
+  Sol in governance refresh v5, 2026-09-11)". Nothing else in those two files
+  changed. A tree-wide grep afterwards leaves no standing 27/34 claim anywhere:
+  every remaining occurrence is correction-notice text recording that the old
+  figure was wrong, in `coordination/BLOCKERS.md`, `coordination/STATUS.md`,
+  `coordination/TASK_CLAIMS.md`, `governance/MODEL_DECISION.md`,
+  `coordination/status/S0.md` (one of which sits inside that file's historical
+  2026-09-05 interval block), and this packet.
 - Every other number above reproduces the previous interval's method exactly.
   The import-graph figures (29/67/0/0 from 72 occurrences) are unchanged from
   v4; the Node, native-static, JSON, and QA figures moved with the two merged
@@ -282,8 +291,8 @@ Exact numbers, reproduced in this worktree on 2026-09-11:
 ## Next bounded action
 
 Independent S0/S4 docs and evidence-scope audit, followed by Sol's merge
-decision. Separately, S2/S4 should correct the superseded 27/34 figure in their
-own packets, and Sol owes an operator decision on the 7 retained worktrees and a
+decision. The S2/S4 packet correction is done under Sol's authorization, so
+what remains is Sol's operator decision on the 7 retained worktrees and a
 scoping decision on the re-conversion cost implied by the deleted comparators.
 No live, model, provider, native, browser, or target run follows from this task.
 
