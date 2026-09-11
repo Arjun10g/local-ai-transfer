@@ -128,6 +128,69 @@ frame replay, checksum validation, exact committed-frame recovery, and append
 flush/readback remain owned by `DescriptorActionJournal`; this native boundary
 neither parses nor repairs frames.
 
+## Accepted design limitations
+
+### The create-path lease keeps `DELETE` for its whole lifetime (review item R4)
+
+Review item R4 observed that a create-path lease retains `DELETE` on the
+retained handle for the whole lease lifetime, although the right is needed only
+until `discard.disarm()`, and proposed shedding it after publication. It is
+closed here as an accepted design limitation rather than implemented, for
+reasons that do not depend on taste.
+
+Win32 has no operation that narrows the access already granted to an open
+handle. Only two shapes exist, and both are worse than the limitation:
+
+- **Duplicate down and close the original.** `DuplicateHandle` with an explicit
+  `GENERIC_READ | GENERIC_WRITE | READ_CONTROL` mask produces a second handle to
+  the *same file object*, so the granted access and share bookkeeping recorded
+  on that file object at open time are unchanged; only the surviving handle's
+  handle-local rights shrink. Buying that shrink costs a `DuplicateHandle` call
+  that can fail, placed *after* the WAL has been created, written, flushed, read
+  back, size-asserted, identity-reopened, and verified — and after
+  `discard.disarm()`, so the correct published artifact may no longer be
+  deleted. The acquisition would then have to refuse a file that is in fact
+  good, which is precisely the half-owned outcome the rest of this slice is
+  built to avoid.
+- **Reopen with reduced access.** A `ReOpenFile` (or a fresh `CreateFileW`)
+  requesting narrower access is a new open and must pass share arbitration
+  against the handle this lease still holds. That handle grants read and write
+  data access and shares `FILE_SHARE_READ` only, so a reopen asking for write
+  data access collides with the exclusive reservation and fails with a sharing
+  violation. The narrowed writer handle cannot be obtained this way at all.
+
+The security-relevant property is unchanged either way. Share bookkeeping lives
+on the file object, not the handle, so the restriction every other process sees
+is the same before and after any such narrowing: write and delete sharing stay
+denied to everyone else for the complete lease lifetime.
+
+What bounds the retained right instead:
+
+- The handed-off duplicate is created with
+  `DuplicateHandle(..., GENERIC_READ | GENERIC_WRITE, FALSE, 0)` and never with
+  `DUPLICATE_SAME_ACCESS`, so `DELETE` can never cross a process boundary.
+- `DescriptorWalLease` exposes no raw-handle accessor, so no caller can reach
+  the retained handle to exercise the right. `DescriptorWalHandoff::handle()`
+  borrows only the narrowed duplicate.
+- `CreatedFileDiscard` is armed only under `create` and is disarmed before the
+  lease takes ownership, so nothing in this tree uses the `DELETE` right once a
+  WAL is published.
+- The reopen path never requests `DELETE` at all.
+
+These three properties are pinned statically rather than restated here.
+`tests/native/test_windows_descriptor_journal_bootstrap_static.py` pins the exact
+duplicate mask and the absence of `DUPLICATE_SAME_ACCESS`
+(`test_duplicate_is_not_born_inheritable_and_carries_no_delete`) and the
+arm-once/disarm-before-transfer ordering of the discard guard
+(`test_failed_create_discards_the_unpublished_leaf_and_reopen_never_deletes`).
+`tests/native/test_descriptor_wal_contract_static.py` pins the absence of any
+lease-side raw-handle accessor and binds all three to the frozen contract
+`contracts/action-journal-descriptor-wal/v0.1.0.json`.
+
+Revisit R4 with the reviewed launcher bridge, under real Windows compilation and
+exact-target tests, where a `DuplicateHandle` failure mode can actually be
+observed rather than reasoned about on a platform that cannot compile this code.
+
 ## Deliberately missing bridge and gates
 
 A Win32 `HANDLE` numeric value is not a Microsoft C runtime file descriptor,

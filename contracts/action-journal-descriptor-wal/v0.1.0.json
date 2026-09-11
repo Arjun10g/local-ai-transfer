@@ -1,0 +1,255 @@
+{
+  "schema_version": "lae.action-journal-descriptor-wal-boundary.v1",
+  "$id": "lae://contracts/action-journal-descriptor-wal/0.1.0",
+  "title": "Inert Win32 DescriptorActionJournal WAL bootstrap boundary",
+  "name": "lae.action-journal-descriptor-wal",
+  "version": "0.1.0",
+  "status": "source_only_not_enabled",
+  "production_available": false,
+  "native_target_registered": false,
+  "helper_added": false,
+  "transport_added": false,
+  "node_integration_added": false,
+  "package_added": false,
+  "activation_permitted": false,
+  "platform": "windows_x64_source_only",
+  "abi_version": 1,
+  "required_by": "ADR-0004-inert-contract-additive-extension",
+  "interface_change_request": "ICR-RUN-WDJB-001",
+  "authoritative_for": "the dormant v2 DescriptorActionJournal WAL lease, handoff, and inheritance boundary in native/action_journal_storage/windows_storage.cpp",
+  "not_authoritative_for": "the v1 fixed container lease, which remains lae.action-journal-storage-boundary.v1",
+  "sibling_storage_contract": "lae.action-journal-storage-boundary.v1",
+  "wal_consumer": "host/agent/action-journal.mjs DescriptorActionJournal",
+  "wal_format_version": 2,
+  "fixed_leaf_name": "action-journal-v2.wal",
+  "native_source": "native/action_journal_storage/windows_storage.cpp",
+  "native_header": "native/action_journal_storage/windows_storage.hpp",
+  "design_note": "native/action_journal_storage/DESCRIPTOR_WAL_BOOTSTRAP.md",
+  "header": {
+    "bytes": 48,
+    "hex": "7b22666f726d6174223a226c61652d616374696f6e2d6a6f75726e616c2d77616c222c2276657273696f6e223a327d0a",
+    "utf8": "{\"format\":\"lae-action-journal-wal\",\"version\":2}\n",
+    "native_constant": "kDescriptorWalHeader",
+    "native_length_constant": "kDescriptorWalHeaderBytes",
+    "node_constant": "DESCRIPTOR_WAL_HEADER",
+    "published_size_asserted_not_assumed": true,
+    "trailing_newline": true
+  },
+  "limits": {
+    "max_wal_bytes": 33554432,
+    "max_wal_bytes_inclusive": true,
+    "native_constant": "kDescriptorWalMaxBytes",
+    "node_constant": "MAX_DESCRIPTOR_WAL_BYTES",
+    "max_path_utf16_code_units": 32767,
+    "file_id_bytes": 16,
+    "max_ancestor_handles": 256,
+    "max_prepared_duplicates": 1
+  },
+  "operations": {
+    "create_new": {
+      "disposition": "CREATE_NEW",
+      "expected_identity": "must_be_absent",
+      "initial_size": 0,
+      "publication": "write the exact 48-byte header through the retained handle, FlushFileBuffers, read back and compare byte for byte, then assert the observed size is exactly 48",
+      "on_failure": "discard_the_never_published_create_new_leaf_through_its_own_open_handle"
+    },
+    "open_existing": {
+      "disposition": "OPEN_EXISTING",
+      "expected_identity": "required_exact_volume_serial_and_file_id",
+      "accepted_prefix": "empty file, an exact strict prefix of the 48-byte header, or the exact header followed by frame bytes",
+      "on_failure": "preserve_the_file_exactly_as_found_never_delete_truncate_or_write"
+    }
+  },
+  "delete_on_failure": {
+    "rule": "DELETE access is requested only when this call creates the leaf, and the disposition is set through the handle this call already owns",
+    "applies_to": "create_new",
+    "never_applies_to": "open_existing",
+    "scope": "a leaf created by CREATE_NEW in this call and never published",
+    "mechanism": "SetFileInformationByHandle with FileDispositionInfo on the already-open handle",
+    "raii_guard": "CreatedFileDiscard",
+    "armed_only_under_create": true,
+    "disarmed_before_lease_ownership": true,
+    "path_metadata_trusted_a_second_time": false,
+    "is_a_wal_repair": false,
+    "reopen_path_requests_delete": false,
+    "reopen_path_may_delete_truncate_or_write": false
+  },
+  "lease": {
+    "type": "private noncopyable move-only DescriptorWalLease",
+    "public_raw_handle_accessor": false,
+    "handle_owner": "UniqueHandle closes each owning HANDLE exactly once",
+    "states": ["empty", "held", "handoff_transferred"],
+    "share_mode": "FILE_SHARE_READ only; write and delete sharing denied for the complete lease lifetime",
+    "exclusive_writer_boundary": "against every other process, for the whole lease lifetime",
+    "recheck_set_equals_acquisition_check_set": true,
+    "recheck_members": [
+      "source_handle_non_inheritable",
+      "file_identity",
+      "file_shape_and_bounded_size",
+      "observed_size",
+      "wal_header_prefix",
+      "owner_only_protected_dacl",
+      "final_path",
+      "volume_policy",
+      "retained_ancestor_identity_and_dacl"
+    ]
+  },
+  "handoff": {
+    "type": "private noncopyable move-only DescriptorWalHandoff",
+    "max_prepared_duplicates": 1,
+    "second_prepare_status": "handoff_already_transferred",
+    "second_prepare_destroys_first_handoff": false,
+    "one_shot_guard_and_recheck_precede_output_reset": true,
+    "source_handle_verified_non_inheritable_before_duplication": true,
+    "source_handle_inheritable_status": "source_handle_inheritable",
+    "duplicate_access": {
+      "requested_mask": "GENERIC_READ | GENERIC_WRITE",
+      "b_inherit_handle": false,
+      "duplicate_options": 0,
+      "duplicate_same_access": false,
+      "delete": false,
+      "write_dac": false,
+      "write_owner": false,
+      "read_control_crosses": true,
+      "read_control_reason": "STANDARD_RIGHTS_READ and STANDARD_RIGHTS_WRITE are both READ_CONTROL, which only lets the child read a DACL naming its own user"
+    },
+    "born_inheritable": false,
+    "inheritance_states": ["absent", "prepared_not_inheritable", "inheritance_armed", "inheritance_revoked", "closed"],
+    "inheritance_control": {
+      "api": "SetHandleInformation(HANDLE_FLAG_INHERIT, ...)",
+      "arm": "arm_inheritance",
+      "revoke": "revoke_inheritance",
+      "observe": "inheritance_armed",
+      "idempotent": true,
+      "decides_on_observed_kernel_flag_not_api_return": true,
+      "failure_status": "inheritance_control_failed"
+    },
+    "take_handle_refused_while_inheritance_armed": true,
+    "handle_value_in_receipt_log_command_line_or_environment": false
+  },
+  "launcher_preconditions": {
+    "binding": "every clause is mandatory; a launcher that cannot satisfy all of them must close the duplicate instead of launching",
+    "required": [
+      "arm_inheritance_immediately_before_the_single_create_process_call",
+      "PROC_THREAD_ATTRIBUTE_HANDLE_LIST",
+      "handle_allowlist_contains_exactly_this_handle",
+      "revoke_or_close_after_child_creation_and_on_every_failure_path",
+      "take_handle_refused_while_inheritance_armed",
+      "no_ambient_handle_inheritance"
+    ],
+    "bInheritHandles_true_without_an_explicit_handle_list": "forbidden",
+    "duplicate_inheritable_while_any_unrelated_child_is_created": "forbidden",
+    "supervisor_contract_property": "no_ambient_handle_inheritance",
+    "serialize_duplicate_as_LAE_ACTION_JOURNAL_FD": "forbidden",
+    "handle_is_a_crt_file_descriptor": false,
+    "child_must_convert_handle_to_a_crt_descriptor": true
+  },
+  "shared_file_object": {
+    "duplicate_is_a_new_open": false,
+    "shares_one_file_object_and_one_file_position": true,
+    "position_owner_after_handoff": "child",
+    "parent_side_io_after_handoff": "refused_with_handoff_already_transferred",
+    "child_io_mode": "positional reads and writes only",
+    "transferred_predicate": "handoff_transferred",
+    "revalidate_refused_after_transfer": true
+  },
+  "path_policy": {
+    "directory": "absolute canonical drive-letter DOS path only",
+    "leaf": "fixed_by_contract_not_caller_controlled",
+    "ancestors": "open existing with FILE_FLAG_OPEN_REPARSE_POINT, reject reparse, retain handles denying write and delete before any leaf create/open",
+    "leaf_open": "FILE_FLAG_OPEN_REPARSE_POINT and FILE_FLAG_WRITE_THROUGH with FILE_SHARE_READ only",
+    "impersonation_defence": "SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS on every CreateFileW call in the translation unit",
+    "identity_reopen_share_mode": "FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, which concedes nothing because the retained handle still denies write and delete sharing to every other process"
+  },
+  "volume_policy": {
+    "drive_type": "DRIVE_FIXED",
+    "filesystem_allowlist": ["NTFS"],
+    "required_flags": ["FILE_PERSISTENT_ACLS"],
+    "rejected_flags": ["FILE_READ_ONLY_VOLUME", "FILE_VOLUME_IS_COMPRESSED"]
+  },
+  "security_policy": {
+    "owner": "exact current process-token user SID",
+    "dacl": "present_non_null_protected_nondefaulted_single_noninherited_allow_ace_for_exact_current_user",
+    "ace_mask": "FILE_ALL_ACCESS",
+    "creation": "absolute security descriptor is supplied atomically to CREATE_NEW"
+  },
+  "trust_anchor": {
+    "reopen_identity": "{volume_serial, file_id} supplied by a separately trusted caller",
+    "identity_read_from_the_candidate_path_may_authorize_its_own_reopen": false,
+    "is_an_authenticity_anchor": false,
+    "frame_parsing_checksum_or_repair_in_this_boundary": false
+  },
+  "required_predicates": [
+    "acquire_descriptor_wal",
+    "prepare_inheritable_handoff",
+    "arm_inheritance",
+    "revoke_inheritance",
+    "inheritance_armed",
+    "take_handle",
+    "handoff_transferred",
+    "revalidate",
+    "no_ambient_handle_inheritance",
+    "PROC_THREAD_ATTRIBUTE_HANDLE_LIST",
+    "kDescriptorWalLeafName",
+    "kDescriptorWalMaxBytes",
+    "descriptor_bridge_available"
+  ],
+  "status_codes": [
+    "ok_created",
+    "ok_opened",
+    "invalid_request",
+    "unsafe_path",
+    "unsafe_volume",
+    "unsupported_filesystem",
+    "private_directory_required",
+    "already_exists",
+    "not_found",
+    "access_denied",
+    "security_unavailable",
+    "reparse_refused",
+    "unsupported_file_type",
+    "link_count_refused",
+    "delete_pending",
+    "size_mismatch",
+    "identity_mismatch",
+    "reopen_identity_mismatch",
+    "io_failed",
+    "genesis_incomplete",
+    "container_corrupt_header",
+    "handoff_already_transferred",
+    "source_handle_inheritable",
+    "inheritance_control_failed",
+    "final_path_mismatch",
+    "internal"
+  ],
+  "status_codes_retained_by_the_storage_contract": {
+    "note": "contracts/action-journal-storage/v0.1.0.json keeps a documented superset of these codes under ADR-0004; it is not changed by this contract",
+    "storage_only": ["platform_unavailable", "rng_failed", "hash_failed", "container_unformatted"]
+  },
+  "receipt": {
+    "schema": "lae.action-journal-descriptor-wal-receipt.v1",
+    "fields": [
+      "abi_version",
+      "status",
+      "wal_bytes",
+      "volume_serial_hex",
+      "file_id_hex",
+      "filesystem",
+      "dacl_profile",
+      "identity_reopened",
+      "exclusive_writer_lease",
+      "descriptor_bridge_available"
+    ],
+    "forbidden": ["handle", "path", "user_sid", "username", "security_descriptor", "secret", "free_form_error"],
+    "descriptor_bridge_available": false
+  },
+  "residual_gates": [
+    "Sol review and merge of this contract",
+    "independent source and security review",
+    "remote Windows SDK compile and static analysis",
+    "reviewed native child launcher bridge with an explicit handle allowlist and in-child HANDLE-to-CRT descriptor conversion",
+    "exact Windows DACL, sharing, inheritance, filter-driver, create-failure discard, and power-loss acceptance",
+    "durable external identity and anti-rollback anchor",
+    "build provenance, dependency scan, package allowlist, and target approval"
+  ]
+}
