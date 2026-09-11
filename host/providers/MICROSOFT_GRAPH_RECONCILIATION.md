@@ -22,22 +22,29 @@ content is never treated as completion.
 
 The per-ID GET is not an optimization. Microsoft Graph returns
 `internetMessageHeaders` only on a single-message projection, so a
-`/mailFolders/drafts/messages` collection query cannot carry the custom
-operation marker no matter what `$select` asks for; exact proof therefore costs
-one bounded ID page plus one GET per candidate. That cost is bounded by a
-single shared constant for both reconciliation seams: at most 20 candidate
-drafts per record. The in-flight seam additionally derives a deadline from
-`mail.create_draft`'s own published 10 s `timeout_ms`, minus a safety margin,
-and refuses to start a proof request that cannot finish inside the remainder;
-each request it does issue is capped to the remaining budget. When the budget
-runs out the adapter returns the typed inconclusive
-`draft_proof_budget_exhausted` result rather than letting the tool overrun its
-deadline. This matters because an overrun surfaces as `tool_timeout`, and the
-controller records a timed-out dispatched action as `unknown_manual` — a state
-no automatic path may touch. The in-flight seam therefore never throws for an
-ambiguous outcome: transport faults, malformed collections, truncation, and
-budget exhaustion are all reported as `reconciling` data. Operator cancellation
-still propagates, because that is a decision rather than an ambiguity.
+`/messages` collection query cannot carry the custom operation marker no matter
+what `$select` asks for; exact proof therefore costs one bounded ID page plus
+one GET per candidate. Every seam that needs the marker uses one shared
+retrieval — the in-flight draft path, the restart draft path, and the Sent
+Items path — so their request budget, projection strictness, and uniqueness
+rules cannot diverge. The bound is a single shared constant, and it is a
+per-call bound of exactly one list page plus at most 20 exact GETs. The shared
+retrieval refuses an absent or malformed marker before spending a request, so
+an unmarked message can never satisfy an unmarked expectation.
+
+The in-flight seams additionally derive a deadline from the invoked tool's own
+published 10 s `timeout_ms`, minus a safety margin, and refuse to start a proof
+request that cannot finish inside the remainder; each request they do issue is
+capped to the remaining budget. When the budget runs out the adapter returns a
+typed inconclusive result (`draft_proof_budget_exhausted` for
+`mail.create_draft`, `sent_proof_budget_exhausted` for `mail.send_draft`)
+rather than letting the tool overrun its deadline. This matters because an
+overrun surfaces as `tool_timeout`, and the controller records a timed-out
+dispatched action as `unknown_manual` — a state no automatic path may touch.
+The in-flight seams therefore never throw for an ambiguous outcome: transport
+faults, malformed collections, truncation, and budget exhaustion are all
+reported as `reconciling` data. Operator cancellation still propagates, because
+that is a decision rather than an ambiguity.
 
 After a process restart, only a durably `acknowledged` `mail.create_draft`
 record is eligible for automatic reconciliation. After explicit device auth
@@ -101,18 +108,35 @@ Sent Items baseline or Teams timeout proof is used.
 
 `mail.send_draft` binds the complete bounded normalized draft content,
 recipients, subject, and non-empty returned ETag/change key at preview. It does
-not claim completion from Graph's `202 Accepted`. Completion requires the draft
-to be absent and exactly one new matching Sent Items projection carrying the
-same bounded `x-lae-operation` marker already present on the draft, plus a
-post-snapshot `sentDateTime` inside the bounded deterministic window. Existing
+not claim completion from Graph's `202 Accepted`, which carries no body, so the
+Sent Items proof is the only completion evidence this operation has.
+
+Before the send, the adapter records a bounded Sent Items baseline
+(`$top=50`, `$select=id,sentDateTime`), which a collection query can answer;
+a paginated or malformed baseline refuses the send outright. After the send,
+proof uses the shared marker retrieval above: one bounded Sent Items ID page
+(`$top=20`, `$orderby=sentDateTime desc`, `$select=id`), then one explicit
+`GET /me/messages/{id}` per returned ID with
+`$select=id,subject,body,toRecipients,ccRecipients,internetMessageHeaders,changeKey,sentDateTime`.
+Completion requires the draft to be absent and exactly one such per-message
+projection carrying the same bounded `x-lae-operation` marker already present
+on the draft, reconstructing the bound content digest, absent from the
+pre-send baseline, and dated inside the bounded deterministic window. Existing
 drafts without that marker, missing versions, stale versions, old matches, or
 undated matches remain reconciling/manual; no unsupported marker is invented.
-Open question, not resolved in this slice: the Sent Items proof is still one
-collection query that asks for `internetMessageHeaders`. If Graph's
-single-message-only projection is what forced the draft path to per-ID GETs,
-that proof cannot match its marker against a real account and every
-`mail.send_draft` would stay reconciling. That cannot be confirmed without a
-live account, so it is recorded as a follow-up rather than changed here.
+
+That per-message GET replaces a single Sent Items collection query that asked
+for `internetMessageHeaders` in `$select` and then required it on every item.
+Because Graph populates that property only on a single-message projection, the
+old query's own guard rejected every item against a real account:
+`unique_sent_item` was unreachable, every send stayed `reconciling`/manual, and
+a transport fault on that query escaped as a failed tool result, which the
+controller records as `unknown_manual`. Both are repaired. The claim that Graph
+withholds the property from collection listings remains unverified against a
+live account; it is the same documented rationale the draft path already
+depends on, and the repair is the fail-closed direction either way — a message
+that does carry the marker on a collection listing still carries it on the
+per-message GET.
 
 Teams sends do not use an idempotency header or automatic retry. They complete
 only from a validated `201 Created` resource. Timeout/list-message proof stays
