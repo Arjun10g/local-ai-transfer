@@ -1,14 +1,51 @@
 # Model Decision Record — Qwen3.5-9B Q4_K_M
 
-## Current governance truth — 2026-09-11
+## Current governance truth — 2026-09-11 (refresh v5)
 
 - Audited integrated source baseline is exact
-  `main@7239b7e1a6a512cabf9e5ab18ba463a7fac351fc`, the last source merge. The
-  docs descendant `6c3a125749581554b88ade018181f61667990ac8` and this document
-  are documentation descendants, not self-referential source hashes.
-- The current production evaluation fixture/profile is 33 tools and 37 cases;
-  `max_cases=64` is a ceiling, not a request to trim. Historical 13/32 and
+  `main@263f11413d1746044a6cc13062ad2b1f821c4d11`, the last source merge. The
+  docs descendants `335211f5ce7cdb230c75c8ba14f7cf31ce43f69f` and
+  `1b22a40e21dce0ebc903bc3c2024ab162adc2d56` and this document are
+  documentation descendants, not self-referential source hashes. The previous
+  baseline `7239b7e` is historical and superseded.
+- **The model has not been tested against the profile it must ship against.**
+  The current production evaluation fixture/profile is 33 tools and 37 cases —
+  `tests/model/production_tool_call_eval.json`, SHA-256
+  `c75af5200b76a504e6b603183ffcf1cbeedb93db18ec544683044b8cc9b8ac6c` — and it
+  has NO recorded score. `max_cases=64` is a ceiling, not a request to trim.
+  Every recorded score dates from 2026-09-04 and was measured on a retired
+  fixture on CUDA/A100 hardware, never on CPU and never on Intel Vulkan: 28/34
+  on the retired 11-tool/34-case canary and 13/32 on the retired
+  28-tool/32-case production profile. The model's score on the shipping
+  profile is unknown, not merely below gate; historical 13/32 and
   28/32/11/34 profile/results remain separate and are not current acceptance.
+- The quality comparators were deleted. Q8_0 and bf16 survive only as hashes
+  in `artifacts/qwen35-9b/scan-receipt.json`, and
+  `artifacts/qwen35-9b/post-cleanup-receipt.json` records `Qwen3.5-9B-Q4_K_M`
+  as the only remaining GGUF, so the ≥95% quality-retention criterion below
+  (`execution/ACCEPTANCE_CRITERIA.md:215`) currently has no reachable
+  reference artifact. Any future quality run must budget a full Shadeform
+  re-conversion, which changes B-004 candidate cost planning.
+- The quality corpus is not authored. `model/quality-eval/quality-fixture-spec.json`
+  defines 13 categories whose `minimum_cases` fields total 1,180, against only
+  3 `fixture_cases` present. Authoring it requires no model, no spend, and no
+  credential; it is tracked as `UNCLAIMED` task `MODEL-QUALITY-CORPUS-001`.
+- A local development run on 2026-09-11, authorized by Sol as a single
+  development-only exception to the B-006 "do not load local bytes" workaround
+  because the local bytes were re-verified byte-exact against the pinned
+  identity, ABORTED before any model load on two independent stop conditions:
+  an 8 GiB Apple M2 development host with roughly 94% of swap in use and
+  memory pressure at WARNING before start (the artifact needs about 5.2 GiB
+  resident), and a prebuilt engine 532 commits behind `fdfed07` that rejects
+  the current `serve` flags with `unknown argument`. No score, no bytes
+  loaded, nothing bound or downloaded; the model identity re-verified exactly
+  at 5,629,109,088 bytes and SHA-256 `c654bc40…68873b`. No model evidence can
+  be produced on that laptop; a real measurement needs a rebuild from current
+  source on a machine of at least 16 GiB (i.e. Shadeform) once the human-only
+  blockers clear. The aborted-run receipt is
+  `artifacts/dev-evidence/local-macos-20260911-aborted/README.md`, held
+  outside `artifacts/evidence-index/` as development evidence only; it
+  advances no gate.
 - The inert unmintable dispatch lease and inert remote-canary hardening are
   source-merged (`5bef3cd`, `a9d2388`) but have no proof issuer, process
   mutation, product activation, success/runtime wiring, live execution, or
@@ -37,36 +74,51 @@
   `2dda060` and merged by `6e0d12c`, but native secure FD ownership,
   single-writer exclusion, authenticity/anti-rollback, compaction, and provider
   reconciliation remain absent.
-- Three slices were integrated this interval, each independently S0/S4
-  source-reviewed with one repair round and a re-review returning
-  `ACCEPT_FOR_MERGE`, and none adding compile, live, provider, production,
-  Windows, or target evidence: Graph restart reconciliation (accepted `4280e95`,
-  merged `61c9475`), which permits bounded automatic completion only for
-  durably acknowledged, newly account-bound `mail.create_draft` records with a
-  fresh unique exact provider `GET` proof while its startup trigger stays
-  operationally inert on memory-only tokens and manual
-  `POST .../reconcile` stays HTTP 501; the dormant Windows descriptor journal
-  bootstrap (accepted `e4ca09b`, merged `4de01f7`), which is uncompiled,
-  unlinked, and outside every product/package/activation graph; and the dormant
-  Windows process authority contract with its private move-only
-  `LaunchAuthority` (accepted `cfe8136`, merged `7239b7e`), which supplies no
-  launch mechanism, compile, or target evidence. ICR-RUN-WDJB-001 is
-  Sol-approved as an additive source-only extension with contract version
-  `0.1.0` retained, generalized by ADR-0004.
-- Current reproduced evidence is `npm test` 426 tests/424 pass/0 fail/0
-  cancelled/1 skipped/1 todo, Windows native static `Ran 289 tests` OK, and QA
-  safe-runner `Ran 20 tests` OK. Static inventory records 153 tracked JSON
-  files (152 strict-valid under a duplicate-key-rejecting parser plus one
-  intentional hostile fixture) and a host import graph of 29 modules/67 unique
-  relative import edges/0 unresolved/0 cycles. QA discovers 62 with 0
-  missing/unknown and 68 records (1 PASS/67 expected SKIP); overall QA remains
-  `BLOCKED` and no full suite is green in the release sense. The prior
-  `6e0d12c` focused numbers (journal/Graph Node 210/209, handoff/release 63/63,
-  env 26/26, QA-runner 27/27, conformance 11/11, JSON 152/151, imports 29/71,
-  QA 59 discovered/65 records) are historical, as are broader Node 350/349 and
-  Python 663/663, which belong to `d195235` and are not current `7239b7e`
-  proof. Bookkeeping is not spend authorization. Credentials require
-  source-side rotation/revocation, including the previously leaked HF token.
+- Two slices were integrated this interval, each independently S0/S4
+  source-reviewed and returning `ACCEPT_FOR_MERGE` on the first pass with
+  NOTE/MINOR findings only, and neither adding compile, live, provider,
+  production, Windows, or target evidence: the frozen descriptor WAL contract
+  (accepted `9f136a0`, merged `237d59b`), which freezes
+  `contracts/action-journal-descriptor-wal/v0.1.0` for the dormant v2
+  boundary, is statically bound to the C++ and Node constants (48-byte header,
+  32 MiB) and to the derived v2 status set (26 v2 codes against 25 v1, with
+  `v1 ∪ v2 ∪ {platform_unavailable}` equal to the 30-code storage set), leaves
+  `contracts/action-journal-storage/v0.1.0.json` byte-identical, and closes
+  review item R4 as a documented, test-pinned accepted Win32 limitation; and
+  the Graph sent-mail proof projection repair (accepted `26beb82`, merged
+  `263f114`), which confirms and fixes the `listSentForDigest`
+  collection-projection defect that left the sole completing state
+  `unique_sent_item` unreachable in code, bounding proof retrieval to one folder
+  ID page plus at most 20 exact GETs per call with typed inconclusive results
+  and a send-proof deadline, while leaving the pre-send `@odata.nextLink`
+  refusal as follow-up `GRAPH-SENT-PAGINATION-PRECHECK`. The Graph projection
+  premise the defect rests on is unverified without a live account, and the
+  repair is fail-closed under either behavior; a pre-dispatch refusal still
+  lands as `unknown_manual`, and three pre-proof requests in the send branch
+  remain uncapped, so the seam is bounded while the tool as a whole is not and
+  a slow provider can still surface as `tool_timeout` → `unknown_manual`. The three slices of
+  the previous interval (`4280e95`/`61c9475`, `e4ca09b`/`4de01f7`,
+  `cfe8136`/`7239b7e`) remain on `main`. ICR-RUN-WDJB-001 is Sol-approved as
+  an additive source-only extension with contract version `0.1.0` retained,
+  generalized by ADR-0004.
+- Current reproduced evidence is `npm test` 432 tests/430 pass/0 fail/0
+  cancelled/1 skipped/1 todo; native static `Ran 309 tests` OK, of which the
+  narrower Windows-only pattern is `Ran 289 tests` OK — 309 is 289 plus the 20
+  tests of the new descriptor-WAL contract suite; and QA safe-runner `Ran 20
+  tests` OK. Static inventory records 154 tracked JSON files (153 strict-valid
+  under a duplicate-key-rejecting parser plus one intentional hostile fixture)
+  and a host import graph of 29 modules/67 unique relative import edges/0
+  unresolved/0 cycles. QA discovers 64 with 0 missing/unknown and 70 records
+  (1 PASS/69 expected SKIP); overall QA remains `BLOCKED` and no full suite is
+  green in the release sense. The prior `7239b7e` numbers (Node 426/424,
+  native static 289, JSON 153/152, QA 62 discovered/68 records) and the older
+  `6e0d12c` focused numbers (journal/Graph Node 210/209, handoff/release
+  63/63, env 26/26, QA-runner 27/27, conformance 11/11, JSON 152/151, imports
+  29/71, QA 59 discovered/65 records) are historical, as are broader Node
+  350/349 and Python 663/663, which belong to `d195235` and are not current
+  `263f114` proof. None of this is model evidence. Bookkeeping is not spend
+  authorization. Credentials require source-side rotation/revocation,
+  including the previously leaked HF token.
 - The model-family/quantization decision below remains accepted only as a
   technical choice. No compile, model-load, provider, Windows-target, target,
   or production acceptance is claimed; release/full access remains blocked.
@@ -131,13 +183,20 @@ Workers may not quietly use Qwen3.5-4B, a 2-bit quant, a fine-tune, a distilled 
 
 ### Historical acceptance evidence (pre-profile synchronization)
 
-The strongest recorded general remote tool evaluation is 27/34, below its
-gate. A separate production-profile run is 13/32 with 19 failures and failed
-that profile. These results are not interchangeable, and neither accepts the
-model/tool path. Later corrected attempts timed out during provider activation
-before evaluation. The expected artifact identity is therefore pinned, but
-quality, local-byte verification, transfer custody, target execution, and
-release acceptance remain open.
+The strongest recorded general remote tool evaluation is 28/34 on the retired
+11-tool/34-case canary fixture (receipt
+`artifacts/qwen35-9b/remote-eval-20260904-j/eval-receipt.json`, git-tracked,
+`metrics.passed = 28` against `metrics.case_count = 34`), below its gate and
+not on the current profile. This corrects the previously recorded 27/34, which
+understated that receipt. A separate production-profile run is 13/32 with 19
+failures and failed that profile. These results are not interchangeable,
+neither accepts the model/tool path, and both were measured on 2026-09-04 on
+retired fixtures on CUDA/A100 — so neither speaks to the current
+33-tool/37-case shipping profile, which has no recorded score at all. Later
+corrected attempts timed out during provider activation before evaluation. The
+expected artifact identity is therefore pinned, but quality, local-byte
+verification, transfer custody, target execution, and release acceptance
+remain open.
 
 ## Why this model
 
