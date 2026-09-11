@@ -1,15 +1,118 @@
 # Release Gates
 
+## Current governance snapshot — 2026-09-11 (refresh v7)
+
+- Exact integrated source head is `c469ed1`. Two source integrations this
+  interval: merge `2e8c86a` (`J1M-HOST-PRIVACY-001`, from
+  `luna/j1m-host-privacy-v1`) and the direct integration `c469ed1`
+  (`J1M-HOST-ROOT-001`). The previous baseline `f4bb424` and its docs
+  descendant `a0aa02c` are historical and superseded. **Release/full access
+  remains `BLOCKED` / `NOT_READY`, and no blocker `State:` line changes.**
+  Nothing below advances a gate.
+- **The first paid Shadeform run executed, and it FAILED.** This is the
+  substantive change since v6, which recorded the run as pending. Run
+  `j1m-eval-20260911-remote-d`, instance `d75747f8-4801-4f72-8a5f-5713ef333905`,
+  hyperstack `A100_80G` ×1 in montreal-canada-2, created 2026-09-11T20:24:07Z
+  and active 20:28:44Z. It failed at `eval-stage:j1m_runner` with **8 receipts
+  requested and 0 salvaged**. Teardown is confirmed — deletion receipt written,
+  no orphan, ephemeral key removed, and a read-only `GET /instances` returned
+  zero afterwards. **USD 3.273486 was booked**: the provider charges the whole
+  reservation, so roughly six metered minutes cost the same as two hours. The
+  row is settled in `experiments/LEDGER.md` with pending `0.0`, so it blocks no
+  later provisioning.
+- **There is still no score.** No oracle delta, no retention ratio, no remote
+  hash verification, and no measurement of any kind on the shipping 33/37
+  profile. That gap is unchanged since the program began and is not narrowed by
+  anything in this refresh.
+- **Root cause, and why no local validator could have caught it.** Every
+  command run `d` issued was accepted by `validate_persisted_argv`, and
+  `scripts/j1m_dry_run.py` passed. Two independent defects, both invisible to
+  argv inspection: (1) the remote login shell carried the image default
+  `umask 022`, so the plan's `mkdir -p` created `0755` directories and the
+  probes wrote `0644` receipts — `j1m_runner._private_atomic_write` refused its
+  very first write and `_safe_cli` exited 2 with its typed refusal on **stdout**,
+  which the lifecycle receipt never captured; and (2) the uploaded runner's
+  `PRIVATE_OUTPUT_ROOT` is `/scratch`, not `/scratch/j1m`, so its progress file
+  lives at `/scratch/experiments/runtime/` — a directory no remote plan ever
+  created.
+- **Two slices close it, and a third gap was found by review before spending
+  again.** `J1M-HOST-PRIVACY-001` puts `umask 077 &&` at the end of
+  `sf.ssh_base` (one place, every remote command; `scp_base` untouched, as it
+  runs no login shell), chmods every created directory including intermediates,
+  derives the progress directories from `resources.progress_path`, publishes
+  the five host-side receipts `0600` atomically into `0700` directories, and
+  records a bounded credential-screened `stdout_tail` for failed stages only.
+  `J1M-HOST-ROOT-001` then establishes the trusted root's own shape — which
+  `mkdir -p` is a no-op about, so the provider image had been deciding it — via
+  `test ! -L /scratch` and `sudo chmod go-w /scratch`, and republishes
+  `/etc/ssl/certs` readable so `umask 077` cannot leave a `0600` CA bundle that
+  would break TLS for every later non-root stage.
+- **A deliberate contract change, named rather than buried.** The two pinned
+  tests asserting that a failed remote receipt retains no stdout were
+  rewritten. A completed stage still retains nothing, the tail is bounded to
+  1200 bytes, and credential-shaped output is still `<redacted>` — but ordinary
+  stdout of a *failed* stage is now persisted. Without it a paid failure books
+  cost and returns no diagnosis, which is exactly what run `d` did.
+- **A protocol deviation, recorded rather than smoothed over.** The independent
+  review of `J1M-HOST-PRIVACY-001` returned `ACCEPT_WITH_REQUIRED_FIXES`, and
+  its required fixes were applied *after* the merge as `J1M-HOST-ROOT-001`,
+  not as a pre-merge repair round. The operator directed a compressed
+  integration path. Each finding was re-verified against the production
+  predicates before being actioned, and none was a defect in what was merged —
+  all three were gaps the merged slice did not yet close.
+- **One reviewer item could not be closed by evidence.** Whether `apt` running
+  under `umask 077` leaves a non-world-readable CA bundle was to be settled by
+  a `docker run ubuntu:22.04` check; this host has no container runtime, so it
+  is closed **by construction** (republish the trust store unconditionally)
+  rather than by measurement. It remains an open evidence item, not a proven
+  negative.
+- **Run `j1m-eval-20260911-remote-e` is prepared but has NOT executed.** Phase
+  id unused, destination `artifacts/qwen35-9b/remote-eval-20260911-e/` present
+  at `0700` and empty, ledger carrying no pending row, comparator arms
+  deliberately deselected (`--evaluate-comparators ""`) so the first run that
+  must produce a score exercises no deferred-cleanup machinery that has never
+  run on a real host. It is blocked at the tool layer by the Claude Code
+  auto-mode permission classifier — **a harness control, not a project gate**.
+  No project refusal, blocker, or policy stopped it, and the lane again
+  declined to route around the denial, because a billable provisioning command
+  is exactly what such a control exists to hold. USD 0.00 spent on it, no
+  instance created, no reservation row.
+- **Spend against the ADR-0005 ceiling.** Cap USD 50.00. Booked to date USD
+  10.041398 — legacy settled 6.767912 plus run `d` 3.273486. Pending owners 0.
+  A successful run `e` is projected at USD 2.60–3.30, worst case USD 4.05
+  against the 3 h provider ceiling, inside the USD 10.00 per-run cap.
+- **Evidence reproduced at `c469ed1` on 2026-09-11.** Python
+  `python3 -m unittest discover -s tests -t . -p 'test_*.py'` **`Ran 840 tests`
+  OK** (743 at v6; +96 across the comparator, corpus, host-privacy and
+  host-root slices); `tests/native` **309 OK**; `tests.qa.test_safe_runner`
+  **20 OK**; `npm test` **432 tests / 430 pass / 0 fail / 1 skipped / 1 todo**
+  (the pre-existing filesystem `KNOWN LIMITATION` pair); the offline J1M
+  dry-run gate **PASS, 24 checks, USD 0.00**; safe QA **`BLOCKED`** with 0
+  missing and 0 unknown, unchanged and expected. The `-t .` root argument
+  remains load-bearing.
+- **What the dry-run gate now proves that it could not at v6.** It replays the
+  production plan's own `mkdir`/`chmod` text through `/bin/sh` against a `0755`
+  stand-in `/scratch` and judges the result with the production predicates,
+  under a **forced `umask 022`** and against a **pre-seeded already-existing
+  `0755`** directory — so neither the operator's own umask nor a fresh
+  temporary tree can make a broken plan pass. It accepts 11/11 receipt paths
+  and publishes 2 at `0600` on the current plan, and refuses all 11 plus both
+  publish attempts (13 refusals) with `0644` files when replaying the run `d`
+  plan, reproducing the booked failure offline.
+
 Overall release/full-access state: **BLOCKED / NOT_READY**. The states below
 describe formal evidence/approval gates, not whether source work exists.
 
-Current audited integrated source baseline is exact
-`main@f89c1684ea051e1c9c92f944cb080d424a086f55`, the last source merge; the
-docs descendants `1e341e9`, `aa1087a`, `25a0d95`, `74a43d0`, `335211f`,
-`1b22a40` and this refresh are documentation descendants, not self-referential
-source hashes. The previous baseline `263f114` is historical and superseded.
+The integrated source head and the reproduced evidence are stated in the
+refresh v7 block above; `c469ed1` supersedes the v6 baseline
+`main@f89c1684ea051e1c9c92f944cb080d424a086f55` and the later `f4bb424`. The
+paragraph and figures below are the **v6** record, retained for history and
+superseded wherever the two disagree — most notably the Python suite, which
+was `Ran 743 tests` at v6 and is `Ran 840 tests` at v7, and the dry-run gate,
+which recorded 142 argv at v6 and 24 checks under a materially stronger host
+simulation at v7.
 
-Current reproduced evidence, measured in the refresh v6 worktree on
+Prior reproduced evidence, measured in the refresh v6 worktree on
 2026-09-11: Python `python3 -m unittest discover -s tests -t . -p 'test_*.py'`
 **`Ran 743 tests` OK**; `npm test` **432 tests / 430 pass / 0 fail / 0
 cancelled / 1 skipped / 1 todo** (the single skip and single todo are the

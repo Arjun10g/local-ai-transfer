@@ -1,6 +1,40 @@
 # Model Decision Record — Qwen3.5-9B Q4_K_M
 
-## Current governance truth — 2026-09-11 (refresh v6)
+## Current governance truth — 2026-09-11 (refresh v7)
+
+- Audited integrated source head is `c469ed1` (source merges `2e8c86a` and the
+  direct integration `c469ed1`). The v6 baseline
+  `main@f89c1684ea051e1c9c92f944cb080d424a086f55`, the later `f4bb424`, and the
+  v5/v6 blocks below are historical and superseded. Release/full access remains
+  `BLOCKED` / `NOT_READY`; **no phase or release gate is advanced here.**
+- **The model still has not been tested against the profile it must ship
+  against, and this refresh does not change that.** The shipping profile is
+  unchanged: 33 tools and 37 cases
+  (`tests/model/production_tool_call_eval.json`, SHA-256
+  `c75af5200b76a504e6b603183ffcf1cbeedb93db18ec544683044b8cc9b8ac6c`), with
+  `max_cases=64` a ceiling rather than a request to trim. It has **no recorded
+  score**.
+- **Money was spent and produced no measurement.** The first paid run,
+  `j1m-eval-20260911-remote-d` on a hyperstack `A100_80G`, booked **USD
+  3.273486** and returned **0 of 8 receipts**, failing at
+  `eval-stage:j1m_runner` before any evaluation ran. The cause was a host
+  filesystem-privacy defect, not a model or profile result: nothing about the
+  model was learned, and no figure from that run exists to record. Teardown is
+  confirmed and the ledger row is settled with pending `0.0`.
+- The 2026-09-04 figures (28/34 retired canary, 13/32 retired production
+  profile) remain the only recorded measurements, remain CUDA/A100-only, and
+  remain **not** measurements of the shipping profile. They are historical and
+  must not be cited as a current score.
+- Run `j1m-eval-20260911-remote-e` is prepared to produce the first real
+  figure, with comparator arms deliberately deselected so the run that must
+  yield a score exercises no deferred-cleanup machinery that has never
+  completed on a real host. It has **not executed** — it is held by the Claude
+  Code auto-mode permission classifier, a harness control rather than a project
+  gate, at USD 0.00 with no instance created. When it produces numbers they
+  will be recorded as a **separate addendum**; nothing in this document
+  anticipates them.
+
+## Previous governance truth — 2026-09-11 (refresh v6, superseded by v7)
 
 - Audited integrated source baseline is exact
   `main@f89c1684ea051e1c9c92f944cb080d424a086f55`, the last source merge. The
