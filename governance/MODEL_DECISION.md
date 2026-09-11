@@ -87,11 +87,16 @@
   review item R4 as a documented, test-pinned accepted Win32 limitation; and
   the Graph sent-mail proof projection repair (accepted `26beb82`, merged
   `263f114`), which confirms and fixes the `listSentForDigest`
-  collection-projection defect that made `mail.send_draft` structurally unable
-  to complete against a real account, bounding proof retrieval to one folder
+  collection-projection defect that left the sole completing state
+  `unique_sent_item` unreachable in code, bounding proof retrieval to one folder
   ID page plus at most 20 exact GETs per call with typed inconclusive results
   and a send-proof deadline, while leaving the pre-send `@odata.nextLink`
-  refusal as follow-up `GRAPH-SENT-PAGINATION-PRECHECK`. The three slices of
+  refusal as follow-up `GRAPH-SENT-PAGINATION-PRECHECK`. The Graph projection
+  premise the defect rests on is unverified without a live account, and the
+  repair is fail-closed under either behavior; a pre-dispatch refusal still
+  lands as `unknown_manual`, and three pre-proof requests in the send branch
+  remain uncapped, so the seam is bounded while the tool as a whole is not and
+  a slow provider can still surface as `tool_timeout` → `unknown_manual`. The three slices of
   the previous interval (`4280e95`/`61c9475`, `e4ca09b`/`4de01f7`,
   `cfe8136`/`7239b7e`) remain on `main`. ICR-RUN-WDJB-001 is Sol-approved as
   an additive source-only extension with contract version `0.1.0` retained,

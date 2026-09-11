@@ -23,10 +23,14 @@
   the 30-code storage set — Sol accepted that corrected invariant because
   `platform_unavailable` is declared but emitted by no function body).
   `contracts/action-journal-storage/v0.1.0.json` is byte-identical to `main`.
-  Review item R4 is closed as a documented, test-pinned accepted limitation:
-  Win32 cannot narrow an open handle's access, and `ReOpenFile` with reduced
-  access collides with the retained handle's exclusive `FILE_SHARE_READ`
-  reservation. No C++/Node/CMake/package change; the boundary stays
+  Review item R4 is closed as a documented, test-pinned accepted limitation
+  resting on a cost/ordering trade rather than an impossibility: Win32 offers
+  no operation that narrows an open handle's own access, and `ReOpenFile` with
+  reduced access collides with the retained handle's exclusive
+  `FILE_SHARE_READ` reservation. The source note concedes a
+  duplicate-down-and-close would shrink the surviving handle's rights and
+  argues the cost, the extra `DuplicateHandle` being itself fallible and
+  landing after publication and `discard.disarm()`. No C++/Node/CMake/package change; the boundary stays
   uncompiled and unlinked.
 - Protected `.secrets/shadeform.env` projection/setup source (`c8c28a9`), the
   metadata-only Windows/HF artifact handoff (`c2801ec`, merged by `e2e5156`),
@@ -125,11 +129,16 @@
   automatic resolution path and accumulate against the 256-record active cap;
   and no live Microsoft account or provider evidence exists. The
   `listSentForDigest` collection-projection defect is no longer plausible but
-  confirmed and repaired: at the pristine base it asked a Sent Items
-  collection query for `internetMessageHeaders`, which Graph returns only on
-  single-message projections, so `mail.send_draft` could never complete
-  against a real account (a safe false negative, never a false completion) and
-  a transport fault on that query escalated the record to `unknown_manual`.
+  confirmed at code level and repaired: at the pristine base it asked a Sent
+  Items collection query for `internetMessageHeaders` and hard-required that
+  property on every item, so the sole completing state `unique_sent_item` was
+  unreachable in code. On the documented Graph behavior that
+  `internetMessageHeaders` is returned only on single-message projections — a
+  premise that cannot be confirmed without a live account; the repair is
+  fail-closed under either behavior — `mail.send_draft` could never complete
+  against a real account (a safe false negative, never a false completion).
+  Independently of that premise, a transport fault on the query escalated the
+  record to `unknown_manual`.
   The repair, accepted at `26beb82` and merged by `263f114`, shares the
   bounded per-message retrieval: `collectMailProof` issues one folder ID page
   plus at most `MAX_MAIL_PROOF_CANDIDATES` = 20 exact GETs per call, refuses

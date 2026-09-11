@@ -25,20 +25,28 @@
   declared in the boundary but emitted by no function body.
   `contracts/action-journal-storage/v0.1.0.json` is byte-identical to `main`.
   Review item R4 — dropping `DELETE` access after WAL publication — is closed
-  as a documented, test-pinned accepted limitation: Win32 cannot narrow an
-  open handle's access, and a `ReOpenFile` with reduced access is a new open
+  as a documented, test-pinned accepted limitation on a cost/ordering trade
+  rather than an impossibility: Win32 offers no operation that narrows an open
+  handle's own access, and a `ReOpenFile` with reduced access is a new open
   that collides with the retained handle's exclusive `FILE_SHARE_READ`
-  reservation. ICR-RUN-WDJB-001 carries the dated note. No C++, Node, CMake,
+  reservation. The source note concedes that a duplicate-down-and-close would
+  shrink the surviving handle's rights, and argues the cost — the extra
+  `DuplicateHandle` can itself fail, after publication and after
+  `discard.disarm()` — not that the narrowing cannot be done. ICR-RUN-WDJB-001 carries the dated note. No C++, Node, CMake,
   or package change; the boundary stays uncompiled, unlinked, and outside
   every product/package/activation graph.
 - Graph sent-mail proof projection: accepted tip `26beb82`, merged by
   `263f11413d1746044a6cc13062ad2b1f821c4d11`. The defect previously recorded
   as merely plausible is confirmed against the pristine base:
   `listSentForDigest` asked a Sent Items collection query for
-  `internetMessageHeaders`, which Graph returns only on single-message
-  projections, so `mail.send_draft` could never complete against a real
-  account — a safe false negative, never a false completion — and a transport
-  fault on that query escalated the record to `unknown_manual`. The repair
+  `internetMessageHeaders` and hard-required that property on every item, so
+  the sole completing state `unique_sent_item` was unreachable in code. On the
+  documented Graph behavior that `internetMessageHeaders` is returned only on
+  single-message projections — a premise that cannot be confirmed without a
+  live account; the repair is fail-closed under either behavior —
+  `mail.send_draft` could never complete against a real account, a safe false
+  negative and never a false completion. Independently of that premise, a
+  transport fault on the query escalated the record to `unknown_manual`. The repair
   shares the bounded per-message retrieval rather than duplicating it:
   `collectMailProof` issues one folder ID page plus at most
   `MAX_MAIL_PROOF_CANDIDATES` = 20 exact GETs per call, refuses absent or
@@ -51,8 +59,9 @@
   than 50 sent items. Two NOTE-level limits also stand, both pre-existing and
   unchanged by this slice: a pre-dispatch provider refusal still lands as
   `unknown_manual` even though nothing was sent, and three pre-proof requests
-  in the send branch remain uncapped. No live Microsoft account or provider
-  evidence exists.
+  in the send branch remain uncapped, so the seam is bounded while the tool as
+  a whole is not and a slow provider can still surface as `tool_timeout` →
+  `unknown_manual`. No live Microsoft account or provider evidence exists.
 - Model testing, corrected current truth: the model has NOT been tested
   against the profile it must ship against. Every recorded score dates from
   2026-09-04 and was measured on retired fixtures — an 11-tool/34-case canary

@@ -144,8 +144,10 @@ Exact numbers, reproduced in this worktree on 2026-09-11:
 - `git diff --stat main..HEAD`: **Markdown files only**.
 - Machine: development macOS host, Darwin arm64. No native build, no model, no
   network, no provider contact, and no target equivalence is claimed.
-- Artifact/index: this packet, the six reconciled documents, and the one new
-  development-evidence receipt held outside `artifacts/evidence-index/`.
+- Artifact/index: this packet, the eight reconciled documents (six
+  current-truth records plus the minimal S2/S4 cross-lane corrections), and the
+  one new development-evidence receipt held outside
+  `artifacts/evidence-index/`.
   Metrics: none beyond the raw runner output above.
 
 ## Recorded decisions
@@ -167,16 +169,24 @@ Exact numbers, reproduced in this worktree on 2026-09-11:
     30-code storage set. Sol accepted that corrected invariant because
     `platform_unavailable` is declared but emitted by no function body. Storage
     `v0.1.0.json` is byte-identical. R4 (dropping `DELETE` after publication) is
-    closed as a documented, test-pinned accepted limitation: Win32 cannot narrow
-    an open handle's access, and `ReOpenFile` with reduced access collides with
-    the `FILE_SHARE_READ` reservation. ICR-RUN-WDJB-001 carries the dated note.
+    closed as a documented, test-pinned accepted limitation on a cost/ordering
+    trade rather than an impossibility: Win32 offers no operation that narrows
+    an open handle's own access, and `ReOpenFile` with reduced access collides
+    with the `FILE_SHARE_READ` reservation. The source note concedes a
+    duplicate-down-and-close would shrink the surviving handle's rights and
+    argues the cost instead. ICR-RUN-WDJB-001 carries the dated note.
     No C++/Node/CMake/package change.
   - *Graph sent-mail proof projection* (`26beb82`, merge `263f114`). The defect
-    is confirmed against the pristine base: `listSentForDigest` asked a Sent
-    Items collection query for `internetMessageHeaders`, which Graph returns
-    only on single-message projections, so `mail.send_draft` could never
-    complete against a real account (a safe false negative) and a transport
-    fault escalated to `unknown_manual`. Repaired by sharing the bounded
+    is confirmed against the pristine base at code level: `listSentForDigest`
+    asked a Sent Items collection query for `internetMessageHeaders` and
+    hard-required that property on every item, so the sole completing state
+    `unique_sent_item` was unreachable in code. On the documented Graph
+    behavior that `internetMessageHeaders` is returned only on single-message
+    projections — a premise that cannot be confirmed without a live account;
+    the repair is fail-closed under either behavior — `mail.send_draft` could
+    never complete against a real account (a safe false negative).
+    Independently of that premise, a transport fault escalated to
+    `unknown_manual`. Repaired by sharing the bounded
     per-message retrieval (`collectMailProof`: one folder ID page plus at most
     `MAX_MAIL_PROOF_CANDIDATES` = 20 exact GETs per call), refusing
     absent/malformed markers before any request, typed inconclusive results, a
@@ -198,7 +208,8 @@ Exact numbers, reproduced in this worktree on 2026-09-11:
   on retired fixtures on CUDA/A100, never CPU or Intel Vulkan. The current
   33-tool/37-case profile has no recorded score, so the model's score on the
   shipping profile is unknown, not merely below gate. The strongest general
-  result is corrected from 27/34 to **28/34** — see the verification note below.
+  result is corrected from 27/34 to **28/34** (a correction *of* the 27/34
+  figure, not *to* it) — see the verification note below.
   The 13/32 production-profile failure statement is kept.
 - **Deleted comparators.** Q8_0 and bf16 exist only as hashes, so the ≥95%
   quality-retention gate has no reachable reference artifact and any future
@@ -272,6 +283,40 @@ Exact numbers, reproduced in this worktree on 2026-09-11:
   does not contradict itself.
 - Wall-clock durations appear only in this packet and are labelled
   non-reproducible. No `duration_ms` value appears in any current-truth file.
+
+## Independent audit disposition
+
+The independent S0/S4 docs and evidence-scope audit of tip `a4548a5` returned
+`ACCEPT_WITH_REQUIRED_FIXES` with no BLOCKER: 2 MAJOR, 3 MINOR, 5 NIT, all
+wording. Every MAJOR and MINOR is applied here, together with the cheap NITs.
+
+- **MAJOR 1.** The Graph collection-projection premise was asserted as
+  established fact in four places. It is now recorded at its true epistemic
+  status: the code-level defect (a collection query hard-requiring
+  `internetMessageHeaders`, leaving `unique_sent_item` unreachable) is
+  verified by reading source, while the Graph API behavior it rests on cannot
+  be confirmed without a live account, and the repair is fail-closed under
+  either behavior. v4's "unverifiable without a live account" qualifier is
+  restored rather than dropped.
+- **MAJOR 2.** The Phase 4 gate row's forward capability claim
+  ("`mail.send_draft` is no longer structurally unable to complete") is
+  deleted. The row now says only that the proof path requests per-message
+  projections and that completion against a real account remains unverified,
+  since every mock probe ends without completion by design.
+- **MINOR 3.** The uncapped-pre-proof-request consequence — the seam is
+  bounded while the tool as a whole is not, so a slow provider can still
+  surface as `tool_timeout` → `unknown_manual` — is carried into STATUS,
+  RELEASE_GATES, S0, and MODEL_DECISION, not just BLOCKERS.
+- **MINOR 4.** This packet's artifact enumeration now says eight reconciled
+  documents, matching its own "Files changed" list.
+- **MINOR 5.** `TASK_CLAIMS.md` "two updated `external-tools` send cases"
+  corrected to three test bodies.
+- **NITs applied.** Provenance markers for the 12-vs-4 injected regressions
+  and the un-re-executed "0/6 against a pristine extraction" figure; the R4
+  closure restated as the cost/ordering trade the source note actually makes
+  rather than an impossibility; the 27/34 → 28/34 arrow form disambiguated;
+  and the descriptor-WAL translation-unit-split trigger recorded on the claims
+  row, since ADR-0004 mandates that split.
 
 ## Blockers
 
