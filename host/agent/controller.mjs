@@ -3,7 +3,7 @@ import { types as utilTypes } from 'node:util';
 import { makeEvent } from './assistant-events.mjs';
 import { makeToolResult, parseToolCall, validateToolResult, EnvelopeError } from './tool-envelope.mjs';
 import { ACTION_JOURNAL_HEALTH_ERRORS, createActionBinding } from './action-journal.mjs';
-import { readGraphAttestation, transferGraphAttestation } from '../providers/microsoft-graph.mjs';
+import { readGraphAttestation, readGraphRestartAttestation, readGraphRestartControl, transferGraphAttestation } from '../providers/microsoft-graph.mjs';
 import { browserSafeCompletionDigest, projectBrowserResult, readBrowserAttestation, transferBrowserAttestation } from '../providers/browser-actions.mjs';
 import { isGraphReadTool, readGraphReadAttestation, transferGraphReadAttestation } from '../providers/microsoft-graph-reads.mjs';
 import { copilotSafeCompletionDigest, readCopilotAttestation, transferCopilotAttestation } from '../providers/copilot-cli.mjs';
@@ -31,6 +31,16 @@ export const NATIVE_SUPERVISOR_DISPATCH_OWNER = 'native_supervisor';
 export const NATIVE_SUPERVISOR_HANDOFF_VERSION = 'native-supervisor-handoff.v1';
 const NATIVE_SUPERVISOR_TOOL_NAMES = new Set(['app.open', 'process.run_allowlisted']);
 const JOURNAL_RECEIPT_DIGEST = /^[a-f0-9]{64}$/u;
+const JOURNAL_OPERATION_ID = /^act_[a-f0-9]{32}$/u;
+const MAX_GRAPH_RESTART_CANDIDATES = 8;
+const GRAPH_RESTART_TIMEOUT_MS = 30000;
+// Bounded, lowercase, metadata-only failure identifier. Only a journal-owned
+// code is surfaced as-is; every other error — including a typed code from some
+// other subsystem — collapses to one explicit code. No message, path,
+// argument, or content ever reaches this value.
+const RESTART_FAILURE_CODE = /^action_journal_[a-z0-9_]{1,48}$/u;
+const restartFailureCode = error => typeof error?.code === 'string' && RESTART_FAILURE_CODE.test(error.code) ? error.code : 'action_journal_complete_failed';
+const restartUnavailable = code => Object.freeze({ state: 'unavailable', examined: 0, completed: 0, blocked: 0, code });
 const exactAuthorizationReadback = (receipt, operationId) => receipt?.operation_id === operationId && receipt?.state === 'authorized' && receipt?.sequence === 1 && JOURNAL_RECEIPT_DIGEST.test(receipt?.receipt_hash ?? '');
 const nativeSupervisorOwnerFor = (toolName, tool, platform) => platform === 'win32' && NATIVE_SUPERVISOR_TOOL_NAMES.has(toolName) && tool?.name === toolName
   ? NATIVE_SUPERVISOR_DISPATCH_OWNER : null;
@@ -182,8 +192,40 @@ function snapshotJournalMethods(journal) {
       if (typeof bound !== 'function' || utilTypes.isProxy(bound)) throw new TypeError('actionJournal does not implement the durable transition contract');
       snapshot[name] = bound;
     }
+    let current = journal; let descriptor;
+    while (current) {
+      if (utilTypes.isProxy(current)) throw new TypeError('actionJournal does not implement the durable transition contract');
+      descriptor = Object.getOwnPropertyDescriptor(current, 'summary');
+      if (descriptor) break;
+      current = Object.getPrototypeOf(current);
+    }
+    if (descriptor) {
+      if (!Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'function' || utilTypes.isProxy(descriptor.value) || descriptor.get !== undefined || descriptor.set !== undefined) throw new TypeError('actionJournal does not implement the durable transition contract');
+      const bound = primordialReflectApply(primordialBind, descriptor.value, [journal]);
+      if (typeof bound !== 'function' || utilTypes.isProxy(bound)) throw new TypeError('actionJournal does not implement the durable transition contract');
+      snapshot.summary = bound;
+    } else snapshot.summary = null;
   } catch { throw new TypeError('actionJournal does not implement the durable transition contract'); }
   return Object.freeze(snapshot);
+}
+const PUBLIC_RECORD_KEYS = Object.freeze(['operation_id', 'tool_name', 'risk_tier', 'side_effect', 'state', 'arguments_digest', 'preview_digest', 'operation_digest', 'created_at_utc', 'updated_at_utc', 'receipt_hash']);
+function safeRestartRecords(summary) {
+  if (!summary || typeof summary !== 'object' || Array.isArray(summary) || utilTypes.isProxy(summary) || ![Object.prototype, null].includes(Object.getPrototypeOf(summary))) return [];
+  const recordsDescriptor = Object.getOwnPropertyDescriptor(summary, 'records');
+  if (!recordsDescriptor || !Object.hasOwn(recordsDescriptor, 'value') || recordsDescriptor.get !== undefined || recordsDescriptor.set !== undefined) return [];
+  const records = recordsDescriptor.value;
+  if (!Array.isArray(records) || utilTypes.isProxy(records) || records.length > MAX_GRAPH_RESTART_CANDIDATES) return [];
+  const candidates = [];
+  for (const record of records) {
+    if (!record || typeof record !== 'object' || Array.isArray(record) || utilTypes.isProxy(record) || ![Object.prototype, null].includes(Object.getPrototypeOf(record))) continue;
+    let descriptors;
+    try { descriptors = Object.getOwnPropertyDescriptors(record); } catch { continue; }
+    if (Object.keys(descriptors).length !== PUBLIC_RECORD_KEYS.length || !PUBLIC_RECORD_KEYS.every(key => Object.hasOwn(descriptors, key) && Object.hasOwn(descriptors[key], 'value') && descriptors[key].get === undefined && descriptors[key].set === undefined)) continue;
+    const value = Object.fromEntries(PUBLIC_RECORD_KEYS.map(key => [key, descriptors[key].value]));
+    if (!JOURNAL_OPERATION_ID.test(value.operation_id ?? '') || value.tool_name !== 'mail.create_draft' || value.state !== 'acknowledged' || !JOURNAL_RECEIPT_DIGEST.test(value.arguments_digest ?? '') || !JOURNAL_RECEIPT_DIGEST.test(value.operation_digest ?? '')) continue;
+    candidates.push(Object.freeze({ operation_id: value.operation_id, tool_name: value.tool_name, state: value.state, arguments_digest: value.arguments_digest, operation_digest: value.operation_digest }));
+  }
+  return candidates;
 }
 function journalStatus(journal) {
   try {
@@ -236,15 +278,18 @@ function snapshotToolDescriptor(name, tool) {
   if (canonical && Object.entries(canonical).some(([key, value]) => value === null ? Object.hasOwn(snapshot, key) : snapshot[key] !== value)) throw new TypeError(`canonical security metadata for ${name} is invalid`);
   return Object.freeze(snapshot);
 }
-function executionRegistryEntries(toolRegistry) {
-  if (toolRegistry === undefined) return [];
+function executionRegistrySnapshot(toolRegistry) {
+  if (toolRegistry === undefined) return { entries: [], graphRestartControls: new Map() };
   if (!toolRegistry || typeof toolRegistry !== 'object' || Array.isArray(toolRegistry)) throw new TypeError('toolRegistry must be an object');
-  return Object.entries(toolRegistry).map(([name, tool]) => {
+  const graphRestartControls = new Map();
+  const entries = Object.entries(toolRegistry).map(([name, tool]) => {
     if (!tool || typeof tool !== 'object' || Array.isArray(tool)) throw new TypeError(`toolRegistry entry ${name} must be an object`);
+    const restartControl = readGraphRestartControl(tool); if (restartControl) graphRestartControls.set(name, restartControl);
     const snapshot = snapshotToolDescriptor(name, tool);
     if (typeof snapshot.execute !== 'function') throw new TypeError(`toolRegistry entry ${name} must provide its matching execute function`);
     return [name, snapshot];
   });
+  return { entries, graphRestartControls };
 }
 
 async function invokeWithTimeout(tool, operation, call, signal) {
@@ -263,6 +308,8 @@ async function invokeWithTimeout(tool, operation, call, signal) {
 export class ConversationController {
   #tools;
   #journalMethods;
+  #graphRestartControls;
+  #restartReconciliationPromise;
   constructor({ engine, maxToolCalls = 8, confirmationTimeoutMs = 30000, maxSessions = 4, maxHistoryMessages = 64, maxHistoryBytes = 262144, toolRegistry, actionJournal } = {}) {
     if (!engine?.generate) throw new TypeError('engine.generate is required');
     if (!Number.isInteger(maxSessions) || maxSessions < 1) throw new TypeError('maxSessions must be positive');
@@ -270,7 +317,37 @@ export class ConversationController {
     this.#journalMethods = actionJournal === undefined ? null : snapshotJournalMethods(actionJournal);
     this.engine = engine; this.maxToolCalls = maxToolCalls; this.confirmationTimeoutMs = confirmationTimeoutMs; this.maxSessions = maxSessions; this.maxHistoryMessages = maxHistoryMessages; this.maxHistoryBytes = maxHistoryBytes; this.actionJournal = actionJournal; this.clock = 0;
     this.sessions = new Map(); this.active = null; this.pending = new Map();
-    this.#tools = new Map([[timeNowDefinition.name, { ...timeNowDefinition, execute: ({ id, arguments: args }) => timeNowTool({ id, arguments: args }) }], ...executionRegistryEntries(toolRegistry)]);
+    const registry = executionRegistrySnapshot(toolRegistry); this.#graphRestartControls = registry.graphRestartControls; this.#restartReconciliationPromise = null;
+    this.#tools = new Map([[timeNowDefinition.name, { ...timeNowDefinition, execute: ({ id, arguments: args }) => timeNowTool({ id, arguments: args }) }], ...registry.entries]);
+  }
+  reconcileRestartActions({ signal } = {}) {
+    if (this.#restartReconciliationPromise) return this.#restartReconciliationPromise;
+    this.#restartReconciliationPromise = this.#reconcileRestartActions(signal).finally(() => { this.#restartReconciliationPromise = null; });
+    return this.#restartReconciliationPromise;
+  }
+  async #reconcileRestartActions(signal) {
+    const health = journalStatus(this.#journalMethods);
+    if (!health.ready || typeof this.#journalMethods?.summary !== 'function') return restartUnavailable(health.code ?? 'action_journal_unavailable');
+    let summary;
+    try { summary = await this.#journalMethods.summary({ limit: MAX_GRAPH_RESTART_CANDIDATES, state: 'acknowledged' }); } catch { return restartUnavailable('action_journal_summary_failed'); }
+    const candidates = safeRestartRecords(summary); let examined = 0; let completed = 0; let blocked = 0; let code = null;
+    const deadline = AbortSignal.timeout(GRAPH_RESTART_TIMEOUT_MS); const proofSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+    for (const candidate of candidates) {
+      if (proofSignal.aborted) break;
+      const control = this.#graphRestartControls.get(candidate.tool_name); if (!control) continue;
+      examined += 1;
+      let attestation;
+      try { attestation = readGraphRestartAttestation(await control.reconcile(candidate, proofSignal)); } catch { continue; }
+      if (!attestation || attestation.provider !== 'microsoft_graph' || attestation.tool_name !== candidate.tool_name || attestation.state !== 'completed' || attestation.proof !== 'restart_unique_exact_draft' || attestation.operation_id !== candidate.operation_id || attestation.operation_digest !== candidate.operation_digest || attestation.arguments_digest !== candidate.arguments_digest || !JOURNAL_RECEIPT_DIGEST.test(attestation.account_fingerprint ?? '')) continue;
+      // A `complete()` rejection is exactly the signal that the durable
+      // journal blocked itself or that a transition raced.  The record keeps
+      // its current durable state and stays eligible for a later pass, and the
+      // failure is surfaced as a typed metadata-only count instead of being
+      // discarded.  Nothing else is attempted on that record.
+      try { await this.#journalMethods.complete(candidate.operation_id); completed += 1; }
+      catch (error) { blocked += 1; code ??= restartFailureCode(error); }
+    }
+    return Object.freeze({ state: blocked > 0 ? 'degraded' : 'completed', examined, completed, blocked, code });
   }
   createSession(sessionId = opaque('ses')) {
     if (!sessionIdPattern.test(sessionId)) throw new Error('invalid session id');

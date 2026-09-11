@@ -72,9 +72,13 @@ function canonicalJson(value, depth = 0, budget = { bytes: 0, nodes: 0 }) {
 }
 export function createActionBinding({ requestId, callId, toolName, arguments: args, preview } = {}) {
   validateOpaque(requestId, 'requestId'); validateOpaque(callId, 'callId'); if (!TOOL_NAME.test(toolName ?? '') || !args || typeof args !== 'object' || Array.isArray(args)) throw new ActionJournalError('action_journal_invalid_record');
-  const requestRef = sha256(`request\0${requestId}`); const callRef = sha256(`call\0${callId}`); const argumentsDigest = sha256(`arguments\0${canonicalJson(args)}`); const previewDigest = preview === undefined ? ZERO_HASH : sha256(`preview\0${canonicalJson(preview)}`);
+  const requestRef = sha256(`request\0${requestId}`); const callRef = sha256(`call\0${callId}`); const argumentsDigest = createActionArgumentsDigest(args); const previewDigest = preview === undefined ? ZERO_HASH : sha256(`preview\0${canonicalJson(preview)}`);
   const operationDigest = sha256(canonicalJson({ version: VERSION, request_ref: requestRef, call_ref: callRef, tool_name: toolName, arguments_digest: argumentsDigest, preview_digest: previewDigest }));
   return Object.freeze({ requestRef, callRef, argumentsDigest, previewDigest, operationDigest });
+}
+export function createActionArgumentsDigest(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) throw new ActionJournalError('action_journal_invalid_record');
+  return sha256(`arguments\0${canonicalJson(args)}`);
 }
 function exactKeys(value) { return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === EVENT_KEYS.length && EVENT_KEYS.every(key => Object.hasOwn(value, key)); }
 function isoTimestamp(value) { return typeof value === 'string' && value.length >= 20 && value.length <= 32 && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value; }
