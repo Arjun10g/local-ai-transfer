@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -54,6 +55,42 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+
+# Required run-identity binding.  The orchestrator uploads this file next to the
+# uploaded config before the first receipt-producing command; the path is
+# source-fixed on both sides so no caller, configuration value, or remote
+# response can redirect it.  Every receipt this script publishes carries the
+# binding, and the salvage transport refuses any receipt whose binding is
+# missing or does not match the run that is fetching it -- that is what stops a
+# receipt left behind by an earlier run being published as this run's evidence.
+_RUN_IDENTITY_PATH = Path("/scratch/j1m/run-identity.json")
+_RUN_IDENTITY_SCHEMA = "local_bmo.j1m.run-identity.v1"
+_RUN_IDENTITY_FIELDS = ("run_id", "instance_id")
+_RUN_IDENTITY_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
+
+
+def _run_identity() -> dict[str, str]:
+    """Return this run's receipt binding, or ``unbound`` when unprovable."""
+
+    unbound = {field: "unbound" for field in _RUN_IDENTITY_FIELDS}
+    try:
+        raw = _RUN_IDENTITY_PATH.read_bytes()
+        if len(raw) > 4096:
+            return unbound
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return unbound
+    if not isinstance(payload, dict) or payload.get("schema") != _RUN_IDENTITY_SCHEMA:
+        return unbound
+    resolved = {}
+    for field in _RUN_IDENTITY_FIELDS:
+        value = payload.get(field)
+        if not isinstance(value, str) or not _RUN_IDENTITY_VALUE.match(value):
+            return unbound
+        resolved[field] = value
+    return resolved
+
+
 def verify(artifact: Path, manifest_path: Path, output: Path) -> dict[str, object]:
     if artifact.name != MODEL_NAME or not artifact.is_file() or not manifest_path.is_file():
         raise ValueError("remote_q4_input_invalid")
@@ -81,7 +118,7 @@ def verify(artifact: Path, manifest_path: Path, output: Path) -> dict[str, objec
     observed = {"size_bytes": artifact.stat().st_size, "sha256": _sha256(artifact)}
     if observed != {"size_bytes": expected.get("expected_size_bytes"), "sha256": expected.get("sha256")}:
         raise ValueError("remote_q4_hash_mismatch")
-    receipt: dict[str, object] = {"schema": "local_bmo.j1m.remote-eval-artifact-receipt.v1", "status": "verified", "name": MODEL_NAME, "size_bytes": observed["size_bytes"], "sha256": observed["sha256"], "manifest_sha256": manifest_digest, "manifest_lock_sha256": lock_parts[0]}
+    receipt: dict[str, object] = {"schema": "local_bmo.j1m.remote-eval-artifact-receipt.v1", "status": "verified", "name": MODEL_NAME, "size_bytes": observed["size_bytes"], "sha256": observed["sha256"], "manifest_sha256": manifest_digest, "manifest_lock_sha256": lock_parts[0], **_run_identity()}
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary: str | None = None
     try:

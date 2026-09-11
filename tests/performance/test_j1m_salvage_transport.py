@@ -29,6 +29,11 @@ ARTIFACT = {
     "sha256": "c6" * 32,
 }
 RUN_IDENTITY = {"run_id": "J1M", "instance_id": "instance-123456", "artifact": ARTIFACT}
+# Run-identity binding is REQUIRED on every allowlisted receipt: the host
+# stamps it from the ``run-identity.json`` the orchestrator uploads before the
+# first receipt-producing command, and a receipt without it -- or with another
+# run's -- is refused rather than published.
+BOUND = {"run_id": RUN_IDENTITY["run_id"], "instance_id": RUN_IDENTITY["instance_id"]}
 HOST_KEY = {"status": "verified", "fingerprint": "SHA256:" + "A" * 43, "key_count": 1,
             "proof": "two-stable-bounded-scans-residual-tofu"}
 
@@ -54,6 +59,7 @@ def eval_artifact_receipt() -> dict:
         "sha256": ARTIFACT["sha256"],
         "manifest_sha256": "3b" * 32,
         "manifest_lock_sha256": "3b" * 32,
+        **BOUND,
     }
 
 
@@ -65,6 +71,7 @@ def cuda_device_receipt() -> dict:
         "device_count": 1,
         "device": {"name": "NVIDIA A100 80GB PCIe", "memory_total_mib": 81920},
         "source": "nvidia-smi bounded query",
+        **BOUND,
     }
 
 
@@ -76,6 +83,7 @@ def toolchain_receipt() -> dict:
         "versions": {"nvcc": "12.4.131"},
         "packages": {"build-essential": "12.9ubuntu3"},
         "package_install": "ubuntu apt repositories",
+        **BOUND,
     }
 
 
@@ -86,6 +94,7 @@ def startup_preflight_receipt() -> dict:
         "size_bytes": ARTIFACT["size_bytes"],
         "sha256": ARTIFACT["sha256"],
         "gguf_version": 3,
+        **BOUND,
     }
 
 
@@ -103,6 +112,7 @@ def eval_receipt() -> dict:
         "model_preflight": {"valid": True, "code": "ok", "status": "verified"},
         "toolchain": {"schema": "local_bmo.j1m.remote-toolchain-receipt.v1", "status": "verified"},
         "metrics": {"case_count": 37, "passed": 30, "failed": 6, "errors": 1},
+        **BOUND,
     }
 
 
@@ -245,7 +255,6 @@ class SalvageTransportTests(unittest.TestCase):
             "/etc/shadow",
             "eval-receipt.json/../../root/.ssh/id_rsa",
             "*.json",
-            "Qwen3.5-9B-Q4_K_M.gguf",
             "salvage-receipt.json",
             "",
         ]
@@ -253,6 +262,32 @@ class SalvageTransportTests(unittest.TestCase):
         self.assertEqual(transfer.calls, [])
         self.assertEqual(
             self.codes(results), ["salvage_name_not_allowlisted"] * len(hostile))
+
+    def test_weights_and_non_schema_bound_outputs_get_their_own_typed_refusal(self):
+        """A build allowlist names them legitimately; they are still not evidence.
+
+        Reporting these as ``not allowlisted`` implied a configuration mistake.
+        The weights are deliberately never carried to the operator laptop, and
+        the two non-object outputs can hold neither a schema nor the required
+        run binding, so each gets its own reason and its refusal class.
+        """
+
+        names = sorted(self.orchestrator._SALVAGE_NON_RECEIPT_NAMES)
+        results, transfer = self.salvage(names)
+        self.assertEqual(transfer.calls, [])
+        self.assertEqual(self.codes(results), ["salvage_refused_non_receipt"] * len(names))
+        self.assertEqual(
+            {item["name"]: item["refusal_class"] for item in results},
+            {
+                "Qwen3.5-9B-Q4_K_M.gguf": "weights",
+                "Qwen3.5-9B-Q8_0.gguf": "weights",
+                "Qwen3.5-9B-bf16.gguf": "weights",
+                "checksums.sha256": "not_schema_bound",
+                "command-receipt.json": "not_schema_bound",
+            },
+        )
+        self.assertEqual(sorted(item.name for item in self.destination.iterdir()),
+                         ["salvage-receipt.json"])
         self.assertEqual(sorted(item.name for item in self.destination.iterdir()),
                          ["salvage-receipt.json"])
 
@@ -292,9 +327,13 @@ class SalvageTransportTests(unittest.TestCase):
         results, transfer = self.salvage(names, payloads)
         self.assertLessEqual(len(transfer.calls), self.orchestrator._SALVAGE_MAX_FILES)
         outcome = {item["name"]: item.get("error_code", item["status"]) for item in results}
-        # `proving-receipt.json` is allowlisted but absent on an eval host; it
-        # is recorded as missing, and the other five still land.
-        self.assertEqual(outcome.pop("proving-receipt.json"), "salvage_transport_failed")
+        # `proving-receipt.json` and the build-mode receipts are allowlisted but
+        # absent on an eval host; each is recorded as missing, and the five
+        # eval-mode receipts still land.
+        absent = set(self.orchestrator._SALVAGE_RECEIPT_ALLOWLIST) - set(payloads)
+        for name in sorted(absent):
+            self.assertEqual(outcome.pop(name), "salvage_transport_failed", name)
+        self.assertEqual(sorted(outcome), sorted(payloads))
         self.assertEqual(sorted(set(outcome.values())), ["completed"])
 
     # ---------------------------------------------------------------- caps
@@ -620,6 +659,7 @@ class SalvageTransportTests(unittest.TestCase):
         self.assertEqual(receipt["caps"], {
             "per_file_bytes": self.orchestrator._SALVAGE_MAX_FILE_BYTES,
             "total_bytes": self.orchestrator._SALVAGE_MAX_TOTAL_BYTES,
+            "min_free_bytes": self.orchestrator._SALVAGE_MIN_FREE_BYTES,
             "max_files": self.orchestrator._SALVAGE_MAX_FILES,
             "wall_clock_seconds": self.orchestrator._SALVAGE_WALL_CLOCK_SECONDS,
             "per_file_timeout_seconds": self.orchestrator._SALVAGE_FILE_TIMEOUT_SECONDS,

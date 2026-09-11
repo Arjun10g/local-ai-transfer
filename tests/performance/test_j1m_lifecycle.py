@@ -24,6 +24,12 @@ from tests.performance.lifecycle_test_isolation import (
 ROOT = Path(__file__).resolve().parents[2]
 
 
+# Every receipt the bounded salvage transport can carry must declare the run
+# that produced it; ``j1m_runner`` stamps these from the uploaded
+# ``run-identity.json``, and fixtures must therefore carry them too.
+RUN_IDENTITY = {"run_id": "unbound", "instance_id": "unbound"}
+
+
 def load(path: Path, name: str):
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader
@@ -306,12 +312,12 @@ class J1MConfigTests(unittest.TestCase):
             self.assertEqual(post_cleanup["inventory_scope"], "post_cleanup_filesystem")
             lock = json.loads((ROOT / "model" / "source-lock" / "qwen35-9b.source-lock.json").read_text(encoding="utf-8"))
             source_hashes = {item["path"]: item.get("sha256") or item.get("lfs_sha256") for item in lock["source_files"] if not item.get("excluded_from_text_only") and (item.get("sha256") or item.get("lfs_sha256"))}
-            (root / "source-model-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.source-model-receipt.v1", "status": "verified", "model_id": lock["model_id"], "revision": lock["revision"], "checked_files": list(source_hashes), "file_hashes": source_hashes, "tokenizer_sha256": "b" * 64, "chat_template_sha256": "c" * 64, "license_sha256": "d" * 64, "verified_at_utc": "2026-01-01T00:00:00+00:00"}), encoding="utf-8")
-            (root / "tensor-metadata.json").write_text(json.dumps({"schema": "local_bmo.j1m.tensor-metadata.v1", "status": "verified", "text_only": True, "tensor_count": 0, "tensors": [], "gguf_metadata": {"general.architecture": "qwen35"}, "vision_projection_present": False, "chat_template_sha256": "c" * 64}), encoding="utf-8")
-            (root / "toolchain.json").write_text(json.dumps({"schema": "local_bmo.j1m.toolchain.v1", "llama_cpp_head": "e" * 40, "python": "Python 3.11", "cmake": "cmake 3.28", "compiler": "cc 12", "os_packages": [], "pip_freeze": "", "dependency_wheelhouse_lock": {}}), encoding="utf-8")
+            (root / "source-model-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.source-model-receipt.v1", "status": "verified", "model_id": lock["model_id"], "revision": lock["revision"], "checked_files": list(source_hashes), "file_hashes": source_hashes, "tokenizer_sha256": "b" * 64, "chat_template_sha256": "c" * 64, "license_sha256": "d" * 64, "verified_at_utc": "2026-01-01T00:00:00+00:00", **RUN_IDENTITY}), encoding="utf-8")
+            (root / "tensor-metadata.json").write_text(json.dumps({"schema": "local_bmo.j1m.tensor-metadata.v1", "status": "verified", "text_only": True, "tensor_count": 0, "tensors": [], "gguf_metadata": {"general.architecture": "qwen35"}, "vision_projection_present": False, "chat_template_sha256": "c" * 64, **RUN_IDENTITY}), encoding="utf-8")
+            (root / "toolchain.json").write_text(json.dumps({"schema": "local_bmo.j1m.toolchain.v1", "llama_cpp_head": "e" * 40, "python": "Python 3.11", "cmake": "cmake 3.28", "compiler": "cc 12", "os_packages": [], "pip_freeze": "", "dependency_wheelhouse_lock": {}, **RUN_IDENTITY}), encoding="utf-8")
             (root / "command-receipt.json").write_text(json.dumps([{"stage": 1, "argv": ["source-check"], "started_at_utc": "2026-01-01T00:00:00+00:00", "ended_at_utc": "2026-01-01T00:00:01+00:00", "exit_code": 0, "status": "completed"}]) + "\n", encoding="utf-8")
-            (root / "scan-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.scan-receipt.v1", "status": "verified", "inventory_scope": "pre_cleanup_conversion_outputs", "text_only": True, "artifacts": scan_records, "vision_projection_present": False}), encoding="utf-8")
-            (root / "post-cleanup-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.post-cleanup-receipt.v1", "status": "verified", "inventory_scope": "post_cleanup_filesystem", "intermediates_absent": True, "remaining_gguf": ["Qwen3.5-9B-Q4_K_M.gguf"], "forbidden_artifacts": [], "q4": {"size_bytes": (root / "Qwen3.5-9B-Q4_K_M.gguf").stat().st_size, "sha256": hashlib.sha256((root / "Qwen3.5-9B-Q4_K_M.gguf").read_bytes()).hexdigest()}}), encoding="utf-8")
+            (root / "scan-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.scan-receipt.v1", "status": "verified", "inventory_scope": "pre_cleanup_conversion_outputs", "text_only": True, "artifacts": scan_records, "vision_projection_present": False, **RUN_IDENTITY}), encoding="utf-8")
+            (root / "post-cleanup-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.post-cleanup-receipt.v1", "status": "verified", "inventory_scope": "post_cleanup_filesystem", "intermediates_absent": True, "remaining_gguf": ["Qwen3.5-9B-Q4_K_M.gguf"], "forbidden_artifacts": [], "q4": {"size_bytes": (root / "Qwen3.5-9B-Q4_K_M.gguf").stat().st_size, "sha256": hashlib.sha256((root / "Qwen3.5-9B-Q4_K_M.gguf").read_bytes()).hexdigest()}, **RUN_IDENTITY}), encoding="utf-8")
             manifest = self.j1m.write_artifacts(root, names)
             self.assertEqual(len(manifest["artifacts"]), 9)
             self.assertEqual(manifest["inventory_scope"], "post_cleanup_deployable_allowlist")
@@ -344,14 +350,14 @@ class J1MConfigTests(unittest.TestCase):
                 (remote / name).write_bytes(name.encode())
             lock = json.loads((ROOT / "model" / "source-lock" / "qwen35-9b.source-lock.json").read_text(encoding="utf-8"))
             source_hashes = {item["path"]: item.get("sha256") or item.get("lfs_sha256") for item in lock["source_files"] if not item.get("excluded_from_text_only") and (item.get("sha256") or item.get("lfs_sha256"))}
-            (remote / "source-model-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.source-model-receipt.v1", "status": "verified", "model_id": lock["model_id"], "revision": lock["revision"], "checked_files": list(source_hashes), "file_hashes": source_hashes, "tokenizer_sha256": "b" * 64, "chat_template_sha256": "c" * 64, "license_sha256": "d" * 64, "verified_at_utc": "2026-01-01T00:00:00+00:00"}), encoding="utf-8")
-            (remote / "tensor-metadata.json").write_text(json.dumps({"schema": "local_bmo.j1m.tensor-metadata.v1", "status": "verified", "text_only": True, "tensor_count": 0, "tensors": [], "gguf_metadata": {"general.architecture": "qwen35"}, "vision_projection_present": False, "chat_template_sha256": "c" * 64}), encoding="utf-8")
-            (remote / "toolchain.json").write_text(json.dumps({"schema": "local_bmo.j1m.toolchain.v1", "llama_cpp_head": "e" * 40, "python": "Python 3.11", "cmake": "cmake 3.28", "compiler": "cc 12", "os_packages": [], "pip_freeze": "", "dependency_wheelhouse_lock": {}}), encoding="utf-8")
+            (remote / "source-model-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.source-model-receipt.v1", "status": "verified", "model_id": lock["model_id"], "revision": lock["revision"], "checked_files": list(source_hashes), "file_hashes": source_hashes, "tokenizer_sha256": "b" * 64, "chat_template_sha256": "c" * 64, "license_sha256": "d" * 64, "verified_at_utc": "2026-01-01T00:00:00+00:00", **RUN_IDENTITY}), encoding="utf-8")
+            (remote / "tensor-metadata.json").write_text(json.dumps({"schema": "local_bmo.j1m.tensor-metadata.v1", "status": "verified", "text_only": True, "tensor_count": 0, "tensors": [], "gguf_metadata": {"general.architecture": "qwen35"}, "vision_projection_present": False, "chat_template_sha256": "c" * 64, **RUN_IDENTITY}), encoding="utf-8")
+            (remote / "toolchain.json").write_text(json.dumps({"schema": "local_bmo.j1m.toolchain.v1", "llama_cpp_head": "e" * 40, "python": "Python 3.11", "cmake": "cmake 3.28", "compiler": "cc 12", "os_packages": [], "pip_freeze": "", "dependency_wheelhouse_lock": {}, **RUN_IDENTITY}), encoding="utf-8")
             (remote / "command-receipt.json").write_text(json.dumps([{"stage": 1, "argv": ["source-check"], "started_at_utc": "2026-01-01T00:00:00+00:00", "ended_at_utc": "2026-01-01T00:00:01+00:00", "exit_code": 0, "status": "completed"}]) + "\n", encoding="utf-8")
             scan_records = [{"name": name, "size_bytes": (remote / name).stat().st_size, "sha256": hashlib.sha256((remote / name).read_bytes()).hexdigest()} for name in ("Qwen3.5-9B-bf16.gguf", "Qwen3.5-9B-Q8_0.gguf", "Qwen3.5-9B-Q4_K_M.gguf")]
-            (remote / "scan-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.scan-receipt.v1", "status": "verified", "inventory_scope": "pre_cleanup_conversion_outputs", "text_only": True, "artifacts": scan_records, "vision_projection_present": False}), encoding="utf-8")
+            (remote / "scan-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.scan-receipt.v1", "status": "verified", "inventory_scope": "pre_cleanup_conversion_outputs", "text_only": True, "artifacts": scan_records, "vision_projection_present": False, **RUN_IDENTITY}), encoding="utf-8")
             q4 = remote / "Qwen3.5-9B-Q4_K_M.gguf"
-            (remote / "post-cleanup-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.post-cleanup-receipt.v1", "status": "verified", "inventory_scope": "post_cleanup_filesystem", "intermediates_absent": True, "remaining_gguf": [q4.name], "forbidden_artifacts": [], "q4": {"size_bytes": q4.stat().st_size, "sha256": hashlib.sha256(q4.read_bytes()).hexdigest()}}), encoding="utf-8")
+            (remote / "post-cleanup-receipt.json").write_text(json.dumps({"schema": "local_bmo.j1m.post-cleanup-receipt.v1", "status": "verified", "inventory_scope": "post_cleanup_filesystem", "intermediates_absent": True, "remaining_gguf": [q4.name], "forbidden_artifacts": [], "q4": {"size_bytes": q4.stat().st_size, "sha256": hashlib.sha256(q4.read_bytes()).hexdigest()}, **RUN_IDENTITY}), encoding="utf-8")
             self.j1m.write_artifacts(remote, ["Qwen3.5-9B-bf16.gguf", "Qwen3.5-9B-Q8_0.gguf", "Qwen3.5-9B-Q4_K_M.gguf"])
             (remote / "Qwen3.5-9B-bf16.gguf").unlink()
             (remote / "Qwen3.5-9B-Q8_0.gguf").unlink()
@@ -1556,8 +1562,9 @@ class StaticSafetyTests(unittest.TestCase):
             return {"status": "completed", "exit_code": 0}
 
         with tempfile.TemporaryDirectory(dir=ROOT) as directory:
-            identity = Path(directory) / "id_ed25519"
+            identity = Path(directory) / "ssh-key"
             identity.write_text("private", encoding="utf-8")
+            identity.chmod(0o600)
             with contextlib.ExitStack() as stack:
                 teardown_failure = mock.patch.object(orchestrator, "teardown_exact", side_effect=RuntimeError("delete unavailable"))
                 patches = [
@@ -1655,8 +1662,9 @@ class StaticSafetyTests(unittest.TestCase):
             return {"status": "confirmed"}
 
         with tempfile.TemporaryDirectory(dir=ROOT) as directory:
-            identity = Path(directory) / "id_ed25519"
+            identity = Path(directory) / "ssh-key"
             identity.write_text("private", encoding="utf-8")
+            identity.chmod(0o600)
             with contextlib.ExitStack() as stack:
                 patches = [
                     mock.patch.object(orchestrator.sf, "load_env", return_value={"SHADEFORM_API_KEY": "api"}),
@@ -1760,8 +1768,9 @@ class StaticSafetyTests(unittest.TestCase):
                 raise OSError("attempt settlement unavailable")
             return append_cost_event(event)
         with tempfile.TemporaryDirectory(dir=ROOT) as directory:
-            identity = Path(directory) / "id_ed25519"
+            identity = Path(directory) / "ssh-key"
             identity.write_text("private", encoding="utf-8")
+            identity.chmod(0o600)
             with contextlib.ExitStack() as stack:
                 key_delete = stack.enter_context(mock.patch.object(orchestrator.sf, "delete_owned_ssh_key_exact"))
                 for patcher in [
@@ -1809,8 +1818,9 @@ class StaticSafetyTests(unittest.TestCase):
         progress = []
         persisted = []
         with tempfile.TemporaryDirectory(dir=ROOT) as directory:
-            identity = Path(directory) / "id_ed25519"
+            identity = Path(directory) / "ssh-key"
             identity.write_text("private", encoding="utf-8")
+            identity.chmod(0o600)
             with contextlib.ExitStack() as stack:
                 for patcher in [
                     mock.patch.object(orchestrator.sf, "load_env", return_value={"SHADEFORM_API_KEY": "api"}),
@@ -1847,8 +1857,9 @@ class StaticSafetyTests(unittest.TestCase):
             def wait(self, timeout): raise AssertionError("ambiguous ownership must retain watchdog")
 
         with tempfile.TemporaryDirectory(dir=ROOT) as directory:
-            identity = Path(directory) / "id_ed25519"
+            identity = Path(directory) / "ssh-key"
             identity.write_text("private", encoding="utf-8")
+            identity.chmod(0o600)
             with contextlib.ExitStack() as stack:
                 for patcher in [
                     mock.patch.object(orchestrator.sf, "load_env", return_value={"SHADEFORM_API_KEY": "api"}),
@@ -1944,7 +1955,8 @@ class StaticSafetyTests(unittest.TestCase):
             self.assertEqual(results, [{
                 "name": "Qwen3.5-9B-Q4_K_M.gguf",
                 "status": "salvage_failed",
-                "error_code": "salvage_name_not_allowlisted",
+                "error_code": "salvage_refused_non_receipt",
+                "refusal_class": "weights",
             }])
             remote.assert_not_called()
             scp_base.assert_not_called()
@@ -2038,7 +2050,13 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertIn("cuda_device_probe.py", " ".join(flattened))
         self.assertIn("--backend", flattened)
         self.assertIn("cuda", flattened)
-        self.assertIn("--token-file", flattened)
+        # ``--token-file`` is deliberately absent: it named a path on a host
+        # this process has not contacted, which ``validate_persisted_argv``
+        # can never accept as a private handle, so every eval argv was
+        # refused before it could spawn.  The remote evaluator now creates
+        # its bearer token in an owner-private directory of its own.
+        self.assertNotIn("--token-file", flattened)
+        self.assertFalse([part for part in flattened if part.endswith("engine-token")])
         self.assertIn("--toolchain-receipt", flattened)
         self.assertIn("--preflight-receipt", flattened)
         self.assertTrue(any(part.endswith("startup-preflight-receipt.json") for part in flattened))

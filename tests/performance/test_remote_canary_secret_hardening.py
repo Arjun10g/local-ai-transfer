@@ -434,13 +434,36 @@ class RemoteCanaryAndReceiptHardeningTests(unittest.TestCase):
         # source-fixed mapping of receipt basenames, and the remote directory
         # is a single source constant rather than a caller or config value.
         self.assertEqual(sorted(self.orchestrator._SALVAGE_RECEIPT_ALLOWLIST), [
+            "conversion-receipt.json",
             "cuda-device-receipt.json",
             "eval-artifact-receipt.json",
             "eval-receipt.json",
+            "manifest.json",
+            "model-receipt.json",
+            "post-cleanup-receipt.json",
             "proving-receipt.json",
+            "scan-receipt.json",
+            "source-model-receipt.json",
             "startup-preflight-receipt.json",
+            "tensor-metadata.json",
             "toolchain-receipt.json",
+            "toolchain.json",
         ])
+        # Build mode now has receipts it can actually salvage.  A paid
+        # conversion that returned nothing and still reported success was the
+        # defect; the weights stay unsalvageable by design.
+        self.assertEqual(
+            sorted(self.orchestrator._SALVAGE_NON_RECEIPT_NAMES),
+            ["Qwen3.5-9B-Q4_K_M.gguf", "Qwen3.5-9B-Q8_0.gguf", "Qwen3.5-9B-bf16.gguf",
+             "checksums.sha256", "command-receipt.json"],
+        )
+        build_allowlist = self.config["artifacts"]["local_fetch_allowlist"]
+        self.assertTrue(set(build_allowlist) <= (
+            set(self.orchestrator._SALVAGE_RECEIPT_ALLOWLIST)
+            | set(self.orchestrator._SALVAGE_NON_RECEIPT_NAMES)
+        ))
+        self.assertTrue(any(name in self.orchestrator._SALVAGE_RECEIPT_ALLOWLIST
+                            for name in build_allowlist))
         self.assertEqual(self.orchestrator._SALVAGE_REMOTE_DIRECTORY, "/scratch/j1m/artifacts")
         self.assertEqual(
             self.orchestrator._SALVAGE_MAX_FILES,
@@ -453,6 +476,12 @@ class RemoteCanaryAndReceiptHardeningTests(unittest.TestCase):
         # no glob metacharacter can appear in a constructed remote operand.
         for name in self.orchestrator._SALVAGE_RECEIPT_ALLOWLIST:
             self.assertRegex(name, r"\A[a-z][a-z0-9-]*\.json\Z")
+        # Every fetchable receipt must also declare a run-identity binding and
+        # a required-key set; nothing is fetchable on schema alone.
+        for name in self.orchestrator._SALVAGE_RECEIPT_ALLOWLIST:
+            self.assertIn(name, self.orchestrator._SALVAGE_REQUIRED_KEYS)
+        self.assertEqual(self.orchestrator._SALVAGE_REQUIRED_IDENTITY,
+                         frozenset(self.runner.RUN_IDENTITY_FIELDS))
 
     def test_malformed_tensor_receipt_is_finite_refusal_without_typeerror_or_file(self):
         class Reader:

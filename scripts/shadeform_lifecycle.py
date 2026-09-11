@@ -53,6 +53,24 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 MUTATION_ENV_FILE = ROOT / ".secrets" / "shadeform.env"
+# Ephemeral SSH material lives in the same protected, Git-ignored, owner-private
+# area as the mutation environment projection (``b306665``).
+#
+# ``j1m_runner.validate_persisted_argv`` (``991b70e``) accepts the ``-i``
+# operand of a persisted argv only when it is a *canonical private handle*:
+# a basename matching ``_HANDLE_BASENAME``, an ordinary single-link file owned
+# by this process at mode ``0600``, an owner-private direct parent, and no
+# group/world-writable ancestor up to ``/``.  A system temporary directory
+# satisfies none of that in practice -- on macOS ``/var`` is a symlink, and on
+# Linux ``/tmp`` is only accepted as a *direct* parent -- and ``id_ed25519``
+# matches no handle basename at all, so every ssh/scp argv the orchestrator
+# builds was refused before it could spawn.  The per-run key directory is
+# therefore created here, under a root the validator already trusts.
+EPHEMERAL_KEY_ROOT = ROOT / ".secrets" / "j1m"
+# Recognised by ``j1m_runner._HANDLE_BASENAME`` through its ``ssh[_-]?key``
+# alternative.  ``ssh-keygen`` writes the public half as ``<name>.pub``.
+EPHEMERAL_KEY_BASENAME = "ssh-key"
+_EPHEMERAL_KEY_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}\Z")
 API_BASE = "https://api.shadeform.ai/v1"
 MAX_PROVIDER_RESPONSE_BYTES = 1_048_576
 RUNTIME_ROOT = ROOT / "experiments" / "runtime"
@@ -2963,10 +2981,73 @@ def _rank_candidates(
     )
 
 
+def ephemeral_key_directory(run_token: str, *, root: Path | None = None) -> Path:
+    """Return the owner-private per-run key directory for one run token.
+
+    The token is bound to a single run (the orchestrator uses its run id plus
+    the fresh ownership nonce), so no two runs can share a directory and the
+    "never reuse a key" rule is enforced by the filesystem: ``create_keypair``
+    refuses a directory that already exists.
+    """
+
+    if not isinstance(run_token, str) or not _EPHEMERAL_KEY_TOKEN.fullmatch(run_token):
+        raise ShadeformError("ephemeral key run token is invalid")
+    base = EPHEMERAL_KEY_ROOT if root is None else Path(root)
+    if not base.is_absolute():
+        raise ShadeformError("ephemeral key root must be absolute")
+    return base / run_token
+
+
+def _private_directory(path: Path, *, create: bool = True) -> None:
+    """Create or prove one owner-private ``0700`` directory, never widening it.
+
+    An existing directory is *proved*, never ``chmod``-ed: the protected
+    ``.secrets`` layout is operator-owned and a silent permission change would
+    hide a misconfiguration rather than surface it.
+    """
+
+    if create:
+        try:
+            path.mkdir(mode=0o700, parents=False, exist_ok=True)
+        except OSError as exc:
+            raise ShadeformError("ephemeral key directory could not be created") from exc
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise ShadeformError("ephemeral key directory is unavailable") from exc
+    if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or
+            info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077):
+        raise ShadeformError("ephemeral key directory is not owner-private")
+
+
 def create_keypair(directory: Path) -> tuple[Path, str]:
-    directory.mkdir(parents=True, exist_ok=True)
-    directory.chmod(stat.S_IRWXU)
-    private = directory / "id_ed25519"
+    """Generate one fresh ed25519 key inside a private, never-reused directory.
+
+    ``directory`` must not already exist: an ephemeral key is created once, for
+    one run, and its whole directory is securely removed by
+    ``destroy_ephemeral_key_directory`` on every exit path.  Every ancestor the
+    call creates is ``0700``, every pre-existing ancestor is proved ``0700``,
+    and the private half is ``0600`` with a basename the persisted-argv policy
+    recognises, so the resulting handle is accepted by
+    ``j1m_runner.validate_persisted_argv`` rather than refused at the first
+    ``ssh``/``scp`` invocation.
+    """
+
+    directory = Path(directory)
+    if directory.is_symlink() or directory.exists():
+        raise ShadeformError("ephemeral key directory already exists; keys are never reused")
+    missing: list[Path] = []
+    ancestor = directory.parent
+    while not ancestor.exists():
+        if ancestor.parent == ancestor:
+            raise ShadeformError("ephemeral key directory has no usable ancestor")
+        missing.append(ancestor)
+        ancestor = ancestor.parent
+    _private_directory(ancestor, create=False)
+    for parent in reversed(missing):
+        _private_directory(parent)
+    _private_directory(directory)
+    private = directory / EPHEMERAL_KEY_BASENAME
     subprocess.run(
         [_verified_executable("ssh-keygen"), "-t", "ed25519", "-N", "", "-q", "-f", str(private)],
         check=True,
@@ -2975,7 +3056,87 @@ def create_keypair(directory: Path) -> tuple[Path, str]:
         env=_secure_subprocess_env(),
     )
     private.chmod(stat.S_IRUSR | stat.S_IWUSR)
-    return private, private.with_suffix(".pub").read_text(encoding="utf-8").strip()
+    public = private.with_name(private.name + ".pub").read_text(encoding="utf-8").strip()
+    return private, public
+
+
+def assert_persisted_argv_handle(identity: Path) -> None:
+    """Prove one key is usable as the ``-i`` operand of a persisted argv.
+
+    Callers that record their ssh/scp commands as evidence -- the J1M
+    orchestrator does, through ``_remote`` -- must prove this *before* any
+    billable provider POST exists.  A key the argv policy would refuse is a
+    local configuration fault, and discovering it after an instance is running
+    means paying for a machine that can never be reached.  Callers that do not
+    persist argv (the remote external-tools lane, which still uses a private
+    system temporary directory) are unaffected and do not call this.
+    """
+
+    from scripts import j1m_runner as _persisted_argv_policy
+
+    if not _persisted_argv_policy._canonical_private_handle_path(str(identity)):
+        raise ShadeformError(
+            "ephemeral key is not a canonical private handle; every persisted "
+            "ssh/scp argv would be refused before it could spawn"
+        )
+
+
+def destroy_ephemeral_key_directory(directory: Path | None) -> dict[str, Any]:
+    """Securely remove one per-run key directory; never raise, never print.
+
+    Called from the orchestrator's ``finally`` on both the success and every
+    failure path.  Key material is overwritten before unlinking and the result
+    is metadata only -- a status, a file count, and the run token -- so the run
+    receipt can record that the ephemeral key is gone without naming or
+    disclosing any of it.
+    """
+
+    if directory is None:
+        return {"status": "absent", "files_removed": 0}
+    directory = Path(directory)
+    receipt: dict[str, Any] = {"status": "removed", "files_removed": 0, "run_token": directory.name[:96]}
+    try:
+        if directory.is_symlink():
+            os.unlink(directory)
+            receipt["status"] = "refused_symlink"
+            return receipt
+        entries = sorted(os.listdir(directory))
+    except FileNotFoundError:
+        receipt["status"] = "absent"
+        return receipt
+    except OSError:
+        receipt["status"] = "incomplete"
+        receipt["error_type"] = "key_directory_unreadable"
+        return receipt
+    for name in entries:
+        target = directory / name
+        try:
+            info = os.lstat(target)
+            if stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+                descriptor = os.open(
+                    target, os.O_WRONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                )
+                try:
+                    remaining = os.fstat(descriptor).st_size
+                    while remaining > 0:
+                        chunk = secrets.token_bytes(min(remaining, 1 << 16))
+                        remaining -= os.write(descriptor, chunk)
+                    os.fsync(descriptor)
+                    os.ftruncate(descriptor, 0)
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            os.unlink(target)
+            receipt["files_removed"] += 1
+        except OSError:
+            receipt["status"] = "incomplete"
+            receipt["error_type"] = "key_file_not_removed"
+    try:
+        os.rmdir(directory)
+    except OSError:
+        receipt["status"] = "incomplete"
+        receipt.setdefault("error_type", "key_directory_not_removed")
+    return receipt
 
 
 def create_ephemeral_ssh_key(env: dict[str, str], directory: Path) -> tuple[Path, str]:
@@ -4031,7 +4192,17 @@ def acquire_pinned_host_key(info: dict[str, Any], known_hosts: Path, *, provider
     known_hosts.write_text("\n".join(verified_lines) + "\n", encoding="utf-8")
     known_hosts.chmod(stat.S_IRUSR | stat.S_IWUSR)
     selected_fingerprint = fingerprint if fingerprint else next(iter(fingerprint_lines))
-    return {"status": "verified", "fingerprint": selected_fingerprint, "key_count": len(verified_lines), "proof": "provider-fingerprint" if fingerprint else "two-stable-bounded-scans-residual-tofu"}
+    # Record the exact bytes that were pinned, not just how many lines they
+    # occupied.  Teardown-time salvage re-proves this digest, so a known_hosts
+    # rewritten with a different key of the same line count is refused instead
+    # of silently accepted.
+    return {
+        "status": "verified",
+        "fingerprint": selected_fingerprint,
+        "key_count": len(verified_lines),
+        "known_hosts_sha256": hashlib.sha256(known_hosts.read_bytes()).hexdigest(),
+        "proof": "provider-fingerprint" if fingerprint else "two-stable-bounded-scans-residual-tofu",
+    }
 
 
 def _transport_options(known_hosts: Path) -> list[str]:

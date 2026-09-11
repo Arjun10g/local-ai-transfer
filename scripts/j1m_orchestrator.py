@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import math
 import os
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -35,7 +37,9 @@ _STDERR_TAIL_LIMIT = 1200
 _EVAL_FIXTURE_MAX_BYTES = 256 * 1024
 _EVAL_RECEIPT_MAX_BYTES = 64 * 1024
 _EVAL_ARTIFACT_RECEIPT_MAX_BYTES = 8 * 1024
-_PREFLIGHT_RECEIPT_MAX_BYTES = 1024
+# Raised from 1024 to leave room for the required run-identity binding that
+# every salvageable receipt now carries.
+_PREFLIGHT_RECEIPT_MAX_BYTES = 2048
 _MAX_OUTPUT_RESERVE_TOKENS = 256
 # Bounded capacity for the current production fixture; identity checks still
 # require the exact catalog supplied by the fixture.
@@ -65,6 +69,50 @@ _SALVAGE_RECEIPT_ALLOWLIST: dict[str, str] = {
     "toolchain-receipt.json": "local_bmo.j1m.remote-toolchain-receipt.v1",
     "cuda-device-receipt.json": "local_bmo.j1m.cuda-device-receipt.v1",
     "proving-receipt.json": "local_bmo.j1m.proving-receipt.v1",
+    # Build-mode receipts.  Every one is a schema-bound JSON object written by
+    # ``j1m_runner`` on the host and therefore carryable by exactly the same
+    # bounded transport: a paid conversion must not return zero evidence.  The
+    # deployable weights are deliberately absent -- see
+    # ``_SALVAGE_NON_RECEIPT_NAMES``.
+    "manifest.json": "local_bmo.j1m.artifact-manifest.v1",
+    "tensor-metadata.json": "local_bmo.j1m.tensor-metadata.v1",
+    "source-model-receipt.json": "local_bmo.j1m.source-model-receipt.v1",
+    "conversion-receipt.json": "local_bmo.j1m.conversion-receipt.v1",
+    "model-receipt.json": "local_bmo.j1m.model-receipt.v1",
+    "toolchain.json": "local_bmo.j1m.toolchain.v1",
+    "scan-receipt.json": "local_bmo.j1m.scan-receipt.v1",
+    "post-cleanup-receipt.json": "local_bmo.j1m.post-cleanup-receipt.v1",
+}
+# Names a configuration may legitimately list that this transport deliberately
+# cannot carry, and why.  They are refused with their own typed reason rather
+# than the generic "not allowlisted", so a build run's receipt says plainly
+# that the weights were never salvageable and the two non-object outputs are
+# not schema-bound, instead of implying a configuration mistake.
+_SALVAGE_NON_RECEIPT_NAMES: dict[str, str] = {
+    # Weights: a multi-GiB artifact is not evidence and is never transferred to
+    # the operator laptop.  This is the ``2d7db4f`` scope decision, retained.
+    "Qwen3.5-9B-bf16.gguf": "weights",
+    "Qwen3.5-9B-Q8_0.gguf": "weights",
+    "Qwen3.5-9B-Q4_K_M.gguf": "weights",
+    # Not JSON at all; nothing to schema-check or bind to this run.
+    "checksums.sha256": "not_schema_bound",
+    # A JSON *array* of command records, so it can carry neither a top-level
+    # schema string nor the required run-identity binding.
+    "command-receipt.json": "not_schema_bound",
+}
+# Identity every allowlisted receipt MUST carry before it can be published.
+# This is required, not opportunistic: a receipt left in the remote artifact
+# directory by an earlier run carries that run's binding and is refused rather
+# than published as this run's evidence.  ``j1m_runner.RUN_IDENTITY_FIELDS`` is
+# what the host-side writers emit, from the ``run-identity.json`` this
+# orchestrator uploads before the first receipt-producing command.
+_SALVAGE_REQUIRED_IDENTITY: frozenset[str] = frozenset(j1m_runner.RUN_IDENTITY_FIELDS)
+# Receipts that additionally assert the approved artifact's identity must carry
+# those fields and match; a receipt that simply omits them is refused rather
+# than silently accepted.
+_SALVAGE_REQUIRED_ARTIFACT_CLAIMS: dict[str, tuple[str, ...]] = {
+    "eval-artifact-receipt.json": ("name", "size_bytes", "sha256"),
+    "eval-receipt.json": ("name", "size_bytes", "sha256"),
 }
 # Minimum top-level keys each receipt must carry before it may be published.
 # The full per-receipt verification still runs in ``_verify_*`` after publish;
@@ -82,14 +130,56 @@ _SALVAGE_REQUIRED_KEYS: dict[str, frozenset[str]] = {
     "toolchain-receipt.json": frozenset({"schema", "status"}),
     "cuda-device-receipt.json": frozenset({"schema", "status"}),
     "proving-receipt.json": frozenset({"schema", "host", "python", "text_only"}),
+    "manifest.json": frozenset({
+        "schema", "created_at_utc", "inventory_scope", "deployable_model_artifacts",
+        "text_only", "artifacts", "tensor_metadata",
+    }),
+    "tensor-metadata.json": frozenset({
+        "schema", "status", "text_only", "tensor_count", "tensors", "gguf_metadata",
+        "vision_projection_present", "chat_template_sha256",
+    }),
+    "source-model-receipt.json": frozenset({
+        "schema", "status", "model_id", "revision", "checked_files", "file_hashes",
+        "license_sha256", "tokenizer_sha256", "chat_template_sha256", "verified_at_utc",
+    }),
+    "conversion-receipt.json": frozenset({
+        "schema", "status", "text_only", "source_revision", "llama_cpp_revision",
+        "artifacts", "command_receipt_sha256", "toolchain",
+    }),
+    "model-receipt.json": frozenset({
+        "schema", "status", "text_only", "q4_artifact", "tensor_metadata_sha256",
+        "vision_projection_present", "scan_receipt_sha256",
+    }),
+    "toolchain.json": frozenset({
+        "schema", "llama_cpp_head", "python", "cmake", "compiler", "os_packages",
+        "pip_freeze",
+    }),
+    "scan-receipt.json": frozenset({
+        "schema", "status", "inventory_scope", "text_only", "artifacts",
+        "vision_projection_present",
+    }),
+    "post-cleanup-receipt.json": frozenset({
+        "schema", "status", "inventory_scope", "intermediates_absent",
+        "remaining_gguf", "forbidden_artifacts", "q4",
+    }),
 }
 # The locally written salvage evidence file.  It is deliberately not fetchable:
 # it describes the transfer and must never be supplied by the remote host.
 _SALVAGE_RECEIPT_NAME = "salvage-receipt.json"
 _SALVAGE_RECEIPT_SCHEMA = "local_bmo.j1m.salvage-receipt.v1"
-_SALVAGE_MAX_FILE_BYTES = 4 * 1024 * 1024
-_SALVAGE_MAX_TOTAL_BYTES = 32 * 1024 * 1024
+# These are the *operative* bounds, not decorative wider ones.  The earlier
+# 4 MiB per-file and 32 MiB total caps could never bind, because the strict
+# receipt decoder refuses anything over ``_RECEIPT_MAX_BYTES`` first and
+# dedup caps distinct fetches at the allowlist size; the receipt's ``caps``
+# block therefore advertised numbers that no input could ever reach.  Each cap
+# below is now the number that actually decides.
+_SALVAGE_MAX_FILE_BYTES = j1m_runner._RECEIPT_MAX_BYTES
 _SALVAGE_MAX_FILES = len(_SALVAGE_RECEIPT_ALLOWLIST)
+_SALVAGE_MAX_TOTAL_BYTES = _SALVAGE_MAX_FILES * _SALVAGE_MAX_FILE_BYTES
+# Refuse the whole call rather than stage a transfer with nowhere to put it.
+# ``scp`` writes into the private staging directory before any size check can
+# run, so the worst case must fit twice over: once staged, once published.
+_SALVAGE_MIN_FREE_BYTES = _SALVAGE_MAX_TOTAL_BYTES * 2
 _SALVAGE_WALL_CLOCK_SECONDS = 300.0
 _SALVAGE_FILE_TIMEOUT_SECONDS = 60.0
 # A request naming more than this many candidates is a configuration fault, not
@@ -456,6 +546,14 @@ def _eval_remote_commands(config: dict[str, Any], remote_root: str) -> list[list
         # Fail before the expensive HF checkout/conversion when the CUDA
         # compiler is unavailable to a noninteractive SSH process.
         ["python3", f"{remote_root}/remote_toolchain_probe.py", "--nvcc", cuda_compiler, "--output", f"{remote_root}/artifacts/toolchain-receipt.json"],
+        # ``--token-file`` is deliberately absent.  It names a path on a host
+        # this process has not contacted, and ``validate_persisted_argv``
+        # accepts a token-file operand only when it is a canonical private
+        # handle *on this machine* -- a proof that cannot exist for a remote
+        # path.  Rather than weaken that policy or rename the option to dodge
+        # its credential detector, the orchestrator stops naming a credential
+        # path it cannot prove: ``remote_model_eval.py`` creates its bearer
+        # token in an owner-private temporary directory of its own.
         # J1M performs the immutable HF download, source verification,
         # conversion and Q4 quantization remotely. This keeps the 5--6 GiB
         # model off the operator laptop and makes the accepted manifest the
@@ -471,7 +569,7 @@ def _eval_remote_commands(config: dict[str, Any], remote_root: str) -> list[list
         ["python3", f"{remote_root}/cuda_device_probe.py", "--output", f"{remote_root}/artifacts/cuda-device-receipt.json"],
         ["cmake", "-S", engine_root, "-B", build_root, "-DCMAKE_BUILD_TYPE=Release", "-DLAE_ENABLE_LLAMA_CPP=ON", "-DLAE_ENABLE_LLAMA_CUDA=ON", f"-DCMAKE_CUDA_ARCHITECTURES={eval_mode['cuda_architecture']}", f"-DCMAKE_CUDA_COMPILER={cuda_compiler}"],
         ["cmake", "--build", build_root, "--target", "lae-engine", "--parallel", str(eval_mode["build_parallelism"])],
-        ["python3", f"{remote_root}/remote_model_eval.py", "--model", f"{remote_root}/artifacts/Qwen3.5-9B-Q4_K_M.gguf", "--model-manifest", f"{remote_root}/model-manifest.json", "--model-manifest-lock", f"{remote_root}/model-manifest.sha256", "--source-revision", config["source"]["revision"], "--llama-revision", llama["revision"], "--llama-checkout", checkout, "--engine", f"{build_root}/native/lae-engine", "--evaluator", f"{remote_root}/evaluate_tool_calls.py", "--fixture", f"{remote_root}/production_tool_call_eval.json", "--token-file", f"{remote_root}/engine-token", "--backend", eval_mode["backend"], "--cuda-device-name", device_name, "--cuda-device-receipt", f"{remote_root}/artifacts/cuda-device-receipt.json", "--toolchain-receipt", f"{remote_root}/artifacts/toolchain-receipt.json", "--receipt", f"{remote_root}/artifacts/eval-receipt.json", "--preflight-receipt", f"{remote_root}/artifacts/startup-preflight-receipt.json", "--timeout", "420"],
+        ["python3", f"{remote_root}/remote_model_eval.py", "--model", f"{remote_root}/artifacts/Qwen3.5-9B-Q4_K_M.gguf", "--model-manifest", f"{remote_root}/model-manifest.json", "--model-manifest-lock", f"{remote_root}/model-manifest.sha256", "--source-revision", config["source"]["revision"], "--llama-revision", llama["revision"], "--llama-checkout", checkout, "--engine", f"{build_root}/native/lae-engine", "--evaluator", f"{remote_root}/evaluate_tool_calls.py", "--fixture", f"{remote_root}/production_tool_call_eval.json", "--backend", eval_mode["backend"], "--cuda-device-name", device_name, "--cuda-device-receipt", f"{remote_root}/artifacts/cuda-device-receipt.json", "--toolchain-receipt", f"{remote_root}/artifacts/toolchain-receipt.json", "--receipt", f"{remote_root}/artifacts/eval-receipt.json", "--preflight-receipt", f"{remote_root}/artifacts/startup-preflight-receipt.json", "--timeout", "420"],
     ]
 
 
@@ -682,11 +780,23 @@ def _verify_eval_canary_coherence(canary: dict[str, Any], *, metrics: dict[str, 
             raise ValueError("eval receipt canary invalid")
 
 
+def _without_run_identity(payload: dict[str, Any]) -> set[str]:
+    """Return a receipt's key set with the run-identity binding removed."""
+
+    return set(payload) - set(j1m_runner.RUN_IDENTITY_FIELDS)
+
+
 def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]:
     """Accept only the bounded aggregate receipt produced by remote eval."""
 
     payload = _bounded_json(path, _EVAL_RECEIPT_MAX_BYTES)
-    allowed_top_level = {"schema", "status", "artifact", "fixture", "engine", "model_preflight", "cuda_device", "toolchain", "metrics", "duration_ms", "prompt_response_logging", "token_logging", "child"}
+    allowed_top_level = {"schema", "status", "artifact", "fixture", "engine", "model_preflight", "cuda_device", "toolchain", "metrics", "duration_ms", "prompt_response_logging", "token_logging", "child", *j1m_runner.RUN_IDENTITY_FIELDS}
+    # The run-identity binding is *required* where it is load-bearing: at the
+    # salvage fetch boundary, before an untrusted receipt is ever published
+    # (``_salvage_validated_payload``).  These verifiers read a file salvage
+    # has already proved and published this run, so they accept the binding
+    # without re-demanding it and no receipt fixture has to grow a field that
+    # is not part of what is being verified here.
     required_top_level = {"schema", "status", "artifact", "fixture", "engine", "model_preflight", "toolchain", "metrics", "prompt_response_logging", "token_logging"}
     if not isinstance(payload, dict) or payload.get("schema") != "local_bmo.j1m.real-tool-eval-receipt.v1":
         raise ValueError("eval receipt schema mismatch")
@@ -842,7 +952,7 @@ def _verify_eval_artifact_receipt(path: Path, artifact: dict[str, Any]) -> dict[
 
     payload = _bounded_json(path, _EVAL_ARTIFACT_RECEIPT_MAX_BYTES)
     required = {"schema", "status", "name", "size_bytes", "sha256", "manifest_sha256", "manifest_lock_sha256"}
-    if not isinstance(payload, dict) or set(payload) != required or payload.get("schema") != "local_bmo.j1m.remote-eval-artifact-receipt.v1" or payload.get("status") != "verified":
+    if not isinstance(payload, dict) or _without_run_identity(payload) != required or payload.get("schema") != "local_bmo.j1m.remote-eval-artifact-receipt.v1" or payload.get("status") != "verified":
         raise ValueError("eval artifact receipt schema mismatch")
     if (payload.get("name") != artifact.get("name") or payload.get("size_bytes") != artifact.get("size_bytes") or
             payload.get("sha256") != artifact.get("sha256")):
@@ -888,17 +998,17 @@ def _verify_startup_preflight_receipt(path: Path, artifact: dict[str, Any]) -> d
         raise ValueError("startup preflight receipt schema invalid")
     status = payload.get("status")
     if status == "verified":
-        if (set(payload) != {"schema", "status", "size_bytes", "sha256", "gguf_version"} or
+        if (_without_run_identity(payload) != {"schema", "status", "size_bytes", "sha256", "gguf_version"} or
                 payload.get("size_bytes") != artifact["size_bytes"] or payload.get("sha256") != artifact["sha256"] or
                 payload.get("gguf_version") != 3):
             raise ValueError("startup preflight receipt identity invalid")
         return {"status": "verified", "size_bytes": payload["size_bytes"], "sha256": payload["sha256"], "gguf_version": 3}
     elif status == "not_started":
-        if set(payload) != {"schema", "status", "error_code"} or payload.get("error_code") != "engine_model_preflight_not_started":
+        if _without_run_identity(payload) != {"schema", "status", "error_code"} or payload.get("error_code") != "engine_model_preflight_not_started":
             raise ValueError("startup preflight receipt not_started outcome invalid")
         return {"status": "not_started", "error_code": payload["error_code"]}
     elif status in {"rejected", "timeout", "oversize", "terminated", "failed"}:
-        if not set(payload) <= {"schema", "status", "error_code", "validator_code", "child"}:
+        if not _without_run_identity(payload) <= {"schema", "status", "error_code", "validator_code", "child"}:
             raise ValueError("startup preflight receipt outcome invalid")
         error_code = payload.get("error_code")
         allowed_errors = {
@@ -965,13 +1075,19 @@ def _salvage_transport_argv(
     # itself used; salvage never re-resolves a host or accepts a new address.
     instance_info = info["instance_info"]
     ip, user, _port = sf._endpoint(instance_info)
+    # ``sf._endpoint`` accepts any ``ipaddress.ip_address``.  An IPv6 endpoint
+    # would need bracketing in the operand and contradicts the ``-4`` pin, so
+    # refuse it explicitly instead of emitting a malformed operand that fails
+    # later as an opaque transport error.
+    if ipaddress.ip_address(ip).version != 4:
+        raise _SalvageRefusal("salvage_endpoint_not_ipv4")
     base = sf.scp_base(instance_info, identity, known_hosts)
     return [
         base[0],
-        # IPv4 only, no agent forwarding, no port/stream forwarding, and no
-        # local command execution.  ``scp_base`` already pins BatchMode,
-        # StrictHostKeyChecking, the pinned known_hosts file, ConnectTimeout,
-        # IdentitiesOnly, and an empty system config.
+        # IPv4 only -- proved above, not assumed -- no agent forwarding, no
+        # port/stream forwarding, and no local command execution.  ``scp_base``
+        # already pins BatchMode, StrictHostKeyChecking, the pinned known_hosts
+        # file, ConnectTimeout, IdentitiesOnly, and an empty system config.
         "-4",
         "-o", "ForwardAgent=no",
         "-o", "ForwardX11=no",
@@ -985,16 +1101,27 @@ def _salvage_transport_argv(
 
 
 def _salvage_transport_error_code(receipt: dict[str, Any]) -> str:
-    """Classify one failed transfer into a finite, value-free reason."""
+    """Classify one failed transfer into a finite, value-free reason.
+
+    OpenSSH signals a host-key mismatch only in prose, and ``_remote`` replaces
+    ``stderr_tail`` with ``"<redacted>"`` whenever the text fails the persisted
+    output policy, so the English-substring match is *evidence*, not proof.
+    ``scp`` exits 255 for every transport-layer refusal including a failed host
+    key, so an exit code of 255 with unreadable stderr is reported as
+    ``salvage_transport_refused`` -- distinct from a plain non-zero exit -- and
+    the receipt records which of the two established the classification.
+    """
 
     status = receipt.get("status")
     if status == "transport_timeout":
         return "salvage_timeout"
     if status == "transport_os":
         return "salvage_transport_os"
-    tail = str(receipt.get("stderr_tail") or "").casefold()
-    if any(marker in tail for marker in _SALVAGE_HOST_KEY_MARKERS):
+    tail = str(receipt.get("stderr_tail") or "")
+    if any(marker in tail.casefold() for marker in _SALVAGE_HOST_KEY_MARKERS):
         return "salvage_host_key_mismatch"
+    if receipt.get("exit_code") == 255:
+        return "salvage_transport_refused"
     return "salvage_transport_failed"
 
 
@@ -1046,18 +1173,27 @@ def _salvage_staged_bytes(staged: Path, limit: int) -> bytes:
 
 
 def _salvage_identity_claims(name: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """Return the artifact-identity fields this receipt asserts, if any."""
+    """Return the artifact-identity fields this receipt asserts, if any.
+
+    A receipt listed in ``_SALVAGE_REQUIRED_ARTIFACT_CLAIMS`` must carry every
+    named field: omitting one is a refusal, not a way to skip the comparison.
+    """
 
     if name == "eval-artifact-receipt.json":
-        return {key: payload.get(key) for key in ("name", "size_bytes", "sha256")}
-    if name == "eval-receipt.json":
+        claims = {key: payload.get(key) for key in ("name", "size_bytes", "sha256")}
+    elif name == "eval-receipt.json":
         recorded = payload.get("artifact")
         if not isinstance(recorded, dict):
             raise _SalvageRefusal("salvage_identity_mismatch")
-        return {key: recorded.get(key) for key in ("name", "size_bytes", "sha256")}
-    if name == "startup-preflight-receipt.json" and payload.get("status") == "verified":
-        return {key: payload.get(key) for key in ("size_bytes", "sha256")}
-    return {}
+        claims = {key: recorded.get(key) for key in ("name", "size_bytes", "sha256")}
+    elif name == "startup-preflight-receipt.json" and payload.get("status") == "verified":
+        claims = {key: payload.get(key) for key in ("size_bytes", "sha256")}
+    else:
+        return {}
+    required = _SALVAGE_REQUIRED_ARTIFACT_CLAIMS.get(name, ())
+    if any(claims.get(field) is None for field in required):
+        raise _SalvageRefusal("salvage_identity_missing")
+    return claims
 
 
 def _salvage_validated_payload(
@@ -1086,10 +1222,22 @@ def _salvage_validated_payload(
         j1m_runner.validate_persisted_receipt(payload)
     except ValueError:
         raise _SalvageRefusal("salvage_receipt_content_refused") from None
+    # Run-identity binding is REQUIRED, not opportunistic.  Every allowlisted
+    # receipt must carry every field, and every field must equal what this run
+    # uploaded to the host in ``run-identity.json`` before the first
+    # receipt-producing command.  A receipt written by an earlier run under the
+    # same remote artifact directory therefore carries that run's binding and
+    # is refused here rather than published as this run's evidence.
     identity = run_identity if isinstance(run_identity, dict) else {}
-    for field in ("run_id", "instance_id"):
+    for field in sorted(_SALVAGE_REQUIRED_IDENTITY):
         expected = identity.get(field)
-        if field in payload and expected is not None and payload[field] != expected:
+        if not isinstance(expected, str) or not expected:
+            # The caller could not state its own identity, so nothing fetched
+            # can be proved to belong to this run.
+            raise _SalvageRefusal("salvage_run_identity_unavailable")
+        if field not in payload:
+            raise _SalvageRefusal("salvage_identity_missing")
+        if payload[field] != expected:
             raise _SalvageRefusal("salvage_identity_mismatch")
     artifact = identity.get("artifact")
     claims = _salvage_identity_claims(name, payload)
@@ -1121,16 +1269,27 @@ def _salvage_host_key_pin(known_hosts: Path, host_key: dict[str, Any] | None) ->
             stat.S_IMODE(info.st_mode) & 0o077 or not 0 < info.st_size <= 65536):
         raise ValueError("salvage host key pin is not a private regular file")
     raw = known_hosts.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
     lines = [line for line in raw.decode("utf-8", errors="strict").splitlines() if line.strip()]
     if not lines:
         raise ValueError("salvage host key pin is empty")
     if isinstance(host_key, dict):
         if host_key.get("status") != "verified":
             raise ValueError("salvage host key pin was never verified")
-        expected = host_key.get("key_count")
-        if isinstance(expected, int) and not isinstance(expected, bool) and len(lines) != expected:
-            raise ValueError("salvage host key pin changed since acquisition")
-    return hashlib.sha256(raw).hexdigest()
+        # A line count cannot detect a key swapped for another of the same
+        # shape.  ``acquire_pinned_host_key`` records the exact digest of the
+        # bytes it pinned, so compare those when they exist and keep the
+        # count comparison only as the fallback for an acquisition record that
+        # predates the digest.
+        recorded = host_key.get("known_hosts_sha256")
+        if isinstance(recorded, str) and recorded:
+            if recorded != digest:
+                raise ValueError("salvage host key pin changed since acquisition")
+        else:
+            expected = host_key.get("key_count")
+            if isinstance(expected, int) and not isinstance(expected, bool) and len(lines) != expected:
+                raise ValueError("salvage host key pin changed since acquisition")
+    return digest
 
 
 def _write_salvage_receipt(destination: Path, receipt: dict[str, Any]) -> None:
@@ -1220,8 +1379,30 @@ def _salvage(
     with tempfile.TemporaryDirectory(prefix="j1m-salvage-") as staging:
         staging_root = Path(staging)
         os.chmod(staging_root, 0o700)
+        # ``scp`` streams into the staging directory before any size check can
+        # run, so prove there is room for the whole worst case twice over --
+        # once staged, once published -- before a single transfer starts.
+        try:
+            free_bytes = shutil.disk_usage(staging_root).free
+        except OSError:
+            free_bytes = 0
+        if free_bytes < _SALVAGE_MIN_FREE_BYTES:
+            raise ValueError("salvage staging has insufficient free space")
         for name in names:
             record: dict[str, Any] = {"name": name}
+            if isinstance(name, str) and name in _SALVAGE_NON_RECEIPT_NAMES:
+                # Legitimately configured, deliberately not carryable: the
+                # weights are not evidence and never reach the operator laptop,
+                # and the two non-object outputs carry neither a schema nor a
+                # run binding.  Say so in its own typed reason rather than
+                # implying a configuration mistake.
+                record.update({
+                    "status": "salvage_failed",
+                    "error_code": "salvage_refused_non_receipt",
+                    "refusal_class": _SALVAGE_NON_RECEIPT_NAMES[name],
+                })
+                results.append(record)
+                continue
             if not isinstance(name, str) or name not in _SALVAGE_RECEIPT_ALLOWLIST:
                 # A configuration or caller may name anything; only source can
                 # make a name fetchable.  Everything else is recorded, never
@@ -1304,10 +1485,13 @@ def _salvage(
         "transport": "scp-argv-bounded-source-allowlist-v1",
         "remote_directory": _SALVAGE_REMOTE_DIRECTORY,
         "host_key_proof": str((host_key or {}).get("proof", "unrecorded"))[:120],
+        "host_key_reproof": ("acquisition-digest" if isinstance((host_key or {}).get("known_hosts_sha256"), str)
+                             and (host_key or {}).get("known_hosts_sha256") else "key-count-fallback"),
         "known_hosts_sha256": known_hosts_sha256,
         "caps": {
             "per_file_bytes": _SALVAGE_MAX_FILE_BYTES,
             "total_bytes": _SALVAGE_MAX_TOTAL_BYTES,
+            "min_free_bytes": _SALVAGE_MIN_FREE_BYTES,
             "max_files": _SALVAGE_MAX_FILES,
             "wall_clock_seconds": _SALVAGE_WALL_CLOCK_SECONDS,
             "per_file_timeout_seconds": _SALVAGE_FILE_TIMEOUT_SECONDS,
@@ -1374,7 +1558,24 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
         temp_root = Path(temp)
         progress_path = ROOT / config["resources"]["progress_path"]
         j1m_runner.write_progress(progress_path, "provider-create-starting", phase_id=phase_id)
-        identity, public_key = sf.create_ephemeral_ssh_key(env, temp_root / "ssh")
+        # The ephemeral key lives in an owner-private per-run directory under
+        # the protected secrets root, not in a system temporary directory: that
+        # is the only location ``validate_persisted_argv`` accepts as the ``-i``
+        # operand of the ssh/scp argv every remote command is built from.  The
+        # run id plus this run's fresh ownership nonce name the directory, so a
+        # key is never shared between runs, and the whole directory is securely
+        # removed in the ``finally`` below on every exit path.
+        key_directory = sf.ephemeral_key_directory(f"{run_id}-{nonce}")
+        try:
+            identity, public_key = sf.create_ephemeral_ssh_key(env, key_directory)
+            # Refuse here, before the first billable provider call, rather than
+            # after an instance is running and unreachable.
+            sf.assert_persisted_argv_handle(identity)
+        except BaseException:
+            # Key generation is outside the protected region, so clean up its
+            # partial output here rather than leaving material on disk.
+            sf.destroy_ephemeral_key_directory(key_directory)
+            raise
         key_id: str | None = None
         instance_id: str | None = None
         ambiguous_create = False
@@ -1608,6 +1809,30 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 raise sf.ShadeformError("host shutdown backstop could not be armed")
             upload = sf.scp_base(info, identity, known_hosts) + [str(config_path), f"{ssh_user}@{info['ip']}:{remote_root}/j1m-config.json"]
             lifecycle["upload"] = _remote(upload, timeout=_eval_timeout(execution_deadline, 120.0))
+            # Bind every receipt this run will produce to this run, before the
+            # first receipt-producing command runs.  Each remote writer reads
+            # this exact source-fixed path and stamps the fields into its
+            # receipt; salvage then refuses any receipt whose binding is absent
+            # or belongs to some earlier run under the same artifact directory.
+            if str(j1m_runner.RUN_IDENTITY_PATH.parent) != remote_root:
+                raise sf.ShadeformError("run identity path does not match the remote workspace")
+            run_identity_local = temp_root / "run-identity.json"
+            run_identity_local.write_text(
+                json.dumps({
+                    "schema": j1m_runner.RUN_IDENTITY_SCHEMA,
+                    "run_id": run_id,
+                    "instance_id": instance_id,
+                }, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            run_identity_local.chmod(0o600)
+            lifecycle["run_identity_upload"] = _remote(
+                sf.scp_base(info, identity, known_hosts)
+                + [str(run_identity_local), f"{ssh_user}@{info['ip']}:{j1m_runner.RUN_IDENTITY_PATH}"],
+                timeout=_eval_timeout(execution_deadline, 120.0),
+            )
+            if lifecycle["run_identity_upload"]["status"] != "completed":
+                raise sf.ShadeformError("run identity binding could not be uploaded")
             source_lock = ROOT / config["source"]["lock"]
             for local, remote in ((ROOT / "scripts" / "j1m_runner.py", f"{remote_root}/j1m_runner.py"), (source_lock, f"{remote_root}/qwen35-9b.source-lock.json")):
                 upload_receipt = _remote(sf.scp_base(info, identity, known_hosts) + [str(local), f"{ssh_user}@{info['ip']}:{remote}"], timeout=_eval_timeout(execution_deadline, 120.0))
@@ -1733,6 +1958,38 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 lifecycle["salvage"] = [{"status": "salvage_failed", "error_type": "salvage_failed"}]
             if mode == "prove" and lifecycle.get("job", {}).get("status") == "completed" and not any(item.get("name") == "proving-receipt.json" and item.get("status") == "completed" for item in lifecycle["salvage"]):
                 lifecycle["receipt_error"] = "proving receipt was not salvaged before teardown"
+                # Same fail-closed rule as eval: a completed remote job whose
+                # required receipt never arrived is not a successful run.
+                lifecycle["status"] = "failed"
+            if mode == "build" and lifecycle.get("job", {}).get("status") == "completed":
+                # A paid multi-hour conversion that returns no evidence is a
+                # failure, not a success with an empty artifact directory.
+                # Build mode now gets the same fail-closed semantics eval and
+                # prove already had: every receipt the source allowlist can
+                # carry must arrive, and the deliberately unsalvageable weights
+                # and non-schema-bound outputs are not counted against it.
+                salvaged_names = {
+                    item.get("name") for item in lifecycle["salvage"]
+                    if item.get("status") == "completed"
+                }
+                expected_names = {
+                    name for name in fetch_allowlist
+                    if isinstance(name, str) and name in _SALVAGE_RECEIPT_ALLOWLIST
+                }
+                if not expected_names:
+                    lifecycle["receipt_error"] = "build fetch allowlist names no salvageable receipt"
+                elif not expected_names <= salvaged_names:
+                    lifecycle["receipt_error"] = "build receipts were not salvaged before teardown"
+                lifecycle["build_receipts"] = {
+                    "expected": sorted(expected_names),
+                    "salvaged": sorted(name for name in salvaged_names if isinstance(name, str)),
+                    "refused_non_receipt": sorted(
+                        item.get("name") for item in lifecycle["salvage"]
+                        if item.get("error_code") == "salvage_refused_non_receipt" and isinstance(item.get("name"), str)
+                    ),
+                }
+                if lifecycle.get("receipt_error"):
+                    lifecycle["status"] = "failed"
             if mode == "eval":
                 artifact_saved = next((item for item in lifecycle["salvage"] if item.get("name") == "eval-artifact-receipt.json" and item.get("status") == "completed"), None)
                 if artifact_saved is None:
@@ -1874,6 +2131,16 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                         sf.append_incident({"phase_id": phase_id, "incident": "attempt-reservation-settlement-failed", "nonce": nonce, "error_type": "reservation_settlement_failed"})
                     except Exception:
                         pass
+            # The ephemeral key has now outlived its last use: salvage is done
+            # and exact deletion has been attempted.  Remove the whole per-run
+            # directory, overwriting the private half first, on the success and
+            # every failure path, and record the outcome as metadata in the run
+            # receipt.  A cleanup failure is recorded, never raised: it must not
+            # be able to strand a provider resource.
+            try:
+                lifecycle["ephemeral_key_cleanup"] = sf.destroy_ephemeral_key_directory(key_directory)
+            except Exception:
+                lifecycle["ephemeral_key_cleanup"] = {"status": "incomplete", "error_type": "key_cleanup_failed"}
             try:
                 _persist_lifecycle(phase_id, lifecycle)
             except Exception:

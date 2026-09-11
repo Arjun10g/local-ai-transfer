@@ -81,6 +81,8 @@ MAX_ENGINE_LINE = 8192
 MAX_EVAL_OUTPUT = 256 * 1024
 FIXTURE_MAX_BYTES = 256 * 1024
 MAX_RECEIPT_BYTES = 64 * 1024
+# Raised from 1024 to leave room for the required run-identity binding.
+MAX_PREFLIGHT_RECEIPT_BYTES = 2048
 MAX_METADATA_BYTES = 256 * 1024
 # Bounded evaluator capacity for the current production profile. Exact
 # membership and ordering remain part of the fixture identity.
@@ -352,6 +354,42 @@ def _preflight_summary(preflight: dict[str, Any]) -> dict[str, Any]:
     return {"status": "verified", "size_bytes": preflight["size_bytes"], "sha256": preflight["sha256"], "gguf_version": 3}
 
 
+
+# Required run-identity binding.  The orchestrator uploads this file next to the
+# uploaded config before the first receipt-producing command; the path is
+# source-fixed on both sides so no caller, configuration value, or remote
+# response can redirect it.  Every receipt this script publishes carries the
+# binding, and the salvage transport refuses any receipt whose binding is
+# missing or does not match the run that is fetching it -- that is what stops a
+# receipt left behind by an earlier run being published as this run's evidence.
+_RUN_IDENTITY_PATH = Path("/scratch/j1m/run-identity.json")
+_RUN_IDENTITY_SCHEMA = "local_bmo.j1m.run-identity.v1"
+_RUN_IDENTITY_FIELDS = ("run_id", "instance_id")
+_RUN_IDENTITY_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
+
+
+def _run_identity() -> dict[str, str]:
+    """Return this run's receipt binding, or ``unbound`` when unprovable."""
+
+    unbound = {field: "unbound" for field in _RUN_IDENTITY_FIELDS}
+    try:
+        raw = _RUN_IDENTITY_PATH.read_bytes()
+        if len(raw) > 4096:
+            return unbound
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return unbound
+    if not isinstance(payload, dict) or payload.get("schema") != _RUN_IDENTITY_SCHEMA:
+        return unbound
+    resolved = {}
+    for field in _RUN_IDENTITY_FIELDS:
+        value = payload.get(field)
+        if not isinstance(value, str) or not _RUN_IDENTITY_VALUE.match(value):
+            return unbound
+        resolved[field] = value
+    return resolved
+
+
 def _write_preflight_receipt(
     path: Path,
     preflight: dict[str, Any] | None = None,
@@ -393,9 +431,9 @@ def _write_preflight_receipt(
             raise ValueError("engine_model_preflight_invalid")
     else:
         raise ValueError("engine_model_preflight_invalid")
-    payload = {"schema": MODEL_PREFLIGHT_RECEIPT_SCHEMA, **summary}
+    payload = {"schema": MODEL_PREFLIGHT_RECEIPT_SCHEMA, **summary, **_run_identity()}
     encoded = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
-    if len(encoded) > 1024:
+    if len(encoded) > MAX_PREFLIGHT_RECEIPT_BYTES:
         raise ValueError("engine_model_preflight_invalid")
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary: str | None = None
@@ -472,6 +510,22 @@ def verify_artifact(model: Path, manifest_path: Path, *, source_revision: str, l
         "modality": artifact.get("modality_profile"),
         "quantization": artifact.get("quantization_profile"),
     }
+
+
+def _resolve_token_file(args: Any) -> tuple[Path, Path | None]:
+    """Return the bearer-token path, creating a private directory if needed.
+
+    A caller-supplied ``--token-file`` is honoured unchanged.  Otherwise the
+    token lives in a ``0700`` directory owned by this process, so it never
+    lands in the salvageable artifact tree and no credential path has to
+    travel through a persisted command line.
+    """
+
+    if getattr(args, "token_file", ""):
+        return Path(args.token_file), None
+    directory = Path(tempfile.mkdtemp(prefix="lae-engine-token-"))
+    os.chmod(directory, 0o700)
+    return directory / "engine-token", directory
 
 
 def _write_token(path: Path) -> None:
@@ -941,7 +995,7 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any], dea
     model_preflight = _engine_model_preflight(args, artifact, timeout=preflight_timeout, receipt_path=preflight_path)
     preflight_summary = getattr(args, "_preflight_summary", _preflight_summary(model_preflight))
     build_info = _engine_build_info(engine, artifact["llama_cpp_revision"], backend, timeout=_stage_timeout(deadline, 30.0, "engine_build_info_failed"))
-    token_file = Path(args.token_file)
+    token_file, token_directory = _resolve_token_file(args)
     _write_token(token_file)
     process: subprocess.Popen[str] | None = None
     engine_stderr: Any = None
@@ -1039,6 +1093,11 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any], dea
         if engine_stderr is not None:
             engine_stderr.close()
         token_file.unlink(missing_ok=True)
+        if token_directory is not None:
+            try:
+                os.rmdir(token_directory)
+            except OSError:
+                pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1052,7 +1111,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--engine", required=True)
     parser.add_argument("--evaluator", required=True)
     parser.add_argument("--fixture", required=True)
-    parser.add_argument("--token-file", required=True)
+    # Optional: the orchestrator cannot name a remote credential path in a
+    # persisted argv (see ``_eval_remote_commands``), so the default is an
+    # owner-private temporary directory created and removed by this process.
+    parser.add_argument("--token-file", default="")
     parser.add_argument("--backend", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--cuda-device-name", default="")
     parser.add_argument("--cuda-device-receipt", default="")
@@ -1095,9 +1157,10 @@ def main(argv: list[str] | None = None) -> int:
             receipt["child"] = child_status
         status = 1
     output = Path(args.receipt)
+    receipt = {**receipt, **_run_identity()}
     encoded = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
     if len(encoded) > MAX_RECEIPT_BYTES:
-        receipt = {"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "failed", "error_code": "evaluator_receipt_invalid", "prompt_response_logging": False, "token_logging": False}
+        receipt = {"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "failed", "error_code": "evaluator_receipt_invalid", "prompt_response_logging": False, "token_logging": False, **_run_identity()}
         encoded = (json.dumps(receipt, sort_keys=True) + "\n").encode("ascii")
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary: str | None = None
