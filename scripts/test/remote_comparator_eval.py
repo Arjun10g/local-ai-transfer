@@ -457,18 +457,45 @@ def _terminate(process: subprocess.Popen[bytes] | None) -> None:
         pass
 
 
+# Host-side receipts are fetched by the bounded salvage transport, which
+# refuses anything that is not an owner-private single-link regular file
+# (``salvage_not_private_regular_file``).  Run ``j1m-eval-20260911-remote-d``
+# published its probe receipt ``0644`` under the image's default ``umask 022``
+# and the salvage refused it, correctly, at teardown.  The mode is therefore
+# set explicitly here instead of being inherited from whatever umask the
+# remote shell happened to carry, and the parent directory is made ``0700`` so
+# no other account can observe or replace a receipt between publication and
+# fetch.  Publication stays atomic: a private temporary file in the same
+# directory, fsynced, then ``os.replace``d over the final name.
+def _publish_private_receipt(output: Path, encoded: bytes) -> None:
+    """Atomically publish one receipt as a 0600 file in a 0700 directory."""
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(output.parent, 0o700)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{output.name}.", dir=os.fspath(output.parent))
+    try:
+        os.fchmod(descriptor, stat.S_IRUSR | stat.S_IWUSR)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, output)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
 def write_receipt(path: Path, receipt: dict[str, Any]) -> dict[str, Any]:
     encoded = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
     if len(encoded) > MAX_RECEIPT_BYTES:
         raise ComparatorFailure("comparator_receipt_write_failed")
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.tmp")
-        with temporary.open("wb") as stream:
-            stream.write(encoded)
-            stream.flush()
-            os.fsync(stream.fileno())
-        temporary.replace(path)
+        _publish_private_receipt(path, encoded)
     except OSError as exc:
         raise ComparatorFailure("comparator_receipt_write_failed") from exc
     return receipt

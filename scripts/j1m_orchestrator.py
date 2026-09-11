@@ -22,7 +22,7 @@ import subprocess
 import tempfile
 import time
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 if __package__ in {None, ""}:
@@ -322,6 +322,24 @@ def _redacted_output_tail(value: object) -> str:
     return text[-_STDERR_TAIL_LIMIT:]
 
 
+def _failed_stage_output_tail(value: object) -> str:
+    """Return a failed stage's bounded stdout tail, or a finite refusal.
+
+    ``_redacted_output_tail`` screens the *whole* stream and then truncates,
+    so the retained tail can be a fragment the persisted-value validator would
+    reject on its own (a half JSON envelope, for instance).  The truncated
+    value is therefore re-validated here, and anything that does not survive
+    becomes ``<redacted>`` rather than a receipt this process cannot persist.
+    """
+
+    try:
+        tail = _redacted_output_tail(value)
+        j1m_runner.validate_persisted_output(tail)
+        return tail
+    except (ValueError, UnicodeError):
+        return "<redacted>"
+
+
 def _bounded_bytes(path: Path, limit: int) -> bytes:
     """Read one bounded descriptor snapshot, rejecting replacement."""
     if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
@@ -534,7 +552,7 @@ def _remote(command: list[str], *, timeout: float) -> dict[str, Any]:
             stderr_tail = _redacted_output_tail(exc.stderr)
         except (ValueError, UnicodeError):
             stderr_tail = "<redacted>"
-        return {"status": "transport_timeout", "exit_code": None, "error_type": "transport_timeout", "stderr_tail": stderr_tail}
+        return {"status": "transport_timeout", "exit_code": None, "error_type": "transport_timeout", "stderr_tail": stderr_tail, "stdout_tail": _failed_stage_output_tail(exc.stdout)}
     except OSError:
         return {"status": "transport_os", "exit_code": None, "error_type": "transport_os", "stderr_tail": "<redacted>"}
     try:
@@ -547,9 +565,75 @@ def _remote(command: list[str], *, timeout: float) -> dict[str, Any]:
     if result.returncode != 0:
         receipt["error_type"] = "remote_exit"
         # Never retain provider/model prompt or response material from a
-        # failed command. The finite error type plus bounded stderr tail are
-        # sufficient for lifecycle diagnosis.
+        # failed command. The finite error type plus bounded, redacted
+        # stdout/stderr tails are sufficient for lifecycle diagnosis.
+        #
+        # stdout is retained only for a FAILED stage, and only then.  Run
+        # ``j1m-eval-20260911-remote-d`` failed with exit 2 and an empty
+        # stderr tail because the remote runner's typed JSON refusal is
+        # printed on stdout, so the lifecycle receipt recorded a paid failure
+        # with no diagnosis in it at all.
+        receipt["stdout_tail"] = _failed_stage_output_tail(result.stdout)
     return receipt
+
+
+def _host_private_directories(remote_root: str, progress_relative: str) -> list[str]:
+    """Every host directory the runner's own private writer must be able to use.
+
+    On the host the runner is uploaded to ``<remote_root>/j1m_runner.py``, so
+    its ``ROOT``/``PRIVATE_OUTPUT_ROOT`` is ``<remote_root>``'s *parent*
+    (``/scratch``), not ``<remote_root>``.  ``_private_ancestor_snapshot``
+    treats that root as the policy boundary -- it may not be group/other
+    writable and must be owned by the ssh user -- and then requires every
+    descendant on the path to be fully owner-private.  Two of those
+    descendants have nothing to do with the artifact tree: the progress file
+    lives at ``<root>/<resources.progress_path>``, whose directories the
+    remote plan never created at all, so even a correctly-permissioned
+    artifact tree left ``--run`` refusing on its first progress write.
+
+    The list is derived, never hardcoded, so a configuration change to
+    ``progress_path`` moves the created directories with it.
+    """
+
+    root = PurePosixPath(remote_root).parent
+    relative = PurePosixPath(progress_relative)
+    if PurePosixPath(remote_root).is_absolute() is False or relative.is_absolute():
+        raise ValueError("remote workspace layout is not a host-relative private tree")
+    directories = [remote_root, f"{remote_root}/artifacts"]
+    current = root
+    for part in relative.parent.parts:
+        current = current / part
+        directories.append(str(current))
+    return directories
+
+
+def _remote_workspace_stages(ssh_user: str, remote_root: str, progress_relative: str) -> tuple[tuple[str, list[str]], ...]:
+    """The bounded preflight that makes the host workspace privately writable.
+
+    ``mkdir -p`` under the prefixed ``umask 077`` creates ``0700``, but it
+    says nothing about a directory that already exists, so every private path
+    is chmodded explicitly.  ``/scratch`` itself is only the trusted root: the
+    policy requires it to be owned by the ssh user and not group/other
+    writable, which an image's own ``root``-owned ``0755`` ``/scratch``
+    satisfies once it is chowned -- so it is deliberately not forced to
+    ``0700``.
+    """
+
+    private = _host_private_directories(remote_root, progress_relative)
+    return (
+        ("scratch_root", ["sudo", "mkdir", "-p", "/scratch"]),
+        ("scratch_owner", ["sudo", "chown", ssh_user, "/scratch"]),
+        ("remote_workspace", ["mkdir", "-p", *private]),
+        ("remote_workspace_private", ["chmod", "700", *private]),
+        ("scratch_df", ["df", "-P", "-k", "/scratch"]),
+        ("scratch_writable", ["test", "-w", "/scratch"]),
+    )
+
+
+_WORKSPACE_STAGE_COUNT = len(_remote_workspace_stages("u", "/scratch/j1m", "experiments/runtime/J1M.progress.json"))
+# One bounded timeout per initial eval stage, in plan order: create the
+# workspace tree, make it owner-private, refresh apt, install the bootstrap.
+_EVAL_BOOTSTRAP_TIMEOUTS = (30.0, 30.0, 120.0, 270.0)
 
 
 def _remote_job_command(mode: str, remote_root: str, required_scratch_gib: int) -> list[str]:
@@ -718,8 +802,20 @@ def _eval_remote_commands(config: dict[str, Any], remote_root: str, selection: t
     checkout = llama["checkout"]
     engine_root = f"{remote_root}/engine"
     build_root = f"{remote_root}/engine-build"
+    # Every directory this plan creates is listed explicitly, intermediate
+    # components included, and then chmodded: the prefixed ``umask 077`` gives
+    # a newly created directory ``0700``, but it cannot fix one that already
+    # exists, and a single ``0755`` component anywhere under the trusted root
+    # refuses every private write beneath it.
+    eval_directories = [
+        f"{remote_root}/model", engine_root, f"{engine_root}/native",
+        f"{engine_root}/vendor", f"{engine_root}/scripts",
+        f"{engine_root}/tests", f"{engine_root}/tests/native",
+        f"{remote_root}/artifacts",
+    ]
     return [
-        ["mkdir", "-p", f"{remote_root}/model", f"{engine_root}/native", f"{engine_root}/vendor", f"{engine_root}/scripts", f"{engine_root}/tests/native", f"{remote_root}/artifacts"],
+        ["mkdir", "-p", *eval_directories],
+        ["chmod", "700", *eval_directories],
         ["sudo", "apt-get", "update"],
         ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "--no-install-recommends", "ca-certificates", "cmake", "build-essential", "git", "python3", "python3-venv"],
         # Fail before the expensive HF checkout/conversion when the CUDA
@@ -811,8 +907,8 @@ def _eval_deadline_ceiling(config: dict[str, Any]) -> dict[str, float]:
 
     mode = config["modes"]["eval"]
     commands = _eval_remote_commands(config, "/scratch/j1m")
-    bootstrap = sum((30.0, 120.0, 270.0))
-    post_upload = sum(_eval_stage_timeout(config, command) for command in commands[3:])
+    bootstrap = sum(_EVAL_BOOTSTRAP_TIMEOUTS)
+    post_upload = sum(_eval_stage_timeout(config, command) for command in commands[4:])
     eval_uploads = _eval_uploads(
         config, "/scratch/j1m", None,
         ROOT / "artifacts" / "qwen35-9b" / "model-manifest.json",
@@ -820,14 +916,14 @@ def _eval_deadline_ceiling(config: dict[str, Any]) -> dict[str, float]:
     small_uploads = float(mode["stage_budgets_seconds"]["small_uploads"])
     # Remote-only has no model upload; every upload is in the small bucket.
     upload_ceiling = small_uploads
-    fixed_setup = 3 * 120.0 + 5 * 30.0 + 30.0  # config/runner/lock + workspace + shutdown arm
+    fixed_setup = 3 * 120.0 + _WORKSPACE_STAGE_COUNT * 30.0 + 30.0  # config/runner/lock + workspace + shutdown arm
     host_key = 120.0 + 3 * 15.0  # bounded two-scan acquisition + key fingerprints
     cleanup = float(mode["stage_budgets_seconds"]["cleanup_reserve"])
     work = float(mode.get("activation_timeout_seconds", 600)) + host_key + fixed_setup + bootstrap + upload_ceiling + post_upload
     run_seconds = float(mode["runtime_hours"]) * 3600.0
     watchdog_seconds = float(mode["external_watchdog_seconds"])
     provider_seconds = float(mode["provider_backstop_hours"]) * 3600.0
-    host_shutdown_seconds = float(mode.get("activation_timeout_seconds", 600)) + host_key + 5 * 30.0 + 30.0 + float(mode["host_shutdown_delay_minutes"]) * 60.0
+    host_shutdown_seconds = float(mode.get("activation_timeout_seconds", 600)) + host_key + _WORKSPACE_STAGE_COUNT * 30.0 + 30.0 + float(mode["host_shutdown_delay_minutes"]) * 60.0
     ceiling = work + cleanup
     if not (ceiling < run_seconds < host_shutdown_seconds < watchdog_seconds < provider_seconds):
         raise ValueError("eval sequential budget does not fit run/cleanup/host/watchdog/provider clocks")
@@ -2530,13 +2626,8 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             lifecycle["status"] = "active"
             lifecycle["stage"] = "active"
             remote_root = "/scratch/j1m"
-            workspace_stages = (
-                ("scratch_root", ["sudo", "mkdir", "-p", "/scratch"]),
-                ("scratch_owner", ["sudo", "chown", ssh_user, "/scratch"]),
-                ("remote_workspace", ["mkdir", "-p", remote_root]),
-                ("scratch_df", ["df", "-P", "-k", "/scratch"]),
-                ("scratch_writable", ["test", "-w", "/scratch"]),
-            )
+            workspace_stages = _remote_workspace_stages(
+                ssh_user, remote_root, str(config["resources"]["progress_path"]))
             for stage_name, stage_argv in workspace_stages:
                 result = _remote(sf.ssh_base(info, identity, known_hosts) + stage_argv, timeout=_eval_timeout(execution_deadline, 30.0))
                 lifecycle[stage_name] = result
@@ -2609,8 +2700,8 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 # Install and upload the bounded bootstrap before any source
                 # work. The remaining stages consume those uploads and copy
                 # the lock into the now-existing pinned vendor tree.
-                bootstrap_timeouts = (30.0, 120.0, 270.0)
-                for index, command in enumerate(eval_commands[:3]):
+                bootstrap_timeouts = _EVAL_BOOTSTRAP_TIMEOUTS
+                for index, command in enumerate(eval_commands[:4]):
                     lifecycle["stage"] = f"eval-bootstrap:{command[0]}"
                     _progress(progress_path, "eval-bootstrap-stage-starting", phase_id=phase_id, operation_stage=lifecycle["stage"])
                     stage = _remote(sf.ssh_base(info, identity, known_hosts) + command, timeout=_eval_timeout(execution_deadline, bootstrap_timeouts[index]))
@@ -2635,7 +2726,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     _progress(progress_path, "eval-upload-result", phase_id=phase_id, operation_stage=lifecycle["stage"], status=upload_receipt["status"], exit_code=upload_receipt.get("exit_code"))
                     if upload_receipt["status"] != "completed":
                         raise sf.ShadeformError("required eval upload failed")
-                for command in eval_commands[3:]:
+                for command in eval_commands[4:]:
                     lifecycle["stage"] = _eval_stage_label(command)
                     if any("remote_model_eval.py" in part for part in command):
                         lifecycle["remote_model_eval_attempted"] = True

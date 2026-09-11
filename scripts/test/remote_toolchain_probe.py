@@ -6,7 +6,9 @@ import argparse
 import json
 import os
 import re
+import stat
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -60,10 +62,41 @@ def _run_identity() -> dict[str, str]:
 
 def _write_receipt(output: Path, receipt: dict[str, object]) -> None:
     receipt = {**receipt, **_run_identity()}
+    _publish_private_receipt(
+        output, (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+
+
+# Host-side receipts are fetched by the bounded salvage transport, which
+# refuses anything that is not an owner-private single-link regular file
+# (``salvage_not_private_regular_file``).  Run ``j1m-eval-20260911-remote-d``
+# published this receipt ``0644`` under the image's default ``umask 022`` and
+# the salvage refused it, correctly, at teardown.  The mode is therefore set
+# explicitly here instead of being inherited from whatever umask the remote
+# shell happened to carry, and the parent directory is made ``0700`` so no
+# other account can observe or replace a receipt between publication and
+# fetch.  Publication stays atomic: a private temporary file in the same
+# directory, fsynced, then ``os.replace``d over the final name.
+def _publish_private_receipt(output: Path, encoded: bytes) -> None:
+    """Atomically publish one receipt as a 0600 file in a 0700 directory."""
+
     output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_name(f".{output.name}.{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(output)
+    os.chmod(output.parent, 0o700)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{output.name}.", dir=os.fspath(output.parent))
+    try:
+        os.fchmod(descriptor, stat.S_IRUSR | stat.S_IWUSR)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, output)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
 
 
 def _probe(binary: str, executable: str | None = None) -> dict[str, object]:

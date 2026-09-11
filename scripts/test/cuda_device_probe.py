@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import stat
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -45,6 +48,39 @@ def _run_identity() -> dict[str, str]:
     return resolved
 
 
+# Host-side receipts are fetched by the bounded salvage transport, which
+# refuses anything that is not an owner-private single-link regular file
+# (``salvage_not_private_regular_file``).  Run ``j1m-eval-20260911-remote-d``
+# published this receipt ``0644`` under the image's default ``umask 022`` and
+# the salvage refused it, correctly, at teardown.  The mode is therefore set
+# explicitly here instead of being inherited from whatever umask the remote
+# shell happened to carry, and the parent directory is made ``0700`` so no
+# other account can observe or replace a receipt between publication and
+# fetch.  Publication stays atomic: a private temporary file in the same
+# directory, fsynced, then ``os.replace``d over the final name.
+def _publish_private_receipt(output: Path, encoded: bytes) -> None:
+    """Atomically publish one receipt as a 0600 file in a 0700 directory."""
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(output.parent, 0o700)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{output.name}.", dir=os.fspath(output.parent))
+    try:
+        os.fchmod(descriptor, stat.S_IRUSR | stat.S_IWUSR)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, output)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
 def probe(output: Path, expected_memory_mib: int = 70000) -> dict[str, object]:
     result = subprocess.run(
         ["nvidia-smi", "--query-gpu=index,name,memory.total,driver_version", "--format=csv,noheader,nounits"],
@@ -67,8 +103,8 @@ def probe(output: Path, expected_memory_mib: int = 70000) -> dict[str, object]:
     if len(rows) != 1 or rows[0]["memory_total_mib"] < expected_memory_mib or "a100" not in str(rows[0]["name"]).lower():
         raise RuntimeError("expected_single_a100_80g_not_proven")
     receipt = {"schema": "local_bmo.j1m.cuda-device-receipt.v1", "status": "verified", "selector": "CUDA0", "device_count": 1, "device": rows[0], "source": "nvidia-smi bounded query", **_run_identity()}
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _publish_private_receipt(
+        output, (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8"))
     return receipt
 
 

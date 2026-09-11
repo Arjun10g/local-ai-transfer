@@ -4281,6 +4281,24 @@ def _endpoint(info: dict[str, Any]) -> tuple[str, str, Any]:
     return parsed_ip, validate_ssh_user(user), port
 
 
+# Every remote command runs through the login shell OpenSSH starts for it, so
+# the umask that shell inherits decides the mode of every directory and file
+# the command creates.  The provider images ship the distribution default
+# ``022``, which produced ``0755`` workspace directories and ``0644`` receipts
+# on run ``j1m-eval-20260911-remote-d`` -- refused by the runner's own private
+# writer and by the salvage policy, with zero receipts recovered.  The prefix
+# lives here, in the one place every remote argv is built, so no individual
+# command can forget it.  ``&&`` (not ``;``) so a shell that cannot set the
+# umask never runs the command that would then create world-readable state.
+REMOTE_SHELL_UMASK = "077"
+
+
+def remote_shell_prefix() -> list[str]:
+    """Return the owner-private umask prefix every remote command carries."""
+
+    return ["umask", REMOTE_SHELL_UMASK, "&&"]
+
+
 def ssh_base(info: dict[str, Any], identity: Path, known_hosts: Path) -> list[str]:
     ip, user, port = _endpoint(info)
     return [
@@ -4291,6 +4309,7 @@ def ssh_base(info: dict[str, Any], identity: Path, known_hosts: Path) -> list[st
         "-p",
         str(port),
         f"{user}@{ip}",
+        *remote_shell_prefix(),
     ]
 
 
