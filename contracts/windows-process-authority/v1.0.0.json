@@ -75,9 +75,38 @@
       "user_config_excluded"
     ]
   },
+  "arguments": {
+    "model": "ordered array of UTF-16-safe strings, supervisor bound",
+    "argv_zero_caller_supplied": false,
+    "command_line_escaping": "one fixed documented algorithm matching the CommandLineToArgvW and MSVCRT parsing rules",
+    "round_trip_parse_equality_required": true,
+    "shell_or_concatenated_command_line_allowed": false,
+    "caller_supplied_command_line_allowed": false,
+    "max_arguments": 64,
+    "max_argument_utf16_units": 8192,
+    "max_command_line_utf16_units": 30000,
+    "argument_digest_required": true,
+    "required": [
+      "argv_array_only",
+      "command_line_escaping_fixed",
+      "command_line_round_trip_verified",
+      "no_shell_or_concatenated_command_line"
+    ],
+    "proof_fields": [
+      "utf16_safe_arguments",
+      "argument_count_and_length_bounded"
+    ]
+  },
   "cancellation_and_orphan": {
     "state_machine": ["idle", "running", "cancel_requested", "complete", "unknown_manual"],
     "generation_fence": true,
+    "generation_caller_supplied": false,
+    "generation_derived_from_authority_generation": true,
+    "generation_strictly_monotonic": true,
+    "unknown_manual_is_terminal": true,
+    "restart_after_orphan_requires_new_authority": true,
+    "bounded_cancel_join_timeout_outcome": "unknown_manual",
+    "complete_on_never_started_authority": "typed_refusal_without_state_change",
     "required": [
       "supervisor_owned_cancellation_event",
       "bounded_cancel_join",
@@ -115,6 +144,8 @@
     "ambient_credential_inheritance",
     "CreateProcess_before_containment_proof",
     "shell_or_fallback_execution",
+    "caller_supplied_command_line_or_shell_string",
+    "caller_supplied_cancellation_generation",
     "raw_path_handle_or_environment_receipt",
     "automatic_retry_or_completion_after_ambiguous_outcome"
   ],
