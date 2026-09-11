@@ -14,8 +14,8 @@
   S0, S2.
 - **Design note:** `scripts/shadeform/SALVAGE_TRANSPORT.md` §3.2, §3.3, §3.5,
   §3.6, §4, §5 (corrected), §8 (key lifecycle), §10-§11 (tests, dry run).
-- **Commits:** `2c73302` (`security:`), `2e753a6` (`qa:`), `<docs commit>`
-  (`docs:`).
+- **Commits:** `2c73302` (`security:`), `2e753a6` (`qa:`), `622f323` (`docs:`),
+  plus this packet correction.
 
 ## Problem
 
