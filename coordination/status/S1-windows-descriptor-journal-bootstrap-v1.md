@@ -3,7 +3,7 @@
 - **Session:** S1
 - **Required model:** GPT-5.6 Luna
 - **Role:** Runtime — dormant Windows DescriptorActionJournal bootstrap
-- **Timestamp (UTC):** 2026-09-11T07:00:53Z
+- **Timestamp (UTC):** 2026-09-11T07:15:16Z
 - **Branch/worktree:** `luna/windows-descriptor-journal-bootstrap-v1` / `wt-windows-descriptor-journal-bootstrap-v1`
 - **Current phase:** Phase 6 source hardening
 - **Primary task ID:** RUN-WINDOWS-DESCRIPTOR-JOURNAL-BOOTSTRAP
@@ -57,9 +57,16 @@ Review repair (`347d57d`, `44b8ff1`, `d2af452`):
 - MINOR 2. The one-shot guard and the full recheck run before `output.reset()`;
   a second call reports `kHandoffAlreadyTransferred` and cannot destroy the
   handoff a first call produced.
-- MINOR 3. Both `CreateFileW` calls in this slice set
-  `SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS`. Shared helpers reused from the
-  merged v1 container path are deliberately unchanged.
+- MINOR 3 and reviewer R2. Every `CreateFileW` call in the translation unit
+  now sets `SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS`: both descriptor-WAL
+  opens, the shared ancestor walk in `acquire_directories`, the volume-device
+  open in `filesystem_policy`, and both v1 container opens. The ancestor opens
+  are the first path-derived opens in the boundary, so an ancestor, not the
+  leaf, would be the impersonation vector if path validation ever regressed.
+  The flags change no behaviour for a disk-file or volume-device target, so no
+  v1 semantics are altered. The test extracts every call by balanced
+  parentheses, requires the extracted count to equal the number of call sites,
+  and requires both flags on each.
 - MINOR 4. Every modeled property now also has a source-anchored assertion
   regexed against the relevant C++ function body, and the models are
   parameterised from values parsed out of that source. Nine injected C++
@@ -82,23 +89,53 @@ Review repair (`347d57d`, `44b8ff1`, `d2af452`):
   container lease and out of scope. Finding 11 fixed by naming the exact focused
   command below. Findings 12 and 13 recorded in source comments and the doc.
 
+Re-review residuals (`26b6b73`):
+
+- Sol residual 2. The two "never" assertions in the merged v1 suite now apply
+  to the whole translation unit minus the v2 descriptor-WAL bodies, instead of
+  to four v1 function bodies, so all shared helpers stay covered. A new guard
+  test asserts the excision keeps eighteen named v1/shared definitions and drops
+  only the v2 ones. Verified by injection in a scratch copy: `FILE_SHARE_DELETE`
+  in `acquire_directories` fails
+  `test_ancestors_and_leaf_are_nofollow_identity_held_with_strict_sharing`, and
+  `SetFileInformationByHandle` in `write_exact` fails
+  `test_genesis_is_full_bounded_zero_flush_readback_rng_and_header_readback`.
+  Both mutations were reverted; the tree was left clean. This inversion is
+  carried in `26b6b73`, whose message describes only the SQOS and prose work.
+- Sol residual 3 and reviewer R1. The duplicate-access prose was wrong.
+  `GENERIC_READ`/`GENERIC_WRITE` map through `FILE_GENERIC_READ`/`WRITE`, whose
+  `STANDARD_RIGHTS_READ`/`STANDARD_RIGHTS_WRITE` are `READ_CONTROL`. The
+  comment and the doc now state: no `DELETE`, no `WRITE_DAC`, no `WRITE_OWNER`
+  cross; `READ_CONTROL` does, and only lets the child read a DACL naming its
+  own user.
+- Reviewer R3, fixed. The reopen handle's `FILE_SHARE_DELETE` reasoning is
+  mirrored into `DESCRIPTOR_WAL_BOOTSTRAP.md`, including why the `DELETE` right
+  cannot be shed after publication.
+- Reviewer R5, partly fixed. The third independent copy of the WAL header
+  literal in `tests/host/descriptor-action-journal.test.mjs:19` is now parsed
+  and byte-compared against the C++ literal by the parity test, closing the
+  drift gap. The remaining §5 items 12-18 stand and are listed under Blockers.
+
 ## Evidence
 
 Commits: claim `06e045e`; implementation `e5b707f`; atomic duplicate ownership
-repair `97a9d7d`; review repair `347d57d`, `44b8ff1`, `d2af452`.
+repair `97a9d7d`; review repair `347d57d`, `44b8ff1`, `d2af452`, `d53a628`;
+re-review residual repair `26b6b73`.
 
 All commands run from the worktree root with `PYTHONDONTWRITEBYTECODE=1`.
 
 - `python3 -m unittest discover -s tests/native -p 'test_windows_*static.py'`:
-  PASS, `Ran 247 tests` / OK (237 before repair; the bootstrap module grew from
-  10 to 20 tests).
+  PASS, `Ran 248 tests` / OK (237 before repair; the bootstrap module grew from
+  10 to 20 tests and the storage module from 16 to 17).
 - `python3 -m unittest tests.qa.test_safe_runner`: PASS, `Ran 20 tests` / OK.
 - `python3 tests/native/test_windows_descriptor_journal_bootstrap_static.py`:
   PASS, `Ran 20 tests` / OK.
+- `python3 tests/native/test_windows_action_journal_storage_static.py`:
+  PASS, `Ran 17 tests` / OK.
 - Focused command, named exactly:
   `python3 -m unittest tests.native.test_windows_descriptor_journal_bootstrap_static tests.native.test_windows_action_journal_storage_static tests.native.test_windows_inert_compile_harness_static tests.qa.test_safe_runner.SafeRunnerTests.test_inventory_exactly_matches_current_tests_without_content_reads`:
-  PASS, `Ran 50 tests` / OK (40 before repair). Per module: bootstrap 20,
-  storage 16, inert harness 13, plus the single inventory test.
+  PASS, `Ran 51 tests` / OK (40 before repair). Per module: bootstrap 20,
+  storage 17, inert harness 13, plus the single inventory test.
 - `node --test tests/host/descriptor-action-journal.test.mjs tests/host/action-journal-protocol.test.mjs`:
   PASS, `tests 63 / pass 63 / fail 0 / cancelled 0 / skipped 0 / todo 0`.
 - `python3 scripts/test/run_qa.py --root . --skip-native --output -`:
@@ -130,6 +167,16 @@ All commands run from the worktree root with `PYTHONDONTWRITEBYTECODE=1`.
   Two file-wide "never" assertions in the merged v1 suite were scoped to the v1
   container functions; the v2 equivalents are pinned function-anchored in the
   bootstrap suite, and both scoped assertions were mutation-checked.
+- Reviewer R4 is deliberately not implemented. Shedding `DELETE` from the
+  create-path handle after `discard.disarm()`, by duplicating down and closing
+  the original, would add a failure path after a WAL is already published and
+  verified: a `DuplicateHandle` failure there would have to fail an acquisition
+  whose artifact is correct and can no longer be discarded. The security-
+  relevant property, the share reservation seen by other processes, is
+  unchanged either way because share bookkeeping lives on the file object. On a
+  platform where none of this can be compiled or executed, the added
+  post-publication failure mode outweighs the handle-local least-privilege gain.
+  Recommend revisiting it with the launcher bridge, under real Windows tests.
 - Delete-on-failure required `DELETE` on the create-path handle, which requires
   the identity-reopen handle to concede `FILE_SHARE_DELETE`. Windows share
   bookkeeping lives on the file object, so the right cannot be shed after
@@ -139,9 +186,12 @@ All commands run from the worktree root with `PYTHONDONTWRITEBYTECODE=1`.
 ## Blockers
 
 - Windows/MSVC compile and static analysis; exact-target owner/DACL/share-mode,
-  short-write/flush/restart, filter-driver, create-failure discard, and
-  power-loss tests are absent. The share-mode and disposition reasoning above is
-  static reading, not execution evidence.
+  short-write/flush/restart, filter-driver, create-failure discard, SQOS
+  behaviour, and power-loss tests are absent. The share-mode and disposition
+  reasoning above is static reading, not execution evidence. Reviewer R5
+  items 12-18 stand: no compile, no `/analyze`, no Windows execution, and no
+  exact-target path-rejection, link-count, or `kAlreadyExists` mapping tests for
+  the v2 leaf.
 - A reviewed launcher must use an explicit handle allowlist, convert the
   inherited `HANDLE` into a readable/writable CRT fd inside the child, prove
   acknowledgement/ownership transfer, and close every failure path.
@@ -160,9 +210,10 @@ All commands run from the worktree root with `PYTHONDONTWRITEBYTECODE=1`.
 
 ## Next bounded action
 
-Re-review of the repair, then remote Windows compilation only under the
-existing OFF-by-default inert compile-check gate.
+Merge by Sol, then remote Windows compilation only under the existing
+OFF-by-default inert compile-check gate.
 
 ## Sol action requested
 
-Re-review the repair commits, and record a decision on ICR-RUN-WDJB-001.
+Merge, and record the ICR-RUN-WDJB-001 decision in the governance refresh. The
+ICR entry is deliberately left at pending-Sol.
