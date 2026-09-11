@@ -1,30 +1,53 @@
 # Blockers
 
-## Current governance reconciliation — 2026-09-09
+## Current governance reconciliation — 2026-09-11
 
 - Exact audited integrated source baseline is
-  `main@6e0d12c0023068456b97fc9c857a3538ca612421`; this docs descendant is not a
-  self-hash. Release/full access remains `BLOCKED` / `NOT_READY`.
+  `main@7239b7e1a6a512cabf9e5ab18ba463a7fac351fc`, the last source merge. The
+  docs descendant `6c3a125749581554b88ade018181f61667990ac8` and this refresh
+  are documentation descendants, not self-hashes. Release/full access remains
+  `BLOCKED` / `NOT_READY`.
 - Protected `.secrets/shadeform.env` projection/setup source (`c8c28a9`), the
   metadata-only Windows/HF artifact handoff (`c2801ec`, merged by `e2e5156`),
   and the inherited-descriptor ActionJournal WAL (`2dda060`, merged by
-  `6e0d12c`) are source-present. They do not establish credential approval,
+  `6e0d12c`) remain source-present. They do not establish credential approval,
   provider execution, signed artifact custody/trust, native Windows authority,
   production activation, or target readiness.
-- The WAL has descriptor-bound durable integrity/recovery behavior but lacks a
-  native secure FD owner and publication boundary, cross-process single-writer
-  exclusion, authenticity/anti-rollback anchoring, compaction, and automatic
-  provider reconciliation. The artifact handoff's public validator always
-  returns `REFUSED_NOT_ACTIVATED` pending real signed artifacts and an approved
-  trust anchor. Graph mutation ambiguity therefore remains fail-closed.
-- Current focused evidence is Node 210 discovered/209 pass/0 fail/1 existing
-  TODO; handoff/release 63/63; env 26/26; QA-runner 27/27; conformance 11/11.
-  Static inventory is 152 tracked JSON files (151 strict-valid plus one
-  intentional duplicate-key hostile fixture) and 29 modules/71 relative
-  imports/0 cycles. QA has 59 discovered, 0 missing/unknown, and 65 records
-  (1 PASS/64 expected SKIP); overall QA remains `BLOCKED`.
+- Three slices were integrated this interval, each independently S0/S4
+  source-reviewed with one repair round and a re-review returning
+  `ACCEPT_FOR_MERGE`: Graph restart reconciliation (`4280e95`, merged
+  `61c9475`), the dormant Windows descriptor journal bootstrap (`e4ca09b`,
+  merged `4de01f7`), and the dormant Windows process authority contract and
+  `LaunchAuthority` (`cfe8136`, merged `7239b7e`). None adds compile, live,
+  provider, production, Windows, or target evidence, and no blocker state below
+  changes.
+- The WAL has descriptor-bound durable integrity/recovery behavior. The new
+  bootstrap adds a dormant, uncompiled Win32 secure create/trusted reopen,
+  single-writer lease, and one-shot non-inheritable handoff for
+  `action-journal-v2.wal`, but native secure owner publication, an
+  authenticity/anti-rollback anchor, compaction, a reviewed launcher, and the
+  HANDLE-to-CRT child bridge are still absent. The artifact handoff's public
+  validator always returns `REFUSED_NOT_ACTIVATED` pending real signed
+  artifacts and an approved trust anchor. Graph mutation ambiguity outside the
+  narrow restart path remains fail-closed.
+- ICR-RUN-WDJB-001 is Sol-approved as an additive source-only extension: four
+  additive status codes in `contracts/action-journal-storage/v0.1.0.json` with
+  version `0.1.0` retained, merged at `4de01f7`, generalized by ADR-0004.
+  Independent source review is complete; formal gate approval is still
+  required.
+- Current reproduced evidence is `npm test` 426 tests/424 pass/0 fail/0
+  cancelled/1 skipped/1 todo (duration_ms 40677.278375); Windows native static
+  `Ran 289 tests` OK; QA safe-runner `Ran 20 tests` OK. Static inventory is 153
+  tracked JSON files (152 strict-valid under a duplicate-key-rejecting parser
+  plus one intentional hostile fixture) and a host import graph of 29
+  modules/67 unique relative import edges/0 unresolved/0 cycles. QA has 62
+  discovered, 0 missing/unknown, and 68 records (1 PASS/67 expected SKIP);
+  overall QA remains `BLOCKED`. The prior `6e0d12c` focused numbers (Node
+  210/209, handoff/release 63/63, env 26/26, QA-runner 27/27, conformance
+  11/11, JSON 152/151, imports 29/71, QA 59 discovered/65 records) are
+  historical.
 - Broader Node 350/349/0/0/1 TODO and Python 663/663 across 30/33 safe files
-  are explicitly historical `d195235` evidence, not current `6e0d12c` proof.
+  are explicitly historical `d195235` evidence, not current `7239b7e` proof.
   Remote execution remains false, ledger migration remains
   `SAFE_TO_MIGRATE_NOW=NO`, and previously exposed credentials—including the
   leaked HF token—require source-side rotation/revocation before reuse.
@@ -59,9 +82,23 @@
   publish, exclusively own, compact, or anti-rollback-anchor that descriptor,
   and it does not automatically reconcile provider ambiguity. Microsoft Graph
   reconciliation source is merged at `b4702a5` after two independent source
-  audits but has no live-provider evidence or approval; browser/Copilot
-  proposal state remains memory-only, and browser/Copilot executable paths are
-  not bound to immutable file identity across preview and spawn.
+  audits but has no live-provider evidence or approval. Graph restart
+  reconciliation source is accepted at `4280e95` and merged by `61c9475` after
+  an independent S0/S4 review with a repair round; it permits bounded automatic
+  completion only for durably acknowledged, newly account-bound
+  `mail.create_draft` records with a fresh unique exact provider `GET` proof,
+  bounded to 8 candidates and 20 proof GETs, and its budget-aware
+  inconclusive-safe in-flight retrieval means the seam can no longer escalate a
+  record to `unknown_manual`. Its limits are material: the startup pass is
+  operationally inert because tokens are memory-only, so only the
+  post-authentication trigger can complete a record; manual
+  `POST .../reconcile` remains HTTP 501; `reconciling` records still have no
+  automatic resolution path and accumulate against the 256-record active cap;
+  `listSentForDigest` plausibly carries the same collection-projection defect
+  and is tracked as follow-up `GRAPH-SENT-PROOF-PROJECTION`; and no live
+  Microsoft account or provider evidence exists. Browser/Copilot proposal state
+  remains memory-only, and browser/Copilot executable paths are not bound to
+  immutable file identity across preview and spawn.
 - Impact: a passing model score or mocked provider run cannot establish safe
   end-to-end mail, Teams, browser-action, or Copilot readiness. After an
   ambiguous provider write, no definitive result or safe automatic retry can be
@@ -123,7 +160,28 @@
   2/2 inventory checks. Dormant supervisor-owned process transaction `64b3947`
   is merged by `ca2d893` after 56/56 source plus 2/2 inventory checks, but its
   durable adapter remains null/unrecovered and it has no public launch API,
-  CMake, or package path. All merged boundaries remain unlinked, uncompiled,
+  CMake, or package path. Dormant launch-authority contract
+  `windows-process-authority` v1.0.0 and a private, noncopyable, move-only
+  `LaunchAuthority` are merged by `7239b7e`; they replace the previous public
+  POD proof with supervisor-owned `UniqueHandle` ownership, bind executable/
+  working-directory/token/Job/cancellation handles to recorded identity values
+  plus operation ID/generation/nonce, require the absolute-manifest-path-binding
+  and no-reparse-component predicates on both bound file identities, carry an
+  ordered argument-vector policy with one fixed `CommandLineToArgvW` escaping
+  algorithm and required round-trip parse verification, add a cancellation state
+  machine whose generations are issuer-derived and strictly monotonic and whose
+  `unknown_manual` state is terminal, and close a latent gap by adding
+  `kNestedJobPolicyProven` to `kProductionAvailable`. They supply no mechanism:
+  the Windows process-creation API accepts a path rather than a handle, no
+  image-section retention, `NtCreateUserProcess`, `GetFinalPathNameByHandle`
+  re-derivation, or post-launch image verification exists, and
+  `valid_for_admission()` only tests that declarative fields are set and that
+  recorded values are non-zero — it never re-derives identity from the live
+  handle at consume time, so a mint-to-spawn executable or junction swap remains
+  undetected. No command line is built, no argument is escaped, and no path is
+  opened. The header is outside the product CMake graph, has no proof issuer,
+  and has never been compiled by any executed target. All merged boundaries
+  remain unlinked, uncompiled,
   activation-gated false, and explicitly unavailable for production/target use.
 - Impact: a path replacement/search-path race can change executed bytes, and a
   launched application can inherit provider credentials or other host secrets.

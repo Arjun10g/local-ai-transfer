@@ -1,10 +1,11 @@
 # Model Decision Record — Qwen3.5-9B Q4_K_M
 
-## Current governance truth — 2026-09-09
+## Current governance truth — 2026-09-11
 
 - Audited integrated source baseline is exact
-  `main@6e0d12c0023068456b97fc9c857a3538ca612421`; this document is its
-  descendant, not a self-referential source hash.
+  `main@7239b7e1a6a512cabf9e5ab18ba463a7fac351fc`, the last source merge. The
+  docs descendant `6c3a125749581554b88ade018181f61667990ac8` and this document
+  are documentation descendants, not self-referential source hashes.
 - The current production evaluation fixture/profile is 33 tools and 37 cases;
   `max_cases=64` is a ceiling, not a request to trim. Historical 13/32 and
   28/32/11/34 profile/results remain separate and are not current acceptance.
@@ -36,16 +37,36 @@
   `2dda060` and merged by `6e0d12c`, but native secure FD ownership,
   single-writer exclusion, authenticity/anti-rollback, compaction, and provider
   reconciliation remain absent.
-- Current bounded integration evidence is journal/Graph Node 210 discovered/
-  209 pass/1 existing TODO, handoff/release 63/63, env 26/26, QA-runner 27/27,
-  and conformance 11/11. Static inventory records 152 tracked JSON files (151
-  strict-valid plus one intentional duplicate-key hostile fixture) and 29
-  modules/71 relative imports/0 cycles. QA discovers 59 with 0 missing/unknown
-  and 65 records (1 PASS/64 expected SKIP); overall QA remains `BLOCKED` and no
-  full suite is green. Broader Node 350/349 and Python 663/663 evidence is
-  historical `d195235` evidence, not current `6e0d12c` proof.
-  Bookkeeping is not spend authorization. Credentials require source-side
-  rotation/revocation, including the previously leaked HF token.
+- Three slices were integrated this interval, each independently S0/S4
+  source-reviewed with one repair round and a re-review returning
+  `ACCEPT_FOR_MERGE`, and none adding compile, live, provider, production,
+  Windows, or target evidence: Graph restart reconciliation (accepted `4280e95`,
+  merged `61c9475`), which permits bounded automatic completion only for
+  durably acknowledged, newly account-bound `mail.create_draft` records with a
+  fresh unique exact provider `GET` proof while its startup trigger stays
+  operationally inert on memory-only tokens and manual
+  `POST .../reconcile` stays HTTP 501; the dormant Windows descriptor journal
+  bootstrap (accepted `e4ca09b`, merged `4de01f7`), which is uncompiled,
+  unlinked, and outside every product/package/activation graph; and the dormant
+  Windows process authority contract with its private move-only
+  `LaunchAuthority` (accepted `cfe8136`, merged `7239b7e`), which supplies no
+  launch mechanism, compile, or target evidence. ICR-RUN-WDJB-001 is
+  Sol-approved as an additive source-only extension with contract version
+  `0.1.0` retained, generalized by ADR-0004.
+- Current reproduced evidence is `npm test` 426 tests/424 pass/0 fail/0
+  cancelled/1 skipped/1 todo, Windows native static `Ran 289 tests` OK, and QA
+  safe-runner `Ran 20 tests` OK. Static inventory records 153 tracked JSON
+  files (152 strict-valid under a duplicate-key-rejecting parser plus one
+  intentional hostile fixture) and a host import graph of 29 modules/67 unique
+  relative import edges/0 unresolved/0 cycles. QA discovers 62 with 0
+  missing/unknown and 68 records (1 PASS/67 expected SKIP); overall QA remains
+  `BLOCKED` and no full suite is green in the release sense. The prior
+  `6e0d12c` focused numbers (journal/Graph Node 210/209, handoff/release 63/63,
+  env 26/26, QA-runner 27/27, conformance 11/11, JSON 152/151, imports 29/71,
+  QA 59 discovered/65 records) are historical, as are broader Node 350/349 and
+  Python 663/663, which belong to `d195235` and are not current `7239b7e`
+  proof. Bookkeeping is not spend authorization. Credentials require
+  source-side rotation/revocation, including the previously leaked HF token.
 - The model-family/quantization decision below remains accepted only as a
   technical choice. No compile, model-load, provider, Windows-target, target,
   or production acceptance is claimed; release/full access remains blocked.
