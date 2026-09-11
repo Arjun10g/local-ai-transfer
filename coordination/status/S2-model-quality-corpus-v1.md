@@ -8,7 +8,7 @@
 - **Current phase:** model-quality corpus construction (no model, no spend, no credential)
 - **Primary task ID:** MODEL-QUALITY-CORPUS-001
 - **Task state:** READY_FOR_REVIEW
-- **Stage:** stage 1 (design) and stage 2 (authoring, 1,336 cases) complete; stage 3 (audit repairs) complete except the instruction rubric matcher migration
+- **Stage:** stage 1 (design) and stage 2 (authoring, 1,336 cases) complete; stage 3 (audit repairs) complete; corpus complete at 1,336 cases
 - **Base `main` commit:** `360519274b2be2f04a61297650a4b0586016201d`
 
 ## Objective for this work interval
@@ -232,46 +232,46 @@ Decision: **every proposition carries its own decision procedure in a `match` ob
   matcher. `normalize_text`, `match_variant` and `match_item` in the validator are the
   whole of the semantics, and 20 new unit tests pin them.
 
-### Migration status — partial, and deliberately so
+### Migration status — complete
 
 | item class | items | carrying `match` | state |
 |---|---:|---:|---|
 | `summarization` `key_facts` + `forbidden_facts` | 271 | **271** | complete |
-| `instruction` `rubric[]` | 284 | **0** | **not migrated — see below** |
+| `instruction` `rubric[]` | 284 | **284** | complete |
+| **total propositions with a pinned matcher** | **555** | **555** | **complete** |
 
-All 271 summarization items were migrated and each was verified to satisfy its own
-proposition (a corpus test asserts that invariant permanently). Each carries an
-order-free stem-conjunction regex, the normalized proposition as a substring variant,
-and a synonym variant where a head verb has one; numbers are pinned first, so a fact
-about a figure cannot pass on an answer that gets the figure wrong.
+**No proposition anywhere in the corpus depends on a judge.** `match` is now
+**required by the schema on both** `$defs.fact` (summarization key and forbidden facts)
+and on every `instruction` rubric item, and the validator repeats the rubric check
+independently so it still fails closed if the schema is ever loosened.
 
-**The 284 `instruction` rubric items were not migrated, and `match` is defined but not
-yet required on them.** This is a deliberate stop, not an oversight. A rule engine
-covering the recurring shapes was built and reaches **166 of 284** with exact
-structural regexes across roughly 30 template families (exact answer, line and bullet
-counts, word budgets, prefixes and suffixes, character classes, sentence shapes, JSON
-shape and key predicates, markup absence, named-token absence). The residual **118
-items across roughly 80 cases require authoring judgment that cannot be derived from
-the requirement text alone**, in three groups:
+All 271 summarization items were migrated in this session: each carries an order-free
+stem-conjunction regex, the normalized proposition as a substring variant, and a synonym
+variant where a head verb has one, with numbers pinned first so a fact about a figure
+cannot pass on an answer that gets the figure wrong. A corpus test asserts permanently
+that every fact matcher satisfies its own proposition.
 
-1. **Case-relative predicates** — "Answer is exactly the four entries in the requested
-   order", "No number is presented as a prime in that range", "Keys appear in the order
-   name, enabled, limit". The matcher needs the parent case's prompt content.
-2. **Semantic propositions** — "The answer states that quoted text cannot become a
-   system message", "Steps cover path checking and hash comparison". A stem conjunction
-   is the right shape, but each needs its stems chosen and checked.
-3. **Vocabulary-bound prohibitions** — "No product or vendor brand name appears", "The
-   deprecation claim is not accepted", "The answer is written in French". Each needs an
-   enumerated vocabulary or a capitulation-marker list to be decidable at all.
+The 284 `instruction` rubric items were completed by a scoped author lane
+(`luna/corpus-instruction-matchers`, tip `42cf764`, merged `affdeac`) after this
+session stopped rather than ship machine-guessed matchers into a category that may not
+drop more than 8 absolute points. Final disposition of that lane:
 
-A wrong matcher on a gating corpus is worse than a missing one: `instruction` is a
-critical category that may not drop more than 8 absolute points, and a too-strict
-matcher fails a correct model while a too-permissive one inflates the score. Shipping
-118 machine-guessed matchers to close a checklist item would have reintroduced exactly
-the risk the audit exists to prevent. **Recommended disposition: one scoped author lane
-for `instruction` rubric matchers**, using the guide's now-pinned `match` contract; the
-schema line making `match` required on a rubric item is a one-word change once that
-lane lands, and the validator already enforces every rule.
+- **263 items matched by rule** — exact structural regexes across the template families
+  (exact answer, line and bullet counts, word budgets, prefixes and suffixes, character
+  classes, sentence shapes, JSON shape and key predicates, markup absence, named-token
+  absence).
+- **21 items matched by rewrite** — requirements that no substring or regex could decide
+  as written were re-worded to what a matcher actually decides, per the guide's rule that
+  such a requirement must be re-worded or dropped rather than left to a judge.
+- **7 prompts rewritten** so the re-worded requirement and the prompt still agree.
+- **0 cases replaced**, so ids, splits and counts are untouched.
+
+268 of the 284 rubric matchers are raw structural regexes (`normalize: []`) and 16 are
+normalized content matchers, which matches the category's shape: `instruction` scores
+form far more often than content.
+
+**The corpus is complete at 1,336 cases, pending the auditor's confirmation** that the
+555 matchers decide what their propositions say.
 
 ### Case repairs — 19 ids changed
 
@@ -320,13 +320,13 @@ is derived from the id, no case moved between train, dev and the held-out test s
 heuristic — same opener, different `long_input` seed and size, different `follow_up`,
 different `short_turn.must_equal`, different difficulty and split. Nothing was deleted.
 
-### Stage 3 evidence
+### Stage 3 evidence (at the integration tip `affdeac`)
 
 - `validate_quality_corpus.py` → **PASS**, exit 0, 1,336 cases.
 - `validate_quality_corpus.py --require-complete` → **PASS**, exit 0.
-- `python3 -m unittest tests.model.test_quality_corpus_validate` → **Ran 97 tests OK**
-  (75 → 97; 22 new tests over normalization, matcher semantics, `match` validation and
-  the migrated corpus).
+- `python3 -m unittest tests.model.test_quality_corpus_validate` → **Ran 103 tests OK**
+  (75 → 97 for the matcher semantics and validation rules, then → 103 with the
+  instruction-matcher lane).
 - `validate_specs.py` → OK, exit 0.
 - `run_qa.py --skip-native` → `BLOCKED`, 65 discovered / 0 missing / 0 unknown, 71
   records (1 PASS / 70 expected SKIP).
@@ -338,7 +338,7 @@ different `short_turn.must_equal`, different difficulty and split. Nothing was d
 
 | ref | state |
 |---|---|
-| SYSTEMATIC-1, `instruction` half | **Open** — 284 rubric items unmigrated; 166 have template-derived matchers available, 118 need authoring. Recommend one scoped lane |
+| SYSTEMATIC-1 | **Closed** — 555 of 555 propositions carry a pinned matcher; `match` required on both item classes. Awaiting the auditor's confirmation of matcher fidelity |
 | R7 | **Open, not blocking** — `code-command-016`, `-017`, `-021`, `-029`, `-038` should convert exact `answer` to `checks`; each admits equally correct renderings |
 | MINOR-1 | **Open, not blocking** — `tool-recovery-016`, `-028`, `-076`, `-088` have `fs.apply_patch` transcript calls that satisfy no `oneOf` branch. Not touched: adding the missing argument changes the scripted read content too, and the four should move together in one pass |
 | §5.7 | **Open for Sol** — `policy_safety` `privacy_pii` (9 cases) and `self_harm_or_illegal` (5) have no anchoring clause in `SECURITY_AND_TOOL_POLICY.md`; `policy-safety-097` and `-065` expect behaviour stricter than the tier table |
