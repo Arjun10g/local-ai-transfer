@@ -10,6 +10,7 @@ a private temporary file for the duration of a build.
 from __future__ import annotations
 
 import argparse
+import codecs
 import contextlib
 import hashlib
 import json
@@ -1741,33 +1742,67 @@ def _screen_streamed_output(text: str) -> None:
             raise ValueError("credential-like command output rejected before persistence")
 
 
+_UNREPRESENTABLE_OUTPUT = "<unrepresentable command output>"
+
+
 def _bounded_command_tail(stream: Any) -> str:
+    """Return a bounded, credential-screened tail of one command's output.
+
+    This raises for exactly one reason: the output carries credential syntax.
+    That is a hard receipt rejection and must fail the stage.
+
+    Output that merely cannot be QUOTED -- undecodable bytes, a byte slice
+    that begins inside a multi-byte character, a tail that is a JSON fragment
+    -- yields a marker instead. A command's exit code decides whether it
+    succeeded; the receipt's inability to quote its output is a receipt
+    problem, not a command failure. Recording it as one failed stages that
+    had exited 0 and cost four paid runs at USD 3.27 each.
+
+    Decoding is INCREMENTAL and lossy for the scan, strict only for the text
+    actually persisted. The previous loop decoded each 65536-byte read on its
+    own with `errors="strict"`, so a multi-byte character straddling a read
+    boundary raised `UnicodeDecodeError` -- pip's progress glyph U+2501 across
+    megabytes of `pip wheel` output made that a near certainty, and it is what
+    failed run `j1m-eval-20260911-remote-g` at plan stage 7. `errors="replace"`
+    on the scan guarantees every region of the stream is screened, which a
+    decode that aborts the loop would not.
+    """
+
     stream.flush()
     stream.seek(0)
     tail = bytearray()
     carry = ""
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     while True:
         chunk = stream.read(65536)
         if not chunk:
             break
-        text = carry + chunk.decode("utf-8", errors="strict")
+        text = carry + decoder.decode(chunk)
         _screen_streamed_output(text)
         carry = text[-256:]
         tail.extend(chunk)
         if len(tail) > _COMMAND_LOG_TAIL_LIMIT * 4:
             del tail[: len(tail) - (_COMMAND_LOG_TAIL_LIMIT * 4)]
-    value = bytes(tail).decode("utf-8", errors="strict")
+    raw = bytes(tail)
+    # The retained tail is a byte slice, so it can begin inside a multi-byte
+    # sequence. Drop that partial lead rather than refusing the whole tail.
+    start = 0
+    while start < len(raw) and start < 3 and (raw[start] & 0xC0) == 0x80:
+        start += 1
+    try:
+        value = raw[start:].decode("utf-8", errors="strict")
+    except UnicodeError:
+        return _UNREPRESENTABLE_OUTPUT
     _screen_streamed_output(value)
     trimmed = value[-_COMMAND_LOG_TAIL_LIMIT:]
     try:
         validate_persisted_output(trimmed)
     except ValueError:
         # A tail sliced out of a stream can be a JSON fragment or a partial
-        # escape that the persisted-VALUE rules reject. That is a property of
-        # slicing, not of the command, and it must not fail a stage that
-        # exited 0. The credential screen above has already run over the whole
+        # escape that the persisted-VALUE rules reject -- again a property of
+        # slicing. The credential screen above has already run over the whole
         # stream and is not bypassed by this fallback.
-        return "<unrepresentable command output>"
+        return _UNREPRESENTABLE_OUTPUT
     return trimmed
 
 

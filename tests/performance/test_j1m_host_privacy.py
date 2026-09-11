@@ -647,3 +647,50 @@ class CommandOutputScreenTests(unittest.TestCase):
                          "unsafe_security_text")
         with self.assertRaises(ValueError):
             self.runner.validate_persisted_argv(["git", "clone", "token%3Dsecret"])
+
+
+class CommandOutputDecodeTests(unittest.TestCase):
+    """Quoting output must never decide whether a command succeeded.
+
+    Run `j1m-eval-20260911-remote-g` reached plan stage 7, `pip wheel`, which
+    exited 0 and was failed anyway: each 65536-byte read was decoded on its
+    own with `errors="strict"`, so pip's progress glyph U+2501 straddling a
+    read boundary raised `UnicodeDecodeError` and the stage was recorded
+    `unsafe_output`. USD 3.27.
+    """
+
+    def setUp(self):
+        self.runner = load(ROOT / "scripts/j1m_runner.py", "output_decode_runner")
+
+    def _tail(self, payload):
+        handle = tempfile.TemporaryFile()
+        self.addCleanup(handle.close)
+        handle.write(payload if isinstance(payload, bytes) else payload.encode("utf-8"))
+        return self.runner._bounded_command_tail(handle)
+
+    def test_multibyte_output_across_read_boundaries_is_quoted_not_refused(self):
+        chunk = self.runner._RECEIPT_MAX_STRING_CHARS
+        # Place a multi-byte character exactly astride the first read boundary.
+        payload = ("x" * (chunk - 2)) + "━━" + ("  50%\n" * 400)
+        self.assertGreater(len(payload.encode("utf-8")), chunk)
+        tail = self._tail(payload)
+        self.assertNotEqual(tail, self.runner._UNREPRESENTABLE_OUTPUT)
+        self.assertLessEqual(len(tail), self.runner._COMMAND_LOG_TAIL_LIMIT)
+
+    def test_a_tail_beginning_mid_character_drops_the_partial_lead(self):
+        # Far more than the retained tail, so the slice lands arbitrarily.
+        payload = "━ progress 50%\n" * 4000
+        tail = self._tail(payload)
+        self.assertNotEqual(tail, self.runner._UNREPRESENTABLE_OUTPUT)
+        self.assertIn("progress", tail)
+
+    def test_undecodable_bytes_yield_a_marker_rather_than_failing_the_stage(self):
+        self.assertEqual(self._tail(b"before\n" + bytes([0xff, 0xfe]) + b"\nafter\n"),
+                         self.runner._UNREPRESENTABLE_OUTPUT)
+
+    def test_a_credential_is_still_caught_inside_a_large_multibyte_stream(self):
+        """The scan is lossy, but it is never skipped for any region."""
+
+        payload = ("━ filler 50%\n" * 20000) + "HF_TOKEN=hf_abcdefghijklmnopqrstuvwxyz012345\n" + ("━ more\n" * 20000)
+        with self.assertRaises(ValueError):
+            self._tail(payload)

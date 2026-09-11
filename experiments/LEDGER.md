@@ -30,3 +30,4 @@ deletion. A `pending` cost blocks all subsequent provisioning.
 | 2026-09-11 | j1m-eval-20260911-remote-d | d75747f8-4801-4f72-8a5f-5713ef333905 | A100_80G | $1.3500 | J1M-EVAL-37D | deleted | $3.2735 | 0.0 |
 | 2026-09-11 | j1m-eval-20260911-remote-e | 576c7f56-1d5e-4805-945a-b0157b2eae24 | A100_80G | $1.3500 | J1M-EVAL-37E | deleted | $3.2735 | 0.0 |
 | 2026-09-11 | j1m-eval-20260911-remote-f | b8b2f935-1f6d-42f3-86cf-2022e43ab301 | A100_80G | $1.3500 | J1M-EVAL-37F | deleted | $3.2735 | 0.0 |
+| 2026-09-11 | j1m-eval-20260911-remote-g | 3741a88d-9644-4656-b10e-f727392bf21e | A100_80G | $1.3500 | J1M-EVAL-37G | deleted | $3.2735 | 0.0 |
