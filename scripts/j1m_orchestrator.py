@@ -41,12 +41,66 @@ _MAX_OUTPUT_RESERVE_TOKENS = 256
 # require the exact catalog supplied by the fixture.
 _MAX_EVAL_TOOLS = 33
 _DELETION_RESERVE_SECONDS = 660.0
-# A pathname passed to SCP cannot remain bound to the validated directory
-# across an untrusted remote transfer.  The descriptor-safe transport needed
-# to close that TOCTOU window is not part of this source-only slice, so
-# external salvage is a deliberate refusal rather than a validate-twice
-# approximation.
-_EXTERNAL_SALVAGE_TRANSPORT_AVAILABLE = False
+# Commit 2d7db4f refused external salvage because the pathname handed to SCP
+# could not remain bound to the *validated destination* across an untrusted
+# remote transfer.  That concern is addressed here by never giving SCP the
+# validated destination at all: the transfer lands in a fresh private staging
+# directory whose contents are untrusted, and the only path that ever reaches
+# the run's artifact directory is the descriptor-safe publisher in
+# ``j1m_runner``.  The transport below is therefore a real, bounded capability
+# and this flag is source-level truth rather than a dormant switch.
+_EXTERNAL_SALVAGE_TRANSPORT_AVAILABLE = True
+# The single remote directory the orchestrator itself named at launch.  Salvage
+# never lists a remote directory, never globs, and never accepts a remote path
+# from a caller: every fetched path is this constant joined with one
+# source-fixed allowlist entry.
+_SALVAGE_REMOTE_DIRECTORY = "/scratch/j1m/artifacts"
+# Receipt name -> the exact schema string that receipt must declare.  This is
+# source-controlled acceptance data.  A name absent from this mapping cannot be
+# fetched even when a configuration file lists it.
+_SALVAGE_RECEIPT_ALLOWLIST: dict[str, str] = {
+    "eval-receipt.json": "local_bmo.j1m.real-tool-eval-receipt.v1",
+    "eval-artifact-receipt.json": "local_bmo.j1m.remote-eval-artifact-receipt.v1",
+    "startup-preflight-receipt.json": "local_bmo.j1m.startup-preflight-receipt.v1",
+    "toolchain-receipt.json": "local_bmo.j1m.remote-toolchain-receipt.v1",
+    "cuda-device-receipt.json": "local_bmo.j1m.cuda-device-receipt.v1",
+    "proving-receipt.json": "local_bmo.j1m.proving-receipt.v1",
+}
+# Minimum top-level keys each receipt must carry before it may be published.
+# The full per-receipt verification still runs in ``_verify_*`` after publish;
+# this is the bounded structural gate the transport applies to untrusted bytes.
+_SALVAGE_REQUIRED_KEYS: dict[str, frozenset[str]] = {
+    "eval-receipt.json": frozenset({
+        "schema", "status", "artifact", "fixture", "engine", "model_preflight",
+        "toolchain", "metrics",
+    }),
+    "eval-artifact-receipt.json": frozenset({
+        "schema", "status", "name", "size_bytes", "sha256", "manifest_sha256",
+        "manifest_lock_sha256",
+    }),
+    "startup-preflight-receipt.json": frozenset({"schema", "status"}),
+    "toolchain-receipt.json": frozenset({"schema", "status"}),
+    "cuda-device-receipt.json": frozenset({"schema", "status"}),
+    "proving-receipt.json": frozenset({"schema", "host", "python", "text_only"}),
+}
+# The locally written salvage evidence file.  It is deliberately not fetchable:
+# it describes the transfer and must never be supplied by the remote host.
+_SALVAGE_RECEIPT_NAME = "salvage-receipt.json"
+_SALVAGE_RECEIPT_SCHEMA = "local_bmo.j1m.salvage-receipt.v1"
+_SALVAGE_MAX_FILE_BYTES = 4 * 1024 * 1024
+_SALVAGE_MAX_TOTAL_BYTES = 32 * 1024 * 1024
+_SALVAGE_MAX_FILES = len(_SALVAGE_RECEIPT_ALLOWLIST)
+_SALVAGE_WALL_CLOCK_SECONDS = 300.0
+_SALVAGE_FILE_TIMEOUT_SECONDS = 60.0
+# A request naming more than this many candidates is a configuration fault, not
+# a transfer to bound one file at a time.
+_SALVAGE_MAX_REQUESTED_NAMES = 64
+_SALVAGE_HOST_KEY_MARKERS = (
+    "host key verification failed",
+    "remote host identification has changed",
+    "host identification has changed",
+    "key verification failed",
+)
 # This is source-controlled acceptance data, not a value supplied by a run
 # configuration.  The config repeats it for operator visibility/parity checks,
 # but a caller cannot turn an arbitrary manifest plus a self-authored lock into
@@ -887,6 +941,208 @@ def _verify_startup_preflight_receipt(path: Path, artifact: dict[str, Any]) -> d
     return selected
 
 
+class _SalvageRefusal(Exception):
+    """A typed, bounded reason one allowlisted receipt was not published."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+def _salvage_transport_argv(
+    info: dict[str, Any], identity: Path, known_hosts: Path, name: str, staged: Path,
+) -> list[str]:
+    """Build the exact non-shell argv for one allowlisted receipt fetch.
+
+    ``name`` is a source-fixed allowlist key, so the remote operand is a
+    constant directory joined with a constant basename.  No caller value, no
+    glob, and no remote directory listing can influence it.
+    """
+
+    if name not in _SALVAGE_RECEIPT_ALLOWLIST:
+        raise _SalvageRefusal("salvage_name_not_allowlisted")
+    # The endpoint is read from the same creation/activation record the run
+    # itself used; salvage never re-resolves a host or accepts a new address.
+    instance_info = info["instance_info"]
+    ip, user, _port = sf._endpoint(instance_info)
+    base = sf.scp_base(instance_info, identity, known_hosts)
+    return [
+        base[0],
+        # IPv4 only, no agent forwarding, no port/stream forwarding, and no
+        # local command execution.  ``scp_base`` already pins BatchMode,
+        # StrictHostKeyChecking, the pinned known_hosts file, ConnectTimeout,
+        # IdentitiesOnly, and an empty system config.
+        "-4",
+        "-o", "ForwardAgent=no",
+        "-o", "ForwardX11=no",
+        "-o", "ClearAllForwardings=yes",
+        "-o", "ExitOnForwardFailure=yes",
+        "-o", "PermitLocalCommand=no",
+        *base[1:],
+        f"{user}@{ip}:{_SALVAGE_REMOTE_DIRECTORY}/{name}",
+        str(staged),
+    ]
+
+
+def _salvage_transport_error_code(receipt: dict[str, Any]) -> str:
+    """Classify one failed transfer into a finite, value-free reason."""
+
+    status = receipt.get("status")
+    if status == "transport_timeout":
+        return "salvage_timeout"
+    if status == "transport_os":
+        return "salvage_transport_os"
+    tail = str(receipt.get("stderr_tail") or "").casefold()
+    if any(marker in tail for marker in _SALVAGE_HOST_KEY_MARKERS):
+        return "salvage_host_key_mismatch"
+    return "salvage_transport_failed"
+
+
+def _salvage_staged_bytes(staged: Path, limit: int) -> bytes:
+    """Read one staged transfer through a descriptor, refusing oversize data.
+
+    The staged file is untrusted remote output.  It is opened without following
+    links, proven to be an ordinary single-link file owned by this process, and
+    read to at most ``limit`` bytes; a file at or beyond the bound is refused
+    rather than truncated.
+    """
+
+    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
+        raise _SalvageRefusal("salvage_descriptor_unavailable")
+    try:
+        descriptor = os.open(
+            staged, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError:
+        raise _SalvageRefusal("salvage_missing") from None
+    try:
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or
+                before.st_nlink != 1 or stat.S_IMODE(before.st_mode) & 0o077):
+            raise _SalvageRefusal("salvage_not_private_regular_file")
+        if before.st_size > limit:
+            raise _SalvageRefusal("salvage_oversize")
+        chunks: list[bytes] = []
+        total = 0
+        while total <= limit:
+            chunk = os.read(descriptor, min(65_536, limit + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > limit:
+                raise _SalvageRefusal("salvage_oversize")
+        after = os.fstat(descriptor)
+        if ((before.st_dev, before.st_ino) != (after.st_dev, after.st_ino) or
+                after.st_nlink != 1 or total != after.st_size):
+            raise _SalvageRefusal("salvage_changed_during_read")
+        return b"".join(chunks)
+    except _SalvageRefusal:
+        raise
+    except OSError:
+        raise _SalvageRefusal("salvage_read_failed") from None
+    finally:
+        os.close(descriptor)
+
+
+def _salvage_identity_claims(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the artifact-identity fields this receipt asserts, if any."""
+
+    if name == "eval-artifact-receipt.json":
+        return {key: payload.get(key) for key in ("name", "size_bytes", "sha256")}
+    if name == "eval-receipt.json":
+        recorded = payload.get("artifact")
+        if not isinstance(recorded, dict):
+            raise _SalvageRefusal("salvage_identity_mismatch")
+        return {key: recorded.get(key) for key in ("name", "size_bytes", "sha256")}
+    if name == "startup-preflight-receipt.json" and payload.get("status") == "verified":
+        return {key: payload.get(key) for key in ("size_bytes", "sha256")}
+    return {}
+
+
+def _salvage_validated_payload(
+    name: str, raw: bytes, run_identity: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Prove untrusted remote bytes are the expected receipt for this run."""
+
+    if len(raw) > j1m_runner._RECEIPT_MAX_BYTES:
+        # The transport's own per-file cap is wider than the strict receipt
+        # decoder's bound; keep the reason precise rather than reporting a
+        # parse failure for a file that is simply too large.
+        raise _SalvageRefusal("salvage_oversize")
+    try:
+        payload = j1m_runner._bounded_json_loads(raw)
+    except ValueError:
+        # Covers malformed JSON, duplicate keys, non-finite numbers, and
+        # anything exceeding the strict decoder's own bound.
+        raise _SalvageRefusal("salvage_invalid_json") from None
+    if not isinstance(payload, dict):
+        raise _SalvageRefusal("salvage_not_an_object")
+    if payload.get("schema") != _SALVAGE_RECEIPT_ALLOWLIST[name]:
+        raise _SalvageRefusal("salvage_schema_mismatch")
+    if not _SALVAGE_REQUIRED_KEYS[name] <= set(payload):
+        raise _SalvageRefusal("salvage_required_key_missing")
+    try:
+        j1m_runner.validate_persisted_receipt(payload)
+    except ValueError:
+        raise _SalvageRefusal("salvage_receipt_content_refused") from None
+    identity = run_identity if isinstance(run_identity, dict) else {}
+    for field in ("run_id", "instance_id"):
+        expected = identity.get(field)
+        if field in payload and expected is not None and payload[field] != expected:
+            raise _SalvageRefusal("salvage_identity_mismatch")
+    artifact = identity.get("artifact")
+    claims = _salvage_identity_claims(name, payload)
+    if claims and isinstance(artifact, dict):
+        for field, value in claims.items():
+            if field in artifact and value != artifact[field]:
+                raise _SalvageRefusal("salvage_identity_mismatch")
+    return payload
+
+
+def _salvage_host_key_pin(known_hosts: Path, host_key: dict[str, Any] | None) -> str:
+    """Prove the host key pinned at first connection is still the one in use.
+
+    ``acquire_pinned_host_key`` wrote ``known_hosts`` before the first remote
+    command, either from a provider fingerprint or from two independent stable
+    scans (recorded residual TOFU).  Salvage refuses to run unless that exact
+    file is still an owner-private regular file carrying the same number of
+    pinned keys, and every transfer then runs with ``StrictHostKeyChecking=yes``
+    against it, so a host swapped between the run and teardown fails the
+    transfer instead of silently re-pinning.
+    """
+
+    try:
+        info = os.lstat(known_hosts)
+    except OSError:
+        raise ValueError("salvage host key pin is unavailable") from None
+    if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or
+            info.st_uid != os.getuid() or info.st_nlink != 1 or
+            stat.S_IMODE(info.st_mode) & 0o077 or not 0 < info.st_size <= 65536):
+        raise ValueError("salvage host key pin is not a private regular file")
+    raw = known_hosts.read_bytes()
+    lines = [line for line in raw.decode("utf-8", errors="strict").splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("salvage host key pin is empty")
+    if isinstance(host_key, dict):
+        if host_key.get("status") != "verified":
+            raise ValueError("salvage host key pin was never verified")
+        expected = host_key.get("key_count")
+        if isinstance(expected, int) and not isinstance(expected, bool) and len(lines) != expected:
+            raise ValueError("salvage host key pin changed since acquisition")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _write_salvage_receipt(destination: Path, receipt: dict[str, Any]) -> None:
+    """Publish local salvage evidence; never let it break teardown."""
+
+    payload = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    j1m_runner._private_atomic_write(
+        destination / _SALVAGE_RECEIPT_NAME, payload,
+        trusted_root=j1m_runner.PRIVATE_OUTPUT_ROOT,
+    )
+
+
 def _salvage(
     info: dict[str, Any],
     identity: Path,
@@ -896,9 +1152,24 @@ def _salvage(
     *,
     deadline: float | None = None,
     q4_expected_gib: float = 6.0,
+    run_identity: dict[str, Any] | None = None,
+    host_key: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Refuse pathname-based external salvage until a bound transport exists."""
+    """Fetch only source-allowlisted receipts, bounded and fail-closed.
 
+    Each allowlisted name is attempted independently so one missing or refused
+    receipt can never stop cleanup.  Nothing here raises for a per-file
+    failure: the caller's ``finally`` must always reach exact teardown.  The
+    destination and host-key preconditions are the only conditions that refuse
+    the whole operation, and they are proved before any process is spawned.
+
+    ``q4_expected_gib`` is retained for signature compatibility.  The bounded
+    transport carries receipts only, so no size-aware model-transfer budget
+    applies; the deployable Q4 artifact is not a salvageable name.
+    """
+
+    if not _EXTERNAL_SALVAGE_TRANSPORT_AVAILABLE:
+        raise ValueError("external salvage transport is unavailable in this source slice")
     try:
         salvage_ancestors = j1m_runner._private_ancestor_snapshot(
             destination, j1m_runner.PRIVATE_OUTPUT_ROOT,
@@ -911,9 +1182,150 @@ def _salvage(
         raise ValueError("salvage destination is not a private directory")
     if not j1m_runner._private_ancestors_stable(salvage_ancestors):
         raise ValueError("salvage destination changed")
-    # Do not retain a dormant SCP implementation here: even a future caller
-    # must not be able to pass an unbound destination pathname to a process.
-    raise ValueError("external salvage transport is unavailable in this source slice")
+    # Re-prove the exact destination inode immediately after the ancestor
+    # check.  A directory replaced by a symlink in that window must not be able
+    # to reach a transfer, and publication later re-proves it again through a
+    # no-follow parent descriptor.
+    try:
+        rechecked = os.lstat(destination)
+    except OSError:
+        raise ValueError("salvage destination changed") from None
+    if (stat.S_ISLNK(rechecked.st_mode) or not stat.S_ISDIR(rechecked.st_mode) or
+            (rechecked.st_dev, rechecked.st_ino) != (destination_stat.st_dev, destination_stat.st_ino) or
+            rechecked.st_uid != os.getuid() or stat.S_IMODE(rechecked.st_mode) & 0o077):
+        raise ValueError("salvage destination changed")
+    if not isinstance(names, list) or len(names) > _SALVAGE_MAX_REQUESTED_NAMES:
+        raise ValueError("salvage request exceeds its bounded candidate count")
+    known_hosts_sha256 = _salvage_host_key_pin(known_hosts, host_key)
+
+    # The ephemeral private key is passed to the transfer as a file handle, and
+    # ``validate_persisted_argv`` will refuse an argv whose ``-i`` operand is
+    # not a canonical private handle.  Prove that here so an unusable key is a
+    # typed, value-free refusal per receipt instead of an opaque local error,
+    # and so no process is spawned with a key the argv policy rejects.
+    identity_usable = j1m_runner._canonical_private_handle_path(str(identity))
+
+    started = time.monotonic()
+    results: list[dict[str, Any]] = []
+    fetched = 0
+    total_bytes = 0
+    seen: set[str] = set()
+
+    def remaining_budget() -> float:
+        wall = _SALVAGE_WALL_CLOCK_SECONDS - (time.monotonic() - started)
+        if deadline is None:
+            return wall
+        return min(wall, deadline - time.monotonic() - _DELETION_RESERVE_SECONDS)
+
+    with tempfile.TemporaryDirectory(prefix="j1m-salvage-") as staging:
+        staging_root = Path(staging)
+        os.chmod(staging_root, 0o700)
+        for name in names:
+            record: dict[str, Any] = {"name": name}
+            if not isinstance(name, str) or name not in _SALVAGE_RECEIPT_ALLOWLIST:
+                # A configuration or caller may name anything; only source can
+                # make a name fetchable.  Everything else is recorded, never
+                # transferred, and never turned into a remote path.
+                record = {"name": str(name)[:128], "status": "salvage_failed",
+                          "error_code": "salvage_name_not_allowlisted"}
+                results.append(record)
+                continue
+            if name in seen:
+                record.update({"status": "salvage_failed", "error_code": "salvage_duplicate_name"})
+                results.append(record)
+                continue
+            seen.add(name)
+            # Cheap source-fixed bounds first, then the cleanup-safety clock,
+            # then the key handle.  Exhausted budget must dominate every other
+            # reason: teardown is more important than any receipt.
+            if fetched >= _SALVAGE_MAX_FILES:
+                record.update({"status": "salvage_failed", "error_code": "salvage_file_count_cap"})
+                results.append(record)
+                continue
+            if total_bytes >= _SALVAGE_MAX_TOTAL_BYTES:
+                record.update({"status": "salvage_failed", "error_code": "salvage_total_size_cap"})
+                results.append(record)
+                continue
+            budget = remaining_budget()
+            if budget <= 1.0:
+                record.update({"status": "salvage_failed", "error_code": "salvage_deadline_reserve"})
+                results.append(record)
+                continue
+            if not identity_usable:
+                record.update({"status": "salvage_failed",
+                               "error_code": "salvage_identity_handle_unusable"})
+                results.append(record)
+                continue
+            staged = staging_root / name
+            try:
+                sf._preflight(info["phase_id"])
+                command = _salvage_transport_argv(info, identity, known_hosts, name, staged)
+                fetched += 1
+                transfer = _remote(command, timeout=min(_SALVAGE_FILE_TIMEOUT_SECONDS, budget))
+                if transfer.get("status") != "completed":
+                    record.update({
+                        "status": "salvage_failed",
+                        "error_code": _salvage_transport_error_code(transfer),
+                        "exit_code": transfer.get("exit_code"),
+                    })
+                    results.append(record)
+                    continue
+                raw = _salvage_staged_bytes(staged, _SALVAGE_MAX_FILE_BYTES)
+                if total_bytes + len(raw) > _SALVAGE_MAX_TOTAL_BYTES:
+                    raise _SalvageRefusal("salvage_total_size_cap")
+                payload = _salvage_validated_payload(name, raw, run_identity)
+                digest = hashlib.sha256(raw).hexdigest()
+                # Only now does a path into the validated destination exist, and
+                # it is the descriptor-safe publisher rather than a pathname
+                # handed to a transfer process.
+                j1m_runner._private_atomic_write(
+                    destination / name, raw, trusted_root=j1m_runner.PRIVATE_OUTPUT_ROOT,
+                )
+                total_bytes += len(raw)
+                record.update({
+                    "status": "completed",
+                    "size_bytes": len(raw),
+                    "sha256": digest,
+                    "schema": payload["schema"],
+                    "exit_code": transfer.get("exit_code"),
+                })
+            except _SalvageRefusal as exc:
+                record.update({"status": "salvage_failed", "error_code": exc.code})
+            except Exception:
+                # Salvage is best effort by contract; an unexpected local
+                # failure must still leave exact teardown reachable.
+                record.update({"status": "salvage_failed", "error_code": "salvage_failed"})
+            results.append(record)
+
+    completed = [item for item in results if item.get("status") == "completed"]
+    receipt = {
+        "schema": _SALVAGE_RECEIPT_SCHEMA,
+        "status": "salvaged" if completed and len(completed) == len(results) else "salvage_failed",
+        "transport": "scp-argv-bounded-source-allowlist-v1",
+        "remote_directory": _SALVAGE_REMOTE_DIRECTORY,
+        "host_key_proof": str((host_key or {}).get("proof", "unrecorded"))[:120],
+        "known_hosts_sha256": known_hosts_sha256,
+        "caps": {
+            "per_file_bytes": _SALVAGE_MAX_FILE_BYTES,
+            "total_bytes": _SALVAGE_MAX_TOTAL_BYTES,
+            "max_files": _SALVAGE_MAX_FILES,
+            "wall_clock_seconds": _SALVAGE_WALL_CLOCK_SECONDS,
+            "per_file_timeout_seconds": _SALVAGE_FILE_TIMEOUT_SECONDS,
+        },
+        "allowlist": sorted(_SALVAGE_RECEIPT_ALLOWLIST),
+        "requested": len(results),
+        "completed": len(completed),
+        "failed": len(results) - len(completed),
+        "total_bytes": total_bytes,
+        "duration_ms": int((time.monotonic() - started) * 1000),
+        "files": results,
+    }
+    try:
+        _write_salvage_receipt(destination, receipt)
+    except Exception:
+        # Evidence is important, but it is never allowed to strand an instance.
+        pass
+    return results
 
 
 def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, artifact_destination: Path, mode: str = "prove", model_artifact: Path | None = None, model_manifest: Path | None = None) -> dict[str, Any]:
@@ -1303,6 +1715,17 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     fetch_allowlist,
                     deadline=execution_deadline if "execution_deadline" in locals() else None,
                     q4_expected_gib=float(config["resources"].get("expected_q4_gib", 6.0)),
+                    # Bind every fetched receipt to this run's own identity, so
+                    # a receipt describing some other artifact or instance is
+                    # refused rather than published.
+                    run_identity={
+                        "run_id": run_id,
+                        "instance_id": instance_id,
+                        "artifact": eval_artifact,
+                    },
+                    # The host key pinned before the first remote command; a
+                    # host swapped before teardown fails the transfer.
+                    host_key=lifecycle.get("host_key"),
                 ) if lifecycle.get("instance_info") else []
             except Exception as exc:
                 # Even an unexpected salvage/setup failure must leave the
