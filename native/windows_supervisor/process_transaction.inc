@@ -38,12 +38,15 @@ struct LaunchReceipt final {
 };
 
 // The accepted lease has no proof issuer and external-proof authority is
-  // false.  Refusal is before journal persistence/external dispatch and
-  // before any process creation or other irreversible mutation.
+// false.  Refusal is before journal persistence/external dispatch and
+// before any process creation or other irreversible mutation.
 LaunchReceipt execute_process_transaction(ProcessLaunchAuthority authority,
                                           const LaunchPlan& plan) noexcept {
-  // The by-value move-only authority is consumed exactly once and retains its
-  // borrow ticket for the entire call, including this inert refusal path. No
+  // The by-value move-only ProcessLaunchAuthority is destroyed at scope exit
+  // on every path, so its BorrowTicket releases the process borrow slot even
+  // on the two refusal paths below, which return before consume() is reached.
+  // consume() therefore runs at most once, and only after both refusals pass;
+  // a refused call leaves the borrow accounting unchanged and retry-safe. No
   // SupervisorState/raw-owner entry point exists for a future bypass.
   // Validate the private authority before consuming the process borrow. No
   // issuer exists in this revision, so the optional is necessarily empty.
