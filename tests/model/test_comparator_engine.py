@@ -37,6 +37,7 @@ from scripts.test import remote_comparator_eval as driver
 from scripts.test.evaluate_tool_calls import load_fixture, run_local
 
 ROOT = Path(__file__).resolve().parents[2]
+PRODUCTION_FIXTURE = ROOT / "tests" / "model" / "production_tool_call_eval.json"
 TOKEN = "comparator-test-token-20260911"
 XML_CALL = "<tool_call><function=system.get_info></function></tool_call>"
 
@@ -133,8 +134,10 @@ class DefaultTransportIdentityTests(unittest.TestCase):
     """The Q4 acceptance path must not have moved by one byte."""
 
     def test_product_case_body_matches_the_pre_transport_construction(self):
-        fixture = load_fixture()
-        for case in fixture["cases"]:
+        # Both the default fixture and the 37-case production profile the
+        # comparator arms actually score.
+        for fixture in (load_fixture(), load_fixture(PRODUCTION_FIXTURE)):
+          for case in fixture["cases"]:
             # Literal copy of the request body the pre-change run_local built.
             expected = {
                 "model": fixture["model"], "session_id": f"eval-{case['id']}",
@@ -147,14 +150,18 @@ class DefaultTransportIdentityTests(unittest.TestCase):
             self.assertEqual(json.dumps(built), json.dumps(expected), case["id"])
 
     def test_product_canary_body_matches_the_pre_transport_construction(self):
-        fixture = load_fixture()
+        for fixture in (load_fixture(), load_fixture(PRODUCTION_FIXTURE)):
+            self.assertEqual(json.dumps(evaluator._canary_payload(fixture)),
+                             json.dumps(self.canary_literal(fixture)))
+
+    @staticmethod
+    def canary_literal(fixture):
         text = ("canary " + ("bounded-context ") * (evaluator.CANARY_MESSAGE_CHARS // 16))[:evaluator.CANARY_MESSAGE_CHARS]
-        expected = {
+        return {
             "model": fixture["model"], "messages": [{"role": "user", "content": text}],
             "tools": fixture["tools"], "stream": False,
             "max_tokens": int(fixture["limits"]["max_output_tokens"]), "mode": "normal",
         }
-        self.assertEqual(json.dumps(evaluator._canary_payload(fixture)), json.dumps(expected))
 
     def test_product_transport_still_performs_the_session_handshake(self):
         session = (200, {"id": "session-abcdefgh", "object": "session", "state_version": 1})
@@ -235,26 +242,29 @@ class UpstreamRequestShapeTests(unittest.TestCase):
         # The caller's own list is never mutated.
         self.assertEqual(seeded[0]["content"], "house rules")
 
-    def test_every_production_case_renders_the_policy_exactly_once(self):
-        fixture = load_fixture()
-        merged = 0
-        for case in fixture["cases"]:
-            body = evaluator._case_payload(fixture, case, evaluator.TRANSPORT_UPSTREAM_OPENAI)
-            systems = [item for item in body["messages"] if item["role"] == "system"]
-            self.assertEqual(len(systems), 1, case["id"])
-            self.assertTrue(systems[0]["content"].startswith(evaluator.SCHEMA_ABSTENTION_POLICY), case["id"])
-            if case["messages"] and case["messages"][0]["role"] == "system":
-                # Merged into the case's own system message, never duplicated.
-                merged += 1
-                self.assertEqual(len(body["messages"]), len(case["messages"]), case["id"])
-                self.assertTrue(systems[0]["content"].endswith(case["messages"][0]["content"]), case["id"])
-                self.assertEqual(body["messages"][1:], case["messages"][1:], case["id"])
-            else:
-                self.assertEqual(len(body["messages"]), len(case["messages"]) + 1, case["id"])
-                self.assertEqual(body["messages"][1:], case["messages"], case["id"])
-        # The production profile exercises both branches of the port.
+    def test_every_fixture_case_renders_the_policy_exactly_once(self):
+        merged = inserted = 0
+        for fixture in (load_fixture(), load_fixture(PRODUCTION_FIXTURE)):
+            for case in fixture["cases"]:
+                body = evaluator._case_payload(fixture, case, evaluator.TRANSPORT_UPSTREAM_OPENAI)
+                systems = [item for item in body["messages"] if item["role"] == "system"]
+                self.assertEqual(len(systems), 1, case["id"])
+                self.assertTrue(systems[0]["content"].startswith(evaluator.SCHEMA_ABSTENTION_POLICY), case["id"])
+                if case["messages"] and case["messages"][0]["role"] == "system":
+                    # Merged into the case's own system message, never duplicated.
+                    merged += 1
+                    self.assertEqual(len(body["messages"]), len(case["messages"]), case["id"])
+                    self.assertTrue(systems[0]["content"].endswith(case["messages"][0]["content"]), case["id"])
+                    self.assertEqual(body["messages"][1:], case["messages"][1:], case["id"])
+                else:
+                    inserted += 1
+                    self.assertEqual(len(body["messages"]), len(case["messages"]) + 1, case["id"])
+                    self.assertEqual(body["messages"][1:], case["messages"], case["id"])
+        # Between them the two shipped fixtures exercise both branches of the
+        # port. The 37-case production profile is all-user-first today, so the
+        # merge branch is covered only by the default fixture.
         self.assertGreater(merged, 0)
-        self.assertLess(merged, len(fixture["cases"]))
+        self.assertGreater(inserted, 0)
 
 
 class UpstreamNormalizationTests(unittest.TestCase):
