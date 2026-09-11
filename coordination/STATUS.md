@@ -1,6 +1,94 @@
 # Program Status
 
-## Current governance snapshot — 2026-09-09
+## Current governance snapshot — 2026-09-11
+
+- Audited integrated source baseline: exact
+  `main@7239b7e1a6a512cabf9e5ab18ba463a7fac351fc`, the last source merge. The
+  docs descendant `6c3a125749581554b88ade018181f61667990ac8` (task-claim flip)
+  and this refresh are documentation descendants, not self-referential source
+  hashes. Overall release/full-access state remains `BLOCKED` / `NOT_READY`;
+  no phase or release gate is advanced.
+- Three slices were integrated this interval. Each was independently S0/S4
+  source-reviewed, went through one repair round, and its re-review returned
+  `ACCEPT_FOR_MERGE`. None adds compile, live, provider, production, Windows,
+  or target evidence.
+- Graph restart reconciliation: accepted tip `4280e95` from base `d723c43`,
+  merged by `61c9475`. It permits bounded automatic restart completion only for
+  durably acknowledged, newly account-bound `mail.create_draft` records backed
+  by a fresh unique exact provider `GET` proof. The bound is per candidate: at
+  most 8 acknowledged candidate records, each checked with one bounded Drafts
+  ID page and at most 20 exact proof GETs, an upper bound of 8 x 21 = 168
+  provider requests per pass, all under the pass deadline. In-flight proof
+  retrieval is now budget-aware and
+  inconclusive-safe (typed results such as `draft_proof_budget_exhausted`), so
+  the seam can no longer escalate a record to `unknown_manual`. `status()` was
+  removed from the pass, giving 0 grant revocations; the auth epoch is sampled
+  before the account fingerprint; a `complete()` failure is surfaced as a typed
+  metadata-only degraded state; the token liveness margin is 90 s. The slice
+  disclosed that it changed already-merged in-flight `listDraftsForMarker`
+  behavior, because a collection `$select` cannot return
+  `internetMessageHeaders`. Honest limits: the startup pass is operationally
+  inert because tokens are memory-only; the pass is bounded but not
+  cancellable, since both production call sites invoke it with no signal and it
+  is limited only by its own 30 s deadline rather than host shutdown or the
+  emergency stop; manual `POST .../reconcile` remains HTTP 501; `reconciling`
+  records have no automatic resolution path; and
+  `listSentForDigest` plausibly carries the same collection-projection defect,
+  recorded as follow-up task `GRAPH-SENT-PROOF-PROJECTION`. No live Microsoft
+  account or provider evidence exists.
+- Windows descriptor journal bootstrap: accepted tip `e4ca09b`, merged by
+  `4de01f7`. It adds a dormant Win32 `action-journal-v2.wal` secure create
+  (`CREATE_NEW`) and trusted reopen bound to external volume plus file identity
+  on the open handle, an exact-user protected DACL, no-follow ancestors, a
+  fixed local NTFS requirement, a single-writer lease, header publication with
+  flush and readback, a 48-byte header and 32 MiB limit byte-identical to the
+  Node journal, a non-inheritable one-shot duplicate with explicit idempotent
+  arm/revoke and a documented `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` launcher
+  precondition, delete-on-failure for never-published just-created leaves, and
+  anonymous SQOS on every path-derived open. The reviewer confirmed
+  single-writer exclusion remains intact under the `FILE_SHARE_DELETE`
+  concession on the reopen handle. The unit is uncompiled, unlinked, and
+  outside all product/package/activation graphs; no Windows, production, or
+  target claim is made. Still absent: native secure owner publication, an
+  authenticity/anti-rollback anchor, compaction, a reviewed launcher, MSVC
+  compile, and exact-target tests.
+- Windows process authority: accepted tip `cfe8136`, merged by `7239b7e`. It
+  adds the dormant `windows-process-authority` v1.0.0 contract and a private,
+  move-only `LaunchAuthority`. It narrows B-005 in ownership and shape only;
+  the mechanism — handle-relative launch, image-section retention, consume-time
+  identity re-derivation, Job/token implementation, compile, and target —
+  remains absent.
+- ICR-RUN-WDJB-001 is Sol-approved as an additive source-only extension: four
+  additive status codes (`handoff_already_transferred`,
+  `source_handle_inheritable`, `inheritance_control_failed`,
+  `final_path_mismatch`) in `contracts/action-journal-storage/v0.1.0.json` with
+  version `0.1.0` retained, merged at `4de01f7`. The generalizing rule is
+  recorded as [ADR-0004](adrs/ADR-0004-inert-contract-additive-extension.md).
+  Independent source review is complete; formal gate approval is still
+  required.
+- Current evidence reproduced on this baseline: `npm test` 426 tests/424
+  pass/0 fail/0 cancelled/1 skipped/1 todo; Windows
+  native static `Ran 289 tests` OK; QA safe-runner `Ran 20 tests` OK; safe QA
+  `BLOCKED` with 62 discovered, 0 missing, 0 unknown and 68 records (1 PASS/67
+  SKIP). Strict tracked-JSON inventory records 153 tracked JSON files, of which
+  152 are strict-valid under a duplicate-key-rejecting parser and one is the
+  intentional hostile fixture
+  `tests/native/fixtures/windows_broker/duplicate-key.json`. The host import
+  graph over `lae-host.mjs` plus `host/**/*.mjs` is 29 modules, 67 unique
+  relative import edges (72 relative import occurrences, counting each unique
+  importer/target pair once), 0 unresolved specifiers, and 0 cycles. The single
+  skip and single todo are the pre-existing filesystem `KNOWN LIMITATION` pair.
+- No readiness follows from any of the above. Previously exposed credentials,
+  including the leaked HF token, still require source-side
+  rotation/revocation. Missing real signed artifact custody and model-quality
+  evidence, provider accounts/consent, native compile/secure owner/broker
+  evidence, an exact Windows hardware/backend receipt, live tool evidence, and
+  target acceptance all remain release gates.
+
+## HISTORICAL / SUPERSEDED governance snapshot — 2026-09-09
+
+> Historical interval snapshot for `main@6e0d12c`; superseded by the
+> 2026-09-11 snapshot above wherever it states current truth.
 
 - Audited integrated source baseline: exact `main@6e0d12c0023068456b97fc9c857a3538ca612421`.
   This documentation descendant is not a self-referential source hash. Overall
@@ -29,14 +117,16 @@
   compaction, or automatic provider reconciliation. Graph mutations therefore
   remain unavailable for production use and ambiguous outcomes remain
   unresolved rather than retried or manufactured as success.
-- Current evidence for the integrated delta is separately scoped: focused
-  journal/Graph Node 210 discovered, 209 passed, 0 failed, 1 existing TODO;
-  handoff/release 63/63; env 26/26; QA-runner unit checks 27/27; conformance
-  11/11. Static inventory records 152 tracked JSON files, of which 151 are
-  strict-valid and one is an intentional duplicate-key hostile fixture; the
-  host import graph is 29 modules/71 relative edges/0 cycles. Safe QA discovers
+- HISTORICAL evidence for that interval's integrated delta, belonging to
+  `6e0d12c` and not to current `7239b7e`: focused journal/Graph Node 210
+  discovered, 209 passed, 0 failed, 1 existing TODO; handoff/release 63/63;
+  env 26/26; QA-runner unit checks 27/27; conformance 11/11. Static inventory
+  then recorded 152 tracked JSON files, of which 151 were strict-valid and one
+  was an intentional duplicate-key hostile fixture; the host import graph was
+  recorded as 29 modules/71 relative edges/0 cycles. Safe QA then discovered
   59 tests with 0 missing/unknown and 65 records (1 PASS/64 expected SKIP), so
-  overall QA remains `BLOCKED`.
+  overall QA remained `BLOCKED`. Current numbers are in the 2026-09-11 snapshot
+  above.
 - The broader Node 350 total/349 passed/0 failed/0 skipped/1 known TODO and
   Python 663/663 across 30/33 safe files are historical evidence from
   `d195235b6a370d377785b6340b15ebc8e47585e3`, not current `6e0d12c` proof.
@@ -54,7 +144,7 @@
   live tool evidence, and target acceptance remain release gates.
 
 The older status bullets below are retained as historical interval evidence and
-are superseded by the 2026-09-09 snapshot wherever they state current truth.
+are superseded by the 2026-09-11 snapshot wherever they state current truth.
 
 - Overall release/full-access state: `BLOCKED` / `NOT_READY`
 - Authoritative source baseline: `main@fa5aa38c806ba98d269ce304325e178416584bbe`
@@ -89,7 +179,13 @@ are superseded by the 2026-09-09 snapshot wherever they state current truth.
   bounded durable integrity/recovery semantics, but production remains blocked
   until a native secure descriptor owner supplies durable publication,
   single-writer exclusion, and anti-rollback authority, and provider recovery
-  can reconcile ambiguous outcomes.
+  can reconcile ambiguous outcomes. The dormant Win32 descriptor-WAL bootstrap
+  accepted at `e4ca09b` and merged by `4de01f7` now supplies a source-only
+  secure create/trusted reopen, single-writer lease, and one-shot
+  non-inheritable handoff for `action-journal-v2.wal`, but it is uncompiled and
+  unlinked, so it does not close that boundary: native secure owner
+  publication, an authenticity/anti-rollback anchor, compaction, a reviewed
+  launcher, MSVC compile, and exact-target tests all remain absent.
 - The protected Shadeform mutation-env layout is source-accepted at `c8c28a9`.
   It requires explicit owner-private `.secrets/` setup and does not authorize a
   provider mutation, credential use, remote run, or spend.
@@ -113,7 +209,14 @@ are superseded by the 2026-09-09 snapshot wherever they state current truth.
 - Process implementation candidate `6167ef6` remains rejected and unmerged.
   The later merged process transaction remains unreachable: its adapter is
   `nullptr`/unrecovered, with no public launch/package/activation or product/
-  runtime CMake linkage. Its only CMake presence is the default-off,
+  runtime CMake linkage. The dormant `windows-process-authority` v1.0.0
+  contract and private move-only `LaunchAuthority` accepted at `cfe8136` and
+  merged by `7239b7e` narrow B-005 in ownership and shape only; they supply no
+  launch mechanism, never re-derive identity from a live handle at consume
+  time, build no command line, open no path, sit outside the product CMake
+  graph, and have never been compiled by any executed target.
+  `kLaunchAuthorityAvailable` and every trust/containment/confinement gate stay
+  false. Its only CMake presence is the default-off,
   unconfigured/unbuilt static target `lae_compilecheck_windows_supervisor`,
   which compiles `authority.cpp` with `process_transaction.inc` marked
   `HEADER_FILE_ONLY`; `SAFE_TO_COMPILE` remains unknown/`NO`.
@@ -123,18 +226,30 @@ are superseded by the 2026-09-09 snapshot wherever they state current truth.
 - The inert Win32 journal-storage boundary is source-merged from `d0ed670` by
   `3d46ccb`; the journal container source is source-merged by `16b4b0e`.
   Even with the inert helper source merged by `645f348`, test-only client
-  merged by `4b8e737`, and descriptor WAL merged by `6e0d12c`, the native
-  secure owner, production bridge/package wiring, compile, authenticity/
-  anti-rollback, single-writer, compaction, provider-reconciliation, and target
-  evidence remain absent.
+  merged by `4b8e737`, descriptor WAL merged by `6e0d12c`, and the dormant
+  Win32 descriptor-WAL bootstrap merged by `4de01f7`, the native secure owner
+  publication, production bridge/package wiring, compile, authenticity/
+  anti-rollback anchor, compaction, reviewed launcher, and target evidence
+  remain absent. The bootstrap adds four additive source-only status codes to
+  `contracts/action-journal-storage/v0.1.0.json` under retained version
+  `0.1.0`, recorded as ICR-RUN-WDJB-001 and ADR-0004.
 - The external lifecycle hardening is source-merged at `91de464`. Remote
   execution remains disabled by the source guard (`REMOTE_EXECUTION_ENABLED=False`),
   and no approved/committed cost-ledger genesis or new provider run is claimed.
 - Graph read tools `ed9d1cb` are merged on `main` by `c2154ba`. Graph
   reconciliation source `b4702a5` is merged on `main` after two
   independent source-safety approvals and a 96-pass mocked integration run.
-  This does not establish live Graph readiness; production action dispatch and
-  live-provider evidence remain unavailable.
+  Graph restart reconciliation is accepted at `4280e95` and merged by
+  `61c9475`; it adds bounded automatic completion only for durably
+  acknowledged, newly account-bound `mail.create_draft` records proved by a
+  fresh unique exact provider `GET`, and it removed the seam's ability to
+  escalate to `unknown_manual`. Its startup trigger is operationally inert
+  because tokens are memory-only, manual `POST .../reconcile` is still HTTP
+  501, `reconciling` records have no automatic resolution path, and
+  `listSentForDigest` plausibly shares the collection-projection defect
+  (follow-up `GRAPH-SENT-PROOF-PROJECTION`). None of this establishes live
+  Graph readiness; production action dispatch and live-provider evidence remain
+  unavailable.
 - The Windows filesystem refusal boundary is source-merged at `7cea137`.
   Windows filesystem mutations and helper-backed reads are refused; this is a
   safety boundary, not Windows functionality or target acceptance.

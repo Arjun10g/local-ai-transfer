@@ -5,23 +5,31 @@ separate. `MERGED_SOURCE_PENDING_GATE` means source is on `main` only; it is
 not a release or live-readiness approval. `PENDING_INDEPENDENT_AUDIT` and
 `REJECTED_REPAIR_PENDING` are not approval states. `SUPERSEDED_SOURCE_HISTORY`
 retains a historical task without making it current authority;
-`BLOCKED_BELOW_GATE` records evidence that failed or cannot satisfy its gate.
+`BLOCKED_BELOW_GATE` records evidence that failed or cannot satisfy its gate;
+`QUARANTINED` means source is present on `main` but unreachable/disabled
+pending repair — it is not an approval state and confers no capability.
 
 Current claims are reconciled to exact audited integrated source
-`main@6e0d12c0023068456b97fc9c857a3538ca612421`; this docs descendant is not a
-self-referential source hash. Current focused evidence is journal/Graph Node
-210 discovered/209 pass/0 fail/1 existing TODO, handoff/release 63/63, env
-26/26, QA-runner 27/27, and conformance 11/11. Static inventory is 152 tracked
-JSON files (151 strict-valid plus one intentional duplicate-key hostile fixture)
-and 29 modules/71 relative imports/0 cycles. QA discovers 59 with 0
-missing/unknown and 65 records (1 PASS/64 expected SKIP); overall QA remains
-`BLOCKED`. Broader Node 350/349/0/0/1 TODO and Python 663/663 across 30/33
-safe files are historical `d195235` evidence, not current `6e0d12c` proof.
-The current evaluation profile identity is 33 tools/37 cases with
-`max_cases=64` ceiling semantics. Historical 13/32 and 28/32/11/34 results
-remain separate. Remote execution is false; only two no-model canary probes
-are permitted. No claim below authorizes compile, live provider, production, or
-target execution; bookkeeping is not spend authorization.
+`main@7239b7e1a6a512cabf9e5ab18ba463a7fac351fc`, the last source merge; the
+docs descendant `6c3a125749581554b88ade018181f61667990ac8` and the current
+governance refresh are documentation descendants, not self-referential source
+hashes. Current reproduced evidence is `npm test` 426 tests/424 pass/0 fail/0
+cancelled/1 skipped/1 todo, Windows native static `Ran 289 tests` OK, and QA
+safe-runner `Ran 20 tests` OK. Static inventory is 153 tracked JSON files (152
+strict-valid under a duplicate-key-rejecting parser plus one intentional
+hostile fixture) and a host import graph of 29 modules/67 unique relative
+import edges/0 unresolved/0 cycles. QA discovers 62 with 0 missing/unknown and
+68 records (1 PASS/67 expected SKIP); overall QA remains `BLOCKED`. The prior
+`6e0d12c` focused numbers (journal/Graph Node 210/209, handoff/release 63/63,
+env 26/26, QA-runner 27/27, conformance 11/11, JSON 152/151, imports 29/71, QA
+59 discovered/65 records) are historical, as are broader Node 350/349/0/0/1
+TODO and Python 663/663 across 30/33 safe files, which belong to `d195235` and
+are not current `7239b7e` proof. The current evaluation profile identity is 33
+tools/37 cases with `max_cases=64` ceiling semantics. Historical 13/32 and
+28/32/11/34 results remain separate. Remote execution is false; only two
+no-model canary probes are permitted. No claim below authorizes compile, live
+provider, production, or target execution; bookkeeping is not spend
+authorization.
 
 | Task | Owner | Branch | State | Dependencies | Review owner | Evidence |
 |---|---|---|---|---|---|---|
@@ -33,7 +41,7 @@ target execution; bookkeeping is not spend authorization.
 | GOV-TRUTH-002 | Luna docs | `main` (merged from `luna/current-truth-refresh-post-native`) | MERGED_SOURCE_PENDING_GATE | `main@2ec9c44`, SOL-003 | S0, S4 | claim `98ec6c8`, implementation `3eda442`, handoff `03a21bc`, merge `e10b58a`; docs-only reconciliation; no source, configuration, availability, or gate change |
 | GOV-TRUTH-003 | Luna docs | `main` (merged from `luna/governance-supervisor-clipboard-truth`) | MERGED_SOURCE_PENDING_GATE | `main@0622713`, SOL-003 | S0, S4 | claim `9d8f940`, source `50f6dcf`, merge `4d6a854`; docs-only current-truth refresh; no source, configuration, availability, phase, or release-gate change |
 | GOV-TRUTH-004 | Luna docs | `luna/current-truth-fa5` | SUPERSEDED_SOURCE_HISTORY | `main@fa5aa38`, SOL-003 | S0, S4 | claim `6cc662f`, source-truth refresh `51ed7f7`; historical docs-only reconciliation; SUPERSEDED_SOURCE_HISTORY by later current-truth refreshes |
-| GOV-TRUTH-005 | Luna docs | `luna/governance-refresh-v3` | READY_FOR_REVIEW | `main@6e0d12c`, SOL-003 | S0, S4 | claim `b9521cd`, implementation `01698e0`; docs-only current-truth refresh for accepted env `c8c28a9`, artifact handoff `c2801ec`, durable journal `2dda060`, and integration `6e0d12c`; QA inventory, JSON, import-graph, conformance, and diff checks pass with release still `BLOCKED`; no source, configuration, secret, availability, phase, or gate change |
+| GOV-TRUTH-005 | Luna docs | `main` (merged from `luna/governance-refresh-v3`) | MERGED_SOURCE_PENDING_GATE | `main@6e0d12c`, SOL-003 | S0, S4 | claim `b9521cd`, implementation `01698e0`, handoff `d723c43`, all on `main`; docs-only current-truth refresh for accepted env `c8c28a9`, artifact handoff `c2801ec`, durable journal `2dda060`, and integration `6e0d12c`; QA inventory, JSON, import-graph, conformance, and diff checks passed with release still `BLOCKED`; no source, configuration, secret, availability, phase, or gate change |
 | RUN-001 | S1 | `luna/runtime` | CLAIMED | SOL-002 | S0, S3, S4 | pending |
 | RUN-002 | S1 | `luna/runtime` | CLAIMED | RUN-001 | S0, S3, S4 | pending |
 | MODEL-001 | S2 | `luna/model-performance` | CLAIMED | SOL-002 | S0, S1, S4 | pending |
@@ -106,3 +114,5 @@ target execution; bookkeeping is not spend authorization.
 | GRAPH-RESTART-RECONCILIATION | S3 | `main` (merged from `luna/graph-restart-reconciliation-v1`) | MERGED_SOURCE_PENDING_GATE | GRAPH-PRODUCTION-COMPOSITION, GRAPH-MANUAL-RESOLUTION-GUARD, TOOL-DURABLE-JOURNAL-BACKEND, SOL-003 | S0, S4 | source `e6e1a55` from exact main `d723c43`, S0/S4 review repair `71f7fb5` + `c549a8f` + `dd89396` (security), `37bbf19` (qa), `438795f` + tip (docs); only durably acknowledged, newly account-bound `mail.create_draft` records may complete after a fresh unique exact Graph GET proof; dispatch/reconciling/unknown and other mutations remain manual; this slice also changed the already-merged in-flight `listDraftsForMarker` path (collection `$select` cannot return `internetMessageHeaders`) and now bounds it to one shared 20-candidate budget with a tool-budget deadline and a typed `draft_proof_budget_exhausted` inconclusive result, so it can never escalate a record to `unknown_manual`; the restart pass samples auth epoch/fingerprint read-only before any call and revokes no operator grant; `complete()` failure returns a typed `blocked` count; Node full 426 discovered/424 PASS/0 FAIL/1 SKIP/1 existing TODO plus focused Graph/journal/external 124/124 and clean `git diff --check`; QA inventory 0 missing/0 unknown with status BLOCKED; `listSentForDigest` collection projection recorded as an unfixed recommended follow-up; no account/network/provider/model/browser/native/live execution or readiness claim; accepted tip `4280e95`; merge `61c9475`; independent S0/S4 source review with repair round; no compile, live, production, or target evidence |
 | RUN-WINDOWS-DESCRIPTOR-JOURNAL-BOOTSTRAP | S1 | `main` (merged from `luna/windows-descriptor-journal-bootstrap-v1`) | MERGED_SOURCE_PENDING_GATE | TOOL-DURABLE-JOURNAL-BACKEND, ACTION-JOURNAL-OWNER, TOOL-034, TOOL-035, TOOL-041, SOL-003 | S0, S3, S4 | claim `06e045e`, implementation `e5b707f`, atomic duplicate ownership repair `97a9d7d`, review repair `347d57d`, `44b8ff1`, `d2af452`, `d53a628`, re-review residual repair `26b6b73`; inert fixed-WAL secure create/trusted reopen, retained single-writer share lease, non-inheritable one-shot duplicate with explicit arm/revoke inheritance and a PROC_THREAD_ATTRIBUTE_HANDLE_LIST launcher precondition, delete-on-failure for a never-published create, full pre-duplication recheck and distinct typed refusals; anonymous SQOS on every path-derived open in the unit; 248/248 Windows static, 20/20 QA, 51/51 focused, 63/63 descriptor protocol, run_qa BLOCKED 60/0/0; additive contract statuses notified as ICR-RUN-WDJB-001; HANDLE-to-CRT child bridge, compile/Windows/target/durability/anti-rollback evidence absent; production/target `NO`; accepted tip `e4ca09b`; merge `4de01f7`; independent S0/S4 source review with repair round; no compile, live, production, or target evidence |
 | RUN-WINDOWS-PROCESS-AUTHORITY-GAP | S1 | `main` (merged from `luna/windows-process-authority-gap-v1`) | MERGED_SOURCE_PENDING_GATE | B-005, B-005-SOURCE, SUPERVISOR-TOPOLOGY-PHASE2A, PROCESS-DISPATCH-LEASE, TOOL-017, TOOL-021 | S0, S4 | claim `f47cdd7`, source `d556a5e`, `4d12c98`, `7add240`, `309bf55`, review repairs `c2aac3b`, `14f9d9f`, `3881049`; base exact `main@d723c43`; dormant `windows-process-authority` v1.0.0 contract plus private noncopyable move-only `LaunchAuthority` with `UniqueHandle` ownership, executable/working-directory/token/Job/cancellation identity values, operation ID/generation/nonce, restored absolute-manifest-path-binding and no-reparse-component predicates, an ordered argument vector with one fixed `CommandLineToArgvW` escaping algorithm and required round-trip verification, and a cancellation state machine whose generations are issuer-derived and strictly monotonic and whose `unknown_manual` state is terminal; 41/41 new plus 268/268 combined Windows-static checks, strict duplicate-key JSON parse clean, QA 60 discovered/0 missing/0 unknown with 66 records (1 PASS/65 SKIP) and overall `BLOCKED`, `git diff --check main...HEAD` exit 0, ten source mutations each verified to fail the suite. No handle-relative launch mechanism, no identity re-derivation at consume time, no command-line builder, no proof issuer, no CMake/package/host/registry path; `kLaunchAuthorityAvailable` and all trust/containment/confinement gates stay false; never compiled; production/target `NO`; accepted tip `cfe8136`; merge `7239b7e`; independent S0/S4 source review with repair round; no compile, live, production, or target evidence |
+| GOV-TRUTH-006 | Luna docs | `luna/governance-refresh-v4` | READY_FOR_REVIEW | `main@7239b7e`, GOV-TRUTH-005, SOL-003 | S0, S4 | docs-only current-truth reconciliation to the last source merge `7239b7e` after integration of Graph restart reconciliation (`4280e95`, merge `61c9475`), the Windows descriptor journal bootstrap (`e4ca09b`, merge `4de01f7`), and the Windows process authority contract (`cfe8136`, merge `7239b7e`); records Sol's ICR-RUN-WDJB-001 approval and ADR-0004; evidence reproduced in-worktree is `npm test` 426/424/0 fail/0 cancelled/1 skipped/1 todo, Windows native static `Ran 289` OK, QA safe-runner `Ran 20` OK, safe QA `BLOCKED` 62 discovered/0 missing/0 unknown with 68 records (1 PASS/67 SKIP), 153 tracked JSON files (152 strict-valid plus one intentional hostile fixture), host import graph 29 modules/67 unique relative edges/0 unresolved/0 cycles, and `git diff --check main..HEAD` exit 0; no source, test, contract, configuration, secret, availability, phase, or release-gate change |
+| GRAPH-SENT-PROOF-PROJECTION | S3 | unassigned | UNCLAIMED | GRAPH-RESTART-RECONCILIATION | S0, S4 | follow-up recorded by the accepted Graph restart reconciliation slice: `listSentForDigest` (`host/providers/microsoft-graph.mjs`) still requests `internetMessageHeaders` in a single Sent Items collection query and requires it per item, so it plausibly carries the same collection-projection defect that forced the draft proof path to a bounded ID page plus per-message GETs; apply the same shape and shared candidate budget, or record a documented reason the two paths differ. Unverifiable without a live account; no live, provider, or readiness work is authorized by this row |
