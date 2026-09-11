@@ -15,8 +15,11 @@
 - Graph restart reconciliation: accepted tip `4280e95` from base `d723c43`,
   merged by `61c9475`. It permits bounded automatic restart completion only for
   durably acknowledged, newly account-bound `mail.create_draft` records backed
-  by a fresh unique exact provider `GET` proof, with at most 8 candidates and
-  20 proof GETs. In-flight proof retrieval is now budget-aware and
+  by a fresh unique exact provider `GET` proof. The bound is per candidate: at
+  most 8 acknowledged candidate records, each checked with one bounded Drafts
+  ID page and at most 20 exact proof GETs, an upper bound of 8 x 21 = 168
+  provider requests per pass, all under the pass deadline. In-flight proof
+  retrieval is now budget-aware and
   inconclusive-safe (typed results such as `draft_proof_budget_exhausted`), so
   the seam can no longer escalate a record to `unknown_manual`. `status()` was
   removed from the pass, giving 0 grant revocations; the auth epoch is sampled
@@ -25,8 +28,11 @@
   disclosed that it changed already-merged in-flight `listDraftsForMarker`
   behavior, because a collection `$select` cannot return
   `internetMessageHeaders`. Honest limits: the startup pass is operationally
-  inert because tokens are memory-only; manual `POST .../reconcile` remains
-  HTTP 501; `reconciling` records have no automatic resolution path; and
+  inert because tokens are memory-only; the pass is bounded but not
+  cancellable, since both production call sites invoke it with no signal and it
+  is limited only by its own 30 s deadline rather than host shutdown or the
+  emergency stop; manual `POST .../reconcile` remains HTTP 501; `reconciling`
+  records have no automatic resolution path; and
   `listSentForDigest` plausibly carries the same collection-projection defect,
   recorded as follow-up task `GRAPH-SENT-PROOF-PROJECTION`. No live Microsoft
   account or provider evidence exists.
@@ -61,7 +67,7 @@
   Independent source review is complete; formal gate approval is still
   required.
 - Current evidence reproduced on this baseline: `npm test` 426 tests/424
-  pass/0 fail/0 cancelled/1 skipped/1 todo (duration_ms 40677.278375); Windows
+  pass/0 fail/0 cancelled/1 skipped/1 todo; Windows
   native static `Ran 289 tests` OK; QA safe-runner `Ran 20 tests` OK; safe QA
   `BLOCKED` with 62 discovered, 0 missing, 0 unknown and 68 records (1 PASS/67
   SKIP). Strict tracked-JSON inventory records 153 tracked JSON files, of which

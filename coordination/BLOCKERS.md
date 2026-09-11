@@ -36,7 +36,7 @@
   Independent source review is complete; formal gate approval is still
   required.
 - Current reproduced evidence is `npm test` 426 tests/424 pass/0 fail/0
-  cancelled/1 skipped/1 todo (duration_ms 40677.278375); Windows native static
+  cancelled/1 skipped/1 todo; Windows native static
   `Ran 289 tests` OK; QA safe-runner `Ran 20 tests` OK. Static inventory is 153
   tracked JSON files (152 strict-valid under a duplicate-key-rejecting parser
   plus one intentional hostile fixture) and a host import graph of 29
@@ -86,12 +86,18 @@
   reconciliation source is accepted at `4280e95` and merged by `61c9475` after
   an independent S0/S4 review with a repair round; it permits bounded automatic
   completion only for durably acknowledged, newly account-bound
-  `mail.create_draft` records with a fresh unique exact provider `GET` proof,
-  bounded to 8 candidates and 20 proof GETs, and its budget-aware
+  `mail.create_draft` records with a fresh unique exact provider `GET` proof.
+  The bound is per candidate: at most 8 acknowledged candidate records, each
+  checked with one bounded Drafts ID page and at most 20 exact proof GETs, an
+  upper bound of 8 x 21 = 168 provider requests per pass, all under the pass
+  deadline. Its budget-aware
   inconclusive-safe in-flight retrieval means the seam can no longer escalate a
   record to `unknown_manual`. Its limits are material: the startup pass is
   operationally inert because tokens are memory-only, so only the
-  post-authentication trigger can complete a record; manual
+  post-authentication trigger can complete a record; the pass is bounded but
+  not cancellable, because both production call sites invoke it with no signal
+  and it is limited only by its own 30 s deadline rather than host shutdown or
+  the emergency stop; manual
   `POST .../reconcile` remains HTTP 501; `reconciling` records still have no
   automatic resolution path and accumulate against the 256-record active cap;
   `listSentForDigest` plausibly carries the same collection-projection defect

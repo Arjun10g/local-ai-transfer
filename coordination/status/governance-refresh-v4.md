@@ -34,8 +34,10 @@ docs-only interval; it advances no gate.
   `coordination/BLOCKERS.md`, `coordination/TASK_CLAIMS.md`,
   `coordination/DECISIONS.md`, `coordination/INTERFACE_CHANGE_REQUESTS.md`,
   `coordination/adrs/ADR-0004-inert-contract-additive-extension.md` (new),
-  `coordination/status/S0.md`, this packet, and
-  `governance/MODEL_DECISION.md`. Markdown only; no source, test, contract
+  `coordination/status/S0.md`, this packet
+  (`coordination/status/governance-refresh-v4.md`, renamed from the misleading
+  `S2-` prefix to match the `governance-refresh-v3.md` precedent and this
+  packet's own "Luna docs" session), and `governance/MODEL_DECISION.md`. Markdown only; no source, test, contract
   JSON, configuration, script, or `.gitignore` change.
 
 ## Inputs and dependencies
@@ -70,9 +72,11 @@ All from the worktree root, after merging `main`:
 
 Exact numbers, reproduced in this worktree on 2026-09-11:
 
-- `npm test`: **426 tests, 424 pass, 0 fail, 0 cancelled, 1 skipped, 1 todo,
-  duration_ms 40677.278375**. The single skip and single todo are the
-  pre-existing filesystem `KNOWN LIMITATION` pair.
+- `npm test`: **426 tests, 424 pass, 0 fail, 0 cancelled, 1 skipped, 1 todo**.
+  The single skip and single todo are the pre-existing filesystem
+  `KNOWN LIMITATION` pair. Wall clock for this one local run was `duration_ms
+  40677.278375` — a single machine-specific observation, not reproducible
+  evidence, which is why no duration is carried into any current-truth file.
 - `python3 -m unittest discover -s tests/native -p 'test_windows_*static.py'`:
   **`Ran 289 tests` … OK**.
 - `python3 -m unittest tests.qa.test_safe_runner`: **`Ran 20 tests` … OK**.
@@ -108,6 +112,13 @@ Exact numbers, reproduced in this worktree on 2026-09-11:
 - **Baseline.** Audited integrated source baseline is exact
   `main@7239b7e1a6a512cabf9e5ab18ba463a7fac351fc`; `6c3a1257` and this refresh
   are documentation descendants.
+- **Graph restart bound (per candidate, not aggregate).** The pass takes at
+  most 8 acknowledged candidate records
+  (`MAX_GRAPH_RESTART_CANDIDATES = 8`, `host/agent/controller.mjs:35`), and
+  each candidate is checked with one bounded Drafts ID page plus at most 20
+  exact proof GETs (`MAX_DRAFT_PROOF_CANDIDATES = 20`,
+  `host/providers/microsoft-graph.mjs:24`) — an upper bound of 8 x 21 = 168
+  provider requests per pass, all under the pass deadline.
 - **Three merged slices**, each independently S0/S4 source-reviewed with one
   repair round and a re-review returning `ACCEPT_FOR_MERGE`, none adding
   compile, live, provider, production, Windows, or target evidence:
@@ -156,6 +167,12 @@ Exact numbers, reproduced in this worktree on 2026-09-11:
   `GRAPH-SENT-PROOF-PROJECTION` rather than left in a packet.
 - Release/full access remains `BLOCKED` / `NOT_READY`, and every Phase gate
   state cell in `coordination/RELEASE_GATES.md` is byte-identical to `main`.
+- Process note, recorded rather than rewritten: the pre-existing claim commit
+  `b50b31e` carries the correct `docs:` prefix but no `Co-Authored-By` trailer,
+  and it claimed the task by adding a status packet before the `GOV-TRUTH-006`
+  row existed in `coordination/TASK_CLAIMS.md`, which
+  `INTERSESSION_PROTOCOL.md` §5 makes the live-ownership record. History was
+  not amended or rebased; the final state is correct.
 
 ## Blockers
 

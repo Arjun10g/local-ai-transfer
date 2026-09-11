@@ -5,7 +5,9 @@ separate. `MERGED_SOURCE_PENDING_GATE` means source is on `main` only; it is
 not a release or live-readiness approval. `PENDING_INDEPENDENT_AUDIT` and
 `REJECTED_REPAIR_PENDING` are not approval states. `SUPERSEDED_SOURCE_HISTORY`
 retains a historical task without making it current authority;
-`BLOCKED_BELOW_GATE` records evidence that failed or cannot satisfy its gate.
+`BLOCKED_BELOW_GATE` records evidence that failed or cannot satisfy its gate;
+`QUARANTINED` means source is present on `main` but unreachable/disabled
+pending repair — it is not an approval state and confers no capability.
 
 Current claims are reconciled to exact audited integrated source
 `main@7239b7e1a6a512cabf9e5ab18ba463a7fac351fc`, the last source merge; the

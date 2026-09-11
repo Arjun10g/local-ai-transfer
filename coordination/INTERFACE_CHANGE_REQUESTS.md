@@ -31,9 +31,10 @@
   this additive source correction is not activation, production availability,
   compile, Windows, or target approval, and advances no phase or release gate.
 - **Affected interface:** `contracts/action-journal-storage/v0.1.0.json`
-  `status_codes`, which the merged suite
-  `tests/native/test_windows_action_journal_storage_static.py:126` requires to
-  equal the exact set of status strings emitted by
+  `status_codes`, which the merged suite's
+  `test_machine_status_contract_exactly_matches_header_mapping`
+  (`tests/native/test_windows_action_journal_storage_static.py:151-152`)
+  requires to equal the exact set of status strings emitted by
   `native/action_journal_storage/windows_storage.cpp`. That translation unit now
   holds two boundaries: the v1 container lease and the dormant v2
   `DescriptorActionJournal` WAL lease.

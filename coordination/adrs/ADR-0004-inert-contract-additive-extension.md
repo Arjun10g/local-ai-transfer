@@ -7,6 +7,13 @@
 - **Implementation owner:** S1 Runtime
 - **Related task/request:** RUN-WINDOWS-DESCRIPTOR-JOURNAL-BOOTSTRAP;
   ICR-RUN-WDJB-001; generalizes ADR-0003
+- **Provenance:** decision made by S0 Sol and relayed for recording; Sol's merge
+  of this refresh to `main` is the ratifying act. Formal gate approval remains
+  separate.
+- **Form:** this ADR deliberately follows ADR-0003's reduced erratum form
+  (Context / Decision / Consequences / Validation / Approval) rather than the
+  full `templates/ADR.md`, matching the closest precedent for a pre-activation
+  source correction.
 
 ## Context
 
@@ -77,10 +84,11 @@ interface artifact describing two boundaries once either becomes reachable.
 
 ## Validation
 
-- The merged status-set assertion in
-  `tests/native/test_windows_action_journal_storage_static.py` compares the
-  contract's declared status strings against the exact set emitted by
-  `native/action_journal_storage/windows_storage.cpp`.
+- The merged status-set assertion
+  `test_machine_status_contract_exactly_matches_header_mapping`
+  (`tests/native/test_windows_action_journal_storage_static.py:151-152`)
+  compares the contract's declared status strings against the exact set emitted
+  by `native/action_journal_storage/windows_storage.cpp`.
 - The descriptor bootstrap suite pins each new status to its own refusal
   condition, so no two conditions can collapse back onto one code.
 - The contract's availability gates are asserted `false`, which is the
