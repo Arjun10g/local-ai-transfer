@@ -214,20 +214,74 @@ Rules:
 
 ## 10. Process policy
 
-`process.run_allowlisted` accepts:
+> **Corrected 2026-09-11 (governance refresh v6).** This section previously
+> documented `process.run_allowlisted` as accepting
+> `executable_id` / `arguments` / `workspace_id` / `timeout_ms`. No shipping
+> component has ever accepted that shape. Sol's ruling is that the shipping
+> catalogue is authoritative, so the schema below is corrected to the shipping
+> form and the rules are restated against it. This is a documentation
+> correction only: no source, schema, capability, or gate changed, and
+> `process.run_allowlisted` remains `NOT_READY_REFUSED` for Windows
+> process/app/browser/clipboard execution.
+
+`process.run_allowlisted` accepts exactly `action_id` plus an optional
+`parameters` object, with no additional properties:
 
 ```json
 {
-  "executable_id": "git",
-  "arguments": ["status", "--short"],
-  "workspace_id": "project",
-  "timeout_ms": 10000
+  "action_id": "git_status",
+  "parameters": {"path": "src"}
 }
 ```
 
+The shape is pinned in three shipping places: the advertised
+catalogue (`tests/model/production_tool_call_eval.json`, the 33-tool shipping
+profile), the tool definition and input schema
+(`host/tools/local/process-run.mjs:23-25`, `processDefinition.parameters` and
+`.input_schema`), and the controller's argument validator
+(`host/agent/controller.mjs:127`). In all three, `action_id` is the only
+required field, `parameters` is an object, and `additionalProperties` is `false`
+at the top level. Two of the three also declare `minLength: 1` alongside
+`maxLength: 64`; `host/agent/controller.mjs:127` declares `maxLength` only,
+which is not a hole because the runtime validator at
+`host/tools/local/process-run.mjs:83` enforces `{min: 1, max: 64}` regardless.
+
+The tool is declared a **fourth** time, in the frozen contract
+`contracts/external-tools/v0.1.0.json:72`. It agrees on the field names — which
+is what this correction turns on — but constrains the nested `parameters` object
+more tightly than the three above do, using `additionalProperties: false`,
+`maxProperties: 16` and a key pattern where they use
+`additionalProperties: true`. **No test compares the two**
+(`tests/host/external-tools.test.mjs` checks only top-level
+`additionalProperties` and a tool count), so the divergence is recorded here
+rather than left uncited.
+
+The model never chooses an executable. `action_id` selects one **fixed,
+operator-configured action**, and the operator's configuration — not the model —
+supplies the executable path, the argument vector, and the working directory.
+When actions are configured, the advertised schema is narrowed further to a
+`oneOf` over the configured action IDs, with each variant requiring exactly the
+placeholder parameters that action declares
+(`host/tools/local/process-run.mjs`, `modelSchema`). With no action configured,
+the tool is not advertised at all (`host/tools/local/index.mjs:55,69`).
+
 Rules:
 
-- Map logical ID to a canonical executable path.
+- Resolve `action_id` against the operator-configured action table only; an
+  unknown `action_id` is refused. The model cannot name an executable, a path,
+  or a raw argument vector.
+- Substitute each declared parameter into the operator's fixed argument vector
+  by explicit placeholder, validating each value against its declared type,
+  length, enum, and numeric bounds. Reject prototype-polluting identifiers
+  (`__proto__`, `constructor`, `prototype`).
+- Refuse interpreter and shell executables outright — `powershell`, `pwsh`,
+  `cmd`, `wscript`, `cscript`, `mshta`, `bash`, `sh`, `zsh`, `fish`, `python`,
+  `python3`, `node`, `deno`, `ruby`, `perl`, `rundll32`, `regsvr32`, `msiexec`,
+  `installutil` — and refuse script-extension targets (`.bat`, `.cmd`, `.ps1`,
+  `.vbs`, `.js`, `.hta`, and the rest of that family).
+- Bound the configuration itself: at most 32 actions, 32 arguments per action,
+  64-character parameter names, and 8,192-character parameter values (the bound
+  is `value.length`, i.e. UTF-16 code units, not bytes).
 - Validate each argument and total length.
 - Spawn directly without shell.
 - Use an approved working directory.
@@ -237,10 +291,21 @@ Rules:
 - Kill the process tree on timeout/cancel.
 - Limit stdout/stderr and mark truncation.
 - Never expose raw environment variables.
-- Require confirmation for mutating commands.
-- Keep an explicit subcommand/argument policy for powerful executables such as Git or PowerShell.
+- Require confirmation. The shipping definition sets
+  `requires_confirmation: true` unconditionally at risk tier `T3`, so
+  confirmation is not limited to commands judged mutating.
+- Keep an explicit subcommand/argument policy for a powerful allowlisted
+  executable such as Git. This is the operator's responsibility, expressed in
+  the action's fixed argument vector and parameter declarations.
 
-PowerShell itself is not an unrestricted generic tool. Approved scripts may be exposed as distinct logical tools with fixed parameters.
+PowerShell is not available through this tool at all. Earlier revisions of this
+section described a subcommand policy for PowerShell; the shipping
+implementation instead refuses `powershell`, `powershell_ise` and `pwsh` as
+executables outright, along with the other interpreters and shells listed
+above, so there is no PowerShell path to constrain. If PowerShell capability is
+ever required, an approved script must be exposed as a distinct logical tool
+with fixed parameters under a separate approval — it cannot be reached by
+configuring a `process.run_allowlisted` action.
 
 ## 11. Application and browser policy
 

@@ -1,6 +1,288 @@
 # Program Status
 
-## Current governance snapshot — 2026-09-11 (refresh v5)
+## Current governance snapshot — 2026-09-11 (refresh v6)
+
+- **Remote evaluation run 2026-09-11-b: PENDING — launch-ready, awaiting
+  operator permission. It has not executed.** The run authorized under ADR-0005
+  (`remote-eval-20260911-b`, caps USD 10.00 and 4 hours) reached a launch-ready
+  state on 2026-09-11 and was then blocked at the tool layer by the Claude Code
+  auto-mode permission classifier. That is a **harness control, not a project
+  gate**: no project refusal, blocker, or policy stopped it, and the lane
+  correctly declined to re-shape or route around the denial, because a
+  billable cloud provisioning command is exactly what such a control exists to
+  hold. A human approval is required. **USD 0.00 spent, no instance created,
+  `.secrets/j1m/` empty (zero residue), no reservation row.** There is no
+  score, no oracle delta, no retention ratio, and no remote hash verification.
+  The destination `artifacts/qwen35-9b/remote-eval-20260911-b/` exists at 0700
+  and is empty. The run's numbers will be recorded as a **separate addendum**
+  when they exist; nothing in this document anticipates them.
+- **Three launch attempts on 2026-09-11 returned typed `input_rejected` before
+  any provider call**, each traced by Sol stepping the pre-spend gates in
+  isolation. All three were pre-spend, at USD 0.00.
+  - *Staging.* The recorded launch command used a **relative**
+    `--artifact-destination`. `prepare_artifact_destination`
+    (`scripts/j1m_orchestrator.py:408`) computes
+    `Path(destination).relative_to(j1m_runner.PRIVATE_OUTPUT_ROOT)`, and since
+    that root is the absolute repository root a relative operand raises and is
+    surfaced as `artifact destination must live under the trusted output root`.
+    **This is not a code defect** — refusing an ambiguous destination before
+    anything is billable is the correct behaviour and must not be loosened. The
+    ergonomic fix is recorded as `J1M-CLI-RELATIVE-DESTINATION-001`, and until
+    it lands every launch command must carry an absolute destination.
+  - *Provider backstop.* `.secrets/shadeform.env` carried
+    `SHADEFORM_AUTO_TERMINATE_HOURS=2` against a 1.94 h eval plan, giving
+    1.03x headroom where `scripts/shadeform_lifecycle.py:190` requires
+    `MIN_BACKSTOP_MARGIN = 1.10`; the refusal is a typed `BackstopError`
+    (`:3374-3386`). Sol raised the ceiling to 3, a deliberate decision rather
+    than a fitted knob — the code says so itself at `:3384` — putting the worst
+    case at 3 h × USD 1.35 = USD 4.05, inside the USD 10.00 run cap. Only key
+    names and that non-secret numeric ceiling are recorded here; **no credential
+    value** from that file was read, printed, or reproduced anywhere.
+  - *Legacy cost ledger.* `sf.list_candidates` validates
+    `experiments/runtime/cost-ledger.jsonl` against
+    `local_bmo.shadeform.cost-event.v2`
+    (`scripts/shadeform_lifecycle.py:80`), and the 108-line 2026-09-04 ledger
+    failed canonicalization at line 1 with `stored cost event is not canonical`
+    (`:1989`). **This blocked every run**, and it is the concrete, reproducible
+    form of the abstract `SAFE_TO_MIGRATE_NOW` /
+    `legacy_schema_or_owner_binding_missing` blocker that governance had been
+    carrying in the abstract for weeks.
+- **Reviewed cost-ledger genesis executed (LEDGER-GENESIS-001 → done).** Sol
+  moved the legacy ledger — sha256
+  `756daa504fc9a1af40f32ce4af777935fb0bcdd00b01a1ad8688ab2c02f4c692`, 108 lines
+  holding 43 settled rows summing USD 6.767912 plus 65 pending rows across 22
+  pending-only owners whose instances already hold deletion receipts,
+  adjudicated by Sol as historical stale estimates and non-billable — to
+  `experiments/runtime/legacy/cost-ledger.legacy-20260904.jsonl` at 0600 inside
+  a 0700 directory, and copied it to
+  `archive/worktree-runtime-state-20260911/main-cost-ledger.legacy-20260904.jsonl`
+  with `SHA256SUMS.ledger`. `scripts/shadeform/initialize_cost_ledger.py` then
+  ran with `--program local-bmo-shadeform --currency USD --budget-cap-usd 50
+  --prior-settled-spend-usd 6.767912 --current-pending-owner-count 0`, the two
+  required evidence digests, and the reviewed-genesis confirmation, returning
+  `status: created`. Verified read-only in this refresh: the legacy file hashes
+  to exactly that sha256 at 108 lines, and the new
+  `experiments/runtime/cost-ledger.jsonl` is 438 bytes, one line — the sole
+  genesis event — at mode 0600. **Residual, explicitly not closed:** the
+  migration preflight's hardcoded literal `"safe_to_migrate_now": False`
+  (`scripts/shadeform_ledger_migration_preflight.py:1110`) is unchanged in
+  source and the incidents-schema findings stand. A genesis does not
+  retroactively validate the legacy rows; it archives them and starts a
+  canonical ledger beside them.
+- **Pre-spend gates after genesis, all read-only or local.**
+  `list_candidates` returned **9 candidates**, exactly one matching the pinned
+  target (hyperstack / montreal-canada-2 / A100_80G / USD 1.35 per hour).
+  No ephemeral key was ever minted by any launch attempt: all three refused earlier, at the destination, backstop and ledger gates, before key creation was reached. `.secrets/j1m/` is empty, and that emptiness is what proves the orchestrator lifecycle never began — not that a run's key was cleaned up. Separately, Sol's **isolated** gate probe called `create_ephemeral_ssh_key` and `assert_persisted_argv_handle` once, then `destroy_ephemeral_key_directory`, which is why the directory is empty rather than absent. That probe is not the orchestrator, and it minted nothing for run b. Nothing beyond the read-only catalogue query contacted a provider.
+- **Two offline dry-run gaps recorded as follow-ups.** The gate passed at 142
+  argv / 0 refused while two live blockers stood, because it exercises a fake
+  environment and a fake ledger. It did not check the real environment's
+  backstop against the configured runtime
+  (`J1M-DRYRUN-REAL-ENV-BACKSTOP-001`) or the real ledger's canonical validity
+  (`J1M-DRYRUN-LEDGER-VALIDITY-001`). Either check would have caught its
+  blocker offline, before a launch attempt and at zero cost. This is the
+  honest limit of the current gate: a PASS proves the argv surface, not the
+  environment the run will actually meet.
+- Audited integrated source baseline: exact
+  `main@f89c1684ea051e1c9c92f944cb080d424a086f55`, the last source merge. The
+  docs descendants `1e341e9`, `aa1087a`, `25a0d95`, `74a43d0`, `335211f`,
+  `1b22a40` (claims flips) and this refresh are documentation descendants, not
+  self-referential source hashes. The previous baseline `263f114` and the
+  refresh v5 snapshot below are historical and superseded. Overall
+  release/full-access state remains `BLOCKED` / `NOT_READY`; no phase or
+  release gate is advanced.
+- Four slices were integrated this interval, each independently reviewed.
+  Comparator evaluation phase (`9a8519c`, merge `c4c0c82`) and comparator
+  engine transport (`943d013`, merge `997b3f1`) each returned
+  `ACCEPT_FOR_MERGE` on the first pass. The model quality corpus (`0cea3ec`,
+  merge `79a8888`) and the paired salvage-transport / key-handle slices
+  (`6c475d4` and `b11e617`, merge `f89c168`) each returned
+  `ACCEPT_WITH_REQUIRED_FIXES` on the first pass and `ACCEPT_FOR_MERGE` after
+  repair. None adds compile, live, provider, production, Windows, or target
+  evidence.
+- **Comparator evaluation phase.** Adds a default-OFF `--evaluate-comparators`
+  flag that retains the comparator arms, scores them with the same evaluator,
+  and writes a `comparator-eval-receipt.v1`. Comparison mathematics use a
+  paired bootstrap with an unpaired stratified fallback. Default-OFF
+  equivalence is proved: with no selection, the plans for every mode are
+  byte-identical to the plans with the flag absent.
+- **Comparator engine transport.** Makes the arms runnable by running them
+  against the pinned upstream `llama-server` — the `runtime_oracle` the
+  specification already names — rather than building a second product engine.
+  This is the substitution Sol confirmed, and it leaves `native/` byte-unchanged,
+  so the compiled Q4 identity is untouched. Adds `--transport upstream-openai`,
+  moves the selection vocabulary to the closed set `'' | q4-oracle | q8 |
+  q8,bf16`, carries the per-arm bearer via `--api-key-file` (minted `O_EXCL`
+  0600, never present in any argv, log, or receipt), binds each arm to
+  `127.0.0.1` on its own port, and flips `_COMPARATOR_ENGINE_AVAILABLE` to
+  `True`. Honest residual recorded by the reviewer: the sampler chains are
+  argmax-equivalent, not identical, and token-sequence equivalence cannot be
+  proved offline because it needs the GGUF.
+- **Model quality corpus.** 1,336 cases across 13 categories against a 1,180
+  floor and a 1,298 target; hash-derived splits (`sha256(id) % 100`) of 271
+  train / 250 dev / 815 test; six author lanes merged conflict-free, each
+  touching only its own category files; 103 tests. Every scoring proposition
+  carries an inline deterministic `match` object — 271 fact items (207
+  `key_facts` plus 64 `forbidden_facts`) and 284 rubric items, 555 in total —
+  so pass/fail is computed by string and regex evaluation with no model, judge,
+  or human rater anywhere in the path. That is what makes the corpus gateable;
+  before it, 176 cases depended on a matcher the corpus never defined.
+  Independent audit returned `ACCEPT_FOR_MERGE` with a residual
+  scoring-affecting defect estimate of **0.2%** (3 cases), safe in the
+  under-crediting direction only — it can reject a correct answer but cannot
+  admit a violation. A further residual errs the opposite way and is excluded
+  from that 0.2%; both must close before the corpus produces a retention or
+  parity number. A fixture is not a score: the corpus advances no gate.
+- **Salvage transport and private key handle.** Restores a bounded,
+  allowlisted, identity-bound receipt salvage. It is not a revert: the TOCTOU
+  rationale of `2d7db4f` is preserved by never giving SCP the validated
+  destination — transfers land in a private staging directory and are published
+  by no-follow descriptor. The ephemeral SSH key moves to
+  `.secrets/j1m/<run-id>-<nonce>/ssh-key` and is destroyed on every exit path
+  except one narrow window: between the handle proof and the protected region a
+  `signal.signal` `ValueError` raised off the main thread leaves the per-run key
+  directory in place, at 0700/0600 and gitignored;
+  the validators are byte-unchanged, and tests pin that the old temporary-
+  directory layout is still refused, so the fix is at the operand rather than
+  the gate. Build, prove and eval now fail when a required receipt is missing,
+  and comparator receipts are salvageable and identity-bound.
+- **Three latent refusals are fixed.** Salvage had been unconditionally refused
+  since `2d7db4f`, so a paid eval run would have returned `failed` with zero
+  receipts. `_persist_lifecycle` raised `NameError` on an undefined
+  `MAX_RECEIPT_BYTES` since `8e3f599`, and because both call sites swallow
+  exceptions, no lifecycle receipt had ever been written. The key operand shape
+  failed the canonical-private-handle rule `validate_persisted_argv` has
+  enforced since `991b70e`, refusing every ssh/scp argv before it could spawn.
+  One of the three — the `_persist_lifecycle` `NameError` — was found by the
+  offline dry-run gate. The gate's other find was the artifact-destination mode,
+  which is not one of these three; the key-operand refusal was self-disclosed by
+  the salvage packet and the salvage refusal was the deliberate `2d7db4f` state.
+- **First launch attempt stopped pre-spend.** On 2026-09-11
+  `remote-eval-20260911-a` stopped at the pre-launch gate at **USD 0.00**. No
+  instance was created, no provider mutation of any kind was issued,
+  `--execute` was never passed, and `SOL_J1M_REVIEWED=1` was never set. It
+  stopped because salvage was refused, so the run could not have returned the
+  receipt it exists to produce. Nothing required teardown.
+- **Model-lane factual corrections, each verified in source.** (a) The
+  evaluation lane is gated by `SOL_J1M_REVIEWED=1`
+  (`scripts/j1m_orchestrator.py:2840-2841`), **not** by
+  `REMOTE_EXECUTION_ENABLED`, which exists only in
+  `scripts/shadeform/remote_external_tools.py` (`:85`, enforced `:804` and
+  `:1255`) and gates only the hostile-tools QA lane. (b) The lane reproduces
+  the Q4 from the **public** pinned revision with no token: `HF_TOKEN` is not
+  in `MUTATION_ENV_KEYS` (`scripts/shadeform_lifecycle.py:134-152`), and the
+  orchestrator records at `:2410-2412` that it must not be placed on the
+  ephemeral host. Any claim that Hugging Face rotation blocks evaluation is
+  withdrawn; SI-002 rotation remains required for authenticated Hugging Face
+  use. (c) bf16, Q8_0 and Q4 are rebuilt in **every** eval run
+  (`scripts/j1m_runner.py:1420-1422`), so the "must budget a full
+  re-conversion" planning statement in B-004, B-006 and `MODEL_DECISION.md` is
+  withdrawn in favour of the marginal comparator cost — but only if the runtime clock gate admits the comparator phase: `fits_static_worst_case` (`scripts/j1m_orchestrator.py:914`) is computed False for every selection, the frequently quoted `raises_authorized_cost: False` (`:917`) is a hardcoded literal rather than a verdict, and `_comparator_clock_available` (`:921`) can refuse the phase at run time with typed `comparator_clock_insufficient` (`:949`), so a budgeted run can pass the Q4 evaluation, spend the money, and still return no retention number. (d) The ledger migration
+  preflight's verdict is not computed: `"safe_to_migrate_now": False` is a
+  hardcoded literal at
+  `scripts/shadeform_ledger_migration_preflight.py:1110`, alongside
+  `adjudication_required: True` and `genesis_emission_forbidden: True`; four
+  structural findings previously masked by permission refusals are now visible
+  and `evidence_complete` remains false. (e) B-004's prescribed non-A100 canary
+  is unexecutable — `execute()` refuses canary mode (`:2023`) and
+  `scripts/test/cuda_device_probe.py:67-68` demands a single A100 — so Sol
+  accepted running the built-in probes on the A100 itself, recorded as an
+  explicit deviation.
+- **Spend authorization (ADR-0005).** On 2026-09-11 the user granted standing
+  authorization to launch provider runs for this program. Sol set the program
+  hard cap at USD 50, consistent with the USD 43.232088 that remains after the
+  settled USD 6.767912 is subtracted, and records per-run caps per run.
+  Lifecycle rules are unchanged: read-only catalogue → cost preflight →
+  dry-run gate → watchdog/backstop → salvage before teardown on every exit path
+  → exact teardown → post-run verification. That last step is **exact-instance,
+  not account-wide**: by design "no account-wide instance-list operation exists
+  in this module" (`scripts/shadeform_lifecycle.py:6-9`). Bookkeeping is not
+  gate approval.
+- **Ledger and permissions.** `experiments/` moved 0755 → 0700 and 22
+  `*.deletion-receipt.json` files 0644 → 0600, content byte-identical with zero
+  git diff. The **legacy** ledger settled at USD 6.767912 across 108 rows and
+  43 distinct identities; it has since been archived and superseded by the
+  genesis recorded above, so `experiments/runtime/cost-ledger.jsonl` is now the
+  sole genesis event carrying that figure forward as
+  `prior_settled_spend_usd`. The one orphan receipt `j1m-loopback-no-orphan` /
+  `instance-loopback-1` (`actual_cost_usd` 7.1e-05) is adjudicated by Sol as a
+  non-billable loopback test artifact; the other 21 match. No tooling command
+  exists to apply that adjudication, so it stands as a recorded decision.
+- **Governance document correction.** `SECURITY_AND_TOOL_POLICY.md` §10
+  documented `process.run_allowlisted` as
+  `executable_id`/`arguments`/`workspace_id`/`timeout_ms`. No shipping
+  component accepts that shape; the advertised catalogue, the tool definition
+  (`host/tools/local/process-run.mjs:23-25`) and the controller validator
+  (`host/agent/controller.mjs:127`) all use `action_id` plus an optional
+  `parameters` object, agreeing on the field names and on top-level
+  `additionalProperties: false`. A fourth definition in the frozen contract
+  `contracts/external-tools/v0.1.0.json:72` agrees on the names but constrains
+  the nested `parameters` object more tightly than the three do; nothing tests
+  the pair. Per Sol's ruling the
+  shipping catalogue is authoritative and §10 is corrected to it, including
+  removal of the obsolete PowerShell subcommand-policy text — the shipping
+  implementation refuses PowerShell and every other interpreter outright. No
+  source, schema, capability, or gate changed.
+- **`max_output_tokens`, ruled.** Three values disagreed. Only the engine's is
+  enforced: `native/server/chat_request.cpp:269` rejects anything outside
+  `1..256` with `max_tokens out of range` and defaults to 8 when the field is
+  absent (`:271`). `contracts/engine-api/contract.json:4` declares
+  `"max_tokens": 64` and its `README.md:47` repeats it, but nothing enforces
+  that at runtime and it is now narrower than the shipping engine.
+  `MODEL_DECISION.md` describes a 1,024 UI default and a 2,048 hard answer cap,
+  which the engine would refuse outright. **Sol's ruling: the enforced engine
+  contract bound is authoritative for the MVP.** The corpus, the shipping
+  fixture and the lane validators already bind to 256. The larger deep-mode
+  budgets are marked aspirational in `MODEL_DECISION.md` and require an
+  engine-api version bump through `INTERFACE_CHANGE_REQUESTS.md`; the
+  `contracts/engine-api` 64 should be reconciled by that same bump.
+- **Worktree housekeeping.** After the 103 removals recorded in v5, Sol had the
+  remaining 10 removed on 2026-09-11. All 10 `git worktree remove` calls
+  succeeded with no `--force` and no `rm -rf`; `git worktree prune` then exited
+  cleanly. Non-git runtime state was archived first to
+  `archive/worktree-runtime-state-20260911/` — which sits **beside** the
+  repository, not inside it — as 7 tarballs plus `SHA256SUMS` and `MANIFEST.md`,
+  directory mode 0700, with `shasum -a 256 -c SHA256SUMS` passing on all 8
+  entries. Three of the 10 had only build output and needed no tarball. One
+  differing `.env` was moved there at mode 0600 and **never opened**; hashes,
+  sizes and modes only. **No branch ref was deleted:** all 10 removed
+  worktrees' `luna/*` refs remain and every tip is reachable by name. At this
+  baseline the repository holds **134 `luna/*` refs** (135 heads including
+  `main`), up from the 121→122 recorded at cleanup time because lanes continued
+  to be created afterwards. `git worktree list` in this refresh shows exactly
+  **two** worktrees — the `main` checkout and this refresh worktree — so no
+  active lane worktree remains for Sol to remove.
+- **Current evidence reproduced on this baseline** (worktree root, 2026-09-11):
+  `python3 -m unittest discover -s tests -t . -p 'test_*.py'` **`Ran 743
+  tests` OK**; `npm test` **432 tests / 430 pass / 0 fail / 0 cancelled / 1
+  skipped / 1 todo**; safe QA **`BLOCKED`**, 70 discovered / 0 missing / 0
+  unknown, **76 records (1 PASS / 75 SKIP)**; offline J1M dry-run gate
+  **PASS**, 142 argv recorded, 0 refused, **USD 0.00**, 0 WARN;
+  quality-corpus validator **PASS** in both modes over **1,336** cases; strict
+  tracked-JSON **168 tracked / 167 strict-valid / 1 intentional hostile
+  fixture**; host import graph **29 modules / 67 unique relative import edges /
+  0 unresolved / 0 cycles** from 72 occurrences. Two invocation facts belong
+  with these: the `-t .` root argument is load-bearing, because without it
+  `tests/qa/` shadows the root `qa/` package and discovery collapses to `Ran
+  646 tests` with **8 module-level errors**; and the dry-run gate **FAILS** in a
+  fresh worktree on `operator_artifact_destination_is_salvage_ready` until
+  `chmod 700 artifacts artifacts/qwen35-9b` is applied, because git cannot
+  carry directory modes. No `duration_ms` figure is carried into this record:
+  a single wall clock on one development host is not reproducible evidence.
+- No readiness follows from any of the above. Authorized spend is not evidence;
+  merged source is not evidence; evidence is not approval. Previously exposed
+  credentials, including the leaked Hugging Face token, still require
+  source-side rotation or revocation before any authenticated use. Missing real
+  signed artifact custody, model-quality evidence, provider accounts and
+  consent, native compile and secure-owner evidence, an exact Windows
+  hardware/backend receipt, live tool evidence, and target acceptance all
+  remain release gates.
+
+## HISTORICAL / SUPERSEDED governance snapshot — 2026-09-11 (refresh v5)
+
+> Historical interval snapshot for `main@263f114`; superseded by the refresh v6
+> snapshot above wherever it states current truth. In particular its
+> `REMOTE_EXECUTION_ENABLED`, re-conversion-budget, unauthored-corpus, and
+> worktree-retention statements are corrected above.
 
 - Audited integrated source baseline: exact
   `main@263f11413d1746044a6cc13062ad2b1f821c4d11`, the last source merge. The
