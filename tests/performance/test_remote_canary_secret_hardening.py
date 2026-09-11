@@ -434,6 +434,9 @@ class RemoteCanaryAndReceiptHardeningTests(unittest.TestCase):
         # source-fixed mapping of receipt basenames, and the remote directory
         # is a single source constant rather than a caller or config value.
         self.assertEqual(sorted(self.orchestrator._SALVAGE_RECEIPT_ALLOWLIST), [
+            "comparator-receipt-bf16.json",
+            "comparator-receipt-q4_k_m.json",
+            "comparator-receipt-q8_0.json",
             "conversion-receipt.json",
             "cuda-device-receipt.json",
             "eval-artifact-receipt.json",
@@ -473,9 +476,21 @@ class RemoteCanaryAndReceiptHardeningTests(unittest.TestCase):
                         "Qwen3.5-9B-Q4_K_M.gguf", "salvage-receipt.json"):
             self.assertNotIn(hostile, self.orchestrator._SALVAGE_RECEIPT_ALLOWLIST)
         # Every fetchable name is a bare basename: no separator, no traversal,
-        # no glob metacharacter can appear in a constructed remote operand.
+        # no glob metacharacter can appear in a constructed remote operand. The
+        # comparator arm names carry an underscore, which the general pin does
+        # not admit; they are ENUMERATED rather than admitted by relaxing the
+        # pin, so a non-enumerated name is still refused.
+        comparator = frozenset(self.orchestrator._SALVAGE_COMPARATOR_RECEIPTS)
+        self.assertEqual(len(comparator), 3)
+        self.assertTrue(comparator <= set(self.orchestrator._SALVAGE_RECEIPT_ALLOWLIST))
         for name in self.orchestrator._SALVAGE_RECEIPT_ALLOWLIST:
+            if name in comparator:
+                self.assertRegex(name, r"\Acomparator-receipt-(?:q4_k_m|q8_0|bf16)\.json\Z")
+                continue
             self.assertRegex(name, r"\A[a-z][a-z0-9-]*\.json\Z")
+        for hostile in ("comparator-receipt-q4.json", "comparator-receipt-.json",
+                        "comparator-receipt-../etc/passwd", "comparator-receipt-*.json"):
+            self.assertNotIn(hostile, self.orchestrator._SALVAGE_RECEIPT_ALLOWLIST)
         # Every fetchable receipt must also declare a run-identity binding and
         # a required-key set; nothing is fetchable on schema alone.
         for name in self.orchestrator._SALVAGE_RECEIPT_ALLOWLIST:

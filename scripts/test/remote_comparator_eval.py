@@ -186,6 +186,38 @@ def verify_arm_artifact(arm: str, model: Path, scan_receipt: Path, anchor_sha256
     return {"name": name, "size_bytes": size, "sha256": digest, "quantization": quantization}
 
 
+# Required run-identity binding. The orchestrator uploads this file next to the
+# uploaded config before the first receipt-producing command; the path is
+# source-fixed on both sides so no caller, configuration value, or remote
+# response can redirect it.
+_RUN_IDENTITY_PATH = Path("/scratch/j1m/run-identity.json")
+_RUN_IDENTITY_SCHEMA = "local_bmo.j1m.run-identity.v1"
+_RUN_IDENTITY_FIELDS = ("run_id", "instance_id")
+_RUN_IDENTITY_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
+
+
+def _run_identity() -> dict[str, str]:
+    """Return this run's receipt binding, or ``unbound`` when unprovable."""
+
+    unbound = {field: "unbound" for field in _RUN_IDENTITY_FIELDS}
+    try:
+        raw = _RUN_IDENTITY_PATH.read_bytes()
+        if len(raw) > 4096:
+            return unbound
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return unbound
+    if not isinstance(payload, dict) or payload.get("schema") != _RUN_IDENTITY_SCHEMA:
+        return unbound
+    resolved = {}
+    for field in _RUN_IDENTITY_FIELDS:
+        value = payload.get(field)
+        if not isinstance(value, str) or not _RUN_IDENTITY_VALUE.match(value):
+            return unbound
+        resolved[field] = value
+    return resolved
+
+
 def fixture_contract(path: Path) -> dict[str, Any]:
     """Read the bounded fixture identity every arm is held to."""
 
@@ -508,6 +540,16 @@ def evaluate_arm(args: argparse.Namespace) -> dict[str, Any]:
         "status": status,
         "arm": args.arm,
         "artifact": artifact,
+        # Flat, required identity. The salvage transport binds every receipt it
+        # publishes to the run that produced it, and an arm receipt additionally
+        # has to say which artifact it scored and against which fixture -- a
+        # retention number computed from an arm that ran on the wrong file or a
+        # different fixture is worse than no number. These mirror
+        # ``artifact.sha256`` and ``fixture.sha256`` so the binding can be
+        # checked without reaching into a nested object.
+        "artifact_sha256": artifact["sha256"],
+        "fixture_sha256": contract["sha256"],
+        **_run_identity(),
         "anchor": {"scan_receipt_sha256": args.scan_receipt_sha256},
         "fixture": contract,
         "host": {

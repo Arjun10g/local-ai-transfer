@@ -127,15 +127,32 @@ class DryRunGateTests(unittest.TestCase):
         self.assertEqual(failure["comparator_cleanup_stages"], expected)
         self.assertIsNone(failure["comparator_cleanup_error"])
 
-    def test_a_refused_comparator_phase_records_a_typed_reason(self):
+    def test_the_comparator_arms_are_salvaged_and_produce_a_real_comparison(self):
+        """The measurement this phase is paid for, not a typed skip.
+
+        The three enumerated arm receipts are fetched through the same bounded
+        transport as every other receipt and bound to this run, so the
+        comparison receipt carries comparisons rather than
+        `comparator_receipt_missing`.
+        """
+
+        codes = self.comparator_run["salvage_codes"]
+        for name in dry_run.orchestrator._SALVAGE_COMPARATOR_RECEIPTS:
+            self.assertEqual(codes.get(name), "completed", name)
+            binding = self.comparator_run["published_identity"][name]
+            self.assertEqual(binding["run_id"], self.comparator_run["run_identity"]["run_id"])
+            self.assertEqual(binding["instance_id"],
+                             self.comparator_run["run_identity"]["instance_id"])
         receipt = self.comparator_run["comparison_receipt"]
-        self.assertTrue(receipt["skipped"])
+        self.assertTrue(receipt["comparisons"])
         for item in receipt["skipped"]:
             self.assertIn(item["reason"], sorted(dry_run.orchestrator._COMPARATOR_SKIP_REASONS))
-        # The baseline arm is never a comparator, so without its own entry a
-        # refused `q4-oracle` wrote a receipt indistinguishable from one that
-        # asked for nothing.
-        self.assertIn("q4_k_m", {item["comparator"] for item in receipt["skipped"]})
+
+    def test_an_arm_receipt_without_its_binding_is_refused_not_measured(self):
+        run = self.receipt["runs"]["__comparator_unbound__"]
+        stripped = run["stripped_receipt"]
+        self.assertEqual(run["salvage_codes"][stripped], "salvage_identity_missing")
+        self.assertNotIn(stripped, run["published"])
 
     def test_no_unexpected_child_process_was_requested(self):
         for name, run in self.receipt["runs"].items():

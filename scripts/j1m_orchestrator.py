@@ -89,7 +89,23 @@ _SALVAGE_RECEIPT_ALLOWLIST: dict[str, str] = {
     "toolchain.json": "local_bmo.j1m.toolchain.v1",
     "scan-receipt.json": "local_bmo.j1m.scan-receipt.v1",
     "post-cleanup-receipt.json": "local_bmo.j1m.post-cleanup-receipt.v1",
+    # Comparator arm receipts. These are receipts like any other -- bounded,
+    # schema-bound JSON objects written by ``remote_comparator_eval.py`` on the
+    # host -- and without them the retention measurement the comparator phase
+    # is paid for degrades to a typed skip. The three arm names are enumerated
+    # here, not derived from a pattern: the fetchable set stays exactly as
+    # source-fixed as it was, and a fourth arm name is still refused.
+    "comparator-receipt-q4_k_m.json": "local_bmo.j1m.comparator-eval-receipt.v1",
+    "comparator-receipt-q8_0.json": "local_bmo.j1m.comparator-eval-receipt.v1",
+    "comparator-receipt-bf16.json": "local_bmo.j1m.comparator-eval-receipt.v1",
 }
+# The enumerated comparator receipt names, in arm order, for the tests and the
+# design note to assert against rather than re-deriving.
+_SALVAGE_COMPARATOR_RECEIPTS = (
+    "comparator-receipt-q4_k_m.json",
+    "comparator-receipt-q8_0.json",
+    "comparator-receipt-bf16.json",
+)
 # Names a configuration may legitimately list that this transport deliberately
 # cannot carry, and why.  They are refused with their own typed reason rather
 # than the generic "not allowlisted", so a build run's receipt says plainly
@@ -120,6 +136,12 @@ _SALVAGE_REQUIRED_IDENTITY: frozenset[str] = frozenset(j1m_runner.RUN_IDENTITY_F
 _SALVAGE_REQUIRED_ARTIFACT_CLAIMS: dict[str, tuple[str, ...]] = {
     "eval-artifact-receipt.json": ("name", "size_bytes", "sha256"),
     "eval-receipt.json": ("name", "size_bytes", "sha256"),
+    # The Q4 arm scores the run's own approved artifact, so its
+    # ``artifact_sha256`` must equal it. The higher-precision arms score
+    # rebuilt files whose digests this process has no way to know, so they are
+    # required to *declare* an artifact digest and to agree with the fixture,
+    # which is the binding that is actually provable here.
+    "comparator-receipt-q4_k_m.json": ("sha256",),
 }
 # Minimum top-level keys each receipt must carry before it may be published.
 # The full per-receipt verification still runs in ``_verify_*`` after publish;
@@ -169,6 +191,13 @@ _SALVAGE_REQUIRED_KEYS: dict[str, frozenset[str]] = {
         "schema", "status", "inventory_scope", "intermediates_absent",
         "remaining_gguf", "forbidden_artifacts", "q4",
     }),
+    **{
+        name: frozenset({
+            "schema", "status", "arm", "artifact", "artifact_sha256",
+            "fixture", "fixture_sha256", "host", "settings", "metrics",
+        })
+        for name in _SALVAGE_COMPARATOR_RECEIPTS
+    },
 }
 # The locally written salvage evidence file.  It is deliberately not fetchable:
 # it describes the transfer and must never be supplied by the remote host.
@@ -1626,6 +1655,8 @@ def _salvage_identity_claims(name: str, payload: dict[str, Any]) -> dict[str, An
         if not isinstance(recorded, dict):
             raise _SalvageRefusal("salvage_identity_mismatch")
         claims = {key: recorded.get(key) for key in ("name", "size_bytes", "sha256")}
+    elif name == "comparator-receipt-q4_k_m.json":
+        claims = {"sha256": payload.get("artifact_sha256")}
     elif name == "startup-preflight-receipt.json" and payload.get("status") == "verified":
         claims = {key: payload.get(key) for key in ("size_bytes", "sha256")}
     else:
@@ -1684,6 +1715,22 @@ def _salvage_validated_payload(
         if field not in payload:
             raise _SalvageRefusal("salvage_identity_missing")
         if payload[field] != expected:
+            raise _SalvageRefusal("salvage_identity_mismatch")
+    if name in _SALVAGE_COMPARATOR_RECEIPTS:
+        # A retention number computed from an arm that scored a different
+        # fixture is worse than no number, so the fixture digest is part of the
+        # required binding rather than something checked later. Every arm must
+        # also declare the artifact digest it scored, even the two whose files
+        # this process cannot independently verify.
+        expected_fixture = identity.get("fixture_sha256")
+        if not isinstance(expected_fixture, str) or not expected_fixture:
+            raise _SalvageRefusal("salvage_run_identity_unavailable")
+        declared = payload.get("artifact_sha256")
+        if not isinstance(declared, str) or not re.fullmatch(r"[0-9a-f]{64}", declared):
+            raise _SalvageRefusal("salvage_identity_missing")
+        if payload.get("fixture_sha256") != expected_fixture:
+            raise _SalvageRefusal("salvage_identity_mismatch")
+        if payload.get("arm") != name[len("comparator-receipt-"):-len(".json")]:
             raise _SalvageRefusal("salvage_identity_mismatch")
     artifact = identity.get("artifact")
     claims = _salvage_identity_claims(name, payload)
@@ -2510,6 +2557,9 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                         "run_id": run_id,
                         "instance_id": instance_id,
                         "artifact": eval_artifact,
+                        # The fixture every comparator arm must have scored.
+                        "fixture_sha256": (_tool_eval_contract()["fixture_identity"]["sha256"]
+                                           if mode == "eval" else None),
                     },
                     # The host key pinned before the first remote command; a
                     # host swapped before teardown fails the transfer.

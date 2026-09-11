@@ -118,6 +118,24 @@ string that receipt must declare:
 | `toolchain.json` | `local_bmo.j1m.toolchain.v1` | build |
 | `scan-receipt.json` | `local_bmo.j1m.scan-receipt.v1` | build |
 | `post-cleanup-receipt.json` | `local_bmo.j1m.post-cleanup-receipt.v1` | build |
+| `comparator-receipt-q4_k_m.json` | `local_bmo.j1m.comparator-eval-receipt.v1` | eval + comparators |
+| `comparator-receipt-q8_0.json` | `local_bmo.j1m.comparator-eval-receipt.v1` | eval + comparators |
+| `comparator-receipt-bf16.json` | `local_bmo.j1m.comparator-eval-receipt.v1` | eval + comparators |
+
+The three comparator arm names are **enumerated**, not derived from a pattern.
+They carry an underscore, which the general fetchable-basename pin
+(`\A[a-z][a-z0-9-]*\.json\Z`) does not admit; the pin is not relaxed, the three
+names are listed, and `comparator-receipt-q4.json`, `comparator-receipt-.json`
+and anything glob- or traversal-shaped is still refused. Their binding is
+stricter than the rest: `run_id` and `instance_id` like every receipt, plus a
+well-formed `artifact_sha256` and a `fixture_sha256` that must equal the
+fixture this run actually holds, plus an `arm` field that must equal the arm in
+its own filename. The Q4 arm scores the run's own approved artifact, so its
+`artifact_sha256` is additionally compared against it; the two higher-precision
+arms score rebuilt files whose digests this process has no way to know, so they
+are required to *declare* one and to agree on the fixture -- which is the
+binding that is actually provable here. A retention number computed from an arm
+that scored a different fixture is worse than no number.
 
 The remote directory is the single source constant
 `_SALVAGE_REMOTE_DIRECTORY = "/scratch/j1m/artifacts"` — the same directory the
@@ -156,9 +174,9 @@ block as if they were operative. They are derived from the binding bound now.
 | Bound | Value | Constant |
 |---|---|---|
 | Per file | 2 MiB, refused not truncated | `_SALVAGE_MAX_FILE_BYTES` (= `j1m_runner._RECEIPT_MAX_BYTES`) |
-| Files fetched | 14 = allowlist size | `_SALVAGE_MAX_FILES` |
-| Total across the call | 28 MiB = files x per-file | `_SALVAGE_MAX_TOTAL_BYTES` |
-| Free space required before any transfer | 56 MiB = total x 2 | `_SALVAGE_MIN_FREE_BYTES` |
+| Files fetched | 17 = allowlist size | `_SALVAGE_MAX_FILES` |
+| Total across the call | 34 MiB = files x per-file | `_SALVAGE_MAX_TOTAL_BYTES` |
+| Free space required before any transfer | 68 MiB = total x 2 | `_SALVAGE_MIN_FREE_BYTES` |
 | Candidate names accepted | 64 | `_SALVAGE_MAX_REQUESTED_NAMES` |
 | Wall clock for the whole call | 300 s | `_SALVAGE_WALL_CLOCK_SECONDS` |
 | Per transfer | 60 s | `_SALVAGE_FILE_TIMEOUT_SECONDS` |
@@ -636,14 +654,14 @@ a selection is set. Two properties are gated beyond the shared argv check:
   a refused phase wrote `{"requested": [], "skipped": []}`. The baseline arm's
   skip is now recorded too.
 
-**Known gap, reported not fixed:** the per-arm `comparator-receipt-<arm>.json`
-files are not in the salvage allowlist, so the comparison degrades to typed
-`comparator_receipt_missing` / `comparator_baseline_missing` skips and no
-retention number can be produced. Adding them is a source-allowlist decision
-with two consequences a reviewer should weigh deliberately -- three new
-fetchable names, and basenames containing `_` that the current allowlist regex
-pin (`\A[a-z][a-z0-9-]*\.json\Z`) refuses -- so it belongs to whoever owns the
-comparator slice, not to this sync.
+- **The arm receipts are salvaged and bound.** Per Sol's decision the three
+  enumerated `comparator-receipt-<arm>.json` names are fetchable (§3.2), so the
+  comparison receipt carries real comparisons rather than
+  `comparator_receipt_missing`. The gate asserts each arm the selection requests
+  was fetched *and* carries this run's binding, and drives a separate run whose
+  Q4 arm receipt has its `run_id` stripped: it must be refused
+  `salvage_identity_missing` and never published, because an unbound arm receipt
+  becoming a retention number is the failure that matters here.
 
 ### 11.5 What it does not prove
 

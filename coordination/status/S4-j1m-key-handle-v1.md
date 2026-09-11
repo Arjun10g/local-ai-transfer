@@ -208,12 +208,41 @@ execute-test census is duplicated in two suites, the comparator merge added a
 thirteenth execute-calling test and updated only one copy, so
 `test_remote_external_tools_lifecycle` asserted `12 != 13`.
 
-**Known gap, reported not fixed:** the per-arm `comparator-receipt-<arm>.json`
-files are not in the salvage allowlist, so the comparison degrades to typed
-`comparator_receipt_missing` / `comparator_baseline_missing` skips. Adding them
-means three new fetchable names *and* relaxing the allowlist basename pin to
-admit `_`, which is a source-allowlist decision for the comparator slice's owner
-rather than for a sync.
+### Comparator arm receipts are salvageable (Sol decision)
+
+They are receipts -- bounded, schema-bound JSON objects -- and without them the
+retention measurement the comparator phase is paid for degraded to a typed
+skip. Three names are added to the source-fixed allowlist against
+`local_bmo.j1m.comparator-eval-receipt.v1`:
+`comparator-receipt-q4_k_m.json`, `comparator-receipt-q8_0.json`,
+`comparator-receipt-bf16.json`. `comparison-receipt.json` is *not* added: it is
+written locally by `_write_comparison_receipt` from the salvaged arms and is
+never produced on the host.
+
+The names are **enumerated, not pattern-matched**. They carry an underscore,
+which the fetchable-basename pin (`\A[a-z][a-z0-9-]*\.json\Z`) does not admit;
+the pin is not relaxed, the three names are listed beside it, and
+`comparator-receipt-q4.json`, `comparator-receipt-.json` and anything glob- or
+traversal-shaped remain refused -- the suite asserts each of those explicitly.
+
+Binding is stricter than for the other receipts. `remote_comparator_eval.py`
+now writes `run_id` and `instance_id` from the uploaded `run-identity.json`
+plus flat `artifact_sha256` and `fixture_sha256` fields, and the transport
+requires all four: a malformed or absent artifact digest is
+`salvage_identity_missing`, a fixture digest that is not the one this run holds
+is `salvage_identity_mismatch`, and so is an `arm` field that disagrees with the
+arm in its own filename. The Q4 arm's `artifact_sha256` is additionally compared
+against the run's approved artifact; the two higher-precision arms score rebuilt
+files whose digests this process cannot know, so they are required to declare
+one and to agree on the fixture, which is the binding that is actually provable.
+
+Caps follow the allowlist: 17 files, 34 MiB total, 68 MiB free space required.
+
+The dry run gains two checks: every arm receipt the selection requests is
+fetched and carries this run's binding, and a separate run whose Q4 arm receipt
+has its `run_id` stripped is refused `salvage_identity_missing` and never
+published. With the arms salvaged, the `q8,bf16` comparison receipt now carries
+two real comparisons and zero skips.
 
 ## Evidence
 
@@ -227,21 +256,23 @@ Post-merge, per suite:
 | `tests.performance.test_comparator_eval` | Ran 33 — OK |
 | `tests.model.test_tool_call_eval` | Ran 32 — OK |
 | `tests.performance.test_remote_canary_secret_hardening` | Ran 27 — OK |
-| `tests.performance.test_j1m_dry_run` | Ran 20 — OK |
+| `tests.performance.test_j1m_dry_run` | Ran 21 — OK |
 | `tests.performance.test_cost_ledger_genesis` | Ran 18 — OK |
 | `tests.performance.test_j1m_key_handle` | Ran 16 — OK |
 
 ```
 python3 -m unittest discover -s tests -p "test_*.py" -t .
-# Ran 633 tests — OK
+# Ran 634 tests — OK
 
 python3 scripts/j1m_dry_run.py
-# PASS — eval, prove, build plus the q8,bf16 comparator phase; 139 argv
-# recorded, none executed, 0 refused; 16/16 checks; network none; spend $0.00
+# PASS — eval, prove, build plus the q8,bf16 comparator phase; 142 argv
+# recorded, none executed, 0 refused; 18/18 checks; network none; spend $0.00
 python3 scripts/j1m_dry_run.py --mode eval    # PASS
 python3 scripts/j1m_dry_run.py --mode prove   # PASS
 python3 scripts/j1m_dry_run.py --mode build   # PASS
 python3 scripts/j1m_dry_run.py --evaluate-comparators q4-oracle   # PASS
+python3 scripts/j1m_dry_run.py --evaluate-comparators q8          # PASS
+python3 scripts/j1m_dry_run.py --evaluate-comparators ""          # PASS
 
 python3 scripts/test/run_qa.py --root . --skip-native --output -
 # 69 discovered / 0 missing / 0 unknown; 75 records (1 PASS / 74 expected SKIP);

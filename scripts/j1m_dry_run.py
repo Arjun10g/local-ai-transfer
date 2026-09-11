@@ -278,6 +278,18 @@ def fake_receipts(config: dict[str, Any], eval_artifact: dict[str, Any] | None,
         "name": "Qwen3.5-9B-Q4_K_M.gguf", "size_bytes": 1, "sha256": "0" * 64,
     }
     digest = orchestrator._APPROVED_EVAL_MANIFEST_SHA256
+
+    def arm_digest(arm: str) -> str:
+        """The Q4 arm scores the run's own artifact; the others score rebuilds.
+
+        Only the Q4 arm's digest is knowable to the orchestrator, and the
+        transport binds exactly that one. The other two are required to declare
+        a well-formed digest, which is what this stands in for.
+        """
+
+        if arm == "q4_k_m":
+            return artifact["sha256"]
+        return hashlib.sha256(arm.encode("utf-8")).hexdigest()
     contract = orchestrator._tool_eval_contract()
     fixture_identity = contract["fixture_identity"]
     counts = contract["category_counts"]
@@ -418,6 +430,30 @@ def fake_receipts(config: dict[str, Any], eval_artifact: dict[str, Any] | None,
             "vision_projection_present": False, "scan_receipt_sha256": "b" * 64,
             "tokenizer_sha256": "c" * 64, "chat_template_sha256": "d" * 64,
             "license_sha256": "b" * 64,
+        },
+        **{
+            f"comparator-receipt-{arm}.json": {
+                "schema": "local_bmo.j1m.comparator-eval-receipt.v1",
+                "status": "verified", "arm": arm,
+                "artifact": {"name": filename, "size_bytes": artifact["size_bytes"],
+                             "sha256": arm_digest(arm), "quantization": quantization},
+                "artifact_sha256": arm_digest(arm),
+                "fixture": {"sha256": fixture_identity["sha256"],
+                            "case_count": case_count},
+                "fixture_sha256": fixture_identity["sha256"],
+                "host": {"kind": "pinned-upstream-llama-server",
+                         "llama_cpp_revision": llama_revision, "backend": "cuda"},
+                "settings": {"context_tokens": contract["context_tokens"],
+                             "temperature": 0, "max_cases": case_count},
+                "metrics": {"case_count": case_count, "passed": case_count,
+                            "failed": 0, "errors": 0,
+                            "category_summary": category_summary},
+            }
+            for arm, (filename, quantization) in (
+                ("q4_k_m", ("Qwen3.5-9B-Q4_K_M.gguf", "Q4_K_M")),
+                ("q8_0", ("Qwen3.5-9B-Q8_0.gguf", "Q8_0")),
+                ("bf16", ("Qwen3.5-9B-bf16.gguf", "bf16")),
+            )
         },
         "manifest.json": {
             "schema": "local_bmo.j1m.artifact-manifest.v1",
@@ -891,15 +927,45 @@ def evaluate(results: dict[str, dict[str, Any]], recorder: Recorder,
             f"{len(comparator_argv)} arm stages all accepted; deferred cleanup {cleanup} "
             f"ran on the success path and {failure_cleanup} on an injected "
             f"eval-stage failure before the phase")
+        # What this selection actually asked for, from the same source vocabulary
+        # the orchestrator uses: `q4-oracle` requests one arm and zero
+        # comparators, so zero comparisons is its *correct* outcome.
+        selection = orchestrator._comparator_selection(run["comparators"])
+        wanted_arms = [f"comparator-receipt-{arm}.json"
+                       for arm in orchestrator._comparator_arms(selection)]
+        wanted_comparators = orchestrator._comparator_comparators(selection)
         receipt_payload = run.get("comparison_receipt") or {}
         skipped = receipt_payload.get("skipped") or []
-        typed = bool(skipped) and all(
-            isinstance(item, dict) and item.get("reason") for item in skipped)
-        add("comparator_refusal_is_typed",
-            typed or bool(receipt_payload.get("comparisons")),
-            f"comparison receipt records {len(skipped)} typed skip(s) "
-            f"{sorted({item.get('reason') for item in skipped})} rather than an "
-            f"empty list indistinguishable from asking for nothing")
+        comparisons = receipt_payload.get("comparisons") or []
+        typed = all(isinstance(item, dict) and item.get("reason") for item in skipped)
+        accounted = len(comparisons) + len(skipped) >= len(wanted_comparators)
+        add("comparator_refusal_is_typed", typed and accounted,
+            f"selection requested {len(wanted_comparators)} comparator(s); receipt "
+            f"carries {len(comparisons)} comparison(s) and {len(skipped)} skip(s) "
+            f"{sorted({item.get('reason') for item in skipped})}, every skip typed")
+
+        codes = run.get("salvage_codes") or {}
+        salvaged_arms = [name for name in wanted_arms if codes.get(name) == "completed"]
+        bound = {name: run["published_identity"].get(name) for name in salvaged_arms}
+        arms_ok = (
+            bool(wanted_arms)
+            and salvaged_arms == wanted_arms
+            and all(isinstance(value, dict) and value.get("run_id") == run["run_identity"]["run_id"]
+                    and value.get("instance_id") == run["run_identity"]["instance_id"]
+                    for value in bound.values())
+        )
+        add("comparator_receipts_salvaged_and_identity_bound", arms_ok,
+            f"{len(salvaged_arms)}/{len(wanted_arms)} enumerated arm receipts the "
+            f"{run['comparators']!r} selection requests were fetched from the source "
+            f"allowlist and bound to this run: {salvaged_arms}")
+
+        unbound_run = results.get("__comparator_unbound__", {})
+        unbound_codes = unbound_run.get("salvage_codes") or {}
+        stripped = unbound_run.get("stripped_receipt")
+        add("an_unbound_comparator_receipt_is_refused",
+            unbound_codes.get(stripped) in {"salvage_identity_missing", "salvage_identity_mismatch"},
+            f"{stripped} with its run binding stripped is refused as "
+            f"{unbound_codes.get(stripped)!r} and never published")
 
     probe = Recorder()
     probe.record(["ssh", "-i", "/nonexistent/id_ed25519", "user@host", "df"],
@@ -956,6 +1022,9 @@ def run_dry_run(modes: tuple[str, ...] = ("eval",), *, key_root: Path | None = N
         results["__comparator_cleanup_on_failure__"] = drive(
             "eval", inject_failure=False, key_root=key_root, recorder=Recorder(),
             comparators=comparators, fail_eval_stage="remote_model_eval.py")
+        # And an arm receipt with its binding stripped must be refused rather
+        # than becoming a number this run is about to pay for.
+        results["__comparator_unbound__"] = _unbound_comparator_run(comparators, key_root)
     primary = modes[0]
     results["__injected_failure__"] = drive(
         primary, inject_failure=True, key_root=key_root, recorder=Recorder())
@@ -978,7 +1047,8 @@ def run_dry_run(modes: tuple[str, ...] = ("eval",), *, key_root: Path | None = N
                               "unknown_subprocesses", "inject_failure", "salvage_codes",
                               "comparators", "comparator_phase", "comparator_cleanup_error",
                               "comparator_cleanup_stages", "comparison_receipt",
-                              "fail_eval_stage"}}
+                              "fail_eval_stage", "stripped_receipt",
+                              "published_identity", "run_identity"}}
             for name, run in results.items()
         },
         "duration_ms": int((time.monotonic() - started) * 1000),
@@ -991,6 +1061,26 @@ def run_dry_run(modes: tuple[str, ...] = ("eval",), *, key_root: Path | None = N
         receipt_path.parent.mkdir(parents=True, exist_ok=True)
         receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return receipt
+
+
+def _unbound_comparator_run(comparators: str, key_root: Path | None) -> dict[str, Any]:
+    """Drive one run whose Q4 arm receipt has lost its run-identity binding."""
+
+    stripped = "comparator-receipt-q4_k_m.json"
+    real_fake_receipts = fake_receipts
+
+    def without_binding(*args, **kwargs):
+        receipts = real_fake_receipts(*args, **kwargs)
+        payload = json.loads(receipts[stripped])
+        payload.pop("run_id", None)
+        receipts[stripped] = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
+        return receipts
+
+    with mock.patch.object(sys.modules[__name__], "fake_receipts", side_effect=without_binding):
+        outcome = drive("eval", inject_failure=False, key_root=key_root,
+                        recorder=Recorder(), comparators=comparators)
+    outcome["stripped_receipt"] = stripped
+    return outcome
 
 
 def _missing_receipt_run(mode: str, key_root: Path | None) -> dict[str, Any]:
