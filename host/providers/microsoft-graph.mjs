@@ -16,12 +16,14 @@ const MAX_WRITE_RECORDS = 256;
 const MAX_RECONCILIATION_ITEMS = 50;
 // Microsoft Graph populates `internetMessageHeaders` only on a single-message
 // projection; a `/messages` collection query cannot return the custom
-// operation marker, so exact draft proof costs one bounded ID page plus one
-// GET per candidate. The in-flight and restart reconciliation seams therefore
-// share one candidate budget: the smaller restart bound is the only value that
-// fits inside the 10 s `mail.create_draft` tool budget, and a single constant
-// keeps the two paths from drifting apart again.
-const MAX_DRAFT_PROOF_CANDIDATES = 20;
+// operation marker, so exact mail proof costs one bounded ID page plus one GET
+// per candidate. Every seam that needs the marker — in-flight draft, restart
+// draft, and Sent Items — therefore shares one candidate budget: the smaller
+// restart bound is the only value that fits inside the 10 s
+// `mail.create_draft`/`mail.send_draft` tool budgets, and a single constant
+// keeps the paths from drifting apart again. The per-call request bound is
+// explicit: one list page plus at most this many exact GETs.
+const MAX_MAIL_PROOF_CANDIDATES = 20;
 // Stop issuing candidate GETs this far before the enclosing tool deadline. An
 // in-flight reconciliation that overran the tool budget would surface as
 // `tool_timeout` and drive a recoverable record to `unknown_manual`; stopping
@@ -39,7 +41,10 @@ const MIN_PROOF_REQUEST_MS = 250;
 // mid-pass, and `getAccessToken` clears the cache, which clears the session
 // and revokes the operator's capability grants.
 const TOKEN_LIVENESS_MARGIN_MS = 90000;
-const DRAFT_PROOF_SELECT = 'id,subject,body,toRecipients,ccRecipients,internetMessageHeaders,changeKey';
+const MAIL_PROOF_SELECT = 'id,subject,body,toRecipients,ccRecipients,internetMessageHeaders,changeKey';
+// Sent Items proof additionally needs the provider's own send timestamp to
+// bound a match to the post-snapshot window.
+const SENT_PROOF_SELECT = `${MAIL_PROOF_SELECT},sentDateTime`;
 const ACCOUNT_OBJECT_ID = /^(?=.{1,512}$)[^\s\p{Cc}\p{Cf}]+$/u;
 // Graph message/chat creation and sent timestamps are documented as UTC.
 // Keep the proof parser narrower than generic RFC3339: accepting a local
@@ -48,6 +53,7 @@ const ACCOUNT_OBJECT_ID = /^(?=.{1,512}$)[^\s\p{Cc}\p{Cf}]+$/u;
 // bounded to the OData-compatible 1–12 digits.
 const GRAPH_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,12}))?Z$/u;
 const OPERATION_ID = /^act_[a-f0-9]{32}$/u;
+const OPERATION_MARKER = /^act_[a-f0-9]{32}:[a-f0-9]{64}(?::[a-f0-9]{64})?$/u;
 const DIGEST = /^[a-f0-9]{64}$/u;
 const RESTART_CANDIDATE_KEYS = Object.freeze(['operation_id', 'tool_name', 'state', 'arguments_digest', 'operation_digest']);
 const LAE_OPERATION_HEADER = 'x-lae-operation';
@@ -157,7 +163,7 @@ const projectionDraft = value => {
   if (matchingOperationHeaders.length > 1) return null;
   const operationHeader = matchingOperationHeaders[0];
   const operationMarkerValue = operationHeader?.value;
-  const operation_marker = operationMarkerValue === undefined ? null : typeof operationMarkerValue === 'string' && /^act_[a-f0-9]{32}:[a-f0-9]{64}(?::[a-f0-9]{64})?$/u.test(operationMarkerValue) ? operationMarkerValue : null;
+  const operation_marker = operationMarkerValue === undefined ? null : typeof operationMarkerValue === 'string' && OPERATION_MARKER.test(operationMarkerValue) ? operationMarkerValue : null;
   if (operationMarkerValue !== undefined && operation_marker === null) return null;
   const bodyPreview = previewText(body.text, 512);
   return { id, subject, raw_body: rawBody, content_type: contentType, body: body.text, body_preview: bodyPreview.text, body_truncated: bodyPreview.truncated, recipients, etag, change_key: changeKey, operation_marker };
@@ -359,26 +365,37 @@ export class MicrosoftGraphProvider {
     if (!Number.isFinite(remaining) || remaining < MIN_PROOF_REQUEST_MS) return { allowed: false, timeoutMs: undefined };
     return { allowed: true, timeoutMs: Math.min(this.requestTimeoutMs, Math.floor(remaining)) };
   }
-  // One bounded Drafts ID page followed by one explicit GET per candidate.
-  // Both reconciliation seams share this retrieval so their request budget,
-  // projection strictness, and uniqueness rules cannot diverge. `exhausted`
-  // means the deadline stopped the walk: that is an inconclusive result, never
-  // evidence of absence.
-  async collectDraftProof({ marker, matches, signal, deadline = null }) {
+  // One bounded folder ID page followed by one explicit GET per candidate ID.
+  // Every marker-proof seam — in-flight draft, restart draft, and Sent Items —
+  // shares this retrieval so their request budget, projection strictness, and
+  // uniqueness rules cannot diverge. The request bound is exactly one list page
+  // plus at most `MAX_MAIL_PROOF_CANDIDATES` GETs per call. `exhausted` means
+  // the deadline stopped the walk: that is an inconclusive result, never
+  // evidence of absence. `folder` and `select` are host-internal literals; no
+  // model, provider, or operator value reaches them, and `$top` is applied
+  // last so a caller's `listQuery` can never widen the shared candidate cap.
+  async collectMailProof({ folder, listQuery, select, project = projectionDraft, marker, matches, signal, deadline = null }) {
+    // An absent or malformed marker can never identify a host-written
+    // operation, and must never be allowed to equal a projection's own absent
+    // marker. Refuse before spending a single request.
+    if (!OPERATION_MARKER.test(marker ?? '')) return { values: null, truncated: false, exhausted: false };
     const listBudget = this.proofRequestBudget(deadline);
     if (!listBudget.allowed) return { values: null, truncated: false, exhausted: true };
-    const response = await this.request({ method: 'GET', path: `${API}/me/mailFolders/drafts/messages`, query: { '$top': MAX_DRAFT_PROOF_CANDIDATES, '$select': 'id' }, signal, timeoutMs: listBudget.timeoutMs });
-    const collection = proofCollection(response.body, MAX_DRAFT_PROOF_CANDIDATES); if (!collection.values || collection.truncated) return { values: collection.values, truncated: collection.truncated, exhausted: false };
+    const response = await this.request({ method: 'GET', path: `${API}/me/mailFolders/${folder}/messages`, query: { ...listQuery, '$top': MAX_MAIL_PROOF_CANDIDATES }, signal, timeoutMs: listBudget.timeoutMs });
+    const collection = proofCollection(response.body, MAX_MAIL_PROOF_CANDIDATES); if (!collection.values || collection.truncated) return { values: collection.values, truncated: collection.truncated, exhausted: false };
     const ids = uniqueProofMap(collection.values, value => validResource(value) ? { id: value.id } : null); if (!ids) return { values: null, truncated: false, exhausted: false };
     const found = [];
     for (const { id } of ids) {
       const itemBudget = this.proofRequestBudget(deadline);
       if (!itemBudget.allowed) return { values: null, truncated: false, exhausted: true };
-      const item = await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(id)}`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$select': DRAFT_PROOF_SELECT }, signal, timeoutMs: itemBudget.timeoutMs });
-      const draft = projectionDraft(item.body); if (!draft || draft.id !== id) return { values: null, truncated: false, exhausted: false };
-      if (draft.operation_marker === marker && matches(draft)) found.push(draft);
+      const item = await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(id)}`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$select': select }, signal, timeoutMs: itemBudget.timeoutMs });
+      const projected = project(item.body); if (!projected || projected.id !== id) return { values: null, truncated: false, exhausted: false };
+      if (projected.operation_marker === marker && matches(projected)) found.push(projected);
     }
     return { values: found, truncated: false, exhausted: false };
+  }
+  async collectDraftProof({ marker, matches, signal, deadline = null }) {
+    return this.collectMailProof({ folder: 'drafts', listQuery: { '$select': 'id' }, select: MAIL_PROOF_SELECT, marker, matches, signal, deadline });
   }
   // In-flight reconciliation runs inside the caller's tool budget. It reports
   // every unproven outcome as typed data instead of throwing: a throw here
@@ -387,12 +404,12 @@ export class MicrosoftGraphProvider {
   // Operator cancellation still propagates, because that is a decision rather
   // than an ambiguity.
   async listDraftsForMarker(marker, expectedDigest, signal, deadline = null) {
-    if (!marker) return { values: null, truncated: false, exhausted: false };
+    if (!DIGEST.test(expectedDigest ?? '')) return { values: null, truncated: false, exhausted: false };
     try { return await this.collectDraftProof({ marker, matches: draft => draftContentDigest(draft) === expectedDigest, signal, deadline }); }
     catch (error) { if (error?.code === 'provider_cancelled' || signal?.aborted) throw error; return { values: null, truncated: false, exhausted: false }; }
   }
   async listDraftsForRestartProof(marker, expectedArgumentsDigest, signal) {
-    if (!marker || !DIGEST.test(expectedArgumentsDigest ?? '')) return { values: null, truncated: false, exhausted: false };
+    if (!DIGEST.test(expectedArgumentsDigest ?? '')) return { values: null, truncated: false, exhausted: false };
     return this.collectDraftProof({ marker, matches: draft => draftMatchesActionArguments(draft, expectedArgumentsDigest), signal });
   }
   async reconcileRestartCandidate(input, signal) {
@@ -426,16 +443,27 @@ export class MicrosoftGraphProvider {
       arguments_digest: candidate.arguments_digest, account_fingerprint: accountFingerprint,
     });
   }
-  async listSentForDigest(expectedDigest, existingIds, snapshotAt, sentMarker, signal) {
-    const response = await this.request({ method: 'GET', path: `${API}/me/mailFolders/sentitems/messages`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$top': MAX_RECONCILIATION_ITEMS, '$orderby': 'sentDateTime desc', '$select': 'id,subject,body,toRecipients,ccRecipients,changeKey,sentDateTime,internetMessageHeaders' }, signal });
-    const collection = proofCollection(response.body); if (!collection.values || collection.truncated) return { values: collection.values, truncated: collection.truncated };
-    const upper = this.now() + 60000;
-    const mapped = uniqueProofMap(collection.values, value => {
-      if (!Array.isArray(value?.internetMessageHeaders) || typeof value?.sentDateTime !== 'string') return null;
-      const item = projectionDraft(value); const sentAt = graphDateTimeMs(value.sentDateTime); if (!item || !Number.isFinite(sentAt)) return null;
+  // Sent Items proof for `mail.send_draft`. Identical shape to the draft path
+  // and for the identical reason: Graph returns `internetMessageHeaders` only
+  // on a single-message projection, so a Sent Items collection query can never
+  // carry the `x-lae-operation` marker no matter what `$select` asks for. One
+  // bounded ID page then one exact GET per candidate. Like the in-flight draft
+  // seam it reports every unproven outcome as typed data instead of throwing:
+  // a throw escapes as `provider_failed`/`tool_timeout`, which the controller
+  // records as `unknown_manual` — a state no automatic path may touch.
+  // Operator cancellation still propagates, because that is a decision rather
+  // than an ambiguity.
+  async listSentForDigest(expectedDigest, existingIds, snapshotAt, sentMarker, signal, deadline = null) {
+    if (!DIGEST.test(expectedDigest ?? '') || !(existingIds instanceof Set) || !Number.isFinite(snapshotAt) || typeof sentMarker !== 'string') return { values: null, truncated: false, exhausted: false };
+    const lower = snapshotAt - 1000; const upper = this.now() + 60000;
+    const project = value => {
+      const item = projectionDraft(value); const sentAt = graphDateTimeMs(value?.sentDateTime);
+      if (!item || !Number.isFinite(sentAt)) return null;
       return { ...item, sent_at_ms: sentAt };
-    }); if (!mapped) return { values: null, truncated: false };
-    return { values: mapped.filter(item => typeof sentMarker === 'string' && item.operation_marker === sentMarker && !existingIds?.has(item.id) && draftContentDigest(item) === expectedDigest && Number.isFinite(snapshotAt) && item.sent_at_ms >= snapshotAt - 1000 && item.sent_at_ms <= upper), truncated: false };
+    };
+    const matches = item => !existingIds.has(item.id) && draftContentDigest(item) === expectedDigest && item.sent_at_ms >= lower && item.sent_at_ms <= upper;
+    try { return await this.collectMailProof({ folder: 'sentitems', listQuery: { '$orderby': 'sentDateTime desc', '$select': 'id' }, select: SENT_PROOF_SELECT, project, marker: sentMarker, matches, signal, deadline }); }
+    catch (error) { if (error?.code === 'provider_cancelled' || signal?.aborted) throw error; return { values: null, truncated: false, exhausted: false }; }
   }
   async listChatMessagesForProof(chatId, signal) {
     const response = await this.request({ method: 'GET', path: `${API}/chats/${encodeURIComponent(chatId)}/messages`, query: { '$top': MAX_RECONCILIATION_ITEMS }, signal });
@@ -459,13 +487,21 @@ export class MicrosoftGraphProvider {
     if (matches.length === 1) return verifiedResult({ call, binding, response, resource: { id: matches[0].id }, reconciliation: 'unique_exact_draft' });
     return result(call, 'ok', reconcilingPayload({ response, reconciliation: matches.length > 1 ? 'multiple_exact_drafts' : 'draft_not_found' }));
   }
-  async reconcileSendDraft(call, args, binding, response, saved, signal) {
+  // Runs inside `mail.send_draft`'s own tool budget. Every request it issues is
+  // capped by the remaining budget and every ambiguous outcome is typed data,
+  // so the seam cannot overrun `timeout_ms` and escalate a recoverable record
+  // to `unknown_manual`.
+  async reconcileSendDraft(call, args, binding, response, saved, signal, deadline = null) {
     if (!saved.prewrite_verified || !saved.post_attempted || !saved.reconciliation_allowed) return result(call, 'ok', reconcilingPayload({ response, reconciliation: 'send_reconciliation_not_authorized' }));
+    const draftBudget = this.proofRequestBudget(deadline);
+    if (!draftBudget.allowed) return result(call, 'ok', reconcilingPayload({ response, reconciliation: 'sent_proof_budget_exhausted' }));
     let draftPresent = true;
-    try { await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(args.draft_id)}`, query: { '$select': 'id' }, signal }); }
-    catch (error) { if (isNotFound(error)) draftPresent = false; else return result(call, 'ok', reconcilingPayload({ response, reconciliation: 'draft_state_unavailable' })); }
+    try { await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(args.draft_id)}`, query: { '$select': 'id' }, signal, timeoutMs: draftBudget.timeoutMs }); }
+    catch (error) { if (error?.code === 'provider_cancelled' || signal?.aborted) throw error; if (isNotFound(error)) draftPresent = false; else return result(call, 'ok', reconcilingPayload({ response, reconciliation: 'draft_state_unavailable' })); }
     if (draftPresent) return result(call, 'ok', reconcilingPayload({ response, reconciliation: 'draft_still_present' }));
-    const collection = await this.listSentForDigest(saved.draftBinding, saved.preexistingSentIds, saved.sent_snapshot_at, saved.sent_marker, signal); if (!collection.values || collection.truncated) return result(call, 'ok', reconcilingPayload({ response, reconciliation: collection.truncated ? 'sent_collection_truncated' : 'sent_collection_unavailable' })); const sent = collection.values;
+    const collection = await this.listSentForDigest(saved.draftBinding, saved.preexistingSentIds, saved.sent_snapshot_at, saved.sent_marker, signal, deadline);
+    if (collection.exhausted) return result(call, 'ok', reconcilingPayload({ response, reconciliation: 'sent_proof_budget_exhausted' }));
+    if (!collection.values || collection.truncated) return result(call, 'ok', reconcilingPayload({ response, reconciliation: collection.truncated ? 'sent_collection_truncated' : 'sent_collection_unavailable' })); const sent = collection.values;
     if (sent.length === 1) return verifiedResult({ call, binding, response, resource: { id: sent[0].id }, reconciliation: 'unique_sent_item' });
     return result(call, 'ok', reconcilingPayload({ response, reconciliation: sent.length > 1 ? 'multiple_matching_sent_items' : 'sent_item_not_found' }));
   }
@@ -531,11 +567,11 @@ export class MicrosoftGraphProvider {
         return await this.reconcileCreateDraft(call, args, binding, response, operation.signal, saved.operation_marker, saved.proof_deadline);
       }
       if (call.name === 'mail.send_draft') {
-        saved.prewrite_verified = false; saved.post_attempted = false; saved.reconciliation_allowed = false;
+        saved.prewrite_verified = false; saved.post_attempted = false; saved.reconciliation_allowed = false; saved.proof_deadline = this.toolProofDeadline(call.name);
         const currentResponse = await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(args.draft_id)}`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$select': 'id,subject,body,toRecipients,ccRecipients,internetMessageHeaders,changeKey' }, signal: operation.signal }); const current = projectionDraft(currentResponse.body); if (!current || !saved.draftIdentity?.etag || !saved.draftIdentity?.change_key || !current.etag || !current.change_key || current.id !== args.draft_id || draftContentDigest(current) !== saved.draftBinding || current.operation_marker !== saved.sent_marker || current.etag !== saved.draftIdentity.etag || current.change_key !== saved.draftIdentity.change_key) throw new ProviderToolError('provider_permission_insufficient', 'draft identity changed after preview');
         const sentBefore = await this.request({ method: 'GET', path: `${API}/me/mailFolders/sentitems/messages`, query: { '$top': MAX_RECONCILIATION_ITEMS, '$orderby': 'sentDateTime desc', '$select': 'id,sentDateTime' }, signal: operation.signal }); const sentCollection = proofCollection(sentBefore.body); if (!sentCollection.values || sentCollection.truncated) throw new ProviderToolError('provider_invalid_response', sentCollection.truncated ? 'sent proof collection is incomplete' : 'sent proof collection unavailable'); const sentSnapshot = uniqueProofMap(sentCollection.values, item => typeof item?.sentDateTime === 'string' && Number.isFinite(graphDateTimeMs(item.sentDateTime)) && typeof item.id === 'string' && item.id.length > 0 ? { id: item.id } : null); if (!sentSnapshot) throw new ProviderToolError('provider_invalid_response', 'sent proof collection contains an incomplete or duplicate item'); saved.preexistingSentIds = new Set(sentSnapshot.map(item => item.id)); saved.sent_snapshot_at = this.now(); saved.prewrite_verified = true; saved.reconciliation_allowed = true;
         const sendHeaders = { 'If-Match': saved.draftIdentity.etag }; response = await this.request({ method: 'POST', path: `${API}/me/messages/${encodeURIComponent(args.draft_id)}/send`, headers: sendHeaders, signal: operation.signal, onDispatch: () => { saved.post_attempted = true; } });
-        return await this.reconcileSendDraft(call, args, binding, response, saved, operation.signal);
+        return await this.reconcileSendDraft(call, args, binding, response, saved, operation.signal, saved.proof_deadline);
       }
       if (call.name === 'mail.mark_read') {
         const before = await this.readMessageState(args.message_id, operation.signal);
@@ -561,7 +597,7 @@ export class MicrosoftGraphProvider {
         try { return await this.reconcileCreateDraft(call, args, binding, null, operation.signal, saved.operation_marker, saved.proof_deadline); } catch {}
       }
       if (call.name === 'mail.send_draft' && ['provider_timeout', 'provider_failed'].includes(error?.code) && !operation.signal.aborted && saved.draftBinding && saved.prewrite_verified && saved.post_attempted && saved.reconciliation_allowed) {
-        try { return await this.reconcileSendDraft(call, args, binding, null, saved, operation.signal); } catch {}
+        try { return await this.reconcileSendDraft(call, args, binding, null, saved, operation.signal, saved.proof_deadline); } catch {}
       }
       if (call.name === 'mail.mark_read' && ['provider_timeout', 'provider_failed'].includes(error?.code) && !operation.signal.aborted && saved.post_attempted) {
         try { const after = await this.readMessageState(args.message_id, operation.signal); if (after.is_read === args.is_read) return verifiedResult({ call, binding, response: null, resource: { id: after.id, is_read: after.is_read }, reconciliation: 'timeout_get_verified' }); return result(call, 'ok', reconcilingPayload({ reconciliation: 'timeout_state_unknown' })); } catch {}
