@@ -858,26 +858,62 @@ def _target_matches_candidate(target: dict[str, Any], candidate: Any) -> bool:
     therefore the default plan -- matching exactly as it did before.
     """
 
+    return _target_mismatch_reason(target, candidate) is None
+
+
+# Skip reasons ordered from least to most specific. A catalogue may offer
+# several rows that could be one approved entry, so the reason reported for
+# that entry is the deepest dimension any row reached before differing: "the
+# offer is here but priced differently" is a materially different fact from
+# "no such offer exists", and a refusal that collapses both to "absent" tells
+# an operator nothing about what to do next.
+_TARGET_SKIP_ORDER = (
+    "not_in_catalogue", "vram_mismatch", "price_mismatch",
+    "instance_type_mismatch", "os_image_mismatch", "os_image_env_override",
+    "interruptible",
+)
+
+
+def _target_mismatch_reason(target: dict[str, Any], candidate: Any, *,
+                            image_from_env: bool = False) -> str | None:
+    """Return ``None`` for an exact match, else the dimension that differed."""
+
     if (candidate.cloud.lower() != target["cloud"]
             or candidate.region.lower() != target["region"].lower()
-            or candidate.gpu != target["gpu"]
-            or candidate.hourly_usd != target["hourly_usd"]):
-        return False
+            or candidate.gpu != target["gpu"]):
+        return "not_in_catalogue"
     try:
         if int(candidate.vram_gb) != int(target["vram_gib"]):
-            return False
+            return "vram_mismatch"
     except (TypeError, ValueError):
-        return False
+        return "vram_mismatch"
+    if candidate.hourly_usd != target["hourly_usd"]:
+        return "price_mismatch"
     if "instance_type" in target and candidate.instance_type != target["instance_type"]:
-        return False
+        return "instance_type_mismatch"
     if "os_image" in target and candidate.os_image != target["os_image"]:
-        return False
+        # ``list_candidates`` reports ``SHADEFORM_IMAGE`` verbatim as every
+        # candidate's image when that key is set, so this mismatch is then a
+        # fact about the operator's environment and not about the provider.
+        # Still a refusal -- an entry approved on one image must not match an
+        # offer arriving on another -- but it is named distinctly, because the
+        # remedy is to unset the override rather than to wait for stock.
+        return "os_image_env_override" if image_from_env else "os_image_mismatch"
     if getattr(candidate, "interruptible", False):
-        return False
-    return True
+        return "interruptible"
+    return None
 
 
-def select_approved_target(config: dict[str, Any], candidates: list[Any]) -> dict[str, Any]:
+def _os_image_source(env: dict[str, str] | None) -> str:
+    """Say where a candidate's ``os_image`` came from. Never the value itself."""
+
+    if env and str(env.get("SHADEFORM_IMAGE", "") or "").strip():
+        return "env:SHADEFORM_IMAGE"
+    return "catalogue"
+
+
+def select_approved_target(config: dict[str, Any], candidates: list[Any], *,
+                           env: dict[str, str] | None = None) -> dict[str, Any]:
     """Pick the first approved target present in the live catalogue.
 
     The approved list is ordered cheapest first and is walked in that order,
@@ -887,21 +923,45 @@ def select_approved_target(config: dict[str, Any], candidates: list[Any]) -> dic
     generation, before any provider POST, and therefore at USD 0.00 -- rather
     than substituting a nearby offer.  ``AGENTS.md`` forbids silently switching
     a reviewed input, and an unapproved instance is exactly that.
+
+    Either way the per-entry verdict is carried out: on a selection as the
+    ``considered`` prefix that was skipped to reach it, and on a refusal on the
+    raised error and in its message, so a refused launch says which approved
+    entries were looked at and on which dimension each one failed.
     """
 
+    image_from_env = _os_image_source(env) != "catalogue"
     considered: list[dict[str, Any]] = []
-    for index, target in j1m_runner.approved_shadeform_targets(config):
-        match = next((item for item in candidates
-                      if _target_matches_candidate(target, item)), None)
-        if match is None:
-            considered.append({"approved_target_index": index, "cloud": target["cloud"],
-                               "region": target["region"], "hourly_usd": target["hourly_usd"],
-                               "status": "absent_from_catalogue"})
+    for index, target in enumerate(config["shadeform_targets"]):
+        record = {
+            "approved_target_index": index, "cloud": target["cloud"],
+            "region": target["region"], "gpu": target["gpu"],
+            "hourly_usd": target["hourly_usd"],
+        }
+        if not target["approved"]:
+            considered.append({**record, "status": "not_approved",
+                               "detail": target["unapproved_reason"]})
             continue
-        selection = j1m_runner.selected_target_record(config, index)
-        selection["considered"] = considered
-        return {"index": index, "target": target, "candidate": match, "selection": selection}
-    raise sf.ShadeformError("no approved J1M target is an eligible current catalogue candidate")
+        reasons = [reason for reason in
+                   (_target_mismatch_reason(target, item, image_from_env=image_from_env)
+                    for item in candidates)]
+        if None in reasons:
+            match = candidates[reasons.index(None)]
+            selection = j1m_runner.selected_target_record(config, index)
+            selection["considered"] = considered
+            selection["os_image_source"] = _os_image_source(env)
+            return {"index": index, "target": target, "candidate": match,
+                    "selection": selection}
+        deepest = max(reasons, key=_TARGET_SKIP_ORDER.index) if reasons else "not_in_catalogue"
+        considered.append({**record, "status": deepest})
+    summary = "; ".join(
+        f"#{item['approved_target_index']} {item['cloud']}/{item['region']} {item['status']}"
+        for item in considered)
+    error = sf.ShadeformError(
+        "no approved J1M target is an eligible current catalogue candidate: " + summary)
+    error.considered = considered
+    error.os_image_source = _os_image_source(env)
+    raise error
 
 
 def _assert_selected_target_within_per_run_cap(
@@ -2167,7 +2227,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
     # Walk the ordered approved list, cheapest first, and take the first entry
     # the live catalogue still offers exactly. No match anywhere on the list is
     # a typed refusal here, at USD 0.00, with nothing created.
-    chosen = select_approved_target(config, candidates)
+    chosen = select_approved_target(config, candidates, env=env)
     target = chosen["target"]
     candidate = chosen["candidate"]
     approved_target_index = chosen["index"]
@@ -2590,8 +2650,13 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     # The Q4 job is already fixed above: nothing below may
                     # change it, and a comparator failure is recorded as a
                     # typed skip rather than failing the Q4 result.
+                    # The rate is the SELECTED entry's, exactly as in the
+                    # pre-spend derivation above. Omitting it here silently
+                    # republished the primary's rate over the real one, which
+                    # on the crusoe entry understated the projection by 22%.
                     comparator_phase = _comparator_phase(
-                        config, comparator_selection, execution_deadline=execution_deadline)
+                        config, comparator_selection, execution_deadline=execution_deadline,
+                        hourly_usd=float(target["hourly_usd"]))
                     lifecycle["comparator_phase"] = comparator_phase
                     try:
                         if comparator_phase["status"] == "approved":

@@ -824,7 +824,7 @@ def _bounded_target_number(value: object, *, upper: float) -> float:
     return number
 
 
-def _validate_shadeform_target(entry: object, *, index: int) -> dict[str, Any]:
+def _validate_shadeform_target(entry: object) -> dict[str, Any]:
     """Validate one approved-target entry, failing closed on anything unknown."""
 
     if not isinstance(entry, dict):
@@ -884,8 +884,7 @@ def _validate_shadeform_targets(payload: dict[str, Any]) -> list[dict[str, Any]]
         # The singular key is the derived accessor this loader publishes, not an
         # input. Accepting both would make "which target is primary" ambiguous.
         raise ValueError("J1M config must record approved targets as the ordered list")
-    validated = [_validate_shadeform_target(entry, index=index)
-                 for index, entry in enumerate(targets)]
+    validated = [_validate_shadeform_target(entry) for entry in targets]
     first = validated[0]
     for entry in validated[1:]:
         for field in _TARGET_SHARED_CLOCK_FIELDS:
@@ -1822,6 +1821,17 @@ def build_plan(config: dict[str, Any], mode: str = "prove", *,
         "approved_targets": shadeform_targets(config),
         "selected_target": selected_target_record(config, target_index),
         "target_selection": "first approved entry that exactly matches a live catalogue candidate; refused if none does",
+        # Which image a live candidate reports is not purely a provider fact:
+        # ``list_candidates`` substitutes ``SHADEFORM_IMAGE`` for every
+        # candidate's image when that key is set, so an entry declaring a
+        # different image can then never match. The plan path reads no
+        # environment, so it records the policy and the key name; the run
+        # records which source actually applied, in ``selected_target``.
+        "os_image_policy": {
+            "env_key": "SHADEFORM_IMAGE",
+            "effect": "when set, every candidate reports that image, so an approved entry declaring a different one is refused as os_image_env_override",
+            "source": "recorded at launch; the plan path reads no environment",
+        },
         "active_run_cost_usd": round(rate * runtime, 4),
         "provider_backstop_cost_usd": round(rate * float(selected_mode["provider_backstop_hours"]), 4),
         "commands": command_plan(config) if mode == "build" else canary_command_plan(config) if mode == "canary" else [["python3", "scripts/j1m_runner.py", "--prove"]],

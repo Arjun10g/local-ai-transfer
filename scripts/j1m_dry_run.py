@@ -1110,6 +1110,14 @@ def _selection_runs(config: dict[str, Any], key_root: Path | None) -> dict[str, 
                            recorder=Recorder(), catalogue=catalogues[name])
         if expected is None:
             runs[name]["pre_spend_refusal"] = True
+    # A full eval on the most expensive approved entry, with the comparator
+    # phase on. The phase is re-derived *in run*, after the eval stages, and
+    # that re-derivation used to drop the rate and republish the primary's
+    # numbers over the real ones -- a 22% understatement in a receipt that
+    # reads as this run's own cost evidence.
+    runs["__target_crusoe_eval_comparators__"] = drive(
+        "eval", inject_failure=False, key_root=key_root, recorder=Recorder(),
+        comparators=DEFAULT_COMPARATORS, catalogue=[_candidate(config, 2)])
     return runs
 
 
@@ -1175,6 +1183,26 @@ def _add_target_selection_checks(results: dict[str, dict[str, Any]], add) -> Non
             f"#{expected} @ ${expected_rate}/h reserved ${reserved} "
             f"worst case ${projection.get('worst_case_usd')} <= cap ${projection.get('per_run_cap_usd')}")
     add("selected_target_prices_every_recorded_figure", cost_ok, "; ".join(cost_details))
+
+    run = results.get("__target_crusoe_eval_comparators__") or {}
+    phase = run.get("comparator_phase") or {}
+    budget = phase.get("budget") or {}
+    selection = run.get("selected_target") or {}
+    required = budget.get("required_seconds")
+    in_run_ok = (
+        selection.get("approved_target_index") == 2
+        and run.get("status") == "completed"
+        and budget.get("hourly_usd") == 1.65
+        and budget.get("authorized_active_cost_usd") == 3.201
+        and required is not None
+        and budget.get("projected_marginal_cost_usd") == round(1.65 * required / 3600.0, 6)
+    )
+    add("in_run_comparator_phase_keeps_the_selected_rate", in_run_ok,
+        f"eval + '{DEFAULT_COMPARATORS}' on approved entry "
+        f"#{selection.get('approved_target_index')}: phase={phase.get('status')} "
+        f"hourly=${budget.get('hourly_usd')} "
+        f"marginal=${budget.get('projected_marginal_cost_usd')} "
+        f"authorized=${budget.get('authorized_active_cost_usd')}")
 
 
 def _destination_precondition(destination: Path) -> tuple[bool, str]:

@@ -135,6 +135,23 @@ Option C, with five recorded semantics.
    denvr at USD 1.55, or crusoe in `culpeper-usa-2`, is a *different offer*
    than the one that was approved and is refused.
 
+   **`os_image` is not purely a provider fact, and this narrows the list.**
+   `list_candidates` substitutes `SHADEFORM_IMAGE` for *every* candidate's
+   image when that key is set in `.secrets/shadeform.env`
+   (`scripts/shadeform_lifecycle.py:2978-2981`). So with, say,
+   `SHADEFORM_IMAGE=ubuntu22.04_cuda12.2_shade_os` set, the denvr entry —
+   which declares CUDA 12.4 — can never match, and with the primary out of
+   stock *which alternate is reachable is decided by an environment variable
+   rather than by this list*. That is fail-closed, never a wrong rental, and
+   the created image is verified again post-create
+   (`scripts/shadeform_lifecycle.py:3659`). It is named distinctly as
+   `os_image_env_override` rather than `os_image_mismatch`, because the remedy
+   is to unset the override rather than to wait for stock. **Launch
+   precondition: leave `SHADEFORM_IMAGE` unset unless every entry the run may
+   reach declares that exact image.** A run records which source applied in
+   `selected_target.os_image_source`; the plan path reads no environment and
+   records the policy and the key name instead, in `os_image_policy`.
+
 3. **No approved entry available means the run is refused pre-spend.**
    `select_approved_target` raises `ShadeformError("no approved J1M target is
    an eligible current catalogue candidate")` before ephemeral key generation
@@ -201,8 +218,16 @@ long the run intends to take.
 
 - The lane is launchable on an approved machine while the primary is out of
   stock, without widening what "approved" means.
-- A refusal now names which approved entries were considered and why each was
-  skipped, instead of reporting one absent pin.
+- A refusal now names which approved entries were considered and, per entry,
+  the dimension it failed on — `not_in_catalogue`, `vram_mismatch`,
+  `price_mismatch`, `instance_type_mismatch`, `os_image_mismatch`,
+  `os_image_env_override`, `interruptible` or `not_approved` — instead of
+  reporting one absent pin. Where several catalogue rows could be one entry,
+  the reason reported is the deepest dimension any of them reached, because
+  "the offer is here but priced differently" is a different fact from "no such
+  offer exists". The list is carried on the raised `ShadeformError` as
+  `considered` and summarised in its message; on a *successful* selection the
+  same list carries the prefix that was skipped to reach it.
 - Every recorded dollar figure is the one that will actually be billed.
 - ADR-0005's per-run cap is enforced rather than noted, for the first time.
 - The ledger reservation, the lifecycle receipt, the plan and the watchdog argv
@@ -222,6 +247,9 @@ long the run intends to take.
 - An `approved: false` entry stays in the list with its reason. Nothing in this
   branch sets one; the field exists so a withdrawal is recorded rather than
   deleted.
+- A set `SHADEFORM_IMAGE` silently narrows which entries are reachable, as
+  §Decision item 2 records. The refusal names it, but nothing prevents an
+  operator from setting it.
 
 ### Required implementation changes
 
@@ -229,9 +257,17 @@ long the run intends to take.
 - Contracts: `model/conversion/j1m-config.json` replaces `shadeform_target`
   with `shadeform_targets` and adds `budget_policy.per_run_cap_usd`. The
   loader republishes `config["shadeform_target"]` as the primary approved entry
-  — bound to the list entry itself, not a copy — so every pre-existing reader
-  is unchanged. Supplying the singular key as *input* is refused, so "which
-  entry is primary" cannot become ambiguous. The cost-event schema
+  — bound to the list entry itself, not a copy. Supplying the singular key as
+  *input* is refused, so "which entry is primary" cannot become ambiguous. Be
+  precise about what that shim is for: on `main` the singular key had five
+  readers, and **four of them were rewritten** to explicit accessors
+  (`scripts/j1m_dry_run.py:542`, `scripts/j1m_orchestrator.py:906` and `:2067`,
+  `scripts/j1m_runner.py:1606` as they stood at `e237bbc`). Each now resolves
+  to `primary_shadeform_target` / `shadeform_targets[0]` or to the explicitly
+  selected entry, and none reads a different entry, so behaviour is unchanged
+  — but the shim itself is exercised only by
+  `tests/model/test_comparator_engine.py`, the one reader left. It exists for
+  readers outside this branch's diff, not for readers inside it. The cost-event schema
   `local_bmo.shadeform.cost-event.v2` is unchanged: the selected index is
   recorded inside the existing `candidate` object.
 - Tests: `tests/performance/test_j1m_approved_targets.py`, registered in

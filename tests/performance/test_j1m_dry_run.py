@@ -131,8 +131,25 @@ class DryRunGateTests(unittest.TestCase):
         selection_checks = {item["check"]: item["status"] for item in self.receipt["checks"]}
         for check in ("approved_target_selection_follows_the_list",
                       "unapproved_catalogue_is_refused_pre_spend",
-                      "selected_target_prices_every_recorded_figure"):
+                      "selected_target_prices_every_recorded_figure",
+                      "in_run_comparator_phase_keeps_the_selected_rate"):
             self.assertEqual(selection_checks[check], "PASS", check)
+
+    def test_a_full_eval_with_comparators_on_an_alternate_keeps_its_own_rate(self):
+        """The in-run re-derivation used to republish the primary's numbers."""
+
+        run = self.receipt["runs"]["__target_crusoe_eval_comparators__"]
+        self.assertEqual(run["status"], "completed")
+        self.assertEqual(run["selected_target"]["approved_target_index"], 2)
+        self.assertEqual(run["selected_target"]["hourly_usd"], 1.65)
+        budget = run["comparator_phase"]["budget"]
+        self.assertEqual(budget["hourly_usd"], 1.65)
+        self.assertEqual(budget["authorized_active_cost_usd"], 3.201)
+        self.assertEqual(budget["projected_marginal_cost_usd"],
+                         round(1.65 * budget["required_seconds"] / 3600.0, 6))
+        # The primary's figures must appear nowhere in this run's evidence.
+        self.assertNotIn(budget["hourly_usd"], (1.35,))
+        self.assertNotEqual(budget["authorized_active_cost_usd"], 2.619)
 
     def test_the_comparator_phase_argv_is_accepted_and_carries_no_bearer_path(self):
         """The comparator stages are argv like any other and face the same policy."""

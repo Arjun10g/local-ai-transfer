@@ -96,9 +96,18 @@ about what is built, what is evaluated, or whether anything may be launched.
 ## Backward compatibility and default-plan equivalence
 
 `load_config` republishes `config["shadeform_target"]` as the primary approved
-entry, bound to the list entry itself rather than to a copy, so all five
-pre-existing readers are untouched. Supplying the singular key as *input* is
-refused, so "which entry is primary" cannot become ambiguous.
+entry, bound to the list entry itself rather than to a copy. Supplying the
+singular key as *input* is refused, so "which entry is primary" cannot become
+ambiguous.
+
+To be accurate about what that shim does: on `main` the singular key had five
+readers and **four were rewritten** here to explicit accessors —
+`scripts/j1m_dry_run.py:542`, `scripts/j1m_orchestrator.py:906` and `:2067`,
+`scripts/j1m_runner.py:1606` as they stood at `e237bbc`. Each resolves to the
+primary or to the explicitly selected entry and none reads a different entry,
+so behaviour is unchanged; but the shim is now exercised by
+`tests/model/test_comparator_engine.py` alone. It is there for readers outside
+this diff, not for readers inside it.
 
 With the primary present the plan is the plan it was. Asserted against the
 figures the single-target config produced, written down rather than recomputed
@@ -207,11 +216,23 @@ worktree before a launch.
    machine, not a schedule; an entry that moved the backstop or watchdog would
    change the safety envelope the modes were reviewed against.
 4. **An exact match compares `os_image` where the entry declares it.** Not in
-   Sol's stated match tuple, and the catalogue's `os_image` is partly derived
-   from `SHADEFORM_IMAGE`. Included because the image is what the toolchain
+   Sol's stated match tuple. Included because the image is what the toolchain
    verdict is *about*: an entry approved on CUDA 12.2 should not match an
    offer that arrives on something else. The primary declares no image, so its
    behaviour is unchanged.
+
+   **This has a consequence worth Sol's attention.** `list_candidates`
+   substitutes `SHADEFORM_IMAGE` for every candidate's image when that key is
+   set (`scripts/shadeform_lifecycle.py:2978-2981`), so a set override makes
+   every entry declaring a different image unmatchable. With
+   `SHADEFORM_IMAGE=ubuntu22.04_cuda12.2_shade_os` and the primary out of
+   stock, denvr (12.4) is unreachable and the lane is back to one alternate —
+   chosen by an environment variable rather than by the approved list. It is
+   fail-closed (a refusal, never a wrong rental) and is named distinctly as
+   `os_image_env_override`, a run records `selected_target.os_image_source`,
+   and the plan records `os_image_policy`. **Launch precondition: leave
+   `SHADEFORM_IMAGE` unset unless every reachable entry declares that exact
+   image.**
 5. **ADR-0005's per-run cap is now enforced in source.** It was recorded but
    never checked; only the program cap was. The check is deliberately
    conservative — it uses the auto-terminate ceiling rather than the effective
@@ -240,3 +261,7 @@ would be evidence about that alternate only.
    which go slightly beyond the stated brief.
 4. Before any launch from a fresh worktree: `chmod 700 artifacts
    artifacts/qwen35-9b`, then re-run `python3 scripts/j1m_dry_run.py`.
+5. Before any launch: confirm `SHADEFORM_IMAGE` is unset in
+   `.secrets/shadeform.env` (key name only — no value need be read). If it is
+   set, only entries declaring that exact image are reachable, and a refusal
+   will report `os_image_env_override` rather than a stock problem.

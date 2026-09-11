@@ -38,7 +38,8 @@ MAIN_PLAN_KEYS = {
     "provider_backstop_cost_usd", "commands", "artifact_allowlist",
     "receipt_allowlist", "required_scratch_gib",
 }
-NEW_PLAN_KEYS = {"approved_targets", "selected_target", "target_selection"}
+NEW_PLAN_KEYS = {"approved_targets", "selected_target", "target_selection",
+                 "os_image_policy"}
 MAIN_PLAN_COSTS = {
     "prove": (0.3375, 0.4219),
     "build": (1.6875, 2.1094),
@@ -309,6 +310,85 @@ class ApprovedTargetSelectionTests(unittest.TestCase):
                 with self.assertRaises(sf.ShadeformError):
                     self.select([candidate_for(self.config, 1, **override)])
 
+    def test_a_refusal_names_every_entry_and_the_dimension_it_failed_on(self):
+        """ADR-0006 claims the refusal says what was considered; prove it."""
+
+        catalogue = [
+            candidate_for(self.config, 0, region="montreal-canada-9"),
+            candidate_for(self.config, 1, hourly_usd=1.55),
+            candidate_for(self.config, 2, interruptible=True),
+        ]
+        with self.assertRaises(sf.ShadeformError) as caught:
+            self.select(catalogue)
+        considered = caught.exception.considered
+        self.assertEqual([item["approved_target_index"] for item in considered], [0, 1, 2])
+        self.assertEqual([item["status"] for item in considered],
+                         ["not_in_catalogue", "price_mismatch", "interruptible"])
+        self.assertEqual([item["cloud"] for item in considered],
+                         ["hyperstack", "denvr", "crusoe"])
+        # The message carries the same verdicts, so a log line is enough.
+        for fragment in ("#0 hyperstack/montreal-canada-2 not_in_catalogue",
+                         "#1 denvr/houston-usa-1 price_mismatch",
+                         "#2 crusoe/culpeper-usa-1 interruptible"):
+            self.assertIn(fragment, str(caught.exception))
+
+    def test_the_reported_reason_is_the_deepest_dimension_any_row_reached(self):
+        """"Here but priced differently" is not the same fact as "not here"."""
+
+        catalogue = [dry_run._unapproved_candidate(),
+                     candidate_for(self.config, 2, instance_type="A100_sxm4_80G")]
+        with self.assertRaises(sf.ShadeformError) as caught:
+            self.select(catalogue)
+        statuses = {item["approved_target_index"]: item["status"]
+                    for item in caught.exception.considered}
+        self.assertEqual(statuses[0], "not_in_catalogue")
+        self.assertEqual(statuses[2], "instance_type_mismatch")
+
+    def test_an_unapproved_entry_is_reported_as_such_with_its_reason(self):
+        payload = json.loads(json.dumps(self.config))
+        payload["shadeform_targets"][2].update(
+            {"approved": False, "unapproved_reason": "image not reviewed for this lane"})
+        with self.assertRaises(sf.ShadeformError) as caught:
+            orchestrator.select_approved_target(payload, [dry_run._unapproved_candidate()])
+        crusoe = caught.exception.considered[2]
+        self.assertEqual(crusoe["status"], "not_approved")
+        self.assertEqual(crusoe["detail"], "image not reviewed for this lane")
+
+    def test_a_selection_carries_the_skipped_prefix_it_walked_past(self):
+        chosen = self.select([candidate_for(self.config, 0, hourly_usd=1.30),
+                              candidate_for(self.config, 2)])
+        self.assertEqual(chosen["index"], 2)
+        self.assertEqual([(item["approved_target_index"], item["status"])
+                          for item in chosen["selection"]["considered"]],
+                         [(0, "price_mismatch"), (1, "not_in_catalogue")])
+
+    def test_an_env_image_override_is_named_distinctly_and_still_refused(self):
+        """`SHADEFORM_IMAGE` makes every candidate report one image."""
+
+        env = {"SHADEFORM_IMAGE": "ubuntu22.04_cuda12.2_shade_os"}
+        # With the override set, every candidate reports the crusoe image, so
+        # denvr -- which declares 12.4 -- can never match, and the remedy is to
+        # unset the override rather than to wait for stock.
+        overridden = candidate_for(self.config, 1,
+                                   os_image="ubuntu22.04_cuda12.2_shade_os")
+        with self.assertRaises(sf.ShadeformError) as caught:
+            orchestrator.select_approved_target(self.config, [overridden], env=env)
+        self.assertEqual(caught.exception.considered[1]["status"], "os_image_env_override")
+        self.assertEqual(caught.exception.os_image_source, "env:SHADEFORM_IMAGE")
+        # Without the override the same mismatch is a fact about the provider.
+        with self.assertRaises(sf.ShadeformError) as plain:
+            orchestrator.select_approved_target(self.config, [overridden])
+        self.assertEqual(plain.exception.considered[1]["status"], "os_image_mismatch")
+        self.assertEqual(plain.exception.os_image_source, "catalogue")
+
+    def test_the_selection_records_which_os_image_source_applied(self):
+        chosen = self.select([candidate_for(self.config, 2)])
+        self.assertEqual(chosen["selection"]["os_image_source"], "catalogue")
+        env = {"SHADEFORM_IMAGE": "ubuntu22.04_cuda12.2_shade_os"}
+        chosen = orchestrator.select_approved_target(
+            self.config, [candidate_for(self.config, 2)], env=env)
+        self.assertEqual(chosen["selection"]["os_image_source"], "env:SHADEFORM_IMAGE")
+
     def test_the_primary_matches_without_declaring_an_instance_type_or_image(self):
         """The pre-existing entry declares neither, so neither is compared."""
 
@@ -347,6 +427,31 @@ class SelectedTargetCostTests(unittest.TestCase):
         for field in ("required_seconds", "static_slack_seconds", "fits_static_worst_case",
                       "arms", "requested"):
             self.assertEqual(default[field], crusoe[field], field)
+
+    def test_every_comparator_re_derivation_passes_the_selected_rate(self):
+        """The in-run phase is derived a second time; it must not lose the rate."""
+
+        source = (ROOT / "scripts" / "j1m_orchestrator.py").read_text(encoding="utf-8")
+        derivations = source.count("_comparator_phase(")
+        # One definition, one pre-catalogue refusal gate at the primary rate,
+        # one post-selection, one in-run, one plan-mode. A sixth would be a new
+        # derivation site this test has not checked for the rate.
+        self.assertEqual(derivations, 5)
+        in_run = source.split("The Q4 job is already fixed above", 1)[1][:900]
+        self.assertIn('hourly_usd=float(target["hourly_usd"])', in_run)
+        post_selection = source.split("Re-derive the phase evidence at the selected rate", 1)[1][:400]
+        self.assertIn('hourly_usd=float(target["hourly_usd"])', post_selection)
+
+    def test_an_in_run_re_derivation_at_the_selected_rate_keeps_its_figures(self):
+        deadline = orchestrator.time.monotonic() + 100000.0
+        primary = orchestrator._comparator_phase(
+            self.config, ("q8_0",), execution_deadline=deadline)
+        crusoe = orchestrator._comparator_phase(
+            self.config, ("q8_0",), execution_deadline=deadline, hourly_usd=1.65)
+        self.assertEqual(primary["budget"]["hourly_usd"], 1.35)
+        self.assertEqual(crusoe["budget"]["hourly_usd"], 1.65)
+        self.assertEqual(crusoe["budget"]["authorized_active_cost_usd"], 3.201)
+        self.assertEqual(crusoe["status"], primary["status"])
 
     def test_the_deadline_ceiling_is_time_based_and_rate_independent(self):
         ceiling = orchestrator._eval_deadline_ceiling(self.config)
@@ -389,7 +494,7 @@ class DefaultPlanEquivalenceTests(unittest.TestCase):
     def setUp(self):
         self.config = base_config()
 
-    def test_the_plan_gains_exactly_three_keys_and_changes_nothing_else(self):
+    def test_the_plan_gains_exactly_four_keys_and_changes_nothing_else(self):
         for mode in ("prove", "build", "eval", "canary"):
             with self.subTest(mode=mode):
                 plan = j1m_runner.build_plan(self.config, mode)
@@ -434,6 +539,14 @@ class DefaultPlanEquivalenceTests(unittest.TestCase):
             {"approved": False, "unapproved_reason": "image not reviewed for this lane"})
         with self.assertRaises(ValueError):
             j1m_runner.build_plan(payload, "eval", target_index=2)
+
+    def test_the_plan_records_the_os_image_env_interplay_without_reading_it(self):
+        """The plan path reads no environment, so it records the policy."""
+
+        policy = j1m_runner.build_plan(self.config, "eval")["os_image_policy"]
+        self.assertEqual(policy["env_key"], "SHADEFORM_IMAGE")
+        self.assertIn("os_image_env_override", policy["effect"])
+        self.assertIn("reads no environment", policy["source"])
 
     def test_the_plan_records_the_whole_approved_list_and_its_default(self):
         plan = j1m_runner.build_plan(self.config, "eval")
