@@ -15,7 +15,9 @@
 - **Design note:** `scripts/shadeform/SALVAGE_TRANSPORT.md` §3.2, §3.3, §3.5,
   §3.6, §4, §5 (corrected), §8 (key lifecycle), §10-§11 (tests, dry run).
 - **Commits:** `2c73302` (`security:`), `2e753a6` (`qa:`), `622f323` (`docs:`),
-  plus this packet correction.
+  the merge of `main@25a0d95`, and the comparator fixes that follow it.
+- **State:** `J1M-KEY-HANDLE-001` is `READY_FOR_REVIEW`;
+  `J1M-SALVAGE-TRANSPORT-001`'s required fixes are resolved on this branch.
 
 ## Problem
 
@@ -160,27 +162,92 @@ live run: `chmod 700 artifacts artifacts/qwen35-9b`. The dry run names this as
 `operator_artifact_destination_is_salvage_ready` and fails until it is done;
 `execute()` refuses before any billable call with the same remedy.
 
+## Merge with `main@25a0d95`
+
+`git merge --no-ff main` brought in the comparator evaluation phase (`c4c0c82`)
+and the comparator engine transport (`997b3f1`). Two textual conflicts, both
+kept-both: `scripts/test/run_qa.py` (main's `test_comparator_eval.py` plus this
+branch's two new suites) and `coordination/TASK_CLAIMS.md` (main's two flipped
+comparator rows plus this branch's two). `scripts/j1m_orchestrator.py`,
+`scripts/j1m_runner.py` and `tests/performance/test_j1m_lifecycle.py`
+auto-merged and were read through: the comparator phase, the key lifecycle, the
+run-identity upload, the destination precondition and the build-mode fail-closed
+block all coexist.
+
+Default-OFF equivalence against `main` was re-proved directly, comparing both
+checkouts in separate interpreters: `_eval_deadline_ceiling`, `_eval_uploads`,
+`_comparator_cleanup_commands`, the `--mode eval` dry-run plan and the eval
+stage count (14) are byte-identical. The only differences are the two
+deliberate operand removals -- `--token-file /scratch/j1m/engine-token` from the
+eval stage and `--token-file /scratch/j1m/comparator-token-<arm>` from every
+comparator arm stage, both of which named a path on a host this process has not
+contacted and were therefore refused by `validate_persisted_argv` before they
+could spawn.
+
+### Engine review findings folded in
+
+- **MINOR 1 — the deferred cleanup tail.** `--retain-comparators` moves `rm -f`,
+  the post-cleanup receipt and the manifest out of the runner's plan, and the
+  phase's `finally` sits below the eval-stage loop's `raise`, so a failure in any
+  later stage skipped all three and never set `comparator_cleanup_error`. The
+  tail is now an idempotent closure, armed as soon as the remote workspace
+  exists, called from both the phase's `finally` and the teardown `finally`,
+  bounded by `_eval_timeout` so it keeps the deletion reserve back and cannot
+  delay exact teardown, and non-raising by construction. The dry run injects a
+  `remote_model_eval.py` stage failure and asserts all three stages still ran.
+- **MINOR 2 — an untyped `q4-oracle` refusal.** `q4-oracle` requests one arm and
+  zero comparators, so a refusal wrote `{"requested": [], "skipped": []}`. The
+  baseline arm's skip is now recorded, for a phase refusal and for a missing or
+  invalid baseline receipt.
+- **NIT 5 — the per-arm bearer file.** `remote_comparator_eval.py` now mints its
+  bearer in its own `0700` directory and removes both with the server, which is
+  also what made the `--token-file` operand removable.
+
+One stale pin on `main` was red before this merge and is fixed here: the
+execute-test census is duplicated in two suites, the comparator merge added a
+thirteenth execute-calling test and updated only one copy, so
+`test_remote_external_tools_lifecycle` asserted `12 != 13`.
+
+**Known gap, reported not fixed:** the per-arm `comparator-receipt-<arm>.json`
+files are not in the salvage allowlist, so the comparison degrades to typed
+`comparator_receipt_missing` / `comparator_baseline_missing` skips. Adding them
+means three new fetchable names *and* relaxing the allowlist basename pin to
+admit `_`, which is a source-allowlist decision for the comparator slice's owner
+rather than for a sync.
+
 ## Evidence
 
-```
-python3 -m unittest tests.performance.test_remote_canary_secret_hardening \
-  tests.performance.test_j1m_lifecycle tests.performance.test_cost_ledger_genesis \
-  tests.performance.test_j1m_salvage_transport tests.performance.test_j1m_key_handle \
-  tests.performance.test_j1m_dry_run
-# Ran 242 tests — OK  (33 new: 16 key-handle, 17 dry-run)
+Post-merge, per suite:
 
+| Suite | Result |
+|---|---|
+| `tests.performance.test_j1m_lifecycle` | Ran 117 — OK |
+| `tests.model.test_comparator_engine` | Ran 48 — OK |
+| `tests.performance.test_j1m_salvage_transport` | Ran 47 — OK |
+| `tests.performance.test_comparator_eval` | Ran 33 — OK |
+| `tests.model.test_tool_call_eval` | Ran 32 — OK |
+| `tests.performance.test_remote_canary_secret_hardening` | Ran 27 — OK |
+| `tests.performance.test_j1m_dry_run` | Ran 20 — OK |
+| `tests.performance.test_cost_ledger_genesis` | Ran 18 — OK |
+| `tests.performance.test_j1m_key_handle` | Ran 16 — OK |
+
+```
 python3 -m unittest discover -s tests -p "test_*.py" -t .
-# Ran 549 tests — OK
+# Ran 633 tests — OK
 
 python3 scripts/j1m_dry_run.py
-# J1M offline dry run: PASS — modes eval, prove, build; 81 argv recorded,
-# none executed; network none; provider calls none; spend $0.00; 14/14 PASS
+# PASS — eval, prove, build plus the q8,bf16 comparator phase; 139 argv
+# recorded, none executed, 0 refused; 16/16 checks; network none; spend $0.00
+python3 scripts/j1m_dry_run.py --mode eval    # PASS
+python3 scripts/j1m_dry_run.py --mode prove   # PASS
+python3 scripts/j1m_dry_run.py --mode build   # PASS
+python3 scripts/j1m_dry_run.py --evaluate-comparators q4-oracle   # PASS
 
 python3 scripts/test/run_qa.py --root . --skip-native --output -
-# 67 discovered / 0 missing / 0 unknown; 73 records (1 PASS / 72 expected SKIP);
+# 69 discovered / 0 missing / 0 unknown; 75 records (1 PASS / 74 expected SKIP);
 # overall BLOCKED, unchanged
 
-git diff --check 6c475d4...HEAD   # exit 0
+git diff --check main...HEAD      # exit 0
 git status --short                # empty
 ```
 

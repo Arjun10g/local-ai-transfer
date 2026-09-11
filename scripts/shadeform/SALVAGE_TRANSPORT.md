@@ -490,6 +490,14 @@ The same reading found two further refusals that a paid run would have hit:
    receipt that could never be published. The field is now `tokens_logged`;
    again, the name was the defect, not the detector.
 
+The comparator phase merged from `main` carried the same `--token-file` defect
+in every arm stage (`--token-file /scratch/j1m/comparator-token-<arm>`), so all
+of its stages were refused before they could spawn. Fixed the same way:
+`remote_comparator_eval.py` mints its bearer in an owner-private directory of
+its own and removes it with the server it authenticated, which also closes the
+engine review's NIT 5. Its receipt's `token_logging` field is renamed
+`tokens_logged` for the same reason as the eval receipt's.
+
 Two defects of a different kind were found by *running* the dry run (§11):
 `_persist_lifecycle` referenced an undefined `MAX_RECEIPT_BYTES` and so raised
 `NameError` on every call since `8e3f599` -- silently, because both call sites
@@ -593,6 +601,8 @@ vacuously.
 | `build_salvage_returns_receipts_and_refuses_weights` | build salvages its receipts and refuses the GGUF |
 | `missing_required_receipt_fails_the_run` | a run whose required receipt never arrived reports `failed` |
 | `injected_refusal_is_caught` | a deliberately unusable `-i` operand is reported `REFUSED` by the harness itself |
+| `comparator_phase_argv_and_cleanup` | every comparator arm stage's argv is accepted, and the deferred intermediate-deletion tail runs on the success path *and* on an injected eval-stage failure before the phase |
+| `comparator_refusal_is_typed` | the comparison receipt records a typed skip rather than an empty list indistinguishable from asking for nothing |
 | `operator_artifact_destination_is_salvage_ready` | the live command's real destination would accept a publication |
 
 ### 11.3 `dry-run-receipt.json`
@@ -609,7 +619,33 @@ through `validate_persisted_receipt`: its whole purpose is to quote argv that a
 receipt validator would reject, in redacted form. The scan is the control that
 matters, and it raises rather than publishing if a planted secret ever appears.
 
-### 11.4 What it does not prove
+### 11.4 Comparator coverage
+
+`--evaluate-comparators` (default `q8,bf16`, `''` to skip) drives the
+default-OFF comparator phase as its own run, because its stages only exist when
+a selection is set. Two properties are gated beyond the shared argv check:
+
+- **The deferred cleanup tail runs on a failure path.** `--retain-comparators`
+  moves `rm -f`, the post-cleanup receipt and the manifest out of the runner's
+  own plan, so this run owes them. The phase's `finally` sits *below* the
+  eval-stage loop's `raise`, so a failure in any later stage skipped all three
+  and left `comparator_cleanup_error` unset. The tail is now an idempotent
+  closure called from both the phase and the teardown `finally`, and the gate
+  injects a `remote_model_eval.py` stage failure and asserts all three still ran.
+- **A refusal is typed.** `q4-oracle` requests one arm and zero comparators, so
+  a refused phase wrote `{"requested": [], "skipped": []}`. The baseline arm's
+  skip is now recorded too.
+
+**Known gap, reported not fixed:** the per-arm `comparator-receipt-<arm>.json`
+files are not in the salvage allowlist, so the comparison degrades to typed
+`comparator_receipt_missing` / `comparator_baseline_missing` skips and no
+retention number can be produced. Adding them is a source-allowlist decision
+with two consequences a reviewer should weigh deliberately -- three new
+fetchable names, and basenames containing `_` that the current allowlist regex
+pin (`\A[a-z][a-z0-9-]*\.json\Z`) refuses -- so it belongs to whoever owns the
+comparator slice, not to this sync.
+
+### 11.5 What it does not prove
 
 That the remote host behaves, that the model converts, or that the provider
 honours its contract. It answers one question -- *would any command in this run

@@ -46,6 +46,9 @@ class DryRunGateTests(unittest.TestCase):
         # source fact: Git does not record directory modes, so the gate is
         # asked about a destination this suite owns rather than the checkout's.
         cls.receipt = dry_run.run_dry_run(("eval", "prove", "build"), key_root=cls.key_root)
+        cls.comparator_run = next(
+            run for name, run in cls.receipt["runs"].items()
+            if name.startswith("__comparators__"))
 
     @classmethod
     def tearDownClass(cls):
@@ -62,9 +65,10 @@ class DryRunGateTests(unittest.TestCase):
     def test_no_argv_in_a_complete_run_is_refused_by_any_local_validator(self):
         refused = [item for item in self.receipt["commands"] if item["validator"] != "accepted"]
         self.assertEqual(refused, [])
-        # A full three-mode run is dozens of commands; a harness that recorded
-        # a handful would be passing by not looking.
-        self.assertGreater(self.receipt["argv_count"], 60)
+        # A full three-mode run plus the comparator phase is well over a
+        # hundred commands; a harness that recorded a handful would be passing
+        # by not looking.
+        self.assertGreater(self.receipt["argv_count"], 120)
 
     def test_the_receipt_lists_every_command_and_no_secret(self):
         self.assertEqual(self.receipt["schema"], "local_bmo.j1m.dry-run-receipt.v1")
@@ -99,6 +103,39 @@ class DryRunGateTests(unittest.TestCase):
             self.assertIn(run["key_cleanup"].get("status"), {"removed", "absent"}, name)
             self.assertFalse(run["key_directory_present"], name)
         self.assertEqual(sorted(self.key_root.iterdir()), [])
+
+    def test_the_comparator_phase_argv_is_accepted_and_carries_no_bearer_path(self):
+        """The comparator stages are argv like any other and face the same policy."""
+
+        arms = [entry for entry in self.receipt["commands"]
+                if any("remote_comparator_eval.py" in part for part in entry["argv"])]
+        self.assertTrue(arms)
+        for entry in arms:
+            self.assertEqual(entry["validator"], "accepted")
+            self.assertNotIn("--token-file", entry["argv"])
+            self.assertFalse([part for part in entry["argv"] if "comparator-token" in part])
+        self.assertEqual(self.comparator_run["comparator_phase"]["status"], "approved")
+
+    def test_the_deferred_cleanup_tail_runs_on_a_failure_before_the_phase(self):
+        """`--retain-comparators` owes three stages; a failure must not eat them."""
+
+        expected = ["--manifest", "--post-cleanup", "rm"]
+        self.assertEqual(self.comparator_run["comparator_cleanup_stages"], expected)
+        failure = self.receipt["runs"]["__comparator_cleanup_on_failure__"]
+        self.assertEqual(failure["fail_eval_stage"], "remote_model_eval.py")
+        self.assertEqual(failure["status"], "failed")
+        self.assertEqual(failure["comparator_cleanup_stages"], expected)
+        self.assertIsNone(failure["comparator_cleanup_error"])
+
+    def test_a_refused_comparator_phase_records_a_typed_reason(self):
+        receipt = self.comparator_run["comparison_receipt"]
+        self.assertTrue(receipt["skipped"])
+        for item in receipt["skipped"]:
+            self.assertIn(item["reason"], sorted(dry_run.orchestrator._COMPARATOR_SKIP_REASONS))
+        # The baseline arm is never a comparator, so without its own entry a
+        # refused `q4-oracle` wrote a receipt indistinguishable from one that
+        # asked for nothing.
+        self.assertIn("q4_k_m", {item["comparator"] for item in receipt["skipped"]})
 
     def test_no_unexpected_child_process_was_requested(self):
         for name, run in self.receipt["runs"].items():

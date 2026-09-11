@@ -198,7 +198,10 @@ class RemoteExternalToolsReceiptTests(unittest.TestCase):
 
     def test_every_execute_calling_test_method_has_runtime_isolation(self):
         found = direct_execute_methods(ROOT / "tests" / "performance")
-        self.assertEqual(len(found), 12)
+        # This census is duplicated in `test_j1m_lifecycle.py`; the comparator
+        # merge added a thirteenth execute-calling test and updated only that
+        # copy, so this one was stale and red on `main`. Both must agree.
+        self.assertEqual(len(found), 13)
         self.assertTrue(
             all(item["isolated"] for item in found),
             [item for item in found if not item["isolated"]],

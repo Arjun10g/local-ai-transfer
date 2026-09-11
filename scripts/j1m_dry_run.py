@@ -59,6 +59,9 @@ from scripts import j1m_runner, shadeform_lifecycle as sf
 ROOT = Path(__file__).resolve().parents[1]
 RECEIPT_SCHEMA = "local_bmo.j1m.dry-run-receipt.v1"
 MODES = ("eval", "prove", "build")
+# Every comparator arm the reviewed selections can request, so the gate covers
+# the widest argv the phase can build.
+DEFAULT_COMPARATORS = "q8,bf16"
 
 # Values that must never appear in any recorded argv.  They are planted in the
 # fake environment and configuration exactly where a real credential would be,
@@ -157,12 +160,15 @@ class SubprocessShim:
     failure rather than silently succeeding.
     """
 
-    def __init__(self, recorder: Recorder, *, mode: str, receipts: dict[str, bytes]) -> None:
+    def __init__(self, recorder: Recorder, *, mode: str, receipts: dict[str, bytes],
+                 fail_eval_stage: str = "") -> None:
         self.recorder = recorder
         self.mode = mode
         self.receipts = receipts
         self.phase = "setup"
         self.fail_next_remote = False
+        self.fail_eval_stage = fail_eval_stage
+        self.failed_stage_once = False
         self.unknown: list[str] = []
 
     def __call__(self, argv, *args, **kwargs):
@@ -179,6 +185,10 @@ class SubprocessShim:
         if program == "ssh-keyscan":
             return _completed(stdout=FAKE_HOST_KEY_LINE + "\n")
         if program == "ssh":
+            if (self.fail_eval_stage and not self.failed_stage_once
+                    and any(self.fail_eval_stage in item for item in argv)):
+                self.failed_stage_once = True
+                return _completed(returncode=1, stderr="dry-run injected stage failure")
             return _completed(stdout="", stderr="")
         if program == "scp":
             return self._scp(argv)
@@ -513,8 +523,17 @@ def _instance_info() -> dict[str, Any]:
 
 
 def drive(mode: str, *, inject_failure: bool, key_root: Path | None,
-          recorder: Recorder) -> dict[str, Any]:
-    """Run one complete lifecycle offline and return everything it produced."""
+          recorder: Recorder, comparators: str = "",
+          fail_eval_stage: str = "") -> dict[str, Any]:
+    """Run one complete lifecycle offline and return everything it produced.
+
+    ``comparators`` drives the default-OFF comparator phase exactly as
+    ``--evaluate-comparators`` does.  ``fail_eval_stage`` makes the shim fail the
+    first remote command containing that substring, which is how the deferred
+    intermediate-deletion tail is proved to run on a failure path: the phase's
+    own ``finally`` sits below the eval-stage loop's ``raise``, so that tail used
+    to be skipped entirely and silently.
+    """
 
     config = j1m_runner.load_config()
     run_id = "J1MDRY"
@@ -524,12 +543,15 @@ def drive(mode: str, *, inject_failure: bool, key_root: Path | None,
         eval_artifact = orchestrator._verify_eval_artifact(
             None, ROOT / "artifacts" / "qwen35-9b" / "model-manifest.json", config)
     receipts = fake_receipts(config, eval_artifact, run_id=run_id, instance_id=FAKE_INSTANCE_ID)
-    shim = SubprocessShim(recorder, mode=mode, receipts=receipts)
+    shim = SubprocessShim(recorder, mode=mode, receipts=receipts,
+                          fail_eval_stage=fail_eval_stage)
     progress: list[str] = []
     cost_events: list[dict[str, Any]] = []
     teardown_calls: list[dict[str, Any]] = []
     key_cleanup: dict[str, Any] = {}
-    outcome: dict[str, Any] = {"mode": mode, "inject_failure": inject_failure}
+    outcome: dict[str, Any] = {"mode": mode, "inject_failure": inject_failure,
+                               "comparators": comparators,
+                               "fail_eval_stage": fail_eval_stage}
 
     persisted: list[dict[str, Any]] = []
     nonces: list[str] = []
@@ -552,6 +574,7 @@ def drive(mode: str, *, inject_failure: bool, key_root: Path | None,
         nonces.append(nonce)
         return nonce
 
+    recorded_from = len(recorder.entries)
     real_remote = orchestrator._remote
 
     def recording_remote(command, *, timeout):
@@ -611,6 +634,7 @@ def drive(mode: str, *, inject_failure: bool, key_root: Path | None,
                 config_path=j1m_runner.DEFAULT_CONFIG,
                 phase_id=phase_id, run_id=run_id,
                 artifact_destination=destination, mode=mode,
+                evaluate_comparators=comparators,
             )
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
@@ -636,6 +660,10 @@ def drive(mode: str, *, inject_failure: bool, key_root: Path | None,
                 for item in final.get("salvage", []) if isinstance(item, dict)
             },
             "run_identity": run_identity,
+            "comparator_phase": final.get("comparator_phase"),
+            "comparator_cleanup_error": final.get("comparator_cleanup_error"),
+            "comparator_cleanup_stages": _cleanup_stages(recorder, since=recorded_from),
+            "comparison_receipt": _comparison_receipt(destination),
             "lifecycle_persisted": bool(persisted),
             # Read the binding out of every published receipt now: the isolated
             # namespace does not outlive this block.
@@ -647,12 +675,45 @@ def drive(mode: str, *, inject_failure: bool, key_root: Path | None,
     return outcome
 
 
+# The deferred intermediate-deletion tail, identified by what it actually runs
+# rather than by a label: `rm -f` over the comparator weights, then the runner's
+# own post-cleanup receipt and manifest stages.
+_CLEANUP_MARKERS = ("rm", "--post-cleanup", "--manifest")
+
+
+def _cleanup_stages(recorder: Recorder, *, since: int) -> list[str]:
+    """Return which of the deferred cleanup stages this run actually reached."""
+
+    found = []
+    for entry in recorder.entries[since:]:
+        argv = entry["argv"]
+        if "rm" in argv and any(part.endswith(".gguf") for part in argv):
+            found.append("rm")
+        for marker in ("--post-cleanup", "--manifest"):
+            if marker in argv:
+                found.append(marker)
+    return sorted(set(found))
+
+
+def _comparison_receipt(destination: Path) -> dict[str, Any] | None:
+    """Return the comparison receipt the run published, if it published one."""
+
+    path = destination / "comparison-receipt.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
 def _published_identity(destination: Path) -> dict[str, Any]:
     """Return each published receipt's run-identity binding, or why it is absent."""
 
     found: dict[str, Any] = {}
     for item in sorted(destination.iterdir()):
-        if item.name == orchestrator._SALVAGE_RECEIPT_NAME or item.suffix != ".json":
+        # Only *salvaged* receipts carry a run binding: `salvage-receipt.json`
+        # and `comparison-receipt.json` are written locally by this run and are
+        # not fetched from the host, so they are not in scope for this check.
+        if item.name not in orchestrator._SALVAGE_RECEIPT_ALLOWLIST:
             continue
         try:
             payload = json.loads(item.read_text(encoding="utf-8"))
@@ -804,6 +865,42 @@ def evaluate(results: dict[str, dict[str, Any]], recorder: Recorder,
         f"a run whose required receipt never arrived reports status="
         f"{missing.get('status')!r} receipt_error={missing.get('receipt_error')!r}")
 
+    comparator_runs = {name: run for name, run in results.items()
+                       if name.startswith("__comparators__")}
+    if not comparator_runs:
+        add("comparator_phase_argv_and_cleanup", True, "comparator phase not selected")
+    else:
+        run = next(iter(comparator_runs.values()))
+        phase = run.get("comparator_phase") or {}
+        cleanup = run.get("comparator_cleanup_stages") or []
+        failure_run = results.get("__comparator_cleanup_on_failure__", {})
+        failure_cleanup = failure_run.get("comparator_cleanup_stages") or []
+        comparator_argv = [
+            entry for entry in recorder.entries
+            if any("remote_comparator_eval.py" in item for item in entry["argv"])
+        ]
+        ok = (
+            phase.get("status") == "approved"
+            and bool(comparator_argv)
+            and all(entry["validator"] == "accepted" for entry in comparator_argv)
+            and cleanup == ["--manifest", "--post-cleanup", "rm"]
+            and failure_cleanup == cleanup
+        )
+        add("comparator_phase_argv_and_cleanup", ok,
+            f"selection {run['comparators']!r}: phase={phase.get('status')}, "
+            f"{len(comparator_argv)} arm stages all accepted; deferred cleanup {cleanup} "
+            f"ran on the success path and {failure_cleanup} on an injected "
+            f"eval-stage failure before the phase")
+        receipt_payload = run.get("comparison_receipt") or {}
+        skipped = receipt_payload.get("skipped") or []
+        typed = bool(skipped) and all(
+            isinstance(item, dict) and item.get("reason") for item in skipped)
+        add("comparator_refusal_is_typed",
+            typed or bool(receipt_payload.get("comparisons")),
+            f"comparison receipt records {len(skipped)} typed skip(s) "
+            f"{sorted({item.get('reason') for item in skipped})} rather than an "
+            f"empty list indistinguishable from asking for nothing")
+
     probe = Recorder()
     probe.record(["ssh", "-i", "/nonexistent/id_ed25519", "user@host", "df"],
                  phase="self-test", mode="self-test")
@@ -839,7 +936,8 @@ def _destination_precondition(destination: Path) -> tuple[bool, str]:
 
 
 def run_dry_run(modes: tuple[str, ...] = ("eval",), *, key_root: Path | None = None,
-                receipt_path: Path | None = None) -> dict[str, Any]:
+                receipt_path: Path | None = None,
+                comparators: str = DEFAULT_COMPARATORS) -> dict[str, Any]:
     """Drive every requested mode offline and return the complete receipt."""
 
     recorder = Recorder()
@@ -847,6 +945,17 @@ def run_dry_run(modes: tuple[str, ...] = ("eval",), *, key_root: Path | None = N
     results: dict[str, dict[str, Any]] = {}
     for mode in modes:
         results[mode] = drive(mode, inject_failure=False, key_root=key_root, recorder=recorder)
+    if comparators and "eval" in modes:
+        # The comparator phase is default OFF, so it needs its own run: its
+        # stages are argv like any other and must pass the same policy.
+        results[f"__comparators__{comparators}"] = drive(
+            "eval", inject_failure=False, key_root=key_root, recorder=recorder,
+            comparators=comparators)
+        # And its deferred cleanup tail has to survive a failure *before* the
+        # comparator phase is ever reached -- the path that used to skip it.
+        results["__comparator_cleanup_on_failure__"] = drive(
+            "eval", inject_failure=False, key_root=key_root, recorder=Recorder(),
+            comparators=comparators, fail_eval_stage="remote_model_eval.py")
     primary = modes[0]
     results["__injected_failure__"] = drive(
         primary, inject_failure=True, key_root=key_root, recorder=Recorder())
@@ -866,7 +975,10 @@ def run_dry_run(modes: tuple[str, ...] = ("eval",), *, key_root: Path | None = N
             name: {key: value for key, value in run.items()
                    if key in {"mode", "status", "error", "receipt_error", "build_receipts",
                               "key_cleanup", "key_directory_present", "published",
-                              "unknown_subprocesses", "inject_failure", "salvage_codes"}}
+                              "unknown_subprocesses", "inject_failure", "salvage_codes",
+                              "comparators", "comparator_phase", "comparator_cleanup_error",
+                              "comparator_cleanup_stages", "comparison_receipt",
+                              "fail_eval_stage"}}
             for name, run in results.items()
         },
         "duration_ms": int((time.monotonic() - started) * 1000),
@@ -934,12 +1046,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", action="append", choices=MODES,
                         help="lifecycle mode to drive; repeatable, defaults to every mode")
+    parser.add_argument("--evaluate-comparators", default=DEFAULT_COMPARATORS,
+                        help="comparator selection to gate as well; '' skips the phase")
     parser.add_argument("--receipt", type=Path,
                         default=ROOT / "experiments" / "runtime" / "dry-run-receipt.json")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
     modes = tuple(dict.fromkeys(args.mode or MODES))
-    receipt = run_dry_run(modes, receipt_path=args.receipt)
+    receipt = run_dry_run(modes, receipt_path=args.receipt,
+                          comparators=args.evaluate_comparators)
     if not args.quiet:
         print(render(receipt))
         print(f"\n  receipt: {args.receipt}")
