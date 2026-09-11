@@ -504,3 +504,76 @@ class NoWeakenedPolicyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FailedPlanSummaryTests(unittest.TestCase):
+    """A failed `--run` must describe itself over the SSH transport.
+
+    Run `j1m-eval-20260911-remote-e` booked its whole USD 3.273486 reservation
+    and reported `exit 1` with both streams empty, because `--run` returned 1
+    without printing anything and the real evidence stayed in
+    `command-receipt.json` on a host about to be deleted. The reservation is
+    charged in full whether or not the failure can be read, so the summary has
+    to survive the orchestrator's own credential screen -- if it does not, the
+    tail is replaced wholesale and the diagnosis is lost again.
+    """
+
+    def setUp(self):
+        self.runner = load(ROOT / "scripts/j1m_runner.py", "plan_summary_runner")
+        self.orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "plan_summary_orchestrator")
+
+    def _receipt(self, stage, status, **extra):
+        receipt = {
+            "stage": stage, "argv": ["/scratch/j1m/venv/bin/pip", "wheel", "--wheel-dir", "/scratch/j1m/wheelhouse"],
+            "started_at_utc": "2026-01-01T00:00:00+00:00",
+            "ended_at_utc": "2026-01-01T00:00:01+00:00",
+            "exit_code": 0 if status == "completed" else 1, "status": status,
+        }
+        receipt.update(extra)
+        return receipt
+
+    def test_the_summary_names_the_failed_stage_without_leaking_the_argv(self):
+        receipts = [
+            self._receipt(1, "completed"),
+            self._receipt(2, "failed", stderr_tail="ERROR: could not build wheels"),
+        ]
+        summary = self.runner._failed_plan_summary(receipts)
+        self.assertEqual(summary["status"], "plan_failed")
+        self.assertEqual(summary["failed_stage"], 2)
+        self.assertEqual(summary["stages_recorded"], 2)
+        self.assertEqual(summary["stages_completed"], 1)
+        self.assertEqual(summary["exit_code"], 1)
+        self.assertEqual(summary["stderr_tail"], "ERROR: could not build wheels")
+        # Program and operand are basenames: enough to name the stage, never
+        # the full argv the receipt already holds.
+        self.assertEqual(summary["failed_program"], "pip")
+        self.assertEqual(summary["failed_operand"], "wheel")
+        for value in summary.values():
+            self.assertNotIn("/scratch", str(value))
+
+    def test_the_summary_survives_the_orchestrators_credential_screen(self):
+        """The property that actually matters: it reaches the lifecycle receipt."""
+
+        receipts = [self._receipt(1, "failed", stderr_tail="fatal: repository not found")]
+        text = json.dumps(self.runner._failed_plan_summary(receipts), sort_keys=True)
+        # Exactly what `_remote` does to a failed stage's stdout.
+        self.assertEqual(self.orchestrator._failed_stage_output_tail(text), text)
+        self.assertNotEqual(self.orchestrator._failed_stage_output_tail(text), "<redacted>")
+
+    def test_a_plan_that_recorded_no_stage_is_typed_rather_than_invented(self):
+        summary = self.runner._failed_plan_summary([])
+        self.assertEqual(summary["error_type"], "no_stage_receipts")
+        self.assertEqual(summary["stages_recorded"], 0)
+        self.assertNotIn("failed_stage", summary)
+        text = json.dumps(summary, sort_keys=True)
+        self.assertEqual(self.orchestrator._failed_stage_output_tail(text), text)
+
+    def test_an_unscreenable_stderr_tail_is_redacted_not_dropped(self):
+        receipts = [self._receipt(1, "failed", stderr_tail="tok " + "a1b2c3d4" * 12)]
+        summary = self.runner._failed_plan_summary(receipts)
+        # Whatever the screen decides, the structural fields always survive and
+        # the whole summary still reaches the receipt.
+        self.assertEqual(summary["failed_stage"], 1)
+        self.assertIn("stderr_tail", summary)
+        text = json.dumps(summary, sort_keys=True)
+        self.assertEqual(self.orchestrator._failed_stage_output_tail(text), text)

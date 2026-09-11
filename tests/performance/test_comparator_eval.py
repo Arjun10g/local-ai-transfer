@@ -424,8 +424,9 @@ class ComparatorFlagTests(unittest.TestCase):
         self.assertEqual(self.orchestrator._eval_fetch_allowlist(self.config, ()),
                          self.config["artifacts"]["eval_fetch_allowlist"])
         extended = self.orchestrator._eval_fetch_allowlist(self.config, ("q8_0", "bf16"))
-        self.assertEqual(extended[:5], self.config["artifacts"]["eval_fetch_allowlist"])
-        self.assertEqual(extended[5:], [
+        base = len(self.config["artifacts"]["eval_fetch_allowlist"])
+        self.assertEqual(extended[:base], self.config["artifacts"]["eval_fetch_allowlist"])
+        self.assertEqual(extended[base:], [
             "comparator-receipt-q4_k_m.json", "comparator-receipt-q8_0.json",
             "comparator-receipt-bf16.json", "scan-receipt.json"])
         self.assertFalse(any(name.lower().endswith(".gguf") for name in extended))

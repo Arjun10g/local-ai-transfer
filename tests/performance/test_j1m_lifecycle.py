@@ -2067,7 +2067,7 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertEqual(plan["active_run_cost_usd"], 2.619)
         self.assertEqual(plan["provider_backstop_cost_usd"], 3.2738)
         self.assertGreater(config["modes"]["eval"]["provider_backstop_hours"], config["modes"]["eval"]["runtime_hours"])
-        self.assertEqual(config["artifacts"]["eval_fetch_allowlist"], ["eval-receipt.json", "startup-preflight-receipt.json", "eval-artifact-receipt.json", "toolchain-receipt.json", "cuda-device-receipt.json"])
+        self.assertEqual(config["artifacts"]["eval_fetch_allowlist"], ["eval-receipt.json", "startup-preflight-receipt.json", "eval-artifact-receipt.json", "toolchain-receipt.json", "cuda-device-receipt.json", "command-receipt.json"])
         commands = orchestrator._eval_remote_commands(config, "/scratch/j1m")
         flattened = [part for command in commands for part in command]
         self.assertIn(config["llama_cpp"]["revision"], flattened)

@@ -1300,7 +1300,7 @@ def _host_receipt_targets(config: dict[str, Any]) -> list[str]:
     host_root = PurePosixPath(remote_root).parent
     names = orchestrator._eval_fetch_allowlist(
         config, orchestrator._comparator_selection(DEFAULT_COMPARATORS))
-    return [
+    targets = [
         # The runner's own progress marker: written before the first stage of
         # `--run`, from `ROOT / resources.progress_path`, where `ROOT` is the
         # uploaded runner's grandparent -- /scratch, not /scratch/j1m.
@@ -1308,6 +1308,12 @@ def _host_receipt_targets(config: dict[str, Any]) -> list[str]:
         f"{remote_root}/artifacts/command-receipt.json",
         *[f"{remote_root}/artifacts/{name}" for name in names],
     ]
+    # The command receipt is named explicitly above because the runner writes
+    # it before any stage, and it is ALSO in the eval fetch allowlist so a
+    # failed plan can be diagnosed after teardown. Probing one path twice
+    # would make `probed_paths` disagree with the distinct paths refused, so
+    # collapse duplicates while keeping first-seen plan order.
+    return list(dict.fromkeys(targets))
 
 
 def host_tree_simulation(*, umask_prefix: tuple[str, ...] | list[str],

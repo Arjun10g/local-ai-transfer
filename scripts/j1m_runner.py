@@ -1857,6 +1857,56 @@ def write_progress(path: Path, stage: str, *, trusted_root: Path | None = None, 
                           trusted_root=trusted_root or PRIVATE_OUTPUT_ROOT)
 
 
+def _failed_plan_summary(receipts: list[dict[str, Any]]) -> dict[str, Any]:
+    """A bounded, screened description of the first failed plan stage.
+
+    `--run` returned 1 with BOTH streams empty on the paid run
+    `j1m-eval-20260911-remote-e`, so its lifecycle receipt recorded an exit
+    code and nothing else while the real evidence sat in
+    `command-receipt.json` on a host that was seconds from deletion. The
+    reservation is booked in full either way, so a failure that cannot be read
+    costs exactly as much as one that can.
+
+    This is the copy that travels over the SSH transport, so it has to survive
+    the orchestrator's credential screen: structural fields only, program and
+    operand reduced to basenames, never the full argv, and a stderr tail only
+    when that tail screens clean against the same validator the orchestrator
+    applies. The authoritative record remains `command-receipt.json`, which the
+    eval fetch allowlist now carries.
+    """
+
+    failed = next((item for item in receipts if item.get("status") != "completed"), None)
+    summary: dict[str, Any] = {
+        "schema": "local_bmo.j1m.plan-failure-summary.v1",
+        "status": "plan_failed",
+        "stages_recorded": len(receipts),
+        "stages_completed": sum(1 for item in receipts if item.get("status") == "completed"),
+    }
+    if failed is None:
+        # Every recorded stage completed, so the plan failed by producing no
+        # receipts at all; say that rather than inventing a stage.
+        summary["error_type"] = "no_stage_receipts"
+        return summary
+    argv = [str(part) for part in (failed.get("argv") or [])]
+    operand = ""
+    if len(argv) > 1 and not argv[1].startswith("-"):
+        operand = Path(argv[1]).name
+    summary.update({
+        "failed_stage": failed.get("stage"),
+        "failed_program": Path(argv[0]).name if argv else "unknown",
+        "failed_operand": operand,
+        "exit_code": failed.get("exit_code"),
+        "error_type": str(failed.get("error_type") or ""),
+    })
+    tail = str(failed.get("stderr_tail") or "")[-400:]
+    try:
+        validate_persisted_output(tail)
+        summary["stderr_tail"] = tail
+    except (ValueError, UnicodeError):
+        summary["stderr_tail"] = "<redacted>"
+    return summary
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -2010,7 +2060,12 @@ def main(argv: list[str] | None = None) -> int:
         config = load_config(args.config)
         commands = command_plan(config, runner=str(Path(__file__).resolve()), config_path="/scratch/j1m/j1m-config.json", source_lock=str(args.lock), retain_comparators=args.retain_comparators)
         receipts = run_commands(commands, ROOT / config["resources"]["progress_path"], token_file=args.token_file, receipt_path=Path("/scratch/j1m/artifacts/command-receipt.json"))
-        return 0 if receipts and all(item["status"] == "completed" for item in receipts) else 1
+        if receipts and all(item["status"] == "completed" for item in receipts):
+            return 0
+        # Never exit 1 silently: that booked a full reservation for an
+        # undiagnosable failure once already.
+        print(json.dumps(_failed_plan_summary(receipts), sort_keys=True))
+        return 1
     config = load_config(args.config)
     plan = build_plan(config)
     if args.plan:
