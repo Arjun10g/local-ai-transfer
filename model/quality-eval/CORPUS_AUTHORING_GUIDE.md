@@ -385,8 +385,64 @@ nested assertion blocks (`final_turn`, `first_turn`, `long_turn`, `short_turn`,
 | `must_contain` | string[] | every listed substring appears |
 | `must_not_contain` | string[] | no listed substring appears |
 | `must_match` | string[] | every listed regular expression matches (must compile) |
-| `max_words` | integer | answer is at most this many whitespace-separated words |
+| `max_words` | integer | answer is at most this many **whitespace-separated tokens** |
 | `stop` | `"eos"` \| `"length"` | how generation must have terminated |
+
+**The bullet-token rule.** `max_words` counts whitespace-separated tokens, so a
+list marker is a word. Three `'- '` bullets of twenty words each is `3 x (20 + 1) =
+63`, not 60; one `'- '` bullet of ten words is 11. A numbered marker (`1.`) counts
+the same way. Two cases shipped one and three short of their own prompts before this
+was written down — do the arithmetic against the prompt, not against the prose budget.
+
+### The `match` object — how a proposition is decided
+
+`summarization` facts and `instruction` rubric items are natural language, so each one
+carries the procedure that decides it. There is **no LLM judge and no human rater**:
+the fixture spec calls for compact deterministic contract fixtures, and a case whose
+pass/fail depends on a rater is a defect (§1).
+
+```json
+"match": {
+  "any_of": ["the hash matched", {"regex": "(?=(?s:.)*\\bhash\\w*)(?=(?s:.)*\\bmatch\\w*)"}],
+  "normalize": ["lowercase", "collapse_ws", "strip_punct", "numerals"]
+}
+```
+
+- **`normalize`** lists the steps applied to the answer before matching. They always
+  run in the canonical order `lowercase`, `collapse_ws`, `strip_punct`, `numerals`
+  regardless of how you list them, and `collapse_ws` runs once more at the end.
+  `numerals` folds spelled-out numbers up to one thousand to digits, so a matcher can
+  be written with digits only. `[]` means the raw answer, newlines and markers intact.
+- **A plain string variant** matches as a **substring** of the normalized answer and is
+  normalized the same way, so write it in ordinary prose.
+- **A `{"regex": ...}` variant** is matched with `re.search` against the normalized
+  answer and is **not** itself normalized — write the pattern in normalized form.
+  Anchor with `\A` / `\Z` for a whole-answer predicate, and express an absence with a
+  negative lookahead: `\A(?!(?s:.)*\bsimply\b)(?s:.)*\Z`.
+- **A required item** (a `key_facts` entry, a `rubric` item) passes when **any**
+  variant matches. **A forbidden item** (a `forbidden_facts` entry) passes when
+  **none** matches.
+
+Authoring rules, enforced by the validator:
+
+1. Every regex must compile and `any_of` may not be empty.
+2. A **normalized** matcher is paraphrase-sensitive and needs **at least two
+   variants** — a synonym, a numeral/word form, a singular/plural, or the literal
+   proposition alongside a looser stem conjunction.
+3. A **raw structural** matcher (`normalize: []`) is an exact predicate over the
+   answer's shape and may carry a single regex; a second variant would only loosen it.
+4. The matcher must match its own `text`/`requirement`. If the proposition does not
+   satisfy its own matcher, the matcher describes something else.
+5. Pin the numbers. A fact about a figure whose matcher does not require the figure
+   will pass on an answer that gets the figure wrong.
+
+The recommended shape for a proposition is an **order-free stem conjunction** —
+`(?=(?s:.)*\bstem1\w*)(?=(?s:.)*\bstem2\w*)` — which survives reordering and
+inflection without admitting unrelated text, plus the normalized proposition itself as
+a substring variant.
+
+A requirement that no substring or regex can decide is not a requirement this corpus
+can score. Re-word it until it is decidable, or drop it — do not leave it to a judge.
 
 ---
 
@@ -396,7 +452,8 @@ Does the model follow an explicit, checkable instruction? Not "is the answer goo
 
 | field | required | meaning |
 |---|---|---|
-| `rubric` | yes | 1..8 items `{id: "r1".., requirement, weight: 1..5}` |
+| `rubric` | yes | 1..8 items `{id: "r1".., requirement, weight: 1..5, match}` |
+| `match` (per item) | yes | the decision procedure for that requirement — see §10's `match` object |
 | `pass_threshold` | yes | fraction of **weighted** rubric items that must pass, `0 < x ≤ 1` |
 
 **Score:** the case passes iff `sum(weight of satisfied items) / sum(all weights) ≥
@@ -408,14 +465,22 @@ decidable by reading the answer alone — "answer has exactly three lines", not
 {
   "metric": "rubric_pass",
   "rubric": [
-    {"id": "r1", "requirement": "Answer contains exactly three lines.", "weight": 2},
-    {"id": "r2", "requirement": "Every line begins with the two characters '- '.", "weight": 2},
-    {"id": "r3", "requirement": "No preamble or closing sentence surrounds the list.", "weight": 1}
+    {"id": "r1", "requirement": "Answer contains exactly three lines.", "weight": 2,
+     "match": {"any_of": [{"regex": "\\A(?:[^\\n]*\\n){2}[^\\n]*\\Z"}], "normalize": []}},
+    {"id": "r2", "requirement": "Every line begins with the two characters '- '.", "weight": 2,
+     "match": {"any_of": [{"regex": "\\A(?:-\\ [^\\n]*(?:\\n|\\Z))+\\Z"}], "normalize": []}},
+    {"id": "r3", "requirement": "The words 'simply' and 'just' do not appear.", "weight": 1,
+     "match": {"any_of": [{"regex": "\\A(?!(?s:.)*\\bsimply\\b)(?!(?s:.)*\\bjust\\b)(?s:.)*\\Z"}],
+               "normalize": ["lowercase"]}}
   ],
   "pass_threshold": 1.0,
-  "max_words": 60
+  "max_words": 63
 }
 ```
+
+Note r1 and r2: a structural requirement is decided by one anchored regex over the raw
+answer, and `max_words` is 63 because three `'- '` markers are three tokens. r3 shows
+a prohibition expressed as a lookahead — the item still passes by *matching*.
 
 ---
 
@@ -449,9 +514,9 @@ A canary leak after reset is a critical failure and is never averaged away.
 
 | field | required | meaning |
 |---|---|---|
-| `key_facts` | yes | 2..16 facts that are actually stated in the source |
+| `key_facts` | yes | 2..16 `{text, match}` facts that are actually stated in the source |
 | `min_coverage` | yes | fraction of `key_facts` that must appear, `0 < x ≤ 1` |
-| `forbidden_facts` | yes | claims not supported by the source; may be `[]` |
+| `forbidden_facts` | yes | `{text, match}` claims not supported by the source; may be `[]` |
 | `max_words` | yes | length bound on the summary |
 
 **Score:** `coverage = matched key_facts / len(key_facts)`; the case passes iff
@@ -462,12 +527,33 @@ case plants an unsupported claim in the source and lists it here.
 ```json
 {
   "metric": "key_fact_coverage_and_hallucination",
-  "key_facts": ["the artifact hash matched", "the smoke test passed"],
+  "key_facts": [
+    {"text": "the artifact hash matched",
+     "match": {"any_of": [{"regex": "(?=(?s:.)*\\bartifact\\w*)(?=(?s:.)*\\bhash\\w*)(?=(?s:.)*\\bmatch\\w*)"},
+                          "the artifact hash matched",
+                          {"regex": "(?=(?s:.)*\\bhash\\w*)(?=(?s:.)*\\b(?:agree|identical|same)\\w*)"}],
+               "normalize": ["lowercase", "collapse_ws", "strip_punct", "numerals"]}},
+    {"text": "the smoke test passed",
+     "match": {"any_of": [{"regex": "(?=(?s:.)*\\bsmoke\\w*)(?=(?s:.)*\\bpass\\w*)"},
+                          "the smoke test passed",
+                          {"regex": "(?=(?s:.)*\\bsmoke\\w*)(?=(?s:.)*\\b(?:succeeded|green|ok)\\w*)"}],
+               "normalize": ["lowercase", "collapse_ws", "strip_punct", "numerals"]}}
+  ],
   "min_coverage": 1.0,
-  "forbidden_facts": ["the release was approved by the security team"],
+  "forbidden_facts": [
+    {"text": "the release was approved by the security team",
+     "match": {"any_of": [{"regex": "(?=(?s:.)*\\brelease\\w*)(?=(?s:.)*\\bapprov\\w*)(?=(?s:.)*\\bsecurity\\w*)"},
+                          "approved by the security team"],
+               "normalize": ["lowercase", "collapse_ws", "strip_punct", "numerals"]}}
+  ],
   "max_words": 50
 }
 ```
+
+A forbidden item may need to fire only on an *unhedged* claim. When the prompt permits
+reporting something as unconfirmed, add the hedge as a negative lookahead so a correctly
+hedged summary satisfies the key fact and the forbidden item at once:
+`(?=(?s:.)*\\bdrive\\w*)(?=(?s:.)*\\btransit\\w*)(?!(?s:.)*\\b(?:rumou?r|unconfirmed|alleged)\\w*)`.
 
 ---
 
@@ -583,8 +669,11 @@ The largest category (220 target). Requires `tools`.
 `call` and `no_call` are mutually exclusive. **Score:** with `call`, the parsed call
 name and argument set must match exactly (a missing, extra, or wrong-typed argument
 fails). With `no_call`, any tool call at all is a **false positive**; the aggregate
-false-positive rate must stay ≤5% (`execution/ACCEPTANCE_CRITERIA.md` §11). Aim for
-roughly one `no_call` case in three, and always declare plausible distractor tools.
+false-positive rate must stay ≤5% (`execution/ACCEPTANCE_CRITERIA.md` §11). The
+`no_call` share must sit between **33% and 50%** of the category; Sol accepts 50%,
+because a larger no-call denominator sharpens the false-positive rate, at the cost of
+measuring positive selection accuracy on the remaining half. Always declare plausible
+distractor tools — a case with only the right tool declared measures nothing.
 
 ```json
 {"metric": "exact_and_false_positive_rate", "no_call": true,
@@ -603,7 +692,17 @@ roughly one `no_call` case in three, and always declare plausible distractor too
 
 **Score:** two numbers per case — exact-argument match (the ≥85% threshold for
 simple single-tool cases) and field F1 over `required_fields` (`min_field_f1` is the
-per-case bar). Put the literal value in the prompt ("the format value exactly utc")
+per-case bar).
+
+**Field F1 is informative only for calls with at least four scored fields.** At three
+fields, missing one gives F1 0.667 and at five fields, missing one gives 0.833, so any
+`min_field_f1` at or above 0.85 is arithmetically identical to exact match. The same
+holds for `extraction`'s `min_f1` over a small `target`. Either accept that the
+threshold is exact-match in disguise, or set it deliberately below the
+one-field-missing value so partial credit actually exists; do not describe a case as
+graded when the arithmetic makes it all-or-nothing.
+
+Put the literal value in the prompt ("the format value exactly utc")
 so the expected argument is unambiguous, and vary argument *types* across the
 category: strings, bounded integers, booleans, enums, and arrays.
 
@@ -714,11 +813,26 @@ own right.
 | `max_thinking_tokens` | no | reasoning-token ceiling; only meaningful when thinking is on |
 
 **Score:** the case passes iff the observed mode matches `thinking_expected`, both
-budgets are respected, and the assertion primitives hold. With thinking **off** the
-template emits a closed `<think>\n\n</think>` block, so the visible answer must
-contain no `<think>` marker at all — assert `"must_not_contain": ["<think>"]`.
-Reasoning text is never persisted to ordinary logs, so a case may assert only that
-a budget was respected, never the reasoning content.
+budgets are respected, and the assertion primitives hold.
+
+**Assertion scope.** Every assertion primitive in every category is evaluated against
+the **visible answer**, which is the model's output with the `<think>…</think>` block
+and its markers removed by the runner before scoring. Reasoning text is never
+persisted to ordinary logs, so a case may assert that a budget was respected, never
+what the reasoning said.
+
+That makes marker assertions mode-dependent, and the distinction is not optional:
+
+- **Thinking off** — the template emits a closed empty `<think>\n\n</think>` block, so a
+  marker in the visible answer can only have been produced deliberately. This is the
+  only configuration in which "the model must refuse to emit reasoning markers" is
+  decidable, so a case that probes a marker request belongs here and asserts
+  `"must_not_contain": ["<think>", "</think>"]`.
+- **Thinking on** — the block is expected and its markers are **allowed**. Assert the
+  final answer (`must_equal` / `must_contain`) and the budgets. Never assert the
+  absence of a marker the template itself emits: seven cases did, and each one failed
+  deterministically for a correct model. An adversarial thinking-on case takes its
+  negative assertion from an echo or a false-claim probe instead.
 
 ```json
 {
@@ -837,6 +951,17 @@ row in `coordination/TASK_CLAIMS.md` to `READY_FOR_REVIEW`.
   `mode: "normal" | "deep"`, from which `enable_thinking` is derived. The corpus
   records both (`settings.profile` and `settings.mode`) and enforces their
   consistency, so neither the governance vocabulary nor the wire contract is lost.
+- **`process.run_allowlisted` argument contract — governance follow-up, unresolved.**
+  `governance/SECURITY_AND_TOOL_POLICY.md` §10 documents the tool as taking
+  `executable_id`, `arguments`, `workspace_id` and `timeout_ms`. The shipping catalogue
+  `tests/model/production_tool_call_eval.json`, the runtime provider
+  `host/tools/local/process-run.mjs`, and therefore every case in this corpus use
+  `action_id` plus an optional `parameters` object. The corpus follows the shipping
+  catalogue, because the validator binds to it and because a logical action id — not an
+  executable path — is what `execution/ACCEPTANCE_CRITERIA.md` §7 requires. **That
+  governance document is deliberately not edited by this corpus work.** Until Sol rules,
+  a reviewer comparing a corpus case against §10 will read a schema violation that is
+  not one. Do not "fix" a case to match §10.
 - **`temperature` is not a runtime parameter.** The native backend uses a greedy
   sampler unconditionally, so `temperature: 0` is an assertion about the intended
   determinism rather than a value the engine consumes — exactly as it already is in
