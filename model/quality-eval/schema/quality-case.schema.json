@@ -788,7 +788,8 @@
             "required": [
               "id",
               "requirement",
-              "weight"
+              "weight",
+              "match"
             ],
             "additionalProperties": false
           }

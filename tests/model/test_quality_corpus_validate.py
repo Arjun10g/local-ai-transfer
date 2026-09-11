@@ -55,7 +55,9 @@ def _case(case_id, category, **overrides):
         "settings": _interactive(),
         "expected": {
             "metric": "rubric_pass",
-            "rubric": [{"id": "r1", "requirement": "Answer is the single word READY.", "weight": 1}],
+            "rubric": [{"id": "r1", "requirement": "Answer is the single word READY.",
+                        "weight": 1,
+                        "match": {"any_of": [{"regex": r"\AREADY\Z"}], "normalize": []}}],
             "pass_threshold": 1.0,
         },
     }
@@ -693,6 +695,70 @@ class MatchObjectValidationTests(unittest.TestCase):
 
     def test_non_object_match_is_rejected(self):
         self.assertTrue(V.check_match_object("nope", "p"))
+
+
+class RubricMatchTests(unittest.TestCase):
+    def test_rubric_item_without_a_match_object_is_rejected(self):
+        corpus = TemporaryCorpus()
+        self.addCleanup(corpus.close)
+        case = _case("instruction-001", "instruction")
+        del case["expected"]["rubric"][0]["match"]
+        corpus.write("instruction", [case])
+        errors = corpus.errors()
+        self.assertTrue(any("missing required property 'match'" in e for e in errors), errors)
+        self.assertTrue(any("requires a 'match' object" in e for e in errors), errors)
+
+    def test_validator_fails_closed_without_the_schema(self):
+        """The semantic layer reports a missing rubric matcher on its own."""
+        case = _case("instruction-001", "instruction")
+        del case["expected"]["rubric"][0]["match"]
+        errors = V.check_case(case, category="instruction", metric="rubric_pass",
+                              catalogue=V.tool_catalogue(REPO_ROOT),
+                              schema={"$defs": {"case": {}}}, seen_ids={})
+        self.assertTrue(any("requires a 'match' object" in e for e in errors), errors)
+
+    def test_bad_regex_inside_a_rubric_matcher_is_reported(self):
+        corpus = TemporaryCorpus()
+        self.addCleanup(corpus.close)
+        case = _case("instruction-001", "instruction")
+        case["expected"]["rubric"][0]["match"]["any_of"] = [{"regex": "(oops"}]
+        corpus.write("instruction", [case])
+        self.assertTrue(any("does not compile" in e for e in corpus.errors()))
+
+    def test_valid_rubric_matcher_passes(self):
+        corpus = TemporaryCorpus()
+        self.addCleanup(corpus.close)
+        corpus.write("instruction", [_case("instruction-001", "instruction")])
+        self.assertEqual(corpus.errors(), [])
+
+    def test_committed_instruction_rubric_items_all_carry_a_checked_matcher(self):
+        path = REPO_ROOT / V.CASES_RELATIVE / "instruction.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        items = 0
+        for case in document["cases"]:
+            for item in case["expected"]["rubric"]:
+                self.assertIn("match", item, msg=case["id"])
+                self.assertEqual(V.check_match_object(item["match"], case["id"]), [])
+                items += 1
+        self.assertGreaterEqual(items, 284)
+
+    def test_every_committed_matcher_accepts_its_case_exemplar(self):
+        """Each case's notes carry a compliant exemplar; every matcher must accept it."""
+        path = REPO_ROOT / V.CASES_RELATIVE / "instruction.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        checked = 0
+        for case in document["cases"]:
+            marker = "Compliant exemplar:\n"
+            notes = case.get("notes", "")
+            if marker not in notes:
+                continue
+            exemplar = notes.split(marker, 1)[1]
+            for item in case["expected"]["rubric"]:
+                self.assertTrue(
+                    V.match_item(exemplar, item["match"]),
+                    msg=f"{case['id']}.{item['id']}: matcher rejects the case's own exemplar")
+                checked += 1
+        self.assertGreaterEqual(checked, 284)
 
 
 class FactMatchCorpusTests(unittest.TestCase):

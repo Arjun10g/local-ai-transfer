@@ -719,10 +719,19 @@ def check_case(
                 re.compile(pattern)
             except re.error:
                 errors.append(f"{case_path}.expected.must_match[{index}]: not a compilable regular expression")
-        # Presence of `match` is required by the schema; its contents are checked here.
+        # A rubric item is natural language, so it carries its own decision procedure.
+        # The schema requires `match`; this check repeats it so the validator still
+        # fails closed if the schema is ever loosened, and then checks the contents.
         for index, item in enumerate(expected.get("rubric", []) or []):
-            if isinstance(item, dict) and "match" in item:
-                errors.extend(check_match_object(item["match"], f"{case_path}.expected.rubric[{index}].match"))
+            if not isinstance(item, dict):
+                continue
+            if "match" not in item:
+                errors.append(
+                    f"{case_path}.expected.rubric[{index}]: a rubric item requires a 'match' "
+                    "object; a requirement no substring or regex can decide is not scoreable"
+                )
+                continue
+            errors.extend(check_match_object(item["match"], f"{case_path}.expected.rubric[{index}].match"))
         for key in ("key_facts", "forbidden_facts"):
             for index, item in enumerate(expected.get(key, []) or []):
                 if isinstance(item, dict) and "match" in item:
