@@ -154,6 +154,19 @@ Running it found two further defects that reading had not:
   components `0700` and refusing an existing non-private one with the exact
   `chmod` that fixes it.
 
+### Gate residue handling (review MINOR)
+
+The gate listed the whole of `.secrets/j1m/` when judging key cleanup, so a
+single stranded directory from an unrelated run made it fail permanently --
+while its detail line printed `removed` for every run regardless. Fixed three
+ways: fake runs now get a uniquely named `.secrets/j1m/dryrun-<nonce>/` subtree
+created and removed by the invocation that owns it; the detail line reports the
+true outcome per run (`removed` / `not-present` / `incomplete(<error type>)` /
+`removal-failed(errno=N)`); and pre-existing residue is surfaced as a `[WARN]`
+with exact paths and left in place, because a live run's key directory is
+removed by teardown so a leftover is a crashed run worth an operator's
+attention, not litter for a gate to delete. PASS/FAIL is now independent of it.
+
 ## Operator precondition
 
 Git does not record directory modes, so on a fresh checkout
@@ -256,13 +269,13 @@ Post-merge, per suite:
 | `tests.performance.test_comparator_eval` | Ran 33 — OK |
 | `tests.model.test_tool_call_eval` | Ran 32 — OK |
 | `tests.performance.test_remote_canary_secret_hardening` | Ran 27 — OK |
-| `tests.performance.test_j1m_dry_run` | Ran 21 — OK |
+| `tests.performance.test_j1m_dry_run` | Ran 27 — OK |
 | `tests.performance.test_cost_ledger_genesis` | Ran 18 — OK |
 | `tests.performance.test_j1m_key_handle` | Ran 16 — OK |
 
 ```
 python3 -m unittest discover -s tests -p "test_*.py" -t .
-# Ran 634 tests — OK
+# Ran 640 tests — OK
 
 python3 scripts/j1m_dry_run.py
 # PASS — eval, prove, build plus the q8,bf16 comparator phase; 142 argv

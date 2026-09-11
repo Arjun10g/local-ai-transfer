@@ -38,6 +38,7 @@ import copy
 import hashlib
 import json
 import os
+import secrets
 import shutil
 import socket
 import subprocess
@@ -705,8 +706,17 @@ def drive(mode: str, *, inject_failure: bool, key_root: Path | None,
             # namespace does not outlive this block.
             "published_identity": _published_identity(destination),
         })
-        key_directory = sf.ephemeral_key_directory(f"{run_id}-{nonces[-1]}") if nonces else None
-        outcome["key_directory_present"] = bool(key_directory and key_directory.exists())
+        key_directory = (sf.ephemeral_key_directory(f"{run_id}-{nonces[-1]}", root=key_root)
+                         if nonces else None)
+        present = bool(key_directory and key_directory.exists())
+        outcome["key_directory_present"] = present
+        if present:
+            # Report why it survived rather than just that it did.
+            try:
+                os.rmdir(key_directory)
+                outcome["key_directory_present"] = False
+            except OSError as exc:
+                outcome["key_directory_errno"] = exc.errno
         outcome["key_root_residue"] = _key_root_residue(key_root)
     return outcome
 
@@ -764,11 +774,43 @@ def _published_identity(destination: Path) -> dict[str, Any]:
 
 
 def _key_root_residue(key_root: Path | None) -> list[str]:
-    root = key_root if key_root is not None else sf.EPHEMERAL_KEY_ROOT
+    """Residue under the root THIS invocation owns, never the real-run root.
+
+    The gate used to list the whole of ``.secrets/j1m/`` here, so a single
+    stranded directory from an unrelated run made it fail forever -- and it is
+    not this gate's business to judge, or to delete, a real run's leftovers.
+    ``run_dry_run`` always hands down a private subtree, so this is empty unless
+    a fake run genuinely failed to clean up after itself.
+    """
+
+    if key_root is None:
+        return []
     try:
-        return sorted(item.name for item in Path(root).iterdir())
+        return sorted(item.name for item in Path(key_root).iterdir())
     except OSError:
         return []
+
+
+def _key_outcome(run: dict[str, Any]) -> str:
+    """Say what actually happened to one run's key directory.
+
+    Never a constant: "removed" was printed for every run regardless, which is
+    exactly the sort of reassuring-but-unearned line this harness exists to stop
+    shipping.
+    """
+
+    status = (run.get("key_cleanup") or {}).get("status")
+    if run.get("key_directory_present"):
+        errno_value = run.get("key_directory_errno")
+        detail = f"errno={errno_value}" if errno_value else "still present"
+        return f"removal-failed({detail})"
+    if status == "removed":
+        return "removed"
+    if status == "absent":
+        return "not-present"
+    if status is None:
+        return "no-cleanup-record"
+    return f"{status}({(run.get('key_cleanup') or {}).get('error_type', 'unspecified')})"
 
 
 # -------------------------------------------------------------------- checks
@@ -842,13 +884,14 @@ def evaluate(results: dict[str, dict[str, Any]], recorder: Recorder,
         f"injected teardown failure surfaced as {failed_run.get('error')!r} and the "
         f"ephemeral key directory was still removed")
 
+    # Judged only on the directories this invocation created, so residue from
+    # an unrelated run can never hold the gate down (see the warning below).
     key_ok = all(
-        run["key_cleanup"].get("status") in {"removed", "absent"}
-        and not run["key_directory_present"] and not run["key_root_residue"]
+        _key_outcome(run) in {"removed", "not-present"} and not run["key_root_residue"]
         for run in results.values()
     )
     add("ephemeral_key_removed_on_every_path", key_ok,
-        "; ".join(f"{name}={run['key_cleanup'].get('status')}" for name, run in results.items()))
+        "; ".join(f"{name}={_key_outcome(run)}" for name, run in results.items()))
 
     caps = {
         "deletion_reserve_seconds": orchestrator._DELETION_RESERVE_SECONDS,
@@ -1001,11 +1044,60 @@ def _destination_precondition(destination: Path) -> tuple[bool, str]:
 # ------------------------------------------------------------------ reporting
 
 
+def real_key_root_residue() -> list[str]:
+    """Every directory sitting in the real per-run key root, with exact paths.
+
+    Reported, never deleted. A live run's key directory is removed by the
+    orchestrator's own teardown, so anything left here is either a crashed run
+    or a cleanup that failed -- a signal worth surfacing to an operator and
+    exactly the wrong thing for a pre-launch gate to quietly tidy away.
+    """
+
+    try:
+        return sorted(str(item) for item in sf.EPHEMERAL_KEY_ROOT.iterdir())
+    except OSError:
+        return []
+
+
+@contextlib.contextmanager
+def dry_run_key_root(key_root: Path | None):
+    """Yield the key root this invocation owns, and remove exactly it after.
+
+    A caller-supplied root is used as-is and left alone. Otherwise the fake runs
+    get their own uniquely named subtree of the real root, so they neither
+    depend on nor touch a real run's residue.
+    """
+
+    if key_root is not None:
+        yield Path(key_root)
+        return
+    sf.EPHEMERAL_KEY_ROOT.parent.mkdir(mode=0o700, exist_ok=True)
+    sf.EPHEMERAL_KEY_ROOT.mkdir(mode=0o700, exist_ok=True)
+    owned = sf.EPHEMERAL_KEY_ROOT / f"dryrun-{secrets.token_hex(8)}"
+    owned.mkdir(mode=0o700)
+    try:
+        yield owned
+    finally:
+        shutil.rmtree(owned, ignore_errors=True)
+
+
 def run_dry_run(modes: tuple[str, ...] = ("eval",), *, key_root: Path | None = None,
                 receipt_path: Path | None = None,
                 comparators: str = DEFAULT_COMPARATORS) -> dict[str, Any]:
     """Drive every requested mode offline and return the complete receipt."""
 
+    # Snapshot residue *before* this invocation creates its own subtree, so the
+    # warning reports what was already there and never this run's own workspace.
+    residue = real_key_root_residue() if key_root is None else []
+    with dry_run_key_root(key_root) as owned_root:
+        return _run_dry_run(modes, key_root=owned_root, receipt_path=receipt_path,
+                            comparators=comparators,
+                            residue=[path for path in residue
+                                     if path != str(owned_root)])
+
+
+def _run_dry_run(modes: tuple[str, ...], *, key_root: Path, receipt_path: Path | None,
+                 comparators: str, residue: list[str]) -> dict[str, Any]:
     recorder = Recorder()
     started = time.monotonic()
     results: dict[str, dict[str, Any]] = {}
@@ -1032,9 +1124,20 @@ def run_dry_run(modes: tuple[str, ...] = ("eval",), *, key_root: Path | None = N
 
     checks = evaluate(results, recorder, modes=modes)
     failed = [item for item in checks if item["status"] == "FAIL"]
+    warnings = []
+    if residue:
+        warnings.append({
+            "warning": "stale_key_directories_in_the_real_key_root",
+            "detail": (f"{len(residue)} directory(ies) left under {sf.EPHEMERAL_KEY_ROOT}; "
+                       "a live run's key directory is removed by teardown, so these are "
+                       "crashed or failed cleanups. Left in place deliberately: this gate "
+                       "reports them and does not delete another run's evidence."),
+            "paths": residue,
+        })
     receipt = {
         "schema": RECEIPT_SCHEMA,
         "status": "PASS" if not failed else "FAIL",
+        "warnings": warnings,
         "modes": list(modes),
         "checks": checks,
         "failed_checks": [item["check"] for item in failed],
@@ -1125,6 +1228,12 @@ def render(receipt: dict[str, Any]) -> str:
     for item in receipt["checks"]:
         lines.append(f"  [{item['status']}] {item['check']}")
         lines.append(f"         {item['detail']}")
+    for item in receipt.get("warnings", []):
+        lines.append("")
+        lines.append(f"  [WARN] {item['warning']}")
+        lines.append(f"         {item['detail']}")
+        for path in item["paths"]:
+            lines.append(f"           {path}")
     if receipt["failed_checks"]:
         lines.append("")
         lines.append("  FAILED: " + ", ".join(receipt["failed_checks"]))

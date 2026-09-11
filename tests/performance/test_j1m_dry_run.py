@@ -14,6 +14,7 @@ No network, no provider, no process launch, no spend; the harness enforces all
 four itself and raises if a run reaches one.
 """
 
+import contextlib
 import importlib.util
 import json
 import os
@@ -273,6 +274,117 @@ class DryRunDetectionTests(unittest.TestCase):
         for item in stored["checks"]:
             self.assertIn(item["status"], {"PASS", "FAIL"})
             self.assertTrue(item["detail"])
+
+
+class DryRunKeyRootResidueTests(unittest.TestCase):
+    """Residue from an unrelated run is a signal, not a verdict.
+
+    The gate listed the whole of `.secrets/j1m/`, so one stranded directory from
+    a crashed run made it fail forever -- while its detail line printed
+    "removed" for every run regardless. A pre-launch gate that is permanently
+    red for a reason it misreports is a gate nobody reads.
+    """
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="residue-root-", dir=ROOT))
+        os.chmod(self.root, 0o700)
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        patcher = mock.patch.object(sf, "EPHEMERAL_KEY_ROOT", self.root / "j1m")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def stale(self, count: int) -> list[Path]:
+        sf.EPHEMERAL_KEY_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+        made = []
+        for index in range(count):
+            path = sf.EPHEMERAL_KEY_ROOT / f"J1M-stale-{index:04d}"
+            path.mkdir(mode=0o700)
+            (path / "ssh-key").write_text("stale", encoding="utf-8")
+            made.append(path)
+        return made
+
+    def test_the_gate_owns_a_uniquely_named_subtree_and_removes_exactly_it(self):
+        seen = []
+        real = dry_run.dry_run_key_root
+
+        def watch(key_root):
+            manager = real(key_root)
+            owned = manager.__enter__()
+            seen.append(owned)
+            try:
+                yield owned
+            finally:
+                manager.__exit__(None, None, None)
+
+        with mock.patch.object(dry_run, "dry_run_key_root",
+                               side_effect=lambda key_root: contextlib.contextmanager(watch)(key_root)):
+            receipt = dry_run.run_dry_run(("prove",))
+        self.assertEqual(len(seen), 1)
+        owned = seen[0]
+        self.assertEqual(owned.parent, sf.EPHEMERAL_KEY_ROOT)
+        self.assertTrue(owned.name.startswith("dryrun-"))
+        self.assertFalse(owned.exists(), "the gate must remove exactly its own subtree")
+        self.assertEqual(receipt["status"], "PASS")
+
+    def test_residue_from_another_run_is_a_warning_and_never_a_failure(self):
+        made = self.stale(16)
+        receipt = dry_run.run_dry_run(("prove",))
+        self.assertEqual(receipt["status"], "PASS")
+        warning = next(item for item in receipt["warnings"]
+                       if item["warning"] == "stale_key_directories_in_the_real_key_root")
+        self.assertEqual(warning["paths"], sorted(str(path) for path in made))
+        self.assertIn("16 directory", warning["detail"])
+        self.assertIn("does not delete", warning["detail"])
+        for path in made:
+            self.assertTrue(path.exists(), "another run's key directory is evidence, not litter")
+        self.assertIn("[WARN]", dry_run.render(receipt))
+
+    def test_a_clean_key_root_produces_no_warning(self):
+        receipt = dry_run.run_dry_run(("prove",))
+        self.assertEqual(receipt["warnings"], [])
+        self.assertNotIn("[WARN]", dry_run.render(receipt))
+
+    def test_the_key_outcome_line_reports_what_actually_happened(self):
+        """Never a constant string, and an errno when removal really failed."""
+
+        self.assertEqual(dry_run._key_outcome({"key_cleanup": {"status": "removed"}}), "removed")
+        self.assertEqual(dry_run._key_outcome({"key_cleanup": {"status": "absent"}}), "not-present")
+        self.assertEqual(dry_run._key_outcome({"key_cleanup": {}}), "no-cleanup-record")
+        self.assertEqual(
+            dry_run._key_outcome({"key_cleanup": {"status": "incomplete",
+                                                  "error_type": "key_file_not_removed"}}),
+            "incomplete(key_file_not_removed)")
+        self.assertEqual(
+            dry_run._key_outcome({"key_cleanup": {"status": "removed"},
+                                  "key_directory_present": True,
+                                  "key_directory_errno": 39}),
+            "removal-failed(errno=39)")
+        self.assertEqual(
+            dry_run._key_outcome({"key_cleanup": {"status": "removed"},
+                                  "key_directory_present": True}),
+            "removal-failed(still present)")
+
+    def test_the_detail_line_names_every_run_and_its_own_outcome(self):
+        receipt = dry_run.run_dry_run(("prove",))
+        detail = next(item["detail"] for item in receipt["checks"]
+                      if item["check"] == "ephemeral_key_removed_on_every_path")
+        for name in receipt["runs"]:
+            self.assertIn(f"{name}=", detail)
+        self.assertNotIn("removal-failed", detail)
+
+    def test_residue_under_another_root_cannot_hold_the_gate_down(self):
+        """The pass/fail judgement covers only what this invocation created."""
+
+        self.stale(3)
+        self.assertEqual(dry_run.run_dry_run(("prove",))["status"], "PASS")
+        # A caller-supplied root is used as-is and is judged, since the fake
+        # runs are the only thing that can put anything in it.
+        owned = Path(tempfile.mkdtemp(prefix="owned-", dir=ROOT))
+        os.chmod(owned, 0o700)
+        self.addCleanup(shutil.rmtree, owned, ignore_errors=True)
+        self.assertEqual(dry_run.run_dry_run(("prove",), key_root=owned)["status"], "PASS")
+        self.assertEqual(dry_run._key_root_residue(owned), [])
+        self.assertEqual(dry_run._key_root_residue(None), [])
 
 
 class DryRunRegistrationTests(unittest.TestCase):

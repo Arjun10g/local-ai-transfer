@@ -663,7 +663,27 @@ a selection is set. Two properties are gated beyond the shared argv check:
   `salvage_identity_missing` and never published, because an unbound arm receipt
   becoming a retention number is the failure that matters here.
 
-### 11.5 What it does not prove
+### 11.5 The key root it owns, and the one it only reports
+
+Fake runs get a uniquely named subtree of the real key root
+(`.secrets/j1m/dryrun-<nonce>/`) created at the start of the invocation and
+removed in its own `finally`. The gate therefore never depends on, and never
+touches, a real run's residue.
+
+Anything already sitting in `.secrets/j1m/` is reported as a `[WARN]` line with
+the exact paths and is deliberately **not** deleted: a live run's key directory
+is removed by the orchestrator's own teardown, so a leftover is a crashed run or
+a failed cleanup, and that is a signal for an operator rather than something a
+pre-launch gate should quietly tidy away. It has no bearing on PASS/FAIL.
+
+`ephemeral_key_removed_on_every_path` judges only the directories this
+invocation created, and its detail line says what actually happened to each one
+-- `removed`, `not-present`, `incomplete(<error type>)` or
+`removal-failed(errno=N)`. It previously printed `removed` for every run
+regardless while failing permanently on unrelated residue: red for a reason it
+misreported, which is a gate nobody reads.
+
+### 11.6 What it does not prove
 
 That the remote host behaves, that the model converts, or that the provider
 honours its contract. It answers one question -- *would any command in this run
