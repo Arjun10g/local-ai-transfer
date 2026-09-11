@@ -1,10 +1,10 @@
 # Model Decision Record — Qwen3.5-9B Q4_K_M
 
-## Current governance truth — 2026-09-08
+## Current governance truth — 2026-09-09
 
-- Audited integrated source baseline is exact candidate
-  `d195235b6a370d377785b6340b15ebc8e47585e3`; this document is its descendant,
-  not a self-referential source hash.
+- Audited integrated source baseline is exact
+  `main@6e0d12c0023068456b97fc9c857a3538ca612421`; this document is its
+  descendant, not a self-referential source hash.
 - The current production evaluation fixture/profile is 33 tools and 37 cases;
   `max_cases=64` is a ceiling, not a request to trim. Historical 13/32 and
   28/32/11/34 profile/results remain separate and are not current acceptance.
@@ -27,13 +27,25 @@
   arbitration is merged at `71537d0` after two final source accepts, but remains
   inert with no native bridge, proof issuer, process mutation, product
   activation, or live process. Phase-2b is design-only/in progress, not
-  source-accepted. Current bounded evidence is Node 350/349/0/0/1 TODO,
-  Python 663/663/0/0/0 across 30/33 safe files, JSON 151/151, and import graph
-  28 modules/63 relative edges/0 cycles. QA discovers 57 with 0 missing/unknown
-  and 63 records (1 PASS/62 expected SKIP); overall QA remains `BLOCKED` and no
-  full suite is green.
+  source-accepted. Protected `.secrets/shadeform.env` projection source is
+  accepted at `c8c28a9`; its operator setup does not authorize credentials or
+  provider execution. Metadata-only Windows/HF handoff source is accepted at
+  `c2801ec` and merged by `e2e5156`, but its public validator permanently
+  returns `REFUSED_NOT_ACTIVATED` without real signed artifacts and an approved
+  trust anchor. Descriptor-backed ActionJournal WAL source is accepted at
+  `2dda060` and merged by `6e0d12c`, but native secure FD ownership,
+  single-writer exclusion, authenticity/anti-rollback, compaction, and provider
+  reconciliation remain absent.
+- Current bounded integration evidence is journal/Graph Node 210 discovered/
+  209 pass/1 existing TODO, handoff/release 63/63, env 26/26, QA-runner 27/27,
+  and conformance 11/11. Static inventory records 152 tracked JSON files (151
+  strict-valid plus one intentional duplicate-key hostile fixture) and 29
+  modules/71 relative imports/0 cycles. QA discovers 59 with 0 missing/unknown
+  and 65 records (1 PASS/64 expected SKIP); overall QA remains `BLOCKED` and no
+  full suite is green. Broader Node 350/349 and Python 663/663 evidence is
+  historical `d195235` evidence, not current `6e0d12c` proof.
   Bookkeeping is not spend authorization. Credentials require source-side
-  rotation/revocation.
+  rotation/revocation, including the previously leaked HF token.
 - The model-family/quantization decision below remains accepted only as a
   technical choice. No compile, model-load, provider, Windows-target, target,
   or production acceptance is claimed; release/full access remains blocked.
@@ -65,6 +77,15 @@ local bytes have not been revalidated in this governance interval and remain
 unapproved; transfer custody, the approved transfer route, and the corporate
 approval reference are unset. A checksum reference alone is not a transfer or
 chain-of-custody receipt.
+
+The v1 Windows artifact-handoff schema and validator can validate bounded
+metadata, fixed identities, receipt digests, release-package exclusion, and the
+shape/canonical digest of a detached Ed25519 signature. They do not read model
+bytes. The public validator has no trust anchor and always emits
+`REFUSED_NOT_ACTIVATED`; even the private future trust-verification seam reports
+`activated: false`. This is a fail-closed integration contract, not artifact
+acceptance, custody, signature verification evidence, or Windows release
+activation.
 
 The deployable GGUF is built on Shadeform from the approved official source revision using a pinned conversion/quantization toolchain. A third-party quant may be used for early research only; it cannot become the release artifact without being independently reproduced or explicitly accepted by a Sol-approved supply-chain ADR.
 

@@ -1,27 +1,33 @@
 # Blockers
 
-## Current governance reconciliation — 2026-09-08
+## Current governance reconciliation — 2026-09-09
 
-- Audited integrated source baseline is `d195235b6a370d377785b6340b15ebc8e47585e3`;
-  this docs descendant is not a self-hash. Release/full access remains
-  `BLOCKED` / `NOT_READY`.
-- Graph composition/auth/read source and strict Shadeform mutation-env
-  projection are integrated, but Graph writes without a healthy production
-  ActionJournal refuse before preview. Manual Graph journal resolution remains
-  blocked without provider proof. The production ActionJournal transport/proof
-  adapter, tombstones, and native bridge remain unavailable.
-- Remote execution remains false; only two no-model canary probes are allowed.
-  External salvage is unavailable and legacy lifecycle is non-green. Ledger
-  migration remains `SAFE_TO_MIGRATE_NOW=NO`; evidence is parse-refused/
-  unavailable, with no genesis or spend authorization. Orphan receipts and
-  unmatched incidents require adjudication. Previously exposed credentials
-  require rotation/revocation; bookkeeping is not spend authorization.
-- Source-only evidence is independently scoped: Node 350/349/0/0/1 TODO;
-  Python 663/663/0/0/0 across 30/33 safe files; JSON 151/151; import graph
-  28 modules/63 relative edges/0 cycles. QA has 57 discovered, 0
-  missing/unknown, and 63 records (1 PASS/62 expected SKIP); overall QA remains
-  `BLOCKED`. These are not compile, live, provider, model, Windows, production,
-  or target evidence. Historical 13/32 and 28/32/11/34 results remain separate.
+- Exact audited integrated source baseline is
+  `main@6e0d12c0023068456b97fc9c857a3538ca612421`; this docs descendant is not a
+  self-hash. Release/full access remains `BLOCKED` / `NOT_READY`.
+- Protected `.secrets/shadeform.env` projection/setup source (`c8c28a9`), the
+  metadata-only Windows/HF artifact handoff (`c2801ec`, merged by `e2e5156`),
+  and the inherited-descriptor ActionJournal WAL (`2dda060`, merged by
+  `6e0d12c`) are source-present. They do not establish credential approval,
+  provider execution, signed artifact custody/trust, native Windows authority,
+  production activation, or target readiness.
+- The WAL has descriptor-bound durable integrity/recovery behavior but lacks a
+  native secure FD owner and publication boundary, cross-process single-writer
+  exclusion, authenticity/anti-rollback anchoring, compaction, and automatic
+  provider reconciliation. The artifact handoff's public validator always
+  returns `REFUSED_NOT_ACTIVATED` pending real signed artifacts and an approved
+  trust anchor. Graph mutation ambiguity therefore remains fail-closed.
+- Current focused evidence is Node 210 discovered/209 pass/0 fail/1 existing
+  TODO; handoff/release 63/63; env 26/26; QA-runner 27/27; conformance 11/11.
+  Static inventory is 152 tracked JSON files (151 strict-valid plus one
+  intentional duplicate-key hostile fixture) and 29 modules/71 relative
+  imports/0 cycles. QA has 59 discovered, 0 missing/unknown, and 65 records
+  (1 PASS/64 expected SKIP); overall QA remains `BLOCKED`.
+- Broader Node 350/349/0/0/1 TODO and Python 663/663 across 30/33 safe files
+  are explicitly historical `d195235` evidence, not current `6e0d12c` proof.
+  Remote execution remains false, ledger migration remains
+  `SAFE_TO_MIGRATE_NOW=NO`, and previously exposed credentials—including the
+  leaked HF token—require source-side rotation/revocation before reuse.
 
 ## B-001 — Exact target receipt incomplete
 
@@ -39,33 +45,36 @@
 - Needed from: user/organization before release sign-off.
 - State: OPEN; does not block implementation or non-sensitive evidence.
 
-## B-003 — Production external-tool chain is not yet restart-safe or identity-bound
+## B-003 — Production external-tool chain lacks activated durable authority and live proof
 
 - Fact: production model evaluation proves only tool proposal/arguments. The
   hostile external-tools harness uses injected Graph/CDP/Copilot fakes and does
   not execute a real account, browser, Copilot service, or Windows process.
   Disabled/unconfigured provider definitions are now withheld from the model,
-  and the reviewed secret-free action-journal/controller barrier is source-
-  merged (`55f3dfd`, merge `65decba`). This source status is not independent
-  evidence or gate approval. However, its Node pathname store deliberately refuses every production
-  action until a native handle-relative protected store exists. Microsoft Graph
+  and the reviewed action-journal/controller barrier is source-merged
+  (`55f3dfd`, merge `65decba`). The descriptor-backed WAL accepted at
+  `2dda060` and integrated by `6e0d12c` supplies canonical append/replay,
+  crash-tail recovery, restart tombstones, and provider-proof ordering once an
+  already-authoritative descriptor is injected. It does not securely acquire,
+  publish, exclusively own, compact, or anti-rollback-anchor that descriptor,
+  and it does not automatically reconcile provider ambiguity. Microsoft Graph
   reconciliation source is merged at `b4702a5` after two independent source
-  audits, but has no live-provider evidence or approval; browser/Copilot
-  proposal state remains memory-only, and browser/Copilot
-  executable paths are not bound to immutable file identity across preview and
-  spawn.
+  audits but has no live-provider evidence or approval; browser/Copilot
+  proposal state remains memory-only, and browser/Copilot executable paths are
+  not bound to immutable file identity across preview and spawn.
 - Impact: a passing model score or mocked provider run cannot establish safe
-  end-to-end mail, Teams, browser-action, or Copilot readiness. A host restart
-  after an ambiguous provider write can permit duplicate work, and a mutable
-  executable can change after preview/version inspection.
+  end-to-end mail, Teams, browser-action, or Copilot readiness. After an
+  ambiguous provider write, no definitive result or safe automatic retry can be
+  established until provider reconciliation completes; retrying outside that
+  boundary could duplicate work. A mutable executable can also change after
+  preview/version inspection.
 - Workaround: keep all external providers disabled by default and all writes
   confirmation-bound. Preserve per-generation active-tool filtering and the
-  fail-closed journal barrier. Inert storage/helper source is merged through
-  `645f348`, and test-only client `dc29ced` is merged by `4b8e737`, but there
-  is no production transport/import, activated supervisor trust, package
-  wiring, compile, or target evidence. Complete those boundaries plus
-  provider-owned reconciliation and executable identity pinning before any
-  write-capable live test.
+  fail-closed journal barrier. Connect the inert storage/helper sources and
+  descriptor WAL to a native secure single owner with durable publication,
+  locking, authenticity/anti-rollback, bounded compaction, package wiring, and
+  compile/target evidence. Complete provider-owned reconciliation and
+  executable identity pinning before any write-capable live test.
 - Needed from: S3 implementation, S4 independent review, and S0 gate decision.
 - State: OPEN; blocks Phase 4/6 readiness and all full-access claims.
 
@@ -87,6 +96,11 @@
   at `91de464`, but `REMOTE_EXECUTION_ENABLED=False` remains binding and no
   approved/committed cost-ledger genesis exists. The merge neither authorizes
   a live retry nor supplies model-quality evidence.
+- Environment correction: mutation/recovery CLIs now default to protected
+  `.secrets/shadeform.env` after accepted `c8c28a9`; project-root `.env` remains
+  a separate read-only-catalogue input and is refused for mutations. An operator
+  must create the protected owner-private directory and project the selected
+  keys offline; source support is not credential approval or spend authority.
 
 ## B-005 — Windows process/application launch boundary is not identity-pinned
 
@@ -136,12 +150,19 @@
   That technical identity does not approve ignored local bytes or establish
   transfer custody. Local revalidation, an approved transfer receipt, and the
   chain of custody remain unset.
+- Fact: accepted source `c2801ec`, integrated by `e2e5156`, adds a bounded
+  metadata-only artifact-handoff schema/validator. Its public path has no trust
+  anchor and always returns `REFUSED_NOT_ACTIVATED`; the private future seam can
+  validate an approved signature but never activates or reads model bytes.
+  No real signed handoff, approved key, trust-store integration, or Windows
+  release-verifier receipt is present.
 - Impact: neither model/tool quality nor the deployable local artifact is
   accepted for release.
-- Workaround: keep the known identity as a fail-closed verifier constraint;
-  do not load or distribute local bytes until an approved transfer and fresh
-  verification receipt exist. Resume quality work only through the separately
-  authorized, lifecycle-gated route.
+- Workaround: keep the known identity and activation-refused handoff as
+  fail-closed constraints; do not load or distribute local bytes until real
+  signed receipts, an approved trust anchor/transfer, and fresh verification
+  evidence exist. Resume quality work only through the separately authorized,
+  lifecycle-gated route.
 - Needed from: S0/S2 artifact and quality approval, S4 evidence review, and the
   target operator for the approved transfer/acceptance route.
 - State: OPEN; blocks Phase 1/2/4/7/8 and every readiness claim.

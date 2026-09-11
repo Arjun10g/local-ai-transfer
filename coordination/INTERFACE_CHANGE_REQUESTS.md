@@ -19,3 +19,43 @@
 - **Evidence required:** explicit 16th-accepted/17th-refused boundaries and a
   cross-layer scan tying protocol, client, helper, pathname journal, container
   contract, reference model, and native constants to 16.
+
+## ICR-RUN-WDJB-001 — descriptor-WAL refusal statuses in the storage boundary contract
+
+- **Status:** additive source-only extension committed on
+  `luna/windows-descriptor-journal-bootstrap-v1`; Sol notification per
+  `INTERSESSION_PROTOCOL.md` §11 and independent review remain required before
+  merge. No approval is claimed here.
+- **Affected interface:** `contracts/action-journal-storage/v0.1.0.json`
+  `status_codes`, which the merged suite
+  `tests/native/test_windows_action_journal_storage_static.py:126` requires to
+  equal the exact set of status strings emitted by
+  `native/action_journal_storage/windows_storage.cpp`. That translation unit now
+  holds two boundaries: the v1 container lease and the dormant v2
+  `DescriptorActionJournal` WAL lease.
+- **Change:** add `handoff_already_transferred`, `source_handle_inheritable`,
+  `inheritance_control_failed`, and `final_path_mismatch`. Version `0.1.0` is
+  retained, matching the ICR-TOOL-042 precedent for a source-only correction.
+- **Why:** the independent review required distinct typed refusals where a DACL
+  regression, a size change, a torn prefix, a path swap, an ancestor swap, a
+  handle-inheritance anomaly, and a repeated handoff were previously
+  indistinguishable, and required a specific "already transferred" status for
+  the one-shot handoff guard. Reusing existing codes would have re-created the
+  conflation the review asked to remove.
+- **Compatibility:** no production transport, host import, package entry, or
+  activation exists for either boundary; `production_available`,
+  `native_target_registered`, `helper_added`, `transport_added`,
+  `node_integration_added`, `package_added`, and `activation_permitted` all
+  remain `false`. No existing status string, identifier, receipt field, on-disk
+  byte, header constant, limit, or gate is changed or removed. The additions are
+  reachable only from the dormant v2 WAL entry points, which have no callers.
+- **Alternative considered:** a separate
+  `contracts/action-journal-descriptor-wal/` contract for the v2 boundary. That
+  is the cleaner long-term shape, but creating a new frozen interface artifact
+  is a larger decision than this repair slice should take unilaterally. Sol may
+  redirect these four codes into such a contract; the source and tests would
+  follow with no behaviour change.
+- **Evidence required:** exact code/contract agreement
+  (`tests/native/test_windows_action_journal_storage_static.py` status-set
+  assertion) plus the descriptor bootstrap suite's per-condition status
+  assertions.

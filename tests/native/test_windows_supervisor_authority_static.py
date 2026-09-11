@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "native/windows_supervisor/authority.cpp"
 BORROW = ROOT / "native/windows_supervisor/borrow_ticket.hpp"
 HEADER = ROOT / "native/windows_supervisor/authority.hpp"
+LAUNCH_HEADER = ROOT / "native/windows_supervisor/launch_authority.hpp"
 CONTRACT = ROOT / "contracts/windows-supervisor/v1.0.0.json"
 
 
@@ -37,6 +38,7 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
         cls.borrow = BORROW.read_text(encoding="utf-8")
         cls.source = cls.cpp + "\n" + cls.borrow
         cls.hpp = HEADER.read_text(encoding="utf-8")
+        cls.launch_header = LAUNCH_HEADER.read_text(encoding="utf-8")
         cls.contract = strict_json(CONTRACT)
 
     def test_contract_remains_false_and_redacted(self):
@@ -55,7 +57,7 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
         for token in (
             "kReleaseManifestPinned = false", "kSelfAuthenticodePinned = false",
             "kPackageIdentityPinned = false", "kCancellableIoProven = false",
-            "kDurableJournalAuthority = false",
+            "kDurableJournalAuthority = false", "kNestedJobPolicyProven = false",
             "kSupervisorOwnedProcessTransactionAccepted = false",
             "if (!trust_gates_open()) return Status::kUnavailable",
         ):
@@ -136,10 +138,29 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
             self.assertIsNone(re.search(pattern, self.cpp), pattern)
 
     def test_no_public_issuer_factory_friend_or_mint(self):
-        for text in (self.hpp, self.cpp):
-            for token in ("CapabilityIssuer", "issue_capability", "mint", "friend class"):
+        for text in (self.hpp, self.cpp, self.launch_header):
+            for token in ("CapabilityIssuer", "issue_capability", "mint"):
                 self.assertNotIn(token, text)
         self.assertNotIn("IssuedCapability", self.hpp)
+        # The pre-existing friend ban is kept for the supervisor authority
+        # header and translation unit; it is narrowed, never deleted.  Only the
+        # launch authority header is exempt, and its friend names are pinned
+        # exactly below and enumerated in
+        # tests/native/test_windows_process_authority_static.py.
+        for text in (self.hpp, self.cpp):
+            self.assertNotIn("friend class", text)
+            self.assertNotIn("friend struct", text)
+        friends = re.findall(r"friend\s+(?:class|struct)\s+(\w+)\s*;",
+                             self.launch_header)
+        self.assertEqual(sorted(set(friends)),
+                         ["LaunchAuthority", "LaunchAuthorityIssuer"])
+        issuer = self.launch_header[
+            self.launch_header.index("class LaunchAuthorityIssuer final"):]
+        self.assertEqual(
+            re.findall(r"friend\s+(?:class|struct)\s+(\w+)\s*;", issuer),
+            ["LaunchAuthority"])
+        self.assertIn("friend class LaunchAuthorityIssuer", self.launch_header)
+        self.assertIn("LaunchAuthorityIssuer() = delete", self.launch_header)
 
     def test_start_shutdown_and_metadata_are_refusal_only(self):
         for method in ("Status Authority::start", "Status Authority::shutdown"):

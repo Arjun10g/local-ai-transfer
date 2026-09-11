@@ -2,6 +2,7 @@
 
 #if defined(_WIN32)
 
+#include "launch_authority.hpp"
 #include "../action_journal_helper/journal_authority_owner.hpp"
 #include "../action_journal_storage/windows_storage.hpp"
 #include "borrow_ticket.hpp"
@@ -17,6 +18,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -137,7 +139,7 @@ struct SupervisorState final {
       const SupervisorStartupHandoff& handoff) {
     // No OS-handle evidence issuer exists in phase 2a.  Refuse before owner
     // open, pipe publication, lease acquisition, or irreversible mutation.
-    if (!kProcessLaunchAvailable || !kSupervisorOwnedProcessTransactionAccepted)
+    if (!kProcessLaunchAvailable)
       return nullptr;
     try {
       auto state = std::make_unique<SupervisorState>(handoff);
@@ -277,13 +279,9 @@ struct ProcessLaunchAuthority final {
 };
 
 bool trust_gates_open() noexcept {
-  return kReleaseManifestPinned && kSelfAuthenticodePinned &&
-      kPackageIdentityPinned && kCancellableIoProven &&
-      kDurableJournalAuthority && kNestedJobPolicyProven &&
-      kBrokerIssuedIdentityProven &&
-      kRetainedExecutingSectionIdentityProven &&
-      kRetainedWorkingDirectoryIdentityProven &&
-      kSupervisorOwnedProcessTransactionAccepted;
+  // One gate includes nested-job policy and every other immutable trust
+  // prerequisite. No caller or environment value can override it.
+  return kProcessLaunchAvailable;
 }
 
 }  // namespace
