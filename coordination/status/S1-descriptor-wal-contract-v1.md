@@ -3,7 +3,7 @@
 - **Session:** S1
 - **Required model:** GPT-5.6 Luna
 - **Role:** Runtime — frozen descriptor-WAL contract and R4 closure
-- **Timestamp (UTC):** 2026-09-11T00:00:00Z
+- **Timestamp (UTC):** 2026-09-11T13:49:30Z
 - **Branch/worktree:** `luna/descriptor-wal-contract-v1` / `wt-descriptor-wal-contract-v1`
 - **Current phase:** Phase 6 source hardening
 - **Primary task ID:** RUN-DESCRIPTOR-WAL-CONTRACT
@@ -117,7 +117,9 @@ referenced not duplicated.
 
 Commits, base exact `main@fdfed07`: claim `5c23585`; contract `e09852e`;
 storage `.md` `170f708`; R4 `2507fdc`; tests `6b7b59b`; ICR `c3c3f31`.
-Accepted tip `c3c3f31ef42365f9806ebe54fc984666a7d6da6a`.
+Last content commit `c3c3f31ef42365f9806ebe54fc984666a7d6da6a`; this packet
+and the claims-row update are committed on top of it, and the branch tip is
+therefore a later docs-only commit.
 
 All commands run from the worktree root with `PYTHONDONTWRITEBYTECODE=1`.
 Machine: macOS source/static review only; no Windows equivalence is claimed.
