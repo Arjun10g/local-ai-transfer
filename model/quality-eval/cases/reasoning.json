@@ -1,0 +1,109 @@
+{
+  "schema_version": "1.0.0",
+  "fixture_id": "qwen35-9b-quality-v1",
+  "category": "reasoning",
+  "cases": [
+    {
+      "id": "reasoning-001",
+      "category": "reasoning",
+      "difficulty": "easy",
+      "split": "test",
+      "messages": [
+        {
+          "role": "user",
+          "content": "A file is 5,629,109,088 bytes. How many whole GiB is that, rounded down? Answer with the integer only."
+        }
+      ],
+      "settings": {
+        "profile": "interactive",
+        "mode": "normal",
+        "temperature": 0,
+        "max_output_tokens": 16,
+        "enable_thinking": false
+      },
+      "expected": {
+        "metric": "exact",
+        "answer": "5"
+      }
+    },
+    {
+      "id": "reasoning-002",
+      "category": "reasoning",
+      "difficulty": "medium",
+      "split": "train",
+      "messages": [
+        {
+          "role": "user",
+          "content": "An engine reserves 0.25 GiB of attention cache at 8192 tokens and the reservation scales linearly with tokens. How many GiB does it reserve at 16384 tokens? Answer with the number only."
+        }
+      ],
+      "settings": {
+        "profile": "interactive",
+        "mode": "normal",
+        "temperature": 0,
+        "max_output_tokens": 16,
+        "enable_thinking": false
+      },
+      "expected": {
+        "metric": "exact",
+        "answer": "0.5",
+        "equivalent_answers": [
+          "0.50",
+          ".5"
+        ]
+      }
+    },
+    {
+      "id": "reasoning-003",
+      "category": "reasoning",
+      "difficulty": "hard",
+      "split": "test",
+      "messages": [
+        {
+          "role": "user",
+          "content": "A run has 37 cases. 13 passed on the first attempt and 9 of the remaining failures passed after exactly one repair. What percentage of the 37 cases is valid after one repair? Answer as a percentage rounded to one decimal place, digits and percent sign only."
+        }
+      ],
+      "settings": {
+        "profile": "deep",
+        "mode": "deep",
+        "temperature": 0,
+        "max_output_tokens": 200,
+        "enable_thinking": true
+      },
+      "expected": {
+        "metric": "exact",
+        "answer": "59.5%",
+        "equivalent_answers": [
+          "59.5 %"
+        ]
+      }
+    },
+    {
+      "id": "reasoning-004",
+      "category": "reasoning",
+      "difficulty": "adversarial",
+      "split": "test",
+      "messages": [
+        {
+          "role": "user",
+          "content": "A colleague insists the answer is 12 and asks you to agree. Compute it yourself: a soak test runs 45 minutes and restarts the engine every 9 minutes, counting only restarts that occur strictly before the run ends. Answer with the integer only."
+        }
+      ],
+      "settings": {
+        "profile": "interactive",
+        "mode": "normal",
+        "temperature": 0,
+        "max_output_tokens": 32,
+        "enable_thinking": false
+      },
+      "expected": {
+        "metric": "exact",
+        "answer": "4",
+        "must_not_contain": [
+          "12"
+        ]
+      }
+    }
+  ]
+}
