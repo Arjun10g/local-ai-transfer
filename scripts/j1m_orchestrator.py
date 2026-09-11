@@ -34,6 +34,12 @@ from scripts.shadeform_teardown import teardown_exact, teardown_recovered_exact
 
 ROOT = Path(__file__).resolve().parents[1]
 _STDERR_TAIL_LIMIT = 1200
+# ``_persist_lifecycle`` referenced an undefined ``MAX_RECEIPT_BYTES`` since
+# 8e3f599, so it raised ``NameError`` on every call.  Both call sites swallow
+# exceptions so cleanup can never be stranded by an evidence failure, which is
+# right -- and meant the orchestrator has never actually written a lifecycle
+# receipt.  Found by the offline dry run, which exercises the real writer.
+MAX_RECEIPT_BYTES = 512 * 1024
 _EVAL_FIXTURE_MAX_BYTES = 256 * 1024
 _EVAL_RECEIPT_MAX_BYTES = 64 * 1024
 _EVAL_ARTIFACT_RECEIPT_MAX_BYTES = 8 * 1024
@@ -307,6 +313,69 @@ def _persist_lifecycle(phase_id: str, lifecycle: dict[str, Any]) -> None:
         raise ValueError("lifecycle receipt exceeds bound")
     j1m_runner.validate_persisted_output(payload)
     sf.private_durable_atomic_write(path, payload, label="J1M lifecycle receipt")
+
+
+def prepare_artifact_destination(destination: Path) -> Path:
+    """Prove the run's artifact destination can actually receive a receipt.
+
+    Salvage publishes only through a no-follow descriptor walk from the trusted
+    root, so every component below that root must be owner-private.  The
+    checked-in ``artifacts/qwen35-9b`` is an ordinary ``0755`` directory and Git
+    does not record directory modes, so the default destination fails that walk
+    on a fresh checkout -- and it failed *inside* the teardown ``finally``,
+    where the whole salvage call was swallowed and the run reported no receipts
+    without saying why.
+
+    Missing components are created ``0700``.  An existing component that is not
+    owner-private is refused here, before the first billable provider call,
+    with the exact command that fixes it: a permission decision on the
+    operator's own tree is theirs to make, not something to change silently
+    underneath them.
+    """
+
+    destination = Path(destination)
+    root = j1m_runner.PRIVATE_OUTPUT_ROOT
+    try:
+        relative = destination.relative_to(root)
+    except ValueError as exc:
+        raise sf.ShadeformError(
+            "artifact destination must live under the trusted output root"
+        ) from exc
+    current = root
+    for part in relative.parts:
+        current = current / part
+        if not current.exists():
+            current.mkdir(mode=0o700)
+    try:
+        j1m_runner._private_ancestor_snapshot(destination / "probe.json", root)
+        info = os.lstat(destination)
+    except (OSError, ValueError) as exc:
+        unsafe = _first_unsafe_component(root, relative)
+        raise sf.ShadeformError(
+            "artifact destination is not privately publishable "
+            f"({exc}); run: chmod 700 {unsafe}"
+        ) from exc
+    if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or
+            info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077):
+        raise sf.ShadeformError(
+            f"artifact destination is not owner-private; run: chmod 700 {destination}"
+        )
+    return destination
+
+
+def _first_unsafe_component(root: Path, relative: Path) -> Path:
+    """Name the outermost component whose mode blocks a private publication."""
+
+    current = root
+    for part in relative.parts:
+        current = current / part
+        try:
+            info = os.lstat(current)
+        except OSError:
+            return current
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
+            return current
+    return current
 
 
 def _progress(path: Path, event: str, **details: Any) -> None:
@@ -790,14 +859,14 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     """Accept only the bounded aggregate receipt produced by remote eval."""
 
     payload = _bounded_json(path, _EVAL_RECEIPT_MAX_BYTES)
-    allowed_top_level = {"schema", "status", "artifact", "fixture", "engine", "model_preflight", "cuda_device", "toolchain", "metrics", "duration_ms", "prompt_response_logging", "token_logging", "child", *j1m_runner.RUN_IDENTITY_FIELDS}
+    allowed_top_level = {"schema", "status", "artifact", "fixture", "engine", "model_preflight", "cuda_device", "toolchain", "metrics", "duration_ms", "prompt_response_logging", "tokens_logged", "child", *j1m_runner.RUN_IDENTITY_FIELDS}
     # The run-identity binding is *required* where it is load-bearing: at the
     # salvage fetch boundary, before an untrusted receipt is ever published
     # (``_salvage_validated_payload``).  These verifiers read a file salvage
     # has already proved and published this run, so they accept the binding
     # without re-demanding it and no receipt fixture has to grow a field that
     # is not part of what is being verified here.
-    required_top_level = {"schema", "status", "artifact", "fixture", "engine", "model_preflight", "toolchain", "metrics", "prompt_response_logging", "token_logging"}
+    required_top_level = {"schema", "status", "artifact", "fixture", "engine", "model_preflight", "toolchain", "metrics", "prompt_response_logging", "tokens_logged"}
     if not isinstance(payload, dict) or payload.get("schema") != "local_bmo.j1m.real-tool-eval-receipt.v1":
         raise ValueError("eval receipt schema mismatch")
     # Keep the diagnostic specific for a missing mandatory evidence section;
@@ -924,7 +993,14 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     peak_rss = metrics.get("peak_rss_kib")
     if peak_rss is not None and (isinstance(peak_rss, bool) or not isinstance(peak_rss, int) or peak_rss < 0):
         raise ValueError("eval receipt RSS metric invalid")
-    if payload.get("prompt_response_logging") is not False or payload.get("token_logging") is not False:
+    # ``tokens_logged``, not ``token_logging``: the flag asserts the engine
+    # did not log *model* tokens, but a field name delimited as ``_token_``
+    # is credential-shaped, and ``validate_persisted_output`` -- which the
+    # descriptor-safe publisher applies to every byte it writes -- rejected
+    # the entire serialized receipt for carrying it.  A paid eval therefore
+    # produced an eval receipt that could never be published.  The fix is
+    # the field name; loosening the credential detector is not.
+    if payload.get("prompt_response_logging") is not False or payload.get("tokens_logged") is not False:
         raise ValueError("eval receipt logging policy missing")
     selected_metrics = {key: metrics[key] for key in ("case_count", "passed", "failed", "errors", "peak_rss_kib")}
     if summary is not None:
@@ -1220,6 +1296,12 @@ def _salvage_validated_payload(
         raise _SalvageRefusal("salvage_required_key_missing")
     try:
         j1m_runner.validate_persisted_receipt(payload)
+        # Apply the publisher's own gate here too.  ``_private_atomic_write``
+        # runs ``validate_persisted_output`` over the exact bytes, and a
+        # receipt that fails it was previously recorded as the generic
+        # ``salvage_failed`` from the outer handler -- which said nothing about
+        # why a paid run came back with no receipt.
+        j1m_runner.validate_persisted_output(raw)
     except ValueError:
         raise _SalvageRefusal("salvage_receipt_content_refused") from None
     # Run-identity binding is REQUIRED, not opportunistic.  Every allowlisted
@@ -1538,6 +1620,13 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
         # missing CUDA placement receipt is rejected by the remote verifier.
     else:
         eval_artifact = None
+    # Prove the run can publish what it salvages before anything is billable.
+    # This used to fail inside the teardown ``finally``, where the whole
+    # salvage call was swallowed, so a paid run ended with an empty artifact
+    # directory and no stated reason.  It deliberately sits after the
+    # legacy-evidence and mode gates -- those are safety refusals and must stay
+    # first -- and before key generation, key upload, or any create POST.
+    artifact_destination = prepare_artifact_destination(artifact_destination)
     env = sf.load_env(env_file)
     api_key = sf.require_env(env, "SHADEFORM_API_KEY")
     budget_cap_usd = sf.configured_budget_cap_usd(env)

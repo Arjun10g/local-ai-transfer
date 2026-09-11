@@ -3094,7 +3094,12 @@ def destroy_ephemeral_key_directory(directory: Path | None) -> dict[str, Any]:
     if directory is None:
         return {"status": "absent", "files_removed": 0}
     directory = Path(directory)
-    receipt: dict[str, Any] = {"status": "removed", "files_removed": 0, "run_token": directory.name[:96]}
+    # ``run_label``, not ``run_token``: a receipt field whose name ends in
+    # ``_token`` is credential-shaped, and ``validate_persisted_output``
+    # rejects the whole lifecycle receipt for carrying it -- silently, since
+    # both persistence call sites swallow evidence failures so cleanup can
+    # never be stranded.  The offline dry run caught it.
+    receipt: dict[str, Any] = {"status": "removed", "files_removed": 0, "run_label": directory.name[:96]}
     try:
         if directory.is_symlink():
             os.unlink(directory)

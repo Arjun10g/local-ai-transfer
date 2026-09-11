@@ -1066,7 +1066,7 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any], dea
             **({"child": child_status} if child_status is not None else {}),
             "duration_ms": round((time.monotonic() - started) * 1000, 1),
             "prompt_response_logging": False,
-            "token_logging": False,
+            "tokens_logged": False,
         }
     finally:
         if process is not None:
@@ -1146,7 +1146,7 @@ def main(argv: list[str] | None = None) -> int:
         receipt = _launch_and_evaluate(args, artifact, deadline=deadline)
         status = 0 if receipt["status"] in {"verified", "completed_with_failures"} else 1
     except (OSError, ValueError, TypeError, KeyError, IndexError, RecursionError, OverflowError, subprocess.SubprocessError) as exc:
-        receipt = {"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "failed", "error_type": type(exc).__name__, "error_code": _safe_error_code(exc), "prompt_response_logging": False, "token_logging": False}
+        receipt = {"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "failed", "error_type": type(exc).__name__, "error_code": _safe_error_code(exc), "prompt_response_logging": False, "tokens_logged": False}
         if fixture_identity is not None:
             receipt["fixture"] = fixture_identity
         preflight = getattr(args, "_preflight_summary", None)
@@ -1160,7 +1160,7 @@ def main(argv: list[str] | None = None) -> int:
     receipt = {**receipt, **_run_identity()}
     encoded = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
     if len(encoded) > MAX_RECEIPT_BYTES:
-        receipt = {"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "failed", "error_code": "evaluator_receipt_invalid", "prompt_response_logging": False, "token_logging": False, **_run_identity()}
+        receipt = {"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "failed", "error_code": "evaluator_receipt_invalid", "prompt_response_logging": False, "tokens_logged": False, **_run_identity()}
         encoded = (json.dumps(receipt, sort_keys=True) + "\n").encode("ascii")
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary: str | None = None
