@@ -93,6 +93,7 @@ TEST_INVENTORY = {
     "tests/performance/test_shadeform_ledger_migration_preflight.py": "lifecycle",
     "tests/performance/test_shadeform_env_security.py": "lifecycle",
     "tests/performance/test_comparator_eval.py": "lifecycle",
+    "tests/performance/test_j1m_approved_targets.py": "lifecycle",
     "tests/performance/test_j1m_dry_run.py": "lifecycle",
     "tests/performance/test_j1m_key_handle.py": "lifecycle",
     "tests/performance/test_j1m_lifecycle.py": "lifecycle",

@@ -114,6 +114,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--gpu-count", type=int)
     parser.add_argument("--vram-gb", type=int)
     parser.add_argument("--os-image")
+    # Provenance only. The recovery profile above is what this process acts on;
+    # this records which entry of the launcher's ordered approved-target list
+    # that profile came from, so the argv a recovering operator reads names the
+    # approved alternate rather than only its identity fields.
+    parser.add_argument("--approved-target-index", type=int)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     args = parser.parse_args(argv)
     from scripts.shadeform_teardown import teardown_recovered_exact
@@ -127,6 +132,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("precreate recovery requires --instance-name")
     if not (math.isfinite(args.max_seconds) and args.max_seconds > 0) or not (math.isfinite(args.poll_seconds) and 0 < args.poll_seconds <= 60):
         parser.error("watchdog durations are outside their bounded range")
+    if args.approved_target_index is not None and not 0 <= args.approved_target_index <= 63:
+        parser.error("--approved-target-index is not a bounded list position")
     if args.deadline_epoch is not None:
         if not (math.isfinite(args.deadline_epoch) and args.deadline_epoch > 0):
             parser.error("--deadline-epoch must be a finite positive epoch")

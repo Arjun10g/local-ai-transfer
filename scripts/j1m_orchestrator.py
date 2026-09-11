@@ -847,6 +847,154 @@ def _eval_deadline_ceiling(config: dict[str, Any]) -> dict[str, float]:
     }
 
 
+def _target_matches_candidate(target: dict[str, Any], candidate: Any) -> bool:
+    """Exact identity match between one approved entry and one live candidate.
+
+    Every dimension the entry declares has to agree exactly, the price
+    included: a catalogue row that is a cent cheaper is a *different* offer
+    than the one Sol approved, so it is refused rather than taken as a bargain.
+    ``instance_type`` and ``os_image`` are compared only when the entry
+    declares them, which is what keeps the pre-existing primary entry -- and
+    therefore the default plan -- matching exactly as it did before.
+    """
+
+    return _target_mismatch_reason(target, candidate) is None
+
+
+# Skip reasons ordered from least to most specific. A catalogue may offer
+# several rows that could be one approved entry, so the reason reported for
+# that entry is the deepest dimension any row reached before differing: "the
+# offer is here but priced differently" is a materially different fact from
+# "no such offer exists", and a refusal that collapses both to "absent" tells
+# an operator nothing about what to do next.
+_TARGET_SKIP_ORDER = (
+    "not_in_catalogue", "vram_mismatch", "price_mismatch",
+    "instance_type_mismatch", "os_image_mismatch", "os_image_env_override",
+    "interruptible",
+)
+
+
+def _target_mismatch_reason(target: dict[str, Any], candidate: Any, *,
+                            image_from_env: bool = False) -> str | None:
+    """Return ``None`` for an exact match, else the dimension that differed."""
+
+    if (candidate.cloud.lower() != target["cloud"]
+            or candidate.region.lower() != target["region"].lower()
+            or candidate.gpu != target["gpu"]):
+        return "not_in_catalogue"
+    try:
+        if int(candidate.vram_gb) != int(target["vram_gib"]):
+            return "vram_mismatch"
+    except (TypeError, ValueError):
+        return "vram_mismatch"
+    if candidate.hourly_usd != target["hourly_usd"]:
+        return "price_mismatch"
+    if "instance_type" in target and candidate.instance_type != target["instance_type"]:
+        return "instance_type_mismatch"
+    if "os_image" in target and candidate.os_image != target["os_image"]:
+        # ``list_candidates`` reports ``SHADEFORM_IMAGE`` verbatim as every
+        # candidate's image when that key is set, so this mismatch is then a
+        # fact about the operator's environment and not about the provider.
+        # Still a refusal -- an entry approved on one image must not match an
+        # offer arriving on another -- but it is named distinctly, because the
+        # remedy is to unset the override rather than to wait for stock.
+        return "os_image_env_override" if image_from_env else "os_image_mismatch"
+    if getattr(candidate, "interruptible", False):
+        return "interruptible"
+    return None
+
+
+def _os_image_source(env: dict[str, str] | None) -> str:
+    """Say where a candidate's ``os_image`` came from. Never the value itself."""
+
+    if env and str(env.get("SHADEFORM_IMAGE", "") or "").strip():
+        return "env:SHADEFORM_IMAGE"
+    return "catalogue"
+
+
+def select_approved_target(config: dict[str, Any], candidates: list[Any], *,
+                           env: dict[str, str] | None = None) -> dict[str, Any]:
+    """Pick the first approved target present in the live catalogue.
+
+    The approved list is ordered cheapest first and is walked in that order,
+    not in catalogue order: the catalogue is evidence about availability and
+    never about preference.  The first entry with an exact live match wins; if
+    no approved entry matches, the run is refused here -- before key
+    generation, before any provider POST, and therefore at USD 0.00 -- rather
+    than substituting a nearby offer.  ``AGENTS.md`` forbids silently switching
+    a reviewed input, and an unapproved instance is exactly that.
+
+    Either way the per-entry verdict is carried out: on a selection as the
+    ``considered`` prefix that was skipped to reach it, and on a refusal on the
+    raised error and in its message, so a refused launch says which approved
+    entries were looked at and on which dimension each one failed.
+    """
+
+    image_from_env = _os_image_source(env) != "catalogue"
+    considered: list[dict[str, Any]] = []
+    for index, target in enumerate(config["shadeform_targets"]):
+        record = {
+            "approved_target_index": index, "cloud": target["cloud"],
+            "region": target["region"], "gpu": target["gpu"],
+            "hourly_usd": target["hourly_usd"],
+        }
+        if not target["approved"]:
+            considered.append({**record, "status": "not_approved",
+                               "detail": target["unapproved_reason"]})
+            continue
+        reasons = [reason for reason in
+                   (_target_mismatch_reason(target, item, image_from_env=image_from_env)
+                    for item in candidates)]
+        if None in reasons:
+            match = candidates[reasons.index(None)]
+            selection = j1m_runner.selected_target_record(config, index)
+            selection["considered"] = considered
+            selection["os_image_source"] = _os_image_source(env)
+            return {"index": index, "target": target, "candidate": match,
+                    "selection": selection}
+        deepest = max(reasons, key=_TARGET_SKIP_ORDER.index) if reasons else "not_in_catalogue"
+        considered.append({**record, "status": deepest})
+    summary = "; ".join(
+        f"#{item['approved_target_index']} {item['cloud']}/{item['region']} {item['status']}"
+        for item in considered)
+    error = sf.ShadeformError(
+        "no approved J1M target is an eligible current catalogue candidate: " + summary)
+    error.considered = considered
+    error.os_image_source = _os_image_source(env)
+    raise error
+
+
+def _assert_selected_target_within_per_run_cap(
+    config: dict[str, Any], *, mode: str, hourly_usd: float, env: dict[str, str],
+) -> dict[str, Any]:
+    """Refuse, pre-spend, a selected target whose worst case breaks the cap.
+
+    The worst case is the longest the provider could keep the instance -- the
+    larger of this mode's provider backstop and the operator's standing
+    ``SHADEFORM_AUTO_TERMINATE_HOURS`` ceiling -- multiplied by the *selected*
+    entry's rate, never by a constant.  ADR-0005 records a per-run cap
+    alongside the program cap but only the program cap was ever enforced in
+    source; this is where the per-run one becomes a refusal instead of a note.
+    """
+
+    cap = j1m_runner.per_run_cap_usd(config)
+    backstop_hours = float(config["modes"][mode]["provider_backstop_hours"])
+    ceiling_hours = sf.configured_auto_terminate_hours(env)
+    worst_case_hours = max(backstop_hours, ceiling_hours)
+    worst_case_usd = round(float(hourly_usd) * worst_case_hours, 6)
+    projection = {
+        "hourly_usd": float(hourly_usd),
+        "worst_case_hours": worst_case_hours,
+        "worst_case_usd": worst_case_usd,
+        "per_run_cap_usd": cap,
+        "mode_active_cost_usd": j1m_runner.mode_active_cost_usd(config, mode, hourly_usd),
+    }
+    if worst_case_usd > cap:
+        raise sf.ShadeformError(
+            "selected J1M target's worst-case run cost exceeds the recorded per-run cap")
+    return projection
+
+
 def _comparator_selection(value: str | None) -> tuple[str, ...]:
     """Parse an approved comparator request; refuse anything else.
 
@@ -887,12 +1035,19 @@ def _comparator_budget(
     config: dict[str, Any], selection: tuple[str, ...], *,
     setup_seconds: float = _COMPARATOR_SETUP_BUDGET_SECONDS,
     arm_seconds: float = _COMPARATOR_ARM_BUDGET_SECONDS,
+    hourly_usd: float | None = None,
 ) -> dict[str, Any]:
     """Bound the comparator phase against the already-authorised eval clocks.
 
     The phase runs strictly inside ``execution_deadline``, which is derived
     from the approved ``modes.eval`` clocks, so it adds no authorised spend.
     The projected marginal cost is recorded as evidence, never as a new cap.
+
+    ``hourly_usd`` is the *selected* approved target's rate.  Every dollar
+    figure here is derived from it rather than from a constant, so a run on an
+    alternate entry reports what that entry actually costs; with the argument
+    absent the primary target's rate is used and the numbers are the ones the
+    single-target config produced.
     """
 
     for value in (setup_seconds, arm_seconds):
@@ -903,7 +1058,10 @@ def _comparator_budget(
     envelope = _eval_deadline_ceiling(config)
     static_slack = envelope["run_seconds"] - envelope["ceiling_seconds"]
     required = (float(setup_seconds) + float(arm_seconds) * len(arms)) if arms else 0.0
-    hourly = float(config["shadeform_target"]["hourly_usd"])
+    if hourly_usd is None:
+        hourly = float(j1m_runner.primary_shadeform_target(config)["hourly_usd"])
+    else:
+        hourly = float(hourly_usd)
     return {
         "requested": list(selection),
         "arms": list(arms),
@@ -912,8 +1070,9 @@ def _comparator_budget(
         "required_seconds": round(required, 3),
         "static_slack_seconds": round(static_slack, 3),
         "fits_static_worst_case": required <= static_slack,
+        "hourly_usd": hourly,
         "projected_marginal_cost_usd": round(hourly * required / 3600.0, 6),
-        "authorized_active_cost_usd": float(config["modes"]["eval"]["active_cost_usd"]),
+        "authorized_active_cost_usd": j1m_runner.mode_active_cost_usd(config, "eval", hourly),
         "raises_authorized_cost": False,
     }
 
@@ -928,10 +1087,11 @@ def _comparator_clock_available(config: dict[str, Any], execution_deadline: floa
 def _comparator_phase(
     config: dict[str, Any], selection: tuple[str, ...], *,
     execution_deadline: float | None = None,
+    hourly_usd: float | None = None,
 ) -> dict[str, Any]:
     """Decide the comparator phase. Every refusal carries a typed reason."""
 
-    budget = _comparator_budget(config, selection)
+    budget = _comparator_budget(config, selection, hourly_usd=hourly_usd)
     phase: dict[str, Any] = {
         "engine_available": _COMPARATOR_ENGINE_AVAILABLE,
         "requested": list(selection),
@@ -2064,10 +2224,24 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
     # Candidate selection is policy- and budget-bound; identity is checked
     # again before create so a catalogue reorder cannot change the target.
     candidates = sf.list_candidates(api_key, env, phase_id=phase_id, min_vram_gb=80, max_runtime_hours=runtime)
-    target = config["shadeform_target"]
-    candidate = next((item for item in candidates if item.cloud.lower() == target["cloud"] and item.region.lower() == target["region"].lower() and item.gpu == target["gpu"] and item.hourly_usd == target["hourly_usd"]), None)
-    if candidate is None:
-        raise sf.ShadeformError("approved J1M target is not an eligible current catalogue candidate")
+    # Walk the ordered approved list, cheapest first, and take the first entry
+    # the live catalogue still offers exactly. No match anywhere on the list is
+    # a typed refusal here, at USD 0.00, with nothing created.
+    chosen = select_approved_target(config, candidates, env=env)
+    target = chosen["target"]
+    candidate = chosen["candidate"]
+    approved_target_index = chosen["index"]
+    selected_target = chosen["selection"]
+    # Every dollar figure from here on is the selected entry's, not the
+    # primary's, and the recorded per-run cap is enforced before key generation.
+    selected_target["cost_projection"] = _assert_selected_target_within_per_run_cap(
+        config, mode=mode, hourly_usd=float(target["hourly_usd"]), env=env)
+    if comparator_selection:
+        # Re-derive the phase evidence at the selected rate. The pre-spend
+        # refusal above already ran on the time-based budget, which the rate
+        # does not enter; this only makes the recorded numbers the true ones.
+        comparator_phase = _comparator_phase(
+            config, comparator_selection, hourly_usd=float(target["hourly_usd"]))
     nonce = sf.new_ownership_nonce()
     with tempfile.TemporaryDirectory(prefix=f"j1m-{phase_id}-") as temp:
         temp_root = Path(temp)
@@ -2102,7 +2276,8 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
         recorded = False
         record: sf.OwnedResource | None = None
         known_hosts = temp_root / "known_hosts"
-        lifecycle: dict[str, Any] = {"phase_id": phase_id, "status": "starting", "mode": mode}
+        lifecycle: dict[str, Any] = {"phase_id": phase_id, "status": "starting", "mode": mode,
+                                     "selected_target": selected_target}
         if eval_artifact is not None:
             lifecycle["artifact"] = eval_artifact
         if comparator_selection:
@@ -2204,6 +2379,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 public_key_sha256=hashlib.sha256(public_key.encode("utf-8")).hexdigest(),
                 expected_budget_cap_usd=budget_cap_usd,
                 public_key_fingerprint=key_fingerprint,
+                approved_target_index=approved_target_index,
             )
             attempt_reserved = True
             # Prearm exact recovery before the first SSH-key provider POST.
@@ -2234,6 +2410,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 "--instance-type", candidate.instance_type, "--hourly-usd", str(candidate.hourly_usd),
                 "--gpu", candidate.gpu, "--gpu-count", "1", "--vram-gb", str(candidate.vram_gb),
                 "--os-image", candidate.os_image,
+                "--approved-target-index", str(approved_target_index),
             ]
             if launcher_start_marker is not None:
                 watchdog_command.extend(["--launcher-start-marker", launcher_start_marker])
@@ -2290,6 +2467,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 expected_budget_cap_usd=budget_cap_usd,
                 public_key_fingerprint=key_fingerprint,
                 ssh_key_id=key_id,
+                approved_target_index=approved_target_index,
             )
             create_intent_started = sf.utc_now().isoformat()
             sf.append_instance_create_intent(
@@ -2472,8 +2650,13 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     # The Q4 job is already fixed above: nothing below may
                     # change it, and a comparator failure is recorded as a
                     # typed skip rather than failing the Q4 result.
+                    # The rate is the SELECTED entry's, exactly as in the
+                    # pre-spend derivation above. Omitting it here silently
+                    # republished the primary's rate over the real one, which
+                    # on the crusoe entry understated the projection by 22%.
                     comparator_phase = _comparator_phase(
-                        config, comparator_selection, execution_deadline=execution_deadline)
+                        config, comparator_selection, execution_deadline=execution_deadline,
+                        hourly_usd=float(target["hourly_usd"]))
                     lifecycle["comparator_phase"] = comparator_phase
                     try:
                         if comparator_phase["status"] == "approved":
