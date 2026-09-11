@@ -3,7 +3,7 @@
 - **Session:** S3
 - **Required model:** GPT-5.6 Luna
 - **Role:** Tools / Host Integration
-- **Timestamp (UTC):** 2026-09-11T06:53:46Z
+- **Timestamp (UTC):** 2026-09-11T06:57:32Z
 - **Branch/worktree:** `luna/graph-restart-reconciliation-v1` / `wt-graph-restart-reconciliation-v1`
 - **Current phase:** Source-only hardening
 - **Primary task ID:** GRAPH-RESTART-RECONCILIATION
@@ -41,11 +41,11 @@ This is stated separately because the previous packet did not say it, and the re
 - Added conservative Graph proof retrieval: one bounded Drafts ID page followed by explicit GETs; pagination, duplicate IDs/headers/resources, malformed projections, normalization mismatch, content mismatch, account mismatch, epoch change, and non-unique matches fail closed.
 - Kept `dispatching` startup recovery as `unknown_manual`, retained `reconciling`/`unknown_manual`, other Graph operations, legacy markers, and the manual-resolution refusal unchanged.
 
-### Review repair (`71f7fb5`, `37bbf19`, this packet)
+### Review repair (`71f7fb5`, `37bbf19`, `438795f`, `c549a8f`)
 
 - **F-1 (MAJOR).** One shared `MAX_DRAFT_PROOF_CANDIDATES = 20` now bounds candidate GETs for both the in-flight and the restart path. The in-flight path derives a deadline from `mail.create_draft`'s own published `timeout_ms` minus a 2.5 s margin, refuses to start a proof request that cannot finish in the remainder (250 ms floor), and caps each request it does issue to the remaining budget. Budget exhaustion returns the typed `draft_proof_budget_exhausted` reconciling result; transport faults, malformed collections, and truncation are likewise returned as `reconciling` data instead of thrown. Operator cancellation still propagates. The seam can therefore no longer produce `tool_timeout`, so it can no longer drive a record to `unknown_manual`.
 - **F-4 / F-8.** The restart pass no longer calls `status()`. It samples the auth epoch and verified account fingerprint read-only from module-private state *before* any provider call, and refuses to issue a request unless a live delegated token is already held with more margin (60 s) than the 30 s pass can consume. Measured revocations for the reviewer's 8-candidate scenario go from 32 to 0, and the epoch guard is now sampled before anything that could reinstall the fingerprint.
-- **F-7.** A durable `complete()` rejection is counted and returned as a typed metadata-only `blocked` count with a bounded lowercase code (`state: 'degraded'`). The record keeps its durable state and stays eligible for a later pass. The pass result shape is now `{ state, examined, completed, blocked, code }`.
+- **F-7.** A durable `complete()` rejection is counted and returned as a typed metadata-only `blocked` count (`state: 'degraded'`). The record keeps its durable state and stays eligible for a later pass. The pass result shape is now `{ state, examined, completed, blocked, code }`. The code is attacker-influenceable metadata because the journal object can be injected, so only a journal-owned `action_journal_*` identifier is surfaced; every other error collapses to `action_journal_complete_failed` (`c549a8f`).
 - **F-3 / F-4 (tests).** Eight new cases; see Evidence.
 - **Inventory.** `tests/host/graph-restart-reconciliation.test.mjs` was missing from `scripts/test/run_qa.py`, which reported it as an unknown entry and failed the inventory check. It is now classified `provider_fixture`.
 - Design docs updated to match the final code: shared budget and rationale, the deadline and typed inconclusive result, the read-only authorization snapshot, the two deliberate operational limits, and what actually happens to a `reconciling` Graph record.
@@ -54,9 +54,9 @@ This is stated separately because the previous packet did not say it, and the re
 
 All commands run from the worktree root on 2026-09-11. Numbers are exact.
 
-- Commits: `71f7fb5` (`security: bound in-flight Graph proof retrieval to a safe inconclusive result`), `37bbf19` (`qa: cover budget exhaustion, legacy markers, and both production restart triggers`), plus this documentation commit. Base slice commits are `c3ca108`, `e6e1a55`, `31ab96d`.
-- `npm test` (`node --test tests/host/*.test.mjs tests/security/*.test.mjs`): **425 discovered, 423 pass, 0 fail, 0 cancelled, 1 skipped, 1 todo, duration_ms 41636.715** (wall 42.128 s). The single skip and single todo are the pre-existing filesystem `KNOWN LIMITATION` pair, unchanged. The count moved 417 -> 425 because this repair adds eight test cases.
-- `node --test tests/host/graph-restart-reconciliation.test.mjs tests/host/graph-production-composition-restart.test.mjs tests/host/graph-manual-resolution-guard.test.mjs tests/host/external-tools.test.mjs`: **123 tests, 123 pass, 0 fail, 0 skipped, 0 todo, duration_ms 2422.110541**.
+- Repair commits: `71f7fb5` (`security: bound in-flight Graph proof retrieval to a safe inconclusive result`), `37bbf19` (`qa: cover budget exhaustion, legacy markers, and both production restart triggers`), `438795f` (`docs: disclose the in-flight reconciliation change and record the repair evidence`), `c549a8f` (`security: restrict the restart failure code to journal-owned identifiers`), plus this final documentation commit. Base slice commits are `c3ca108`, `e6e1a55`, `31ab96d`.
+- `npm test` (`node --test tests/host/*.test.mjs tests/security/*.test.mjs`): **425 discovered, 423 pass, 0 fail, 0 cancelled, 1 skipped, 1 todo, duration_ms 41197.132959** (wall 41.784 s). The single skip and single todo are the pre-existing filesystem `KNOWN LIMITATION` pair, unchanged. The count moved 417 -> 425 because this repair adds eight test cases.
+- `node --test tests/host/graph-restart-reconciliation.test.mjs tests/host/graph-production-composition-restart.test.mjs tests/host/graph-manual-resolution-guard.test.mjs tests/host/external-tools.test.mjs`: **123 tests, 123 pass, 0 fail, 0 skipped, 0 todo, duration_ms 988.663**.
 - `git diff --check main...HEAD`: no output, **exit 0**.
 - `python3 scripts/test/run_qa.py --root . --skip-native --output -`: **status `BLOCKED`**, inventory **0 missing / 0 unknown**, 60 discovered, `passed false`, `release_passed false`. `BLOCKED` is the expected safe-mode result: safe mode executes no suite, so every mandatory suite is an unproven SKIP.
 - Machine: local source workspace, Darwin arm64, Python 3.14.6. No native build, no model, no network, no provider contact.
@@ -68,7 +68,7 @@ New test cases added in `37bbf19` (all in `tests/host/graph-restart-reconciliati
 2. Proof request budgets clamp to the transport timeout, refuse an unusable remainder, reject an out-of-range internal budget, and actually shorten the transport deadline.
 3. A restart pass issues no request and revokes no grant without a live token, and performs no `/me` account check even when authenticated.
 4. An auth epoch change mid-pass blocks completion even when the same account is re-verified.
-5. A `complete()` rejection is surfaced as a typed metadata-only blocked count, for a typed and an untyped failure, leaving the record `acknowledged`.
+5. A `complete()` rejection is surfaced as a typed metadata-only blocked count for a journal-typed, an untyped, and a foreign-typed failure, leaving the record `acknowledged`.
 6. A legacy two-part marker is ineligible for restart completion.
 7. An acknowledged non-`mail.create_draft` record is skipped with zero provider callbacks.
 8. Composition startup invokes the pass on its own controller; a successful device-code authentication invokes it exactly once and a failed one never does.
@@ -104,7 +104,7 @@ New test cases added in `37bbf19` (all in `tests/host/graph-restart-reconciliati
 
 ## Next bounded action
 
-Independent re-review of `31ab96d..37bbf19`, especially the in-flight proof budget and its typed inconclusive result, the read-only authorization snapshot and epoch ordering, the typed `blocked` result shape, and the unchanged journal durability and manual-resolution gates.
+Independent re-review of `31ab96d..HEAD` (`71f7fb5`, `37bbf19`, `438795f`, `c549a8f`, and this documentation commit), especially the in-flight proof budget and its typed inconclusive result, the read-only authorization snapshot and epoch ordering, the typed `blocked` result shape, and the unchanged journal durability and manual-resolution gates.
 
 ## Sol action requested
 
