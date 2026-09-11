@@ -15,6 +15,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# Floor written by the seed commit: 4 exemplars in each of the 13 category files.
+SEED_CASES_PER_CATEGORY = 4
+SEED_CASE_TOTAL = 52
+
 # scripts/model-artifact is not an importable package name, so load the validator
 # by path exactly as tests/performance/test_model_specs.py loads validate_specs.py.
 _SPEC = importlib.util.spec_from_file_location(
@@ -204,12 +208,25 @@ class ValidFixtureTests(unittest.TestCase):
         self.assertEqual(corpus.errors(), [])
 
     def test_committed_corpus_passes_in_authoring_mode(self):
+        # Bounds, not equalities: author lanes grow their own category file between
+        # the seed commit and completion, so this test must tolerate growth while
+        # still catching a lost file, a lost seed, or runaway generation.
         errors, rows = V.validate_corpus(REPO_ROOT)
         self.assertEqual(errors, [])
         self.assertEqual(len(rows), 13)
-        self.assertEqual(sum(row["count"] for row in rows), 52)
+        self.assertGreaterEqual(sum(row["count"] for row in rows), SEED_CASE_TOTAL)
         for row in rows:
-            self.assertEqual(row["count"], 4, msg=row["category"])
+            self.assertGreaterEqual(row["count"], SEED_CASES_PER_CATEGORY, msg=row["category"])
+
+    def test_committed_corpus_never_exceeds_twice_the_spec_minimum(self):
+        _, rows = V.validate_corpus(REPO_ROOT)
+        for row in rows:
+            self.assertLessEqual(
+                row["count"],
+                2 * row["minimum"],
+                msg=f"{row['category']}: {row['count']} cases is more than twice the spec "
+                    f"minimum of {row['minimum']}; check for runaway generation",
+            )
 
     def test_committed_corpus_keeps_the_three_reserved_fixture_ids(self):
         _, rows = V.validate_corpus(REPO_ROOT)
