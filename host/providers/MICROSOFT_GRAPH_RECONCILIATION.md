@@ -56,7 +56,8 @@ acknowledged records and 20 draft IDs per record are examined within a
 
 The pass samples the auth epoch and the verified account fingerprint read-only,
 before any provider call, and refuses to issue a request unless a live
-delegated token is already held with more margin than the pass can consume. It
+delegated token is already held with more life (90 s) than the 30 s pass plus
+the credential's own 60 s refresh threshold can consume. It
 deliberately does not call the provider's `status()`: that call mutates
 operator-visible authorization state — a failing credential check clears the
 session and revokes the live `microsoft.graph.*` capability grants — and it
