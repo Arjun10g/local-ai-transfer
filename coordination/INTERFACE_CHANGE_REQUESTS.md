@@ -67,6 +67,31 @@
   contract (for example `contracts/action-journal-descriptor-wal/`) is
   REQUIRED for the v2 WAL boundary before any transport, import, package, or
   activation path exists.
+- **Follow-up note (2026-09-11, S1 Runtime, `luna/descriptor-wal-contract-v1`,
+  task RUN-DESCRIPTOR-WAL-CONTRACT):** the separate frozen contract ADR-0004
+  requires for the v2 WAL boundary now exists at
+  `contracts/action-journal-descriptor-wal/v0.1.0.json` with a companion
+  `v0.1.0.md`. It is source-only: `production_available`,
+  `native_target_registered`, `helper_added`, `transport_added`,
+  `node_integration_added`, `package_added`, and `activation_permitted` are all
+  literal `false`, and no transport, host import, package entry, or activation
+  path exists for the boundary it describes. It declares the 26 status codes the
+  v2 functions actually emit, derived from `windows_storage.cpp` by
+  function-body extraction, together with the fixed `action-journal-v2.wal`
+  leaf, the exact 48-byte header and the inclusive 33,554,432-byte bound, the
+  lease/handoff/inheritance states, the launcher preconditions, the duplicate's
+  `GENERIC_READ | GENERIC_WRITE` mask, the create-only delete-on-failure rule,
+  and the shared-file-position rule.
+  `contracts/action-journal-storage/v0.1.0.json` is **not** modified: it retains
+  the four codes as a documented superset under this ICR and ADR-0004, so the
+  merged status-set equality assertion keeps its force, and its `.md` now says
+  so and records that a future storage version may drop them only under a new
+  ICR and a version bump. `tests/native/test_descriptor_wal_contract_static.py`
+  pins all of it, including that the storage contract minus the emitted union is
+  exactly `platform_unavailable`. Review item R4 is closed in the same slice as
+  a documented accepted design limitation with no C++ change. Sol review and
+  merge of the new contract are pending; no approval, activation, production
+  availability, compile, Windows, or target claim is made here.
 - **Evidence required:** exact code/contract agreement
   (`tests/native/test_windows_action_journal_storage_static.py` status-set
   assertion) plus the descriptor bootstrap suite's per-condition status
