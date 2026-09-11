@@ -47,6 +47,7 @@ CASE_ID = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 MAX_CASES = 4096
 SKIP_REASONS = frozenset({
     "comparator_not_requested",
+    "comparator_engine_unavailable",
     "comparator_clock_insufficient",
     "comparator_stage_failed",
     "comparator_receipt_missing",
