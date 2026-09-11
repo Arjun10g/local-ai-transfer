@@ -512,6 +512,26 @@ class ComparatorBudgetTests(unittest.TestCase):
         self.assertNotIn("reason", ample)
         self.assertGreaterEqual(ample["available_seconds"], required)
 
+    def test_a_mid_phase_clock_exhaustion_is_a_typed_skip_not_a_run_failure(self):
+        # _eval_timeout refuses a stage budget that would cross the provider
+        # clock. Inside the comparator phase that must degrade to a typed
+        # comparator skip: the Q4 job has already completed and nothing in
+        # the comparator phase may retract it.
+        import time
+        with self.assertRaises(self.orchestrator.sf.ShadeformError):
+            self.orchestrator._eval_timeout(time.monotonic() - 1.0, 60.0)
+        source = (ROOT / "scripts/j1m_orchestrator.py").read_text()
+        phase = source[source.index('if comparator_selection:\n                    # The Q4 job'):]
+        phase = phase[:phase.index('if lifecycle["job"]["status"] != "completed"')]
+        self.assertIn('except sf.ShadeformError:', phase)
+        self.assertIn('"comparator_clock_insufficient"', phase)
+        self.assertIn('"comparator_stage_failed"', phase)
+        # The deferred deletion tail is in a finally, so it runs on the
+        # refusal path too, and an unproven deletion is typed.
+        self.assertIn('finally:', phase)
+        self.assertIn('comparator_cleanup_error', phase)
+        self.assertLess(phase.index('finally:'), phase.index('_comparator_cleanup_commands'))
+
     @isolated_lifecycle_execute
     def test_execute_refuses_comparators_before_any_provider_access(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as directory:

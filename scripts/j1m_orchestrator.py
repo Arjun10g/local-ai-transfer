@@ -1631,10 +1631,19 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                         if comparator_phase["status"] == "approved":
                             for command in _comparator_remote_commands(config, remote_root, comparator_selection):
                                 lifecycle["stage"] = _eval_stage_label(command)
+                                try:
+                                    stage_timeout = _eval_timeout(execution_deadline, _comparator_stage_timeout(config, command))
+                                except sf.ShadeformError:
+                                    # The clock ran out mid-phase. That is a
+                                    # typed comparator skip, never a failure
+                                    # of the Q4 run that already completed.
+                                    comparator_phase["status"] = "refused"
+                                    comparator_phase["reason"] = "comparator_clock_insufficient"
+                                    break
                                 _progress(progress_path, "comparator-stage-starting", phase_id=phase_id, operation_stage=lifecycle["stage"])
                                 stage = _remote(
                                     sf.ssh_base(info, identity, known_hosts) + command,
-                                    timeout=_eval_timeout(execution_deadline, _comparator_stage_timeout(config, command)))
+                                    timeout=stage_timeout)
                                 lifecycle.setdefault("eval_stages", []).append(stage)
                                 _progress(progress_path, "comparator-stage-result", phase_id=phase_id, operation_stage=lifecycle["stage"], status=stage["status"], exit_code=stage.get("exit_code"))
                                 if stage["status"] != "completed":
