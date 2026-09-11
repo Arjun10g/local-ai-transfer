@@ -3,6 +3,11 @@
   "fixture_id": "qwen35-9b-quality-v1",
   "purpose": "Compact deterministic contract fixtures; full prompts/results remain outside ordinary logs",
   "model": "qwen35-9b-q4-k-m",
+  "cases_dir": "model/quality-eval/cases",
+  "case_schema": "model/quality-eval/schema/quality-case.schema.json",
+  "authoring_guide": "model/quality-eval/CORPUS_AUTHORING_GUIDE.md",
+  "case_id_pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*-[0-9]{3}$",
+  "split_derivation": "sha256(id) hex as integer modulo 100: <20 train, <40 dev, else test",
   "split_policy": {"train": "prompt-tuning-only", "dev": "bounded-selection", "test": "held-out-and-immutable"},
   "categories": [
     {"id": "instruction", "minimum_cases": 100, "metric": "rubric_pass"},

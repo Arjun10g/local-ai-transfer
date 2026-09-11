@@ -1,0 +1,2346 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local-bmo.invalid/schemas/quality-case.schema.json",
+  "title": "Qwen3.5-9B quality-evaluation corpus case and category file",
+  "description": "Authoring contract for model/quality-eval/cases/<category>.json. The root schema validates one category file; #/$defs/case validates a single case. Category-to-metric binding follows model/quality-eval/quality-fixture-spec.json. Semantic rules that JSON Schema cannot express (deterministic split derivation, production tool-name membership, forbidden content patterns, per-category minimums) are enforced by scripts/model-artifact/validate_quality_corpus.py.",
+  "$ref": "#/$defs/category_file",
+  "$defs": {
+    "category_file": {
+      "type": "object",
+      "title": "One quality-evaluation category file",
+      "properties": {
+        "schema_version": {
+          "const": "1.0.0"
+        },
+        "fixture_id": {
+          "const": "qwen35-9b-quality-v1"
+        },
+        "category": {
+          "enum": [
+            "instruction",
+            "continuity_reset",
+            "summarization",
+            "extraction",
+            "reasoning",
+            "code_command",
+            "file_task_planning",
+            "tool_selection_no_tool",
+            "tool_arguments",
+            "tool_recovery",
+            "policy_safety",
+            "long_short_integrity",
+            "thinking_control"
+          ]
+        },
+        "cases": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 400,
+          "items": {
+            "$ref": "#/$defs/case"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "fixture_id",
+        "category",
+        "cases"
+      ],
+      "additionalProperties": false
+    },
+    "case": {
+      "type": "object",
+      "title": "One quality-evaluation case",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*-[0-9]{3}$",
+          "maxLength": 96
+        },
+        "category": {
+          "enum": [
+            "instruction",
+            "continuity_reset",
+            "summarization",
+            "extraction",
+            "reasoning",
+            "code_command",
+            "file_task_planning",
+            "tool_selection_no_tool",
+            "tool_arguments",
+            "tool_recovery",
+            "policy_safety",
+            "long_short_integrity",
+            "thinking_control"
+          ]
+        },
+        "difficulty": {
+          "enum": [
+            "easy",
+            "medium",
+            "hard",
+            "adversarial"
+          ]
+        },
+        "split": {
+          "enum": [
+            "train",
+            "dev",
+            "test"
+          ]
+        },
+        "lang": {
+          "type": "string",
+          "pattern": "^[a-z]{2}(?:-[A-Z]{2})?$"
+        },
+        "messages": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "properties": {
+              "role": {
+                "enum": [
+                  "system",
+                  "user"
+                ]
+              },
+              "content": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 24000
+              }
+            },
+            "required": [
+              "role",
+              "content"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "tools": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 33,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{1,95}$"
+          }
+        },
+        "settings": {
+          "type": "object",
+          "description": "Deterministic generation settings. 'profile' is the governance generation profile (governance/MODEL_DECISION.md); 'mode' is the literal host/engine wire value (contracts/host-api/contract.json, contracts/engine-api/contract.json); 'enable_thinking' is the derived native flag (mode == 'deep'). max_output_tokens is bounded by the engine's accepted 1..256 range.",
+          "properties": {
+            "profile": {
+              "enum": [
+                "interactive",
+                "tool_selection",
+                "deep"
+              ]
+            },
+            "mode": {
+              "enum": [
+                "normal",
+                "deep"
+              ]
+            },
+            "temperature": {
+              "const": 0
+            },
+            "max_output_tokens": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 256
+            },
+            "enable_thinking": {
+              "type": "boolean"
+            },
+            "context_tokens": {
+              "enum": [
+                8192,
+                16384
+              ]
+            }
+          },
+          "required": [
+            "profile",
+            "mode",
+            "temperature",
+            "max_output_tokens",
+            "enable_thinking"
+          ],
+          "additionalProperties": false
+        },
+        "follow_up": {
+          "type": "object",
+          "properties": {
+            "reset": {
+              "type": "boolean"
+            },
+            "messages": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 4,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "enum": [
+                      "system",
+                      "user"
+                    ]
+                  },
+                  "content": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 24000
+                  }
+                },
+                "required": [
+                  "role",
+                  "content"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "reset",
+            "messages"
+          ],
+          "additionalProperties": false
+        },
+        "long_input": {
+          "type": "object",
+          "properties": {
+            "generator": {
+              "enum": [
+                "numbered_lines",
+                "repeated_record",
+                "log_lines",
+                "synthetic_report"
+              ]
+            },
+            "target_tokens": {
+              "type": "integer",
+              "minimum": 512,
+              "maximum": 15000
+            },
+            "seed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "placeholder": {
+              "type": "string",
+              "pattern": "^\\{\\{LONG_INPUT\\}\\}$"
+            }
+          },
+          "required": [
+            "generator",
+            "target_tokens",
+            "seed",
+            "placeholder"
+          ],
+          "additionalProperties": false
+        },
+        "notes": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 480
+        },
+        "expected": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "category",
+        "difficulty",
+        "split",
+        "messages",
+        "settings",
+        "expected"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "instruction"
+              }
+            },
+            "required": [
+              "category"
+            ]
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "$ref": "#/$defs/expected_rubric_pass"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "continuity_reset"
+              }
+            },
+            "required": [
+              "category"
+            ]
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "$ref": "#/$defs/expected_state_canary_and_pass"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "summarization"
+              }
+            },
+            "required": [
+              "category"
+            ]
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "$ref": "#/$defs/expected_key_fact_coverage_and_hallucination"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "extraction"
+              }
+            },
+            "required": [
+              "category"
+            ]
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "$ref": "#/$defs/expected_exact_or_f1"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "reasoning"
+              }
+            },
+            "required": [
+              "category"
+            ]
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "$ref": "#/$defs/expected_exact"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "code_command"
+              }
+            },
+            "required": [
+              "category"
+            ]
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "$ref": "#/$defs/expected_tests_or_exact"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "file_task_planning"
+              }
+            },
+            "required": [
+              "category"
+            ]
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "$ref": "#/$defs/expected_action_plan_correctness"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "tool_selection_no_tool"
+              }
+            },
+            "required": [
+              "category"
+            ]
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "$ref": "#/$defs/expected_exact_and_false_positive_rate"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "tool_arguments"
+              }
+            },
+            "required": [
+              "category"
+            ]
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "$ref": "#/$defs/expected_exact_and_field_f1"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "tool_recovery"
+              }
+            },
+            "required": [
+              "category"
+            ]
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "$ref": "#/$defs/expected_final_task_success"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "policy_safety"
+              }
+            },
+            "required": [
+              "category"
+            ]
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "$ref": "#/$defs/expected_violation_rate"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "long_short_integrity"
+              }
+            },
+            "required": [
+              "category"
+            ]
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "$ref": "#/$defs/expected_pair_pass_and_corruption_flag"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "thinking_control"
+              }
+            },
+            "required": [
+              "category"
+            ]
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "$ref": "#/$defs/expected_mode_and_budget_compliance"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "enum": [
+                  "continuity_reset",
+                  "long_short_integrity"
+                ]
+              }
+            },
+            "required": [
+              "category"
+            ]
+          },
+          "then": {
+            "required": [
+              "follow_up"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "enum": [
+                  "tool_selection_no_tool",
+                  "tool_arguments",
+                  "tool_recovery",
+                  "file_task_planning"
+                ]
+              }
+            },
+            "required": [
+              "category"
+            ]
+          },
+          "then": {
+            "required": [
+              "tools"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "settings": {
+                "properties": {
+                  "mode": {
+                    "const": "deep"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              }
+            },
+            "required": [
+              "settings"
+            ]
+          },
+          "then": {
+            "properties": {
+              "settings": {
+                "properties": {
+                  "profile": {
+                    "const": "deep"
+                  },
+                  "enable_thinking": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "profile",
+                  "enable_thinking"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "settings": {
+                "properties": {
+                  "mode": {
+                    "const": "normal"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              }
+            },
+            "required": [
+              "settings"
+            ]
+          },
+          "then": {
+            "properties": {
+              "settings": {
+                "properties": {
+                  "profile": {
+                    "enum": [
+                      "interactive",
+                      "tool_selection"
+                    ]
+                  },
+                  "enable_thinking": {
+                    "const": false
+                  }
+                },
+                "required": [
+                  "profile",
+                  "enable_thinking"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "settings": {
+                "properties": {
+                  "profile": {
+                    "const": "tool_selection"
+                  }
+                },
+                "required": [
+                  "profile"
+                ]
+              }
+            },
+            "required": [
+              "settings"
+            ]
+          },
+          "then": {
+            "required": [
+              "tools"
+            ]
+          }
+        }
+      ]
+    },
+    "message": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "enum": [
+            "system",
+            "user"
+          ]
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 24000
+        }
+      },
+      "required": [
+        "role",
+        "content"
+      ],
+      "additionalProperties": false
+    },
+    "tool_name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.-]{1,95}$"
+    },
+    "call": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.-]{1,95}$"
+        },
+        "arguments": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "name",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    "assertions": {
+      "type": "object",
+      "title": "Assertion primitives",
+      "properties": {
+        "must_equal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "must_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_not_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_match": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "max_words": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "stop": {
+          "enum": [
+            "eos",
+            "length"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "expected_rubric_pass": {
+      "type": "object",
+      "properties": {
+        "metric": {
+          "const": "rubric_pass"
+        },
+        "rubric": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^r[0-9]{1,2}$"
+              },
+              "requirement": {
+                "type": "string",
+                "minLength": 8,
+                "maxLength": 240
+              },
+              "weight": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5
+              },
+              "match": {
+                "$ref": "#/$defs/match"
+              }
+            },
+            "required": [
+              "id",
+              "requirement",
+              "weight",
+              "match"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "pass_threshold": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "must_equal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "must_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_not_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_match": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "max_words": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "stop": {
+          "enum": [
+            "eos",
+            "length"
+          ]
+        }
+      },
+      "required": [
+        "metric",
+        "rubric",
+        "pass_threshold"
+      ],
+      "additionalProperties": false
+    },
+    "expected_state_canary_and_pass": {
+      "type": "object",
+      "properties": {
+        "metric": {
+          "const": "state_canary_and_pass"
+        },
+        "canary": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "pattern": "^[A-Z][A-Z0-9]{2,15}-[0-9]{1,4}$"
+            },
+            "must_persist": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "value",
+            "must_persist"
+          ],
+          "additionalProperties": false
+        },
+        "first_turn": {
+          "type": "object",
+          "title": "Assertions on the first assistant turn",
+          "properties": {
+            "must_equal": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "must_contain": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 12,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "must_not_contain": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 12,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "must_match": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "max_words": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096
+            },
+            "stop": {
+              "enum": [
+                "eos",
+                "length"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "minProperties": 1
+        },
+        "final_turn": {
+          "type": "object",
+          "title": "Assertions on the assistant turn after follow_up",
+          "properties": {
+            "must_equal": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "must_contain": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 12,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "must_not_contain": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 12,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "must_match": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "max_words": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096
+            },
+            "stop": {
+              "enum": [
+                "eos",
+                "length"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "minProperties": 1
+        },
+        "must_equal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "must_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_not_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_match": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "max_words": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "stop": {
+          "enum": [
+            "eos",
+            "length"
+          ]
+        }
+      },
+      "required": [
+        "metric",
+        "canary",
+        "final_turn"
+      ],
+      "additionalProperties": false
+    },
+    "expected_key_fact_coverage_and_hallucination": {
+      "type": "object",
+      "properties": {
+        "metric": {
+          "const": "key_fact_coverage_and_hallucination"
+        },
+        "key_facts": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/fact"
+          }
+        },
+        "min_coverage": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "forbidden_facts": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 12,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/fact"
+          }
+        },
+        "must_equal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "must_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_not_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_match": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "max_words": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "stop": {
+          "enum": [
+            "eos",
+            "length"
+          ]
+        }
+      },
+      "required": [
+        "metric",
+        "key_facts",
+        "min_coverage",
+        "forbidden_facts",
+        "max_words"
+      ],
+      "additionalProperties": false
+    },
+    "expected_exact_or_f1": {
+      "type": "object",
+      "properties": {
+        "metric": {
+          "const": "exact_or_f1"
+        },
+        "output_format": {
+          "enum": [
+            "json",
+            "csv",
+            "lines",
+            "kv"
+          ]
+        },
+        "target": {
+          "type": [
+            "object",
+            "array"
+          ]
+        },
+        "scoring": {
+          "enum": [
+            "exact",
+            "field_f1"
+          ]
+        },
+        "min_f1": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "must_equal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "must_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_not_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_match": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "max_words": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "stop": {
+          "enum": [
+            "eos",
+            "length"
+          ]
+        }
+      },
+      "required": [
+        "metric",
+        "output_format",
+        "target",
+        "scoring"
+      ],
+      "additionalProperties": false,
+      "if": {
+        "properties": {
+          "scoring": {
+            "const": "field_f1"
+          }
+        },
+        "required": [
+          "scoring"
+        ]
+      },
+      "then": {
+        "required": [
+          "min_f1"
+        ]
+      }
+    },
+    "expected_exact": {
+      "type": "object",
+      "properties": {
+        "metric": {
+          "const": "exact"
+        },
+        "answer": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "equivalent_answers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          }
+        },
+        "tolerance": {
+          "type": "number",
+          "minimum": 0
+        },
+        "must_equal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "must_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_not_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_match": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "max_words": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "stop": {
+          "enum": [
+            "eos",
+            "length"
+          ]
+        }
+      },
+      "required": [
+        "metric",
+        "answer"
+      ],
+      "additionalProperties": false
+    },
+    "expected_tests_or_exact": {
+      "type": "object",
+      "properties": {
+        "metric": {
+          "const": "tests_or_exact"
+        },
+        "language": {
+          "enum": [
+            "bash",
+            "powershell",
+            "python",
+            "json",
+            "none"
+          ]
+        },
+        "answer": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "checks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "contains",
+                  "not_contains",
+                  "regex",
+                  "equals"
+                ]
+              },
+              "value": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "required": [
+              "kind",
+              "value"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "must_equal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "must_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_not_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_match": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "max_words": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "stop": {
+          "enum": [
+            "eos",
+            "length"
+          ]
+        }
+      },
+      "required": [
+        "metric",
+        "language"
+      ],
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "required": [
+            "answer"
+          ]
+        },
+        {
+          "required": [
+            "checks"
+          ]
+        }
+      ]
+    },
+    "expected_action_plan_correctness": {
+      "type": "object",
+      "properties": {
+        "metric": {
+          "const": "action_plan_correctness"
+        },
+        "plan": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "properties": {
+              "step": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 8
+              },
+              "tool": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_.-]{1,95}$"
+              },
+              "arguments_subset": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "step",
+              "tool",
+              "arguments_subset"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "ordering": {
+          "enum": [
+            "strict",
+            "any"
+          ]
+        },
+        "forbidden_tools": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{1,95}$"
+          }
+        },
+        "requires_confirmation": {
+          "type": "boolean"
+        },
+        "must_equal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "must_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_not_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_match": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "max_words": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "stop": {
+          "enum": [
+            "eos",
+            "length"
+          ]
+        }
+      },
+      "required": [
+        "metric",
+        "plan",
+        "ordering"
+      ],
+      "additionalProperties": false
+    },
+    "expected_exact_and_false_positive_rate": {
+      "type": "object",
+      "properties": {
+        "metric": {
+          "const": "exact_and_false_positive_rate"
+        },
+        "call": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_.-]{1,95}$"
+            },
+            "arguments": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "name",
+            "arguments"
+          ],
+          "additionalProperties": false
+        },
+        "no_call": {
+          "const": true
+        },
+        "forbid_names": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{1,95}$"
+          }
+        },
+        "must_equal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "must_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_not_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_match": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "max_words": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "stop": {
+          "enum": [
+            "eos",
+            "length"
+          ]
+        }
+      },
+      "required": [
+        "metric"
+      ],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "call"
+          ]
+        },
+        {
+          "required": [
+            "no_call"
+          ]
+        }
+      ]
+    },
+    "expected_exact_and_field_f1": {
+      "type": "object",
+      "properties": {
+        "metric": {
+          "const": "exact_and_field_f1"
+        },
+        "call": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_.-]{1,95}$"
+            },
+            "arguments": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "name",
+            "arguments"
+          ],
+          "additionalProperties": false
+        },
+        "required_fields": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$"
+          }
+        },
+        "min_field_f1": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "must_equal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "must_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_not_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_match": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "max_words": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "stop": {
+          "enum": [
+            "eos",
+            "length"
+          ]
+        }
+      },
+      "required": [
+        "metric",
+        "call",
+        "required_fields",
+        "min_field_f1"
+      ],
+      "additionalProperties": false
+    },
+    "expected_final_task_success": {
+      "type": "object",
+      "properties": {
+        "metric": {
+          "const": "final_task_success"
+        },
+        "tool_transcript": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 6,
+          "items": {
+            "type": "object",
+            "properties": {
+              "call": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_.-]{1,95}$"
+                  },
+                  "arguments": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "name",
+                  "arguments"
+                ],
+                "additionalProperties": false
+              },
+              "result": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "ok",
+                      "error"
+                    ]
+                  },
+                  "code": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "content": {
+                    "type": "string",
+                    "maxLength": 4096
+                  },
+                  "untrusted": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "status"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "call",
+              "result"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "final": {
+          "type": "object",
+          "title": "Assertions on the final assistant answer",
+          "properties": {
+            "must_equal": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "must_contain": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 12,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "must_not_contain": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 12,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "must_match": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "max_words": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096
+            },
+            "stop": {
+              "enum": [
+                "eos",
+                "length"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "minProperties": 1
+        },
+        "max_tool_calls": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "forbidden_tools": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{1,95}$"
+          }
+        },
+        "must_equal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "must_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_not_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_match": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "max_words": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "stop": {
+          "enum": [
+            "eos",
+            "length"
+          ]
+        }
+      },
+      "required": [
+        "metric",
+        "tool_transcript",
+        "final"
+      ],
+      "additionalProperties": false
+    },
+    "expected_violation_rate": {
+      "type": "object",
+      "properties": {
+        "metric": {
+          "const": "violation_rate"
+        },
+        "boundary": {
+          "enum": [
+            "unauthorized_execution",
+            "confirmation_bypass",
+            "workspace_escape",
+            "data_egress",
+            "credential_disclosure",
+            "prompt_injection",
+            "untrusted_tool_output",
+            "unsafe_scheme",
+            "self_harm_or_illegal",
+            "privacy_pii",
+            "model_identity_or_policy_override"
+          ]
+        },
+        "expected_behavior": {
+          "enum": [
+            "refuse",
+            "refuse_with_alternative",
+            "comply",
+            "require_confirmation"
+          ]
+        },
+        "violation_markers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 240
+          }
+        },
+        "must_not_call": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{1,95}$"
+          }
+        },
+        "must_equal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "must_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_not_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_match": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "max_words": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "stop": {
+          "enum": [
+            "eos",
+            "length"
+          ]
+        }
+      },
+      "required": [
+        "metric",
+        "boundary",
+        "expected_behavior",
+        "violation_markers"
+      ],
+      "additionalProperties": false
+    },
+    "expected_pair_pass_and_corruption_flag": {
+      "type": "object",
+      "properties": {
+        "metric": {
+          "const": "pair_pass_and_corruption_flag"
+        },
+        "long_turn": {
+          "type": "object",
+          "title": "Assertions on the long-prompt answer",
+          "properties": {
+            "must_equal": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "must_contain": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 12,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "must_not_contain": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 12,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "must_match": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "max_words": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096
+            },
+            "stop": {
+              "enum": [
+                "eos",
+                "length"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "minProperties": 1
+        },
+        "short_turn": {
+          "type": "object",
+          "title": "Assertions on the following short-prompt answer",
+          "properties": {
+            "must_equal": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "must_contain": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 12,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "must_not_contain": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 12,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "must_match": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "max_words": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096
+            },
+            "stop": {
+              "enum": [
+                "eos",
+                "length"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "minProperties": 1
+        },
+        "corruption_checks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "truncation",
+              "repetition",
+              "encoding",
+              "state_leak"
+            ]
+          }
+        },
+        "must_not_leak": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 240
+        },
+        "must_equal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "must_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_not_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_match": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "max_words": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "stop": {
+          "enum": [
+            "eos",
+            "length"
+          ]
+        }
+      },
+      "required": [
+        "metric",
+        "long_turn",
+        "short_turn",
+        "corruption_checks"
+      ],
+      "additionalProperties": false
+    },
+    "expected_mode_and_budget_compliance": {
+      "type": "object",
+      "properties": {
+        "metric": {
+          "const": "mode_and_budget_compliance"
+        },
+        "thinking_expected": {
+          "type": "boolean"
+        },
+        "max_output_tokens_budget": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256
+        },
+        "max_thinking_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256
+        },
+        "must_equal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "must_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_not_contain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "must_match": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "max_words": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "stop": {
+          "enum": [
+            "eos",
+            "length"
+          ]
+        }
+      },
+      "required": [
+        "metric",
+        "thinking_expected",
+        "max_output_tokens_budget"
+      ],
+      "additionalProperties": false
+    },
+    "match": {
+      "type": "object",
+      "title": "Deterministic matcher for a natural-language proposition or requirement",
+      "description": "The answer is normalized by applying the listed steps in the fixed order lowercase, collapse_ws, strip_punct, numerals, then each any_of variant is tried against it. A plain string variant matches as a substring; a {\"regex\": ...} variant matches when re.search succeeds, so the author anchors with \\\\A/\\\\Z when a whole-answer predicate is meant. A required item (key_fact, rubric) passes when ANY variant matches; a forbidden item (forbidden_fact) passes when NONE matches. No model, judge or human rater is involved.",
+      "properties": {
+        "any_of": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 400
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "regex": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 800
+                  }
+                },
+                "required": [
+                  "regex"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "normalize": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "lowercase",
+              "collapse_ws",
+              "strip_punct",
+              "numerals"
+            ]
+          }
+        }
+      },
+      "required": [
+        "any_of",
+        "normalize"
+      ],
+      "additionalProperties": false
+    },
+    "fact": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 240
+        },
+        "match": {
+          "$ref": "#/$defs/match"
+        }
+      },
+      "required": [
+        "text",
+        "match"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
