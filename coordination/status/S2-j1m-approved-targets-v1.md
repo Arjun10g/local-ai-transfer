@@ -87,7 +87,7 @@ about what is built, what is evaluated, or whether anything may be launched.
   cost-event field set and schema `local_bmo.shadeform.cost-event.v2` are
   unchanged.
 - **Dry run** `scripts/j1m_dry_run.py` — seven approved-target scenarios and
-  three new checks; `drive()` accepts a fake catalogue and `_candidate()`
+  four new checks; `drive()` accepts a fake catalogue and `_candidate()`
   builds a row for any entry with per-dimension overrides, so a near-miss is
   built from the real entry rather than hand-typed.
 - **Tests** `tests/performance/test_j1m_approved_targets.py` — 57 cases,
@@ -120,8 +120,9 @@ from the new code (`MAIN_PLAN_COSTS`):
 | eval | 2.619 | 3.2738 |
 | canary | 0.3375 | 0.4219 |
 
-The plan gains exactly three keys — `approved_targets`, `selected_target`,
-`target_selection` — and `candidate` is still the primary target object.
+The plan gains exactly four keys — `approved_targets`, `selected_target`,
+`target_selection`, `os_image_policy` — and `candidate` is still the primary
+target object.
 `build_plan(config, "build")["commands"]` is still `command_plan(config)`, the
 eval upload count still equals `_eval_deadline_ceiling`'s `upload_count`, and
 no approved entry's cloud, region or rate appears anywhere in any remote
@@ -171,14 +172,14 @@ deleted.
 
 ## Evidence (reproduced in this worktree at the branch tip)
 
-- `python3 -m unittest discover -s tests -t . -p 'test_*.py'` → **801 tests,
+- `python3 -m unittest discover -s tests -t . -p 'test_*.py'` → **811 tests,
   OK**. The same command on `main@e237bbc` in this worktree gives 743 OK, so
-  the 58 new cases are 57 in `test_j1m_approved_targets.py` plus one in
+  the 68 new cases are 66 in `test_j1m_approved_targets.py` plus two in
   `test_j1m_dry_run.py`.
 - `python3 scripts/j1m_dry_run.py` → **PASS**, **142 argv recorded / 0 refused**
   — unchanged from the 142 baseline, because every scenario run uses its own
-  recorder exactly as the pre-existing scenario runs do. 15 runs now, up from
-  8. All three new checks PASS:
+  recorder exactly as the pre-existing scenario runs do. 16 runs now, up from
+  8. All four new checks PASS:
   - `approved_target_selection_follows_the_list` — primary only → #0; denvr
     only → #1; crusoe only → #2; all three present in reverse catalogue order
     → #0.
@@ -188,6 +189,9 @@ deleted.
   - `selected_target_prices_every_recorded_figure` — #0 @ USD 1.35/h reserved
     USD 0.421875; #1 @ USD 1.50/h reserved USD 0.46875; #2 @ USD 1.65/h
     reserved USD 0.515625; each worst case inside the USD 10.00 cap.
+  - `in_run_comparator_phase_keeps_the_selected_rate` — eval plus the
+    `q8,bf16` selection on approved entry #2 reports `phase=approved`,
+    hourly USD 1.65, marginal USD 1.6775, authorized USD 3.201.
 - `python3 scripts/test/run_qa.py --root . --skip-native --output -` →
   `BLOCKED`, **0 missing / 0 unknown**, 71 discovered (70 on `main@e237bbc`).
   `BLOCKED` is the standing evidence state and is unrelated to this branch.

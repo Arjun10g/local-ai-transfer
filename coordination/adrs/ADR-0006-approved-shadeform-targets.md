@@ -271,7 +271,7 @@ long the run intends to take.
   `local_bmo.shadeform.cost-event.v2` is unchanged: the selected index is
   recorded inside the existing `candidate` object.
 - Tests: `tests/performance/test_j1m_approved_targets.py`, registered in
-  `scripts/test/run_qa.py`; seven approved-target scenarios and three new
+  `scripts/test/run_qa.py`; seven approved-target scenarios and four new
   checks in `scripts/j1m_dry_run.py`.
 - Migration/rollback: rollback is deleting the two alternate entries. The
   primary entry's values are unchanged, so a one-entry list behaves exactly as
