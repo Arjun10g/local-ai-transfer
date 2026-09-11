@@ -577,3 +577,73 @@ class FailedPlanSummaryTests(unittest.TestCase):
         self.assertIn("stderr_tail", summary)
         text = json.dumps(summary, sort_keys=True)
         self.assertEqual(self.orchestrator._failed_stage_output_tail(text), text)
+
+
+class CommandOutputScreenTests(unittest.TestCase):
+    """Real tool output must reach a receipt; credentials still must not.
+
+    Two independent defects in this path failed the paid runs
+    `j1m-eval-20260911-remote-e` and `-f` at their FIRST plan stage, `git
+    clone`, after it had already exited 0 -- USD 3.27 each, and the whole
+    pipeline could never have advanced past stage 1.
+    """
+
+    def setUp(self):
+        self.runner = load(ROOT / "scripts/j1m_runner.py", "output_screen_runner")
+
+    def _stream(self, text):
+        handle = tempfile.TemporaryFile()
+        self.addCleanup(handle.close)
+        handle.write(text.encode("utf-8"))
+        return handle
+
+    def test_output_larger_than_the_receipt_bound_is_not_rejected_on_size(self):
+        """The size rule belongs to a value being written, not to a read chunk.
+
+        The reader takes 65536 bytes and prepends a 256-character carry, so
+        from the second read onward the scanned value exceeded the 64 KiB
+        receipt bound no matter what it contained.
+        """
+
+        bulk = "".join(f"remote: Counting objects: {index % 100}%\n" for index in range(8000))
+        self.assertGreater(len(bulk), self.runner._RECEIPT_MAX_STRING_CHARS * 2)
+        tail = self.runner._bounded_command_tail(self._stream(bulk))
+        self.assertLessEqual(len(tail), self.runner._COMMAND_LOG_TAIL_LIMIT)
+        self.assertIn("Counting objects", tail)
+
+    def test_a_credential_anywhere_in_the_stream_still_refuses_the_receipt(self):
+        """The whole-stream screen is the property that must not regress.
+
+        The credential sits far outside the retained tail, so only a scan of
+        every chunk can see it.
+        """
+
+        leaked = ("filler line\n" * 20000) + "HF_TOKEN=hf_abcdefghijklmnopqrstuvwxyz012345\n" + ("trailing\n" * 20000)
+        with self.assertRaises(ValueError):
+            self.runner._bounded_command_tail(self._stream(leaked))
+
+    def test_a_literal_percent_in_output_is_a_percentage_not_an_escape(self):
+        for line in (
+            "remote: Counting objects:  55% (1234/2740)",
+            "Receiving objects: 100% (2740/2740), 12.3 MiB | 4.5 MiB/s, done.",
+            "Resolving deltas: 100% (1500/1500), done.",
+        ):
+            self.assertIsNone(self.runner._credential_like_text(line, literal_percent=True), line)
+            self.assertIsNone(self.runner.validate_persisted_output(line) and None, line)
+
+    def test_a_percent_encoded_credential_survives_a_stray_percent(self):
+        """The decoded view is not abandoned; it is what catches obfuscation."""
+
+        self.assertEqual(
+            self.runner._credential_like_text("token%3Dsecret and progress 55%", literal_percent=True),
+            "credential_assignment")
+        with self.assertRaises(ValueError):
+            self.runner.validate_persisted_output("token%3Dsecret and progress 55%")
+
+    def test_argv_strictness_is_deliberately_unchanged(self):
+        """Only free-text OUTPUT opts in; argv has a trusted option context."""
+
+        self.assertEqual(self.runner._credential_like_text("Counting objects: 55%"),
+                         "unsafe_security_text")
+        with self.assertRaises(ValueError):
+            self.runner.validate_persisted_argv(["git", "clone", "token%3Dsecret"])

@@ -120,7 +120,36 @@ def _decode_percent_once(candidate: str) -> str:
         raise ValueError("invalid percent encoding in persisted security boundary") from exc
 
 
-def _security_variants(value: str, *, allow_line_breaks: bool = False) -> Iterator[str]:
+def _neutralize_stray_percent(candidate: str) -> str:
+    """Re-encode a `%` that introduces no valid escape, so the rest still decodes.
+
+    Command OUTPUT is free text. `Receiving objects:  45% (1234/2740)` is a
+    percentage, not a malformed escape, and treating it as one rejected every
+    progress line git, pip, `hf download` and both converters emit -- which is
+    what failed the paid runs `j1m-eval-20260911-remote-e` and `-f` at their
+    first plan stage, `git clone`, after it had exited 0.
+
+    This does NOT abandon the decoded view, which is the part that catches a
+    credential hidden as `token%3Dsecret`: stray `%` becomes `%25` so the
+    well-formed escapes on the same line are still decoded and screened. It is
+    applied only where a literal percent is expected -- output -- never to
+    argv, whose strictness is unchanged.
+    """
+
+    out: list[str] = []
+    for index, character in enumerate(candidate):
+        if character == "%" and not (
+            index + 2 < len(candidate)
+            and candidate[index + 1] in "0123456789abcdefABCDEF"
+            and candidate[index + 2] in "0123456789abcdefABCDEF"
+        ):
+            out.append("%25")
+        else:
+            out.append(character)
+    return "".join(out)
+
+
+def _security_variants(value: str, *, allow_line_breaks: bool = False, literal_percent: bool = False) -> Iterator[str]:
     """Yield bounded security views until percent decoding reaches stability."""
 
     if len(value) > _SECURITY_TEXT_MAX_CHARS:
@@ -135,7 +164,12 @@ def _security_variants(value: str, *, allow_line_breaks: bool = False) -> Iterat
         if normalized not in seen:
             seen.add(normalized)
             yield normalized
-        decoded = _decode_percent_once(candidate)
+        try:
+            decoded = _decode_percent_once(candidate)
+        except ValueError:
+            if not literal_percent:
+                raise
+            decoded = _decode_percent_once(_neutralize_stray_percent(candidate))
         if decoded == candidate:
             return
         if (
@@ -253,7 +287,7 @@ def _is_private_handle_path_option(option: str) -> bool:
     return normalized in _SPLIT_PRIVATE_HANDLE_OPTIONS or bool(_PATH_OPTION.search(option))
 
 
-def _credential_like_text(value: str, *, allow_private_path: bool = False, _depth: int = 0) -> str | None:
+def _credential_like_text(value: str, *, allow_private_path: bool = False, literal_percent: bool = False, _depth: int = 0) -> str | None:
     """Return a stable rejection reason for one persisted string, if unsafe."""
 
     if "\x00" in value:
@@ -261,7 +295,7 @@ def _credential_like_text(value: str, *, allow_private_path: bool = False, _dept
     if _depth > _SECURITY_ASSIGNMENT_MAX_DEPTH:
         raise ValueError("credential assignment nesting exceeds its bound")
     try:
-        for variant in _security_variants(value):
+        for variant in _security_variants(value, literal_percent=literal_percent):
             for match in _ASSIGNMENT_NAME_CANDIDATE.finditer(variant):
                 if any(ord(character) > 127 for character in match.group(1)):
                     return "unsafe_security_name"
@@ -294,7 +328,8 @@ def _credential_like_text(value: str, *, allow_private_path: bool = False, _dept
                 # assignment after its first equals sign (for example an
                 # environment wrapper around a token assignment).
                 if ("=" in assigned or ":" in assigned) and _credential_like_text(
-                    assigned, allow_private_path=allow_private_path, _depth=_depth + 1
+                    assigned, allow_private_path=allow_private_path,
+                    literal_percent=literal_percent, _depth=_depth + 1
                 ) is not None:
                     return "credential_assignment"
             # Header values are frequently represented as `Authorization: ...` or
@@ -577,7 +612,10 @@ def validate_persisted_output(value: object) -> str:
     # happens to contain `token` is rejected only when it has credential
     # syntax.  This keeps diagnostics useful without persisting key material.
     for line in text.splitlines() or [text]:
-        if _credential_like_text(line.strip()) is not None:
+        # `literal_percent`: output is free text, where `%` is overwhelmingly a
+        # percentage rather than an escape. Percent-encoded credentials are
+        # still decoded and caught; see `_neutralize_stray_percent`.
+        if _credential_like_text(line.strip(), literal_percent=True) is not None:
             raise ValueError("credential-like command output rejected before persistence")
     stripped = text.strip()
     if stripped and stripped[0] in "[{\"":
@@ -1674,6 +1712,35 @@ def read_token_file(path: Path) -> str:
         os.close(fd)
 
 
+def _screen_streamed_output(text: str) -> None:
+    """Credential-screen streamed command output, line by line.
+
+    ``validate_persisted_output`` is the rule for a value about to be WRITTEN.
+    Besides the credential screen it enforces the receipt's maximum string
+    length and parses anything JSON-shaped -- neither of which describes a
+    transient chunk that is read, scanned and dropped.
+
+    Applying it per chunk meant any command printing more than
+    ``_RECEIPT_MAX_STRING_CHARS`` failed on SIZE alone: the reader takes 65536
+    bytes and prepends a 256-character carry, so from the second read onward
+    the scanned value exceeds the 64 KiB bound no matter what it contains. A
+    stage that exited 0 was then recorded ``unsafe_output`` and failed the
+    whole plan. ``git clone``'s own sideband progress clears 64 KiB in one
+    read, and so do ``pip wheel``, ``hf download`` and both converters, so the
+    plan could never have got past its first stage. Paid runs
+    ``j1m-eval-20260911-remote-e`` and ``-f`` died exactly there, USD 3.27 each.
+
+    The credential screen is the part that must see the WHOLE stream -- a key
+    printed in the middle must refuse the receipt even though only the tail is
+    kept -- so it is preserved unchanged and applied line by line here. The
+    receipt-shaped rules apply to the bounded tail that is actually persisted.
+    """
+
+    for line in text.splitlines() or [text]:
+        if _credential_like_text(line.strip(), literal_percent=True) is not None:
+            raise ValueError("credential-like command output rejected before persistence")
+
+
 def _bounded_command_tail(stream: Any) -> str:
     stream.flush()
     stream.seek(0)
@@ -1684,14 +1751,24 @@ def _bounded_command_tail(stream: Any) -> str:
         if not chunk:
             break
         text = carry + chunk.decode("utf-8", errors="strict")
-        validate_persisted_output(text)
+        _screen_streamed_output(text)
         carry = text[-256:]
         tail.extend(chunk)
         if len(tail) > _COMMAND_LOG_TAIL_LIMIT * 4:
             del tail[: len(tail) - (_COMMAND_LOG_TAIL_LIMIT * 4)]
     value = bytes(tail).decode("utf-8", errors="strict")
-    validate_persisted_output(value)
-    return value[-_COMMAND_LOG_TAIL_LIMIT:]
+    _screen_streamed_output(value)
+    trimmed = value[-_COMMAND_LOG_TAIL_LIMIT:]
+    try:
+        validate_persisted_output(trimmed)
+    except ValueError:
+        # A tail sliced out of a stream can be a JSON fragment or a partial
+        # escape that the persisted-VALUE rules reject. That is a property of
+        # slicing, not of the command, and it must not fail a stage that
+        # exited 0. The credential screen above has already run over the whole
+        # stream and is not bypassed by this fallback.
+        return "<unrepresentable command output>"
+    return trimmed
 
 
 def run_commands(commands: list[list[str]], progress_path: Path, *, cwd: Path | None = None, token_file: Path | None = None, receipt_path: Path | None = None, trusted_root: Path | None = None) -> list[dict[str, Any]]:
