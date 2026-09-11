@@ -103,6 +103,18 @@ class WindowsActionJournalStorageStaticTests(unittest.TestCase):
         cls.hpp = source(HEADER)
         cls.contract = strict_json(CONTRACT)
         cls.vector = strict_json(VECTOR)
+        # The v1 container boundary only. The v2 descriptor-WAL boundary shares
+        # this translation unit; its own invariants are pinned by
+        # tests/native/test_windows_descriptor_journal_bootstrap_static.py.
+        cls.container = "".join(
+            re.search(pattern + r".*?\n\}", cls.cpp, re.S).group(0)
+            for pattern in (
+                r"StorageStatus acquire_storage\(const StorageRequest",
+                r"StorageStatus zero_initialize\(HANDLE",
+                r"StorageStatus initialize_header\(HANDLE",
+                r"StorageStatus load_header\(HANDLE",
+            )
+        )
 
     def test_contract_and_source_remain_inert(self):
         for key in (
@@ -174,7 +186,12 @@ class WindowsActionJournalStorageStaticTests(unittest.TestCase):
             r"kDirectoryShare\s*=\s*[^;]*(?:FILE_SHARE_WRITE|FILE_SHARE_DELETE)",
         )
         self.assertIn("constexpr DWORD kFileShare = FILE_SHARE_READ;", self.cpp)
-        self.assertNotIn("FILE_SHARE_DELETE", self.cpp)
+        # Scoped to the v1 container boundary. The v2 descriptor-WAL boundary
+        # shares this translation unit and concedes FILE_SHARE_DELETE on its
+        # identity-reopen handle only, where the first handle still denies it to
+        # everyone else; that is pinned by
+        # tests/native/test_windows_descriptor_journal_bootstrap_static.py.
+        self.assertNotIn("FILE_SHARE_DELETE", self.container)
         self.assertIn("std::vector<HeldDirectory> directories", self.cpp)
         self.assertIn("UniqueHandle path_reopen", self.cpp)
         self.assertIn("GetFinalPathNameByHandleW", self.cpp)
@@ -228,8 +245,10 @@ class WindowsActionJournalStorageStaticTests(unittest.TestCase):
             "decode_header(readback", "SetEndOfFile",
         ):
             self.assertIn(token, self.cpp)
+        # Scoped to the v1 container boundary: it never deletes, renames,
+        # replaces, or sets file information on any path, published or not.
         for forbidden in ("DeleteFile", "MoveFile", "ReplaceFile", "SetFileInformationByHandle"):
-            self.assertNotIn(forbidden, self.cpp)
+            self.assertNotIn(forbidden, self.container)
 
     def test_existing_open_requires_trusted_identity_and_exact_header(self):
         self.assertIn("open && (!request.has_expected_identity", self.cpp)
