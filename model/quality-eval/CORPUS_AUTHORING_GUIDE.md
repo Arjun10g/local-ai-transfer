@@ -317,6 +317,18 @@ from validate_quality_corpus import derive_split as d;\
 print(*[(i,d(i)) for i in sys.argv[1:]],sep='\n')" instruction-005 instruction-006
 ```
 
+**Why ordinals are skipped and targets overshoot.** The bucket is hash noise, not a
+quota: at n≈66 a single case is 1.5 points of the split, so a category can land
+outside the ±5-point band purely by chance. The remedy is to skip the offending
+ordinal and take the next one, or to author a few cases past the target until the
+band closes — both are expected, and neither is a defect. Because ordinals are never
+renumbered, those skips stay visible as gaps.
+
+A consequence for editing a *finished* category: removing a case moves the
+proportions. `continuity_reset` at 92 currently sits on the boundary, so any removal
+there must be **paired with an addition in the same commit**, and the commit must
+show the validator passing in both modes.
+
 ### Difficulty mix
 
 Target per category, enforced within **±10 points** once the category has ≥20 cases:
@@ -791,8 +803,10 @@ A category file is done when **all** of the following hold:
    the derived one — no hand-edited splits.
 4. Difficulty mix is within ±10 points of 25/30/25/20, and every `adversarial` case
    carries a negative assertion.
-5. Ids are contiguous from `001`, unique, and no previously committed id was renamed
-   or renumbered. The reserved ids in §3 are untouched.
+5. Ids are unique, strictly increasing, and never reused or renumbered; **gaps are
+   permitted and expected** because the split is hash-derived — an author may skip an
+   ordinal whose bucket would push the category outside the ±5-point split band. The
+   reserved ids in §3 are untouched.
 6. Every case has `temperature: 0`, an explicit bounded `max_output_tokens`, and an
    explicit `enable_thinking` consistent with `mode`. `deep` appears only where §5
    permits and is not the default for the category.

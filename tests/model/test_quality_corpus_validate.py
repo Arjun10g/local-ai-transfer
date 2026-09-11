@@ -239,9 +239,14 @@ class ValidFixtureTests(unittest.TestCase):
                     found[case["id"]] = case["category"]
         self.assertEqual(found, V.LEGACY_CASE_IDS)
 
-    def test_committed_corpus_fails_require_complete_while_seeded(self):
+    def test_committed_corpus_passes_require_complete(self):
+        # Stage 2 is authored: every category is at or above its spec minimum and
+        # both proportion checks hold, so the completion gate must now be clean.
         errors, _ = V.validate_corpus(REPO_ROOT, require_complete=True)
-        self.assertTrue(any("below the spec minimum" in error for error in errors))
+        self.assertEqual(errors, [])
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = V.main(["--root", str(REPO_ROOT), "--require-complete"])
+        self.assertEqual(code, 0)
 
 
 class FailureClassTests(unittest.TestCase):
@@ -600,10 +605,19 @@ class CliTests(unittest.TestCase):
         self.assertIn("TOTAL", output)
         self.assertIn("1180", output)
 
-    def test_require_complete_exits_one_while_the_corpus_is_seeded(self):
+    def test_require_complete_exits_zero_on_the_authored_corpus(self):
         code, output = self._run(["--root", str(REPO_ROOT), "--require-complete"])
+        self.assertEqual(code, 0, output)
+        self.assertIn("quality corpus: PASS", output)
+        self.assertIn("require-complete", output)
+
+    def test_require_complete_exits_one_on_an_under_filled_corpus(self):
+        corpus = TemporaryCorpus()
+        self.addCleanup(corpus.close)
+        code, output = self._run(["--root", str(corpus.root), "--require-complete"])
         self.assertEqual(code, 1)
         self.assertIn("quality corpus: FAIL", output)
+        self.assertIn("below the spec minimum", output)
 
     def test_broken_corpus_exits_one(self):
         corpus = TemporaryCorpus()
