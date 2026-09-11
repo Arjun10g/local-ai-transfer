@@ -1248,7 +1248,24 @@ def write_artifacts(output_dir: Path, names: list[str], *, source_lock: Path = S
     return manifest
 
 
-def command_plan(config: dict[str, Any], source: str = "/scratch/hf/Qwen3.5-9B", output: str = "/scratch/j1m/artifacts", runner: str = "scripts/j1m_runner.py", config_path: str = "model/conversion/j1m-config.json", source_lock: str | None = None) -> list[list[str]]:
+def comparator_cleanup_plan(output: str = "/scratch/j1m/artifacts", runner: str = "scripts/j1m_runner.py", config_path: str = "model/conversion/j1m-config.json", source_lock: str | None = None) -> list[list[str]]:
+    """Return the intermediate-deletion tail that ``retain_comparators`` defers.
+
+    These are the exact final three stages of :func:`command_plan`.  They are
+    only ever *moved*, never dropped: a caller that retains the comparators for
+    evaluation must append this plan so intermediate deletion, the
+    post-cleanup receipt, and the manifest still happen on the same host.
+    """
+
+    python_exec = "/scratch/j1m/venv/bin/python"
+    return [
+        ["rm", "-f", f"{output}/Qwen3.5-9B-bf16.gguf", f"{output}/Qwen3.5-9B-Q8_0.gguf"],
+        [python_exec, runner, "--config", config_path, "--post-cleanup", output],
+        [python_exec, runner, "--config", config_path, "--manifest", output, "--lock", source_lock or str(SOURCE_LOCK)],
+    ]
+
+
+def command_plan(config: dict[str, Any], source: str = "/scratch/hf/Qwen3.5-9B", output: str = "/scratch/j1m/artifacts", runner: str = "scripts/j1m_runner.py", config_path: str = "model/conversion/j1m-config.json", source_lock: str | None = None, *, retain_comparators: bool = False) -> list[list[str]]:
     llama = config["llama_cpp"]
     converter = f"{llama['checkout']}/convert_hf_to_gguf.py"
     python_exec = "/scratch/j1m/venv/bin/python"
@@ -1294,9 +1311,9 @@ def command_plan(config: dict[str, Any], source: str = "/scratch/hf/Qwen3.5-9B",
         [f"{llama['quantizer']}", f"{output}/Qwen3.5-9B-bf16.gguf", f"{output}/Qwen3.5-9B-Q4_K_M.gguf", "Q4_K_M"],
         [python_exec, runner, "--config", config_path, "--inspect-tensors", f"{output}/Qwen3.5-9B-Q4_K_M.gguf", f"{output}/tensor-metadata.json", "--source-receipt", f"{output}/source-model-receipt.json"],
         [python_exec, runner, "--config", config_path, "--scan", output],
-        ["rm", "-f", f"{output}/Qwen3.5-9B-bf16.gguf", f"{output}/Qwen3.5-9B-Q8_0.gguf"],
-        [python_exec, runner, "--config", config_path, "--post-cleanup", output],
-        [python_exec, runner, "--config", config_path, "--manifest", output, "--lock", source_lock or str(SOURCE_LOCK)],
+        # The deployable-only tail is deferred, never dropped, when the
+        # comparators must survive long enough to be evaluated.
+        *([] if retain_comparators else comparator_cleanup_plan(output, runner, config_path, source_lock)),
     ]
 
 
@@ -1537,6 +1554,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-receipt", type=Path)
     parser.add_argument("--scan", type=Path)
     parser.add_argument("--post-cleanup", type=Path)
+    parser.add_argument("--retain-comparators", action="store_true", help="defer intermediate deletion so the rebuilt comparators can be evaluated; the deferred stages must still be run")
     parser.add_argument("--execute", action="store_true", help="reserved for an already-approved host; never provisions")
     args = parser.parse_args(argv)
     if args.verify_llama:
@@ -1659,7 +1677,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.run:
         config = load_config(args.config)
-        commands = command_plan(config, runner=str(Path(__file__).resolve()), config_path="/scratch/j1m/j1m-config.json", source_lock=str(args.lock))
+        commands = command_plan(config, runner=str(Path(__file__).resolve()), config_path="/scratch/j1m/j1m-config.json", source_lock=str(args.lock), retain_comparators=args.retain_comparators)
         receipts = run_commands(commands, ROOT / config["resources"]["progress_path"], token_file=args.token_file, receipt_path=Path("/scratch/j1m/artifacts/command-receipt.json"))
         return 0 if receipts and all(item["status"] == "completed" for item in receipts) else 1
     config = load_config(args.config)
