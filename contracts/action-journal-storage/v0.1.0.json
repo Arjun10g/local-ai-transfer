@@ -136,6 +136,10 @@
     "genesis_incomplete",
     "container_unformatted",
     "container_corrupt_header",
+    "handoff_already_transferred",
+    "source_handle_inheritable",
+    "inheritance_control_failed",
+    "final_path_mismatch",
     "internal"
   ],
   "receipt": {

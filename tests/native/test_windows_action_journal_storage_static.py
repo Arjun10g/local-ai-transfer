@@ -103,6 +103,31 @@ class WindowsActionJournalStorageStaticTests(unittest.TestCase):
         cls.hpp = source(HEADER)
         cls.contract = strict_json(CONTRACT)
         cls.vector = strict_json(VECTOR)
+        # Everything in this translation unit EXCEPT the v2 descriptor-WAL
+        # bodies, so the v1 container entry points and every shared helper
+        # (acquire_directories, write_exact, read_exact, final_path,
+        # private_security, validate_volume, ...) stay covered by the "never"
+        # invariants below. The v2 boundary shares this translation unit; its
+        # own invariants are pinned function-anchored by
+        # tests/native/test_windows_descriptor_journal_bootstrap_static.py.
+        wal_helpers = cls.cpp.index("bool expected_identity_valid(")
+        spans = [
+            (wal_helpers, cls.cpp.index("}  // namespace\n", wal_helpers)),
+            (cls.cpp.index("struct DescriptorWalHandoff::Impl"),
+             cls.cpp.index("const char* status_name(")),
+        ]
+        acquire_wal = re.search(
+            r"StorageStatus acquire_descriptor_wal\(const DescriptorWalRequest.*?\n\}",
+            cls.cpp, re.S)
+        assert acquire_wal is not None
+        spans.append(acquire_wal.span())
+        remainder, cursor = [], 0
+        for start, end in sorted(spans):
+            assert cursor <= start < end
+            remainder.append(cls.cpp[cursor:start])
+            cursor = end
+        remainder.append(cls.cpp[cursor:])
+        cls.v1_only = "".join(remainder)
 
     def test_contract_and_source_remain_inert(self):
         for key in (
@@ -174,10 +199,35 @@ class WindowsActionJournalStorageStaticTests(unittest.TestCase):
             r"kDirectoryShare\s*=\s*[^;]*(?:FILE_SHARE_WRITE|FILE_SHARE_DELETE)",
         )
         self.assertIn("constexpr DWORD kFileShare = FILE_SHARE_READ;", self.cpp)
-        self.assertNotIn("FILE_SHARE_DELETE", self.cpp)
+        # The whole translation unit minus the v2 descriptor-WAL bodies. Only
+        # the v2 identity-reopen handle concedes FILE_SHARE_DELETE, and only
+        # because its own first handle holds DELETE and still denies delete
+        # sharing to everyone else; that is pinned by
+        # tests/native/test_windows_descriptor_journal_bootstrap_static.py.
+        self.assertNotIn("FILE_SHARE_DELETE", self.v1_only)
         self.assertIn("std::vector<HeldDirectory> directories", self.cpp)
         self.assertIn("UniqueHandle path_reopen", self.cpp)
         self.assertIn("GetFinalPathNameByHandleW", self.cpp)
+
+    def test_v1_scope_excludes_only_the_v2_bodies_and_keeps_shared_helpers(self):
+        for retained in (
+            "bool acquire_directories(", "bool write_exact(", "bool read_exact(",
+            "bool final_path(", "bool private_security(", "StorageStatus validate_volume(",
+            "StorageStatus filesystem_policy(", "bool directories_stable(",
+            "bool plain_attributes(", "StorageStatus file_shape(", "bool seek(",
+            "bool get_identity(", "bool current_user(", "bool build_private_security(",
+            "bool canonical_directory(", "StorageStatus acquire_storage(",
+            "StorageStatus zero_initialize(", "const char* status_name(",
+        ):
+            self.assertIn(retained, self.v1_only)
+        for excised in (
+            "StorageStatus acquire_descriptor_wal(", "class CreatedFileDiscard final",
+            "DescriptorWalLease::", "DescriptorWalHandoff::Impl",
+            "StorageStatus descriptor_wal_shape(", "validate_descriptor_wal_prefix(",
+        ):
+            self.assertNotIn(excised, self.v1_only)
+        self.assertLess(len(self.v1_only), len(self.cpp))
+        self.assertGreater(len(self.v1_only), len(self.cpp) // 2)
 
     def test_private_dacl_is_atomic_on_create_and_strict_on_parent_and_file(self):
         for token in (
@@ -228,8 +278,11 @@ class WindowsActionJournalStorageStaticTests(unittest.TestCase):
             "decode_header(readback", "SetEndOfFile",
         ):
             self.assertIn(token, self.cpp)
+        # The whole translation unit minus the v2 descriptor-WAL bodies: the v1
+        # container boundary and every shared helper never delete, rename,
+        # replace, or set file information on any path, published or not.
         for forbidden in ("DeleteFile", "MoveFile", "ReplaceFile", "SetFileInformationByHandle"):
-            self.assertNotIn(forbidden, self.cpp)
+            self.assertNotIn(forbidden, self.v1_only)
 
     def test_existing_open_requires_trusted_identity_and_exact_header(self):
         self.assertIn("open && (!request.has_expected_identity", self.cpp)
