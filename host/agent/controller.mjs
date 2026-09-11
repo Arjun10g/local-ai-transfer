@@ -34,6 +34,12 @@ const JOURNAL_RECEIPT_DIGEST = /^[a-f0-9]{64}$/u;
 const JOURNAL_OPERATION_ID = /^act_[a-f0-9]{32}$/u;
 const MAX_GRAPH_RESTART_CANDIDATES = 8;
 const GRAPH_RESTART_TIMEOUT_MS = 30000;
+// Bounded, lowercase, metadata-only failure identifier. A typed code from the
+// durable journal is surfaced as-is; anything else collapses to one explicit
+// code. No message, path, argument, or content ever reaches this value.
+const RESTART_FAILURE_CODE = /^[a-z][a-z0-9_]{2,63}$/u;
+const restartFailureCode = error => typeof error?.code === 'string' && RESTART_FAILURE_CODE.test(error.code) ? error.code : 'action_journal_complete_failed';
+const restartUnavailable = code => Object.freeze({ state: 'unavailable', examined: 0, completed: 0, blocked: 0, code });
 const exactAuthorizationReadback = (receipt, operationId) => receipt?.operation_id === operationId && receipt?.state === 'authorized' && receipt?.sequence === 1 && JOURNAL_RECEIPT_DIGEST.test(receipt?.receipt_hash ?? '');
 const nativeSupervisorOwnerFor = (toolName, tool, platform) => platform === 'win32' && NATIVE_SUPERVISOR_TOOL_NAMES.has(toolName) && tool?.name === toolName
   ? NATIVE_SUPERVISOR_DISPATCH_OWNER : null;
@@ -320,10 +326,10 @@ export class ConversationController {
   }
   async #reconcileRestartActions(signal) {
     const health = journalStatus(this.#journalMethods);
-    if (!health.ready || typeof this.#journalMethods?.summary !== 'function') return Object.freeze({ state: 'unavailable', examined: 0, completed: 0 });
+    if (!health.ready || typeof this.#journalMethods?.summary !== 'function') return restartUnavailable(health.code ?? 'action_journal_unavailable');
     let summary;
-    try { summary = await this.#journalMethods.summary({ limit: MAX_GRAPH_RESTART_CANDIDATES, state: 'acknowledged' }); } catch { return Object.freeze({ state: 'unavailable', examined: 0, completed: 0 }); }
-    const candidates = safeRestartRecords(summary); let examined = 0; let completed = 0;
+    try { summary = await this.#journalMethods.summary({ limit: MAX_GRAPH_RESTART_CANDIDATES, state: 'acknowledged' }); } catch { return restartUnavailable('action_journal_summary_failed'); }
+    const candidates = safeRestartRecords(summary); let examined = 0; let completed = 0; let blocked = 0; let code = null;
     const deadline = AbortSignal.timeout(GRAPH_RESTART_TIMEOUT_MS); const proofSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
     for (const candidate of candidates) {
       if (proofSignal.aborted) break;
@@ -332,9 +338,15 @@ export class ConversationController {
       let attestation;
       try { attestation = readGraphRestartAttestation(await control.reconcile(candidate, proofSignal)); } catch { continue; }
       if (!attestation || attestation.provider !== 'microsoft_graph' || attestation.tool_name !== candidate.tool_name || attestation.state !== 'completed' || attestation.proof !== 'restart_unique_exact_draft' || attestation.operation_id !== candidate.operation_id || attestation.operation_digest !== candidate.operation_digest || attestation.arguments_digest !== candidate.arguments_digest || !JOURNAL_RECEIPT_DIGEST.test(attestation.account_fingerprint ?? '')) continue;
-      try { await this.#journalMethods.complete(candidate.operation_id); completed += 1; } catch {}
+      // A `complete()` rejection is exactly the signal that the durable
+      // journal blocked itself or that a transition raced.  The record keeps
+      // its current durable state and stays eligible for a later pass, and the
+      // failure is surfaced as a typed metadata-only count instead of being
+      // discarded.  Nothing else is attempted on that record.
+      try { await this.#journalMethods.complete(candidate.operation_id); completed += 1; }
+      catch (error) { blocked += 1; code ??= restartFailureCode(error); }
     }
-    return Object.freeze({ state: 'completed', examined, completed });
+    return Object.freeze({ state: blocked > 0 ? 'degraded' : 'completed', examined, completed, blocked, code });
   }
   createSession(sessionId = opaque('ses')) {
     if (!sessionIdPattern.test(sessionId)) throw new Error('invalid session id');

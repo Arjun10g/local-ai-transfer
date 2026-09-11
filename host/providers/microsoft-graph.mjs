@@ -14,7 +14,26 @@ const MAX_TOKEN_BYTES = 4096;
 const MAX_PROPOSALS = 128;
 const MAX_WRITE_RECORDS = 256;
 const MAX_RECONCILIATION_ITEMS = 50;
-const MAX_RESTART_RECONCILIATION_ITEMS = 20;
+// Microsoft Graph populates `internetMessageHeaders` only on a single-message
+// projection; a `/messages` collection query cannot return the custom
+// operation marker, so exact draft proof costs one bounded ID page plus one
+// GET per candidate. The in-flight and restart reconciliation seams therefore
+// share one candidate budget: the smaller restart bound is the only value that
+// fits inside the 10 s `mail.create_draft` tool budget, and a single constant
+// keeps the two paths from drifting apart again.
+const MAX_DRAFT_PROOF_CANDIDATES = 20;
+// Stop issuing candidate GETs this far before the enclosing tool deadline. An
+// in-flight reconciliation that overran the tool budget would surface as
+// `tool_timeout` and drive a recoverable record to `unknown_manual`; stopping
+// early instead reports a typed inconclusive result and keeps the record
+// `reconciling`.
+const PROOF_DEADLINE_MARGIN_MS = 2500;
+// Never start a proof request that cannot plausibly complete inside the
+// remaining budget, and never let one outlive that budget.
+const MIN_PROOF_REQUEST_MS = 250;
+// Matches `MicrosoftDeviceCodeCredential.getAccessToken`'s own refresh margin.
+const TOKEN_LIVENESS_MARGIN_MS = 60000;
+const DRAFT_PROOF_SELECT = 'id,subject,body,toRecipients,ccRecipients,internetMessageHeaders,changeKey';
 const ACCOUNT_OBJECT_ID = /^(?=.{1,512}$)[^\s\p{Cc}\p{Cf}]+$/u;
 // Graph message/chat creation and sent timestamps are documented as UTC.
 // Keep the proof parser narrower than generic RFC3339: accepting a local
@@ -170,6 +189,13 @@ const validResource = (value, expectedId = null) => value && typeof value === 'o
 const messageState = (body, expectedId) => body && typeof body === 'object' && !Array.isArray(body) && body.id === expectedId && typeof body.isRead === 'boolean' ? { id: body.id, is_read: body.isRead } : null;
 const teamsResource = (body, chatId, content) => validResource(body) && (!body.chatId || body.chatId === chatId) && body.body && typeof body.body === 'object' && body.body.content === content ? { id: body.id, chat_id: chatId } : null;
 const isNotFound = error => error?.httpStatus === 404;
+// Read-only liveness probe for an already-held delegated token.
+// `getAccessToken` clears the session — which revokes operator capability
+// grants and bumps the auth epoch — when it finds an expired cache. A
+// read-only reconciliation pass must never be the thing that does that, so it
+// refuses to issue any request unless a live token is already cached with more
+// margin than the whole pass can consume. This reads state only.
+const hasLiveDelegatedToken = (credential, nowMs) => !!credential?.cached && typeof credential.cached.expiresAt === 'number' && Number.isFinite(nowMs) && credential.cached.expiresAt > nowMs + TOKEN_LIVENESS_MARGIN_MS;
 const putBounded = (map, key, value, max) => { if (map.size >= max && !map.has(key)) map.delete(map.keys().next().value); map.set(key, value); };
 const proofCollection = (body, max = MAX_RECONCILIATION_ITEMS) => {
   if (!body || typeof body !== 'object' || Array.isArray(body) || !Array.isArray(body.value)) return { values: null, truncated: false };
@@ -263,15 +289,20 @@ export class MicrosoftGraphProvider {
     let value; try { value = typeof this.credentialSource === 'function' ? await this.credentialSource(signal) : await this.credentialSource.getAccessToken?.(signal); } catch (error) { if (['provider_cancelled', 'provider_offline', 'provider_timeout'].includes(error?.code)) throw new ProviderToolError(error.code); this.clearAuth(); throw new ProviderToolError('provider_unauthorized'); }
     if (typeof value !== 'string' || !value || Buffer.byteLength(value, 'utf8') > MAX_TOKEN_BYTES || /[\u0000-\u001f\u007f]/u.test(value)) throw new ProviderToolError('provider_unauthorized'); return value;
   }
-  async request({ method, path, query, headers = {}, body, signal, onDispatch }) {
+  async request({ method, path, query, headers = {}, body, signal, onDispatch, timeoutMs }) {
     if (!validGraphMethodPath(method, path)) throw new ProviderToolError('provider_destination_rejected');
+    // Host-internal per-request budget. It is never model, provider, or
+    // operator supplied and can only shorten the configured transport
+    // deadline, so a caller that is itself under a deadline cannot overrun it.
+    if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > this.requestTimeoutMs)) throw new ProviderToolError('provider_invalid_request');
+    const requestBudgetMs = timeoutMs ?? this.requestTimeoutMs;
     if (this.credentialSource instanceof MicrosoftDeviceCodeCredential && !scopeAllows(this.credentialSource.scopes, requiredGraphScope(method, path))) throw new ProviderToolError('provider_unauthorized', 'configured delegated scopes do not cover this operation');
     const bearer = await this.token(signal); checkAborted(signal); const deadline = new AbortController(); let rejectAbort; const relay = () => { deadline.abort(); rejectAbort?.(Object.assign(new Error('provider cancelled'), { code: 'provider_cancelled' })); }; signal?.addEventListener('abort', relay, { once: true }); let timer;
     let response; try {
       const request = { origin: this.origin, method, path, query: query ?? {}, headers: { ...headers, authorization: `Bearer ${bearer}`, accept: 'application/json' }, body, signal: deadline.signal };
       if (onDispatch !== undefined && typeof onDispatch !== 'function') throw new ProviderToolError('provider_invalid_request');
       checkAborted(signal);
-      const pending = typeof this.transport === 'function' ? this.transport({ ...request, onDispatch }) : this.transport.request({ ...request, onDispatch }); let rejectTimeout; const timeout = new Promise((_, reject) => { rejectTimeout = reject; }); const cancelled = new Promise((_, reject) => { rejectAbort = reject; }); timer = setTimeout(() => { deadline.abort(); rejectTimeout(Object.assign(new Error('provider timeout'), { code: 'provider_timeout' })); }, this.requestTimeoutMs); response = await Promise.race([pending, timeout, cancelled]);
+      const pending = typeof this.transport === 'function' ? this.transport({ ...request, onDispatch }) : this.transport.request({ ...request, onDispatch }); let rejectTimeout; const timeout = new Promise((_, reject) => { rejectTimeout = reject; }); const cancelled = new Promise((_, reject) => { rejectAbort = reject; }); timer = setTimeout(() => { deadline.abort(); rejectTimeout(Object.assign(new Error('provider timeout'), { code: 'provider_timeout' })); }, requestBudgetMs); response = await Promise.race([pending, timeout, cancelled]);
     } catch (error) {
       if (signal?.aborted) throw new ProviderToolError('provider_cancelled');
       if (deadline.signal.aborted) throw new ProviderToolError('provider_timeout');
@@ -299,42 +330,81 @@ export class MicrosoftGraphProvider {
     const controller = new AbortController(); const relay = () => controller.abort(); signal?.addEventListener('abort', relay, { once: true }); const unsubscribe = this.grantStore?.subscribe(capability, relay);
     return { signal: controller.signal, close: () => { signal?.removeEventListener('abort', relay); unsubscribe?.(); } };
   }
+  // Deadline for proof requests issued inside this tool invocation, derived
+  // from the tool's own published `timeout_ms` minus a safety margin. The
+  // controller aborts the whole call at `timeout_ms`; stopping before that
+  // keeps an ambiguous create recoverable instead of `unknown_manual`.
+  toolProofDeadline(name) {
+    const budget = graphDefinitions[name]?.timeout_ms;
+    if (!Number.isInteger(budget) || budget <= PROOF_DEADLINE_MARGIN_MS + MIN_PROOF_REQUEST_MS) return null;
+    const started = this.now();
+    return Number.isFinite(started) ? started + budget - PROOF_DEADLINE_MARGIN_MS : null;
+  }
   async readMessageState(messageId, signal) {
     const response = await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(messageId)}`, query: { '$select': 'id,isRead' }, signal });
     const state = messageState(response.body, messageId); if (!state) throw new ProviderToolError('provider_invalid_response'); return state;
   }
-  async listDraftsForMarker(marker, expectedDigest, signal) {
-    if (!marker) return { values: null, truncated: false };
-    const response = await this.request({ method: 'GET', path: `${API}/me/mailFolders/drafts/messages`, query: { '$top': MAX_RECONCILIATION_ITEMS, '$select': 'id' }, signal });
-    const collection = proofCollection(response.body); if (!collection.values || collection.truncated) return { values: collection.values, truncated: collection.truncated };
-    const ids = uniqueProofMap(collection.values, value => validResource(value) ? { id: value.id } : null); if (!ids) return { values: null, truncated: false };
-    const mapped = [];
+  // Remaining budget for one proof request. `null` deadline means the caller
+  // is not under an enclosing tool budget (the restart pass, which is bounded
+  // by its own abort signal instead).
+  proofRequestBudget(deadline) {
+    if (deadline === null || deadline === undefined) return { allowed: true, timeoutMs: undefined };
+    const remaining = deadline - this.now();
+    if (!Number.isFinite(remaining) || remaining < MIN_PROOF_REQUEST_MS) return { allowed: false, timeoutMs: undefined };
+    return { allowed: true, timeoutMs: Math.min(this.requestTimeoutMs, Math.floor(remaining)) };
+  }
+  // One bounded Drafts ID page followed by one explicit GET per candidate.
+  // Both reconciliation seams share this retrieval so their request budget,
+  // projection strictness, and uniqueness rules cannot diverge. `exhausted`
+  // means the deadline stopped the walk: that is an inconclusive result, never
+  // evidence of absence.
+  async collectDraftProof({ marker, matches, signal, deadline = null }) {
+    const listBudget = this.proofRequestBudget(deadline);
+    if (!listBudget.allowed) return { values: null, truncated: false, exhausted: true };
+    const response = await this.request({ method: 'GET', path: `${API}/me/mailFolders/drafts/messages`, query: { '$top': MAX_DRAFT_PROOF_CANDIDATES, '$select': 'id' }, signal, timeoutMs: listBudget.timeoutMs });
+    const collection = proofCollection(response.body, MAX_DRAFT_PROOF_CANDIDATES); if (!collection.values || collection.truncated) return { values: collection.values, truncated: collection.truncated, exhausted: false };
+    const ids = uniqueProofMap(collection.values, value => validResource(value) ? { id: value.id } : null); if (!ids) return { values: null, truncated: false, exhausted: false };
+    const found = [];
     for (const { id } of ids) {
-      const item = await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(id)}`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$select': 'id,subject,body,toRecipients,ccRecipients,internetMessageHeaders,changeKey' }, signal });
-      const draft = projectionDraft(item.body); if (!draft || draft.id !== id) return { values: null, truncated: false };
-      mapped.push(draft);
+      const itemBudget = this.proofRequestBudget(deadline);
+      if (!itemBudget.allowed) return { values: null, truncated: false, exhausted: true };
+      const item = await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(id)}`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$select': DRAFT_PROOF_SELECT }, signal, timeoutMs: itemBudget.timeoutMs });
+      const draft = projectionDraft(item.body); if (!draft || draft.id !== id) return { values: null, truncated: false, exhausted: false };
+      if (draft.operation_marker === marker && matches(draft)) found.push(draft);
     }
-    return { values: mapped.filter(value => value.operation_marker === marker && draftContentDigest(value) === expectedDigest), truncated: false };
+    return { values: found, truncated: false, exhausted: false };
+  }
+  // In-flight reconciliation runs inside the caller's tool budget. It reports
+  // every unproven outcome as typed data instead of throwing: a throw here
+  // escapes as `tool_timeout`/`provider_failed`, which the controller records
+  // as `unknown_manual` — a state the restart pass is not allowed to touch.
+  // Operator cancellation still propagates, because that is a decision rather
+  // than an ambiguity.
+  async listDraftsForMarker(marker, expectedDigest, signal, deadline = null) {
+    if (!marker) return { values: null, truncated: false, exhausted: false };
+    try { return await this.collectDraftProof({ marker, matches: draft => draftContentDigest(draft) === expectedDigest, signal, deadline }); }
+    catch (error) { if (error?.code === 'provider_cancelled' || signal?.aborted) throw error; return { values: null, truncated: false, exhausted: false }; }
   }
   async listDraftsForRestartProof(marker, expectedArgumentsDigest, signal) {
-    if (!marker || !DIGEST.test(expectedArgumentsDigest ?? '')) return { values: null, truncated: false };
-    const response = await this.request({ method: 'GET', path: `${API}/me/mailFolders/drafts/messages`, query: { '$top': MAX_RESTART_RECONCILIATION_ITEMS, '$select': 'id' }, signal });
-    const collection = proofCollection(response.body, MAX_RESTART_RECONCILIATION_ITEMS); if (!collection.values || collection.truncated) return { values: collection.values, truncated: collection.truncated };
-    const ids = uniqueProofMap(collection.values, value => validResource(value) ? { id: value.id } : null); if (!ids) return { values: null, truncated: false };
-    const matches = [];
-    for (const { id } of ids) {
-      const item = await this.request({ method: 'GET', path: `${API}/me/messages/${encodeURIComponent(id)}`, headers: { Prefer: 'outlook.body-content-type="text"' }, query: { '$select': 'id,subject,body,toRecipients,ccRecipients,internetMessageHeaders,changeKey' }, signal });
-      const draft = projectionDraft(item.body); if (!draft || draft.id !== id) return { values: null, truncated: false };
-      if (draft.operation_marker === marker && draftMatchesActionArguments(draft, expectedArgumentsDigest)) matches.push(draft);
-    }
-    return { values: matches, truncated: false };
+    if (!marker || !DIGEST.test(expectedArgumentsDigest ?? '')) return { values: null, truncated: false, exhausted: false };
+    return this.collectDraftProof({ marker, matches: draft => draftMatchesActionArguments(draft, expectedArgumentsDigest), signal });
   }
   async reconcileRestartCandidate(input, signal) {
     const candidate = restartCandidate(input);
     if (!candidate || !(this.credentialSource instanceof MicrosoftDeviceCodeCredential)) return null;
-    if (await this.status(signal) !== 'ready') return null;
-    const auth = providerState(this); const accountFingerprint = this.verifiedAccountFingerprint(); const epoch = auth.epoch;
+    // Authorization state is sampled read-only and BEFORE any call that could
+    // reinstall it. Calling `status()` here would (a) mutate operator-visible
+    // authorization state — a failing credential check clears the session and
+    // revokes the live `microsoft.graph.*` grants — and (b) reassign
+    // `sessionFingerprint` on the way out, so the post-proof epoch guard would
+    // be comparing against a value sampled after the very clear it exists to
+    // detect. A recovery sweep reads identity; it never establishes it.
+    const auth = providerState(this); const epoch = auth.epoch; const accountFingerprint = this.verifiedAccountFingerprint();
     if (!accountFingerprint) return null;
+    // Refuse to touch the network unless a live delegated token is already
+    // held with more margin than this pass can consume, so the pass can never
+    // be the cause of a credential clear or a grant revocation.
+    if (!hasLiveDelegatedToken(this.credentialSource, this.now())) return null;
     let collection;
     try {
       const marker = operationMarker(candidate, accountFingerprint);
@@ -376,8 +446,9 @@ export class MicrosoftGraphProvider {
     const upper = this.now() + 60000;
     return items.filter(item => item.content_type === 'text' && item.content === args.body && item.sender_id === saved.team_sender_id && Number.isFinite(item.created_ms) && item.created_ms >= saved.team_prewrite_at - 1000 && item.created_ms <= upper);
   }
-  async reconcileCreateDraft(call, args, binding, response = null, signal, marker = operationMarker(binding)) {
-    const collection = await this.listDraftsForMarker(marker, requestedDraftContentDigest(args), signal); const matches = collection.values ?? [];
+  async reconcileCreateDraft(call, args, binding, response = null, signal, marker = operationMarker(binding), deadline = null) {
+    const collection = await this.listDraftsForMarker(marker, requestedDraftContentDigest(args), signal, deadline); const matches = collection.values ?? [];
+    if (collection.exhausted) return result(call, 'ok', reconcilingPayload({ response, reconciliation: 'draft_proof_budget_exhausted' }));
     if (!collection.values || collection.truncated) return result(call, 'ok', reconcilingPayload({ response, reconciliation: collection.truncated ? 'draft_collection_truncated' : 'draft_collection_unavailable' }));
     if (matches.length === 1) return verifiedResult({ call, binding, response, resource: { id: matches[0].id }, reconciliation: 'unique_exact_draft' });
     return result(call, 'ok', reconcilingPayload({ response, reconciliation: matches.length > 1 ? 'multiple_exact_drafts' : 'draft_not_found' }));
@@ -445,13 +516,13 @@ export class MicrosoftGraphProvider {
     let response;
     try {
       if (call.name === 'mail.create_draft') {
-        saved.post_attempted = false; const marker = operationMarker(binding, this.verifiedAccountFingerprint()); saved.operation_marker = marker; const body = { subject: args.subject, body: { contentType: 'Text', content: args.body }, toRecipients: args.to.map(address), ccRecipients: (args.cc ?? []).map(address) };
+        saved.post_attempted = false; saved.proof_deadline = this.toolProofDeadline(call.name); const marker = operationMarker(binding, this.verifiedAccountFingerprint()); saved.operation_marker = marker; const body = { subject: args.subject, body: { contentType: 'Text', content: args.body }, toRecipients: args.to.map(address), ccRecipients: (args.cc ?? []).map(address) };
         if (marker) body.internetMessageHeaders = [{ name: LAE_OPERATION_HEADER, value: marker }];
         response = await this.request({ method: 'POST', path: `${API}/me/messages`, body, signal: operation.signal, onDispatch: () => { saved.post_attempted = true; } });
         const created = response.status === 201 && validResource(response.body);
         if (created && saved.post_attempted) return verifiedResult({ call, binding, response, resource: { id: response.body.id }, reconciliation: 'created_resource' });
         if (created && !saved.post_attempted) return result(call, 'ok', reconcilingPayload({ response, resource: { id: response.body.id }, reconciliation: 'dispatch_unconfirmed' }));
-        return await this.reconcileCreateDraft(call, args, binding, response, operation.signal, saved.operation_marker);
+        return await this.reconcileCreateDraft(call, args, binding, response, operation.signal, saved.operation_marker, saved.proof_deadline);
       }
       if (call.name === 'mail.send_draft') {
         saved.prewrite_verified = false; saved.post_attempted = false; saved.reconciliation_allowed = false;
@@ -481,7 +552,7 @@ export class MicrosoftGraphProvider {
       throw new ProviderToolError('provider_invalid_response');
     } catch (error) {
       if (call.name === 'mail.create_draft' && ['provider_timeout', 'provider_failed'].includes(error?.code) && !operation.signal.aborted && saved.post_attempted) {
-        try { return await this.reconcileCreateDraft(call, args, binding, null, operation.signal, saved.operation_marker); } catch {}
+        try { return await this.reconcileCreateDraft(call, args, binding, null, operation.signal, saved.operation_marker, saved.proof_deadline); } catch {}
       }
       if (call.name === 'mail.send_draft' && ['provider_timeout', 'provider_failed'].includes(error?.code) && !operation.signal.aborted && saved.draftBinding && saved.prewrite_verified && saved.post_attempted && saved.reconciliation_allowed) {
         try { return await this.reconcileSendDraft(call, args, binding, null, saved, operation.signal); } catch {}

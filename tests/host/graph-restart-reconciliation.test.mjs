@@ -68,7 +68,7 @@ test('restart reconciliation coalesces and completes only an acknowledged draft 
   const restarted = graphFixture({ drafts: [providerDraft({ id: 'draft-provider-1', marker })] }); await restarted.provider.startAuth();
   const controller = new ConversationController({ engine, actionJournal: saved.journal, toolRegistry: createMicrosoftGraphTools(restarted.provider) });
   const [first, second] = await Promise.all([controller.reconcileRestartActions(), controller.reconcileRestartActions()]);
-  assert.deepEqual(first, { state: 'completed', examined: 1, completed: 1 }); assert.deepEqual(second, first);
+  assert.deepEqual(first, { state: 'completed', examined: 1, completed: 1, blocked: 0, code: null }); assert.deepEqual(second, first);
   assert.equal((await saved.journal.detail(saved.binding.operation_id)).state, 'completed');
   assert.deepEqual(restarted.counts(), { device: 1, token: 1, list: 1, gets: 1 });
   const listRequest = restarted.calls.find(call => call.path === '/v1.0/me/mailFolders/drafts/messages');
@@ -94,7 +94,7 @@ test('account, content, uniqueness, pagination, and private tool identity all fa
   const saved = await acknowledgedDraftJournal(t); const real = graphFixture(); await real.provider.startAuth(); const marker = `${saved.binding.operation_id}:${saved.binding.operation_digest}:${real.provider.getAccountFingerprint()}`; real.provider.transport.request = graphFixture({ drafts: [providerDraft({ id: 'draft-clone', marker })] }).provider.transport.request;
   const genuine = createMicrosoftGraphTools(real.provider)['mail.create_draft']; const cloned = { ...genuine };
   const controller = new ConversationController({ engine, actionJournal: saved.journal, toolRegistry: { 'mail.create_draft': cloned } });
-  assert.deepEqual(await controller.reconcileRestartActions(), { state: 'completed', examined: 0, completed: 0 });
+  assert.deepEqual(await controller.reconcileRestartActions(), { state: 'completed', examined: 0, completed: 0, blocked: 0, code: null });
   assert.equal((await saved.journal.detail(saved.binding.operation_id)).state, 'acknowledged');
 });
 
@@ -107,7 +107,7 @@ test('reconciling and startup-ambiguous dispatch states remain manual with zero 
   for (const [current, id] of [[reconciling.journal, reconciling.binding.operation_id], [reopenedDispatch, dispatching.operation_id]]) {
     let calls = 0; const fixture = graphFixture(); fixture.provider.transport.request = async () => { calls += 1; throw new Error('must not call provider'); };
     const controller = new ConversationController({ engine, actionJournal: current, toolRegistry: createMicrosoftGraphTools(fixture.provider) });
-    assert.deepEqual(await controller.reconcileRestartActions(), { state: 'completed', examined: 0, completed: 0 }); assert.equal(calls, 0); assert.notEqual((await current.detail(id)).state, 'completed');
+    assert.deepEqual(await controller.reconcileRestartActions(), { state: 'completed', examined: 0, completed: 0, blocked: 0, code: null }); assert.equal(calls, 0); assert.notEqual((await current.detail(id)).state, 'completed');
   }
 });
 
@@ -123,14 +123,14 @@ test('auth epoch changes and hostile journal summaries cannot manufacture restar
   const hostile = Object.fromEntries(methods.map(name => [name, name === 'health' ? () => ({ state: 'ready', error: null }) : name === 'complete' ? async () => { completes += 1; } : async () => {}]));
   Object.defineProperty(hostile, 'summary', { value: async () => ({ records: new Proxy([], {}) }) });
   const noProvider = createMicrosoftGraphTools(graphFixture().provider); const hostileController = new ConversationController({ engine, actionJournal: hostile, toolRegistry: noProvider });
-  assert.deepEqual(await hostileController.reconcileRestartActions(), { state: 'completed', examined: 0, completed: 0 }); assert.equal(completes, 0);
+  assert.deepEqual(await hostileController.reconcileRestartActions(), { state: 'completed', examined: 0, completed: 0, blocked: 0, code: null }); assert.equal(completes, 0);
 
   let getterCalls = 0; const accessorSummary = { ...hostile, summary: async () => { const output = {}; Object.defineProperty(output, 'records', { get() { getterCalls += 1; return []; } }); return output; } };
   const accessorController = new ConversationController({ engine, actionJournal: accessorSummary, toolRegistry: noProvider });
-  assert.deepEqual(await accessorController.reconcileRestartActions(), { state: 'completed', examined: 0, completed: 0 }); assert.equal(getterCalls, 0);
+  assert.deepEqual(await accessorController.reconcileRestartActions(), { state: 'completed', examined: 0, completed: 0, blocked: 0, code: null }); assert.equal(getterCalls, 0);
 
   const stable = { ...hostile, summary: async () => ({ health: {}, total: 0, active: 0, records: [] }) }; const stableController = new ConversationController({ engine, actionJournal: stable, toolRegistry: noProvider }); stable.summary = async () => { throw new Error('replacement summary must not run'); };
-  assert.deepEqual(await stableController.reconcileRestartActions(), { state: 'completed', examined: 0, completed: 0 });
+  assert.deepEqual(await stableController.reconcileRestartActions(), { state: 'completed', examined: 0, completed: 0, blocked: 0, code: null });
   const summaryAccessor = { ...hostile }; Object.defineProperty(summaryAccessor, 'summary', { get() { throw new Error('summary getter must not run'); } });
   assert.throws(() => new ConversationController({ engine, actionJournal: summaryAccessor, toolRegistry: noProvider }), /actionJournal does not implement/u);
   const summaryProxy = { ...hostile, summary: new Proxy(async () => ({ records: [] }), {}) };
