@@ -27,6 +27,7 @@ offline host-tree simulation that reproduces the incident from source.
 import importlib.util
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -147,8 +148,14 @@ class RemoteDirectoryModeTests(unittest.TestCase):
             "shadeform", "/scratch/j1m", self.progress_relative)
         names = [name for name, _argv in stages]
         self.assertEqual(names, [
-            "scratch_root", "scratch_owner", "remote_workspace",
+            "scratch_root", "scratch_not_symlink", "scratch_owner",
+            "scratch_root_private", "remote_workspace",
             "remote_workspace_private", "scratch_df", "scratch_writable"])
+        # The root's own shape is established BEFORE anything is written
+        # beneath it: an unusable root must fail while the instance is still
+        # cheap, not after the model download.
+        self.assertLess(names.index("scratch_not_symlink"), names.index("remote_workspace"))
+        self.assertLess(names.index("scratch_root_private"), names.index("remote_workspace"))
         created = self._assert_every_mkdir_is_chmodded(
             [argv for _name, argv in stages if argv[0] != "sudo"])
         self.assertEqual(created, [
@@ -172,6 +179,38 @@ class RemoteDirectoryModeTests(unittest.TestCase):
         self.assertEqual(stages["scratch_owner"], ["sudo", "chown", "shadeform", "/scratch"])
         self.assertNotIn("/scratch", stages["remote_workspace_private"])
         self.assertNotIn("/scratch", stages["remote_workspace"])
+        # `go-w` strips exactly the bits the root predicate rejects and leaves
+        # the read/execute bits the non-root toolchain needs; it is NOT 0700.
+        self.assertEqual(stages["scratch_root_private"],
+                         ["sudo", "chmod", "go-w", "/scratch"])
+        self.assertNotIn("700", stages["scratch_root_private"])
+
+    def test_the_root_predicate_refuses_the_shapes_the_preflight_now_repairs(self):
+        """The images this plan may land on, judged by the production predicate.
+
+        `mkdir -p` is a no-op on an existing `/scratch`, so before this stage
+        the IMAGE decided the root's mode. `_private_ancestor_snapshot` checks
+        the root with `& 0o022` and refuses a symlink outright, so a `1777`
+        scratch mount, a `0775` group share, or a symlink into `/mnt` would
+        have failed every private write after the instance became billable --
+        and this provider books the whole reservation either way.
+        """
+
+        root = Path(tempfile.mkdtemp(prefix="j1m-root-shape-"))
+        self.addCleanup(shutil.rmtree, root, True)
+        target = root / "artifacts"
+        target.mkdir()
+        os.chmod(target, 0o700)
+        probe = target / "receipt.json"
+        for mode in (0o777, 0o775, 0o1777, 0o757):
+            os.chmod(root, mode)
+            with self.assertRaises(ValueError, msg=f"{mode:04o} accepted"):
+                self.runner._private_ancestor_snapshot(probe, root)
+        # What the preflight leaves behind is accepted.
+        os.chmod(root, 0o1777 & ~0o022)
+        self.runner._private_ancestor_snapshot(probe, root)
+        os.chmod(root, 0o755)
+        self.runner._private_ancestor_snapshot(probe, root)
 
     def test_the_private_directories_are_derived_from_the_configured_progress_path(self):
         """The runner's ROOT on the host is /scratch, not /scratch/j1m.
@@ -205,10 +244,15 @@ class RemoteDirectoryModeTests(unittest.TestCase):
 
     def test_the_bootstrap_slice_covers_the_new_privatising_stage(self):
         source = (ROOT / "scripts/j1m_orchestrator.py").read_text(encoding="utf-8")
-        self.assertIn("eval_commands[:4]", source)
-        self.assertIn("eval_commands[4:]", source)
-        self.assertEqual(len(self.orchestrator._EVAL_BOOTSTRAP_TIMEOUTS), 4)
-        self.assertEqual(self.orchestrator._WORKSPACE_STAGE_COUNT, 6)
+        # Both bounds are derived from the timeout tuple, so adding a stage
+        # cannot leave one slice re-timed and the other short.
+        self.assertIn("eval_commands[:_EVAL_BOOTSTRAP_STAGE_COUNT]", source)
+        self.assertIn("eval_commands[_EVAL_BOOTSTRAP_STAGE_COUNT:]", source)
+        self.assertNotIn("eval_commands[:4]", source)
+        self.assertEqual(len(self.orchestrator._EVAL_BOOTSTRAP_TIMEOUTS), 5)
+        self.assertEqual(self.orchestrator._EVAL_BOOTSTRAP_STAGE_COUNT,
+                         len(self.orchestrator._EVAL_BOOTSTRAP_TIMEOUTS))
+        self.assertEqual(self.orchestrator._WORKSPACE_STAGE_COUNT, 8)
         # The envelope must still fit its run/host/watchdog/provider clocks.
         envelope = self.orchestrator._eval_deadline_ceiling(self.config)
         self.assertLess(envelope["ceiling_seconds"], envelope["run_seconds"])

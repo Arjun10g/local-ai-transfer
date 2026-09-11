@@ -622,7 +622,20 @@ def _remote_workspace_stages(ssh_user: str, remote_root: str, progress_relative:
     private = _host_private_directories(remote_root, progress_relative)
     return (
         ("scratch_root", ["sudo", "mkdir", "-p", "/scratch"]),
+        # ``mkdir -p`` is a no-op on an existing ``/scratch``, so the IMAGE's
+        # mode and link status -- not this plan's -- decide whether the runner
+        # can write at all.  ``_private_ancestor_snapshot`` refuses a symlinked
+        # root outright and refuses any root carrying ``0o022``, so a provider
+        # image shipping ``/scratch`` as a ``1777`` scratch mount, a ``0775``
+        # group share, or a symlink into ``/mnt`` would fail every private
+        # write AFTER the instance is billable -- and this provider books the
+        # whole reservation, so that costs a full run.  Establish both facts
+        # here: the link test fails closed, and ``go-w`` strips exactly the
+        # bits the root predicate rejects while leaving the read/execute bits
+        # the non-root toolchain needs.
+        ("scratch_not_symlink", ["test", "!", "-L", "/scratch"]),
         ("scratch_owner", ["sudo", "chown", ssh_user, "/scratch"]),
+        ("scratch_root_private", ["sudo", "chmod", "go-w", "/scratch"]),
         ("remote_workspace", ["mkdir", "-p", *private]),
         ("remote_workspace_private", ["chmod", "700", *private]),
         ("scratch_df", ["df", "-P", "-k", "/scratch"]),
@@ -632,8 +645,13 @@ def _remote_workspace_stages(ssh_user: str, remote_root: str, progress_relative:
 
 _WORKSPACE_STAGE_COUNT = len(_remote_workspace_stages("u", "/scratch/j1m", "experiments/runtime/J1M.progress.json"))
 # One bounded timeout per initial eval stage, in plan order: create the
-# workspace tree, make it owner-private, refresh apt, install the bootstrap.
-_EVAL_BOOTSTRAP_TIMEOUTS = (30.0, 30.0, 120.0, 270.0)
+# workspace tree, make it owner-private, refresh apt, install the bootstrap,
+# restore the public trust store.
+_EVAL_BOOTSTRAP_TIMEOUTS = (30.0, 30.0, 120.0, 270.0, 30.0)
+# The bootstrap prefix is sliced by length in both the deadline derivation and
+# the run loop; deriving both from this constant keeps a plan change from
+# silently re-timing a stage or skipping one.
+_EVAL_BOOTSTRAP_STAGE_COUNT = len(_EVAL_BOOTSTRAP_TIMEOUTS)
 
 
 def _remote_job_command(mode: str, remote_root: str, required_scratch_gib: int) -> list[str]:
@@ -818,6 +836,17 @@ def _eval_remote_commands(config: dict[str, Any], remote_root: str, selection: t
         ["chmod", "700", *eval_directories],
         ["sudo", "apt-get", "update"],
         ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "--no-install-recommends", "ca-certificates", "cmake", "build-essential", "git", "python3", "python3-venv"],
+        # dpkg restores each archived file's own mode, but a maintainer script
+        # that GENERATES a file inherits the login shell's umask -- now 077.
+        # ``update-ca-certificates`` regenerates the CA bundle exactly that
+        # way, and a root-owned 0600 bundle breaks TLS for every later
+        # non-root stage (the pinned llama.cpp clone, pip, the Hugging Face
+        # fetch) long after the instance is billable.  The trust store is
+        # public material by definition, so republish it readable.  Scoped to
+        # ``/etc/ssl/certs`` and never ``/etc/ssl``, whose ``private/``
+        # sibling holds host keys that must stay owner-only; ``X`` sets the
+        # search bit on directories without making any file executable.
+        ["sudo", "chmod", "-R", "go+rX", "/etc/ssl/certs"],
         # Fail before the expensive HF checkout/conversion when the CUDA
         # compiler is unavailable to a noninteractive SSH process.
         ["python3", f"{remote_root}/remote_toolchain_probe.py", "--nvcc", cuda_compiler, "--output", f"{remote_root}/artifacts/toolchain-receipt.json"],
@@ -908,7 +937,7 @@ def _eval_deadline_ceiling(config: dict[str, Any]) -> dict[str, float]:
     mode = config["modes"]["eval"]
     commands = _eval_remote_commands(config, "/scratch/j1m")
     bootstrap = sum(_EVAL_BOOTSTRAP_TIMEOUTS)
-    post_upload = sum(_eval_stage_timeout(config, command) for command in commands[4:])
+    post_upload = sum(_eval_stage_timeout(config, command) for command in commands[_EVAL_BOOTSTRAP_STAGE_COUNT:])
     eval_uploads = _eval_uploads(
         config, "/scratch/j1m", None,
         ROOT / "artifacts" / "qwen35-9b" / "model-manifest.json",
@@ -2701,7 +2730,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 # work. The remaining stages consume those uploads and copy
                 # the lock into the now-existing pinned vendor tree.
                 bootstrap_timeouts = _EVAL_BOOTSTRAP_TIMEOUTS
-                for index, command in enumerate(eval_commands[:4]):
+                for index, command in enumerate(eval_commands[:_EVAL_BOOTSTRAP_STAGE_COUNT]):
                     lifecycle["stage"] = f"eval-bootstrap:{command[0]}"
                     _progress(progress_path, "eval-bootstrap-stage-starting", phase_id=phase_id, operation_stage=lifecycle["stage"])
                     stage = _remote(sf.ssh_base(info, identity, known_hosts) + command, timeout=_eval_timeout(execution_deadline, bootstrap_timeouts[index]))
@@ -2726,7 +2755,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     _progress(progress_path, "eval-upload-result", phase_id=phase_id, operation_stage=lifecycle["stage"], status=upload_receipt["status"], exit_code=upload_receipt.get("exit_code"))
                     if upload_receipt["status"] != "completed":
                         raise sf.ShadeformError("required eval upload failed")
-                for command in eval_commands[4:]:
+                for command in eval_commands[_EVAL_BOOTSTRAP_STAGE_COUNT:]:
                     lifecycle["stage"] = _eval_stage_label(command)
                     if any("remote_model_eval.py" in part for part in command):
                         lifecycle["remote_model_eval_attempted"] = True

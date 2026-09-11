@@ -406,9 +406,10 @@ class ComparatorFlagTests(unittest.TestCase):
 
     def test_remote_commands_and_uploads_are_untouched(self):
         commands = self.orchestrator._eval_remote_commands(self.config, "/scratch/j1m")
-        # 14 before J1M-HOST-PRIVACY-001; the extra stage is the `chmod 700`
-        # that follows the plan's own `mkdir -p`.
-        self.assertEqual(len(commands), 15)
+        # 14 before J1M-HOST-PRIVACY-001, 15 with the `chmod 700` that follows
+        # the plan's own `mkdir -p`; 16 with the J1M-HOST-ROOT-001 trust-store
+        # republish that keeps `umask 077` from leaving a 0600 CA bundle.
+        self.assertEqual(len(commands), 16)
         self.assertEqual(commands[1][:2], ["chmod", "700"])
         self.assertEqual(commands[0][2:], commands[1][2:])
         flattened = " ".join(part for command in commands for part in command)

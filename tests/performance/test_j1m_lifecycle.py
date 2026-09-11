@@ -2108,15 +2108,21 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertIn((ROOT / "tests/native/runtime_tests.cpp", "/scratch/j1m/engine/tests/native/runtime_tests.cpp", False), uploads)
         self.assertIn((ROOT / "tests/native/model_validator_tests.cpp", "/scratch/j1m/engine/tests/native/model_validator_tests.cpp", False), uploads)
         source = (ROOT / "scripts/j1m_orchestrator.py").read_text(encoding="utf-8")
-        # [:3]/[3:] before J1M-HOST-PRIVACY-001; the bootstrap now carries the
-        # `chmod 700` that makes the created tree owner-private.
-        self.assertIn("eval_commands[:4]", source)
-        self.assertIn("eval_commands[4:]", source)
+        # [:3]/[3:] before J1M-HOST-PRIVACY-001, [:4]/[4:] once the bootstrap
+        # carried the `chmod 700`. The bound is now DERIVED from the timeout
+        # tuple, so a plan change cannot re-time a stage or drop one silently.
+        self.assertIn("eval_commands[:_EVAL_BOOTSTRAP_STAGE_COUNT]", source)
+        self.assertIn("eval_commands[_EVAL_BOOTSTRAP_STAGE_COUNT:]", source)
+        self.assertNotIn("eval_commands[:4]", source)
         commands = orchestrator._eval_remote_commands(j1m.load_config(), "/scratch/j1m")
         self.assertEqual(commands[0][:2], ["mkdir", "-p"])
         self.assertEqual(commands[1][:2], ["chmod", "700"])
         self.assertEqual(commands[2][:2], ["sudo", "apt-get"])
         self.assertEqual(commands[3][:5], ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install"])
+        # The trust store is republished readable immediately after the install
+        # that may have regenerated it under `umask 077`, and before any
+        # non-root stage needs TLS. Scoped to certs, never to /etc/ssl itself.
+        self.assertEqual(commands[4], ["sudo", "chmod", "-R", "go+rX", "/etc/ssl/certs"])
         j1m_index = next(index for index, command in enumerate(commands) if "j1m_runner.py" in command[1])
         toolchain_indices = [index for index, command in enumerate(commands) if "remote_toolchain_probe.py" in command[1]]
         self.assertEqual(len(toolchain_indices), 2)

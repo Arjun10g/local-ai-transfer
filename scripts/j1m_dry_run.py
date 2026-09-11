@@ -1335,11 +1335,30 @@ def host_tree_simulation(*, umask_prefix: tuple[str, ...] | list[str],
     commands = _host_replay_commands(config, legacy=legacy)
     prefix = list(umask_prefix)
     scratch = Path(tempfile.mkdtemp(prefix="j1m-host-sim-"))
+    # The replayed shell inherits THIS process's umask, so an operator whose
+    # own umask is already 077 would watch this simulation pass with the
+    # remote prefix deleted -- precisely the defect it exists to catch. Force
+    # the provider image's default for the whole simulation: from here on only
+    # the replayed prefix and the plan's own explicit chmods can make anything
+    # private, and `_private_atomic_write` has to set its mode rather than
+    # inherit a lucky one.
+    previous_umask = os.umask(0o022)
     try:
         # The trusted root is a policy boundary, not a private directory: the
         # snapshot requires it to be owned by this user and not group/other
         # writable, which 0755 satisfies. Starting at 0755 proves that.
         os.chmod(scratch, 0o755)
+        # A fresh stand-in lets every `mkdir -p` create its own target, which
+        # would leave the plan's explicit `chmod 700` stages dead code this
+        # gate never exercises -- delete them and it still passes. Seed one
+        # private path as an ALREADY-EXISTING 0755 directory: the shape a
+        # provider image leaves behind, and exactly the case `mkdir -p`
+        # silently does nothing about, so only an explicit chmod can still
+        # make it private.
+        seeded = Path(str(scratch) + "/j1m/artifacts")
+        seeded.mkdir(parents=True, exist_ok=True)
+        os.chmod(seeded.parent, 0o755)
+        os.chmod(seeded, 0o755)
 
         def host(path: str) -> Path:
             if not path.startswith("/scratch"):
@@ -1386,12 +1405,15 @@ def host_tree_simulation(*, umask_prefix: tuple[str, ...] | list[str],
             "plan": "run-d" if legacy else "current",
             "commands_replayed": len(replayed),
             "root_mode": "0755",
+            "process_umask": "0022",
+            "seeded_existing_0755": "/scratch/j1m/artifacts",
             "probed_paths": len(targets),
             "written_paths": written,
             "created_file_mode": probe_mode,
             "refused": refused,
         }
     finally:
+        os.umask(previous_umask)
         shutil.rmtree(scratch, ignore_errors=True)
 
 

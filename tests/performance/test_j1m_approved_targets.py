@@ -456,7 +456,7 @@ class SelectedTargetCostTests(unittest.TestCase):
     def test_the_deadline_ceiling_is_time_based_and_rate_independent(self):
         ceiling = orchestrator._eval_deadline_ceiling(self.config)
         self.assertEqual(ceiling["run_seconds"], 1.94 * 3600.0)
-        self.assertEqual(ceiling["watchdog_seconds"], 7700.0)
+        self.assertEqual(ceiling["watchdog_seconds"], 7800.0)
         self.assertEqual(ceiling["provider_seconds"], 2.425 * 3600.0)
         self.assertNotIn("hourly_usd", ceiling)
 

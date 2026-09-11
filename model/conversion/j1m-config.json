@@ -98,7 +98,7 @@
       "cuda_device_name": "CUDA0",
       "gpu_layers": 99,
       "runtime_hours": 1.94,
-      "external_watchdog_seconds": 7700,
+      "external_watchdog_seconds": 7800,
       "host_shutdown_delay_minutes": 110,
       "provider_backstop_hours": 2.425,
       "transfer_reserve_seconds": 300,
