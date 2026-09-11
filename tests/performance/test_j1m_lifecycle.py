@@ -1920,33 +1920,58 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertEqual(orchestrator._eval_stage_label(["cmake", "-S", "engine"]), "eval-stage:cmake-configure")
         self.assertEqual(orchestrator._eval_stage_label(["cmake", "--build", "build"]), "eval-stage:cmake-build")
 
-    def test_salvage_timeout_is_size_aware_and_deadline_bounded(self):
-        """External pathname salvage is retired until a bound transport exists."""
+    def test_salvage_refuses_the_model_artifact_name_without_any_transfer(self):
+        """The bounded transport carries receipts; the Q4 GGUF is not fetchable."""
 
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_timeout")
         info = {"phase_id": "j1m-test", "instance_info": {"ssh_user": "u", "ip": "127.0.0.1"}}
         with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             identity = Path(directory) / "id"
             known_hosts = Path(directory) / "known_hosts"
+            known_hosts.write_text("host ssh-ed25519 AAAA\n", encoding="utf-8")
+            known_hosts.chmod(0o600)
             destination = Path(directory) / "artifacts"
             destination.mkdir(mode=0o700)
-            with mock.patch.object(orchestrator, "_remote") as remote:
-                with self.assertRaisesRegex(ValueError, "external salvage transport is unavailable"):
-                    orchestrator._salvage(
-                        info, identity, known_hosts, destination,
-                        ["Qwen3.5-9B-Q4_K_M.gguf"], q4_expected_gib=6,
-                        deadline=time.monotonic() + 1000,
-                    )
+            with mock.patch.object(orchestrator.j1m_runner, "PRIVATE_OUTPUT_ROOT", Path(directory)), \
+                    mock.patch.object(orchestrator.sf, "_preflight"), \
+                    mock.patch.object(orchestrator.sf, "scp_base") as scp_base, \
+                    mock.patch.object(orchestrator, "_remote") as remote:
+                results = orchestrator._salvage(
+                    info, identity, known_hosts, destination,
+                    ["Qwen3.5-9B-Q4_K_M.gguf"], q4_expected_gib=6,
+                    deadline=time.monotonic() + 1000,
+                )
+            self.assertEqual(results, [{
+                "name": "Qwen3.5-9B-Q4_K_M.gguf",
+                "status": "salvage_failed",
+                "error_code": "salvage_name_not_allowlisted",
+            }])
             remote.assert_not_called()
+            scp_base.assert_not_called()
+            self.assertFalse((destination / "Qwen3.5-9B-Q4_K_M.gguf").exists())
 
     def test_salvage_stops_without_scp_when_only_deletion_reserve_remains(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_salvage_reserve")
         info = {"phase_id": "j1m-test", "instance_info": {"ssh_user": "u", "ip": "127.0.0.1"}}
-        with tempfile.TemporaryDirectory(dir=ROOT) as directory, mock.patch.object(orchestrator.sf, "_preflight"), mock.patch.object(orchestrator.sf, "scp_base", return_value=["scp"]), mock.patch.object(orchestrator, "_remote") as remote:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory, \
+                mock.patch.object(orchestrator.j1m_runner, "PRIVATE_OUTPUT_ROOT", Path(directory)), \
+                mock.patch.object(orchestrator.sf, "_preflight"), \
+                mock.patch.object(orchestrator.sf, "scp_base", return_value=["scp"]), \
+                mock.patch.object(orchestrator, "_remote") as remote:
             destination = Path(directory) / "out"
             destination.mkdir(mode=0o700)
-            with self.assertRaisesRegex(ValueError, "external salvage transport is unavailable"):
-                orchestrator._salvage(info, Path(directory) / "id", Path(directory) / "known", destination, ["one.json", "two.json"], deadline=time.monotonic() + 0.01)
+            known_hosts = Path(directory) / "known"
+            known_hosts.write_text("host ssh-ed25519 AAAA\n", encoding="utf-8")
+            known_hosts.chmod(0o600)
+            results = orchestrator._salvage(
+                info, Path(directory) / "id", known_hosts, destination,
+                ["eval-receipt.json", "cuda-device-receipt.json"],
+                deadline=time.monotonic() + 0.01,
+            )
+            self.assertEqual(
+                [item["error_code"] for item in results],
+                ["salvage_deadline_reserve", "salvage_deadline_reserve"],
+            )
         remote.assert_not_called()
 
     def test_eval_deadline_envelope_keeps_host_shutdown_jitter(self):
