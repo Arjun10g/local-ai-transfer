@@ -159,6 +159,44 @@ class ComparisonMathTests(unittest.TestCase):
         self.assertEqual(tripped["critical_category_verdict"], "fail")
         self.assertEqual(tripped["verdict"], "fail")
 
+    def test_the_critical_drop_threshold_is_exactly_the_fixture_spec_value(self):
+        # A 100-case category makes one case worth exactly one point, so the
+        # boundary can be hit on the nose rather than approached.  The
+        # threshold under test is read from the gate, never hardcoded here, so
+        # replacing it in source with any looser constant fails this test.
+        limit = self.gate["critical_category_max_drop_points"]
+        self.assertEqual(limit, 8.0)
+
+        def single_category(passed):
+            return {
+                "case_count": 100, "passed": passed,
+                "category_summary": {"tool_selection": {
+                    "case_count": 100, "passed": passed,
+                    "failed": 100 - passed, "errors": 0}},
+            }
+
+        def verdict(drop):
+            entry = comparison.compare_arm(
+                comparator_label="q8_0", gate=self.gate,
+                baseline_metrics=single_category(100 - int(drop)),
+                comparator_metrics=single_category(100))
+            self.assertEqual(entry["category_drop_max_points"], float(drop))
+            return entry["critical_category_verdict"], entry["verdict"]
+
+        self.assertEqual(verdict(limit), ("pass", "fail"))          # 8.0 points
+        self.assertEqual(verdict(limit + 1), ("fail", "fail"))      # 9.0 points
+        self.assertEqual(verdict(0)[0], "pass")
+        # Identical arms clear every gate, so the only thing separating the
+        # two boundary cases above really is the critical-category rule.
+        clean = comparison.compare_arm(
+            comparator_label="q8_0", gate=self.gate,
+            baseline_metrics=single_category(100), comparator_metrics=single_category(100),
+            baseline_cases=[{"id": f"c{index}", "category": "tool_selection", "passed": True}
+                            for index in range(100)],
+            comparator_cases=[{"id": f"c{index}", "category": "tool_selection", "passed": True}
+                              for index in range(100)])
+        self.assertEqual(clean["verdict"], "pass")
+
     def test_bootstrap_is_deterministic_under_the_recorded_seed(self):
         baseline = comparison.normalize_metrics(arm_metrics(BASELINE))
         comparator = comparison.normalize_metrics(arm_metrics(STRONGER))

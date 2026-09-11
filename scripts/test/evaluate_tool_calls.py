@@ -660,7 +660,15 @@ def normalize_structured_tool_calls(
     elif isinstance(raw, str):
         if len(raw.encode("utf-8")) > MAX_TOOL_SCHEMA_BYTES:
             raise ValueError("parameter_too_large")
-        arguments = _parse_json_value(raw)
+        try:
+            arguments = _parse_json_value(raw)
+        except ValueError as exc:
+            # ``_parse_json_value`` reports its own bound violations with
+            # fixture-shaped codes; an argument that busts a bound is a
+            # ``parameter_too_large``, exactly as it is on the XML path.
+            if str(exc).startswith("fixture_"):
+                raise ValueError("parameter_too_large") from exc
+            raise
     elif isinstance(raw, dict):
         arguments = raw
     else:
