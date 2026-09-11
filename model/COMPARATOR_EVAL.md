@@ -178,16 +178,16 @@ peak, when bf16 (17.92 GB) + Q8_0 (9.53 GB) + Q4 (5.63 GB) + the HF source are
 all resident simultaneously. Holding that peak longer does not raise it.
 `required_scratch_gib = 70` is unchanged.
 
-### 2.4 The eval clock has 339 seconds of static slack
+### 2.4 The eval clock has 309 seconds of static slack
 
 `_eval_deadline_ceiling` sums worst-case stage budgets:
 
 ```
-activation 600 + host_key 165 + fixed_setup 510 + bootstrap 420
-+ small_uploads 420 + post_upload 4050              = 6165 s work
-+ cleanup_reserve 480                               = 6645 s ceiling
+activation 600 + host_key 165 + fixed_setup 540 + bootstrap 420
++ small_uploads 420 + post_upload 4050              = 6195 s work
++ cleanup_reserve 480                               = 6675 s ceiling
 run_seconds = 1.94 h                                = 6984 s
-static slack                                        =  339 s
+static slack                                        =  309 s
 ```
 
 A comparator phase cannot fit that worst case, and this slice **does not raise
@@ -315,6 +315,8 @@ cache_state          "cold_process_fresh_server_per_arm"
 sample_count         37
 metrics              {case_count, passed, failed, errors, peak_rss_kib, category_summary,
                       canary, error_diagnostics, quality_diagnostics}
+case_indicators      [{id, category, passed}] -- bounded per-case pass vector, no
+                     prompt/response/model output; required for a paired interval
 timings              {server_ready_ms, evaluation_ms, total_ms}
 prompt_response_logging  false
 token_logging            false
@@ -384,24 +386,45 @@ single flip is a 100-point category delta; per-category `case_count` is
 recorded alongside every delta so a reviewer can see that.
 
 **Bootstrap non-inferiority** — `random.Random(20260911)`, 10,000 resamples,
-95% percentile interval, stratified by category. Each resample draws, for each
-category and independently for each arm, `case_count_c` indicators with
-replacement from that arm's own indicator multiset for that category, then
-recomputes the overall score difference `score(q4_k_m) − score(comparator)` in
-points. The interval is the 2.5th/97.5th percentiles of the 10,000 deltas,
-using the nearest-rank convention on the sorted list.
+95% percentile interval, nearest-rank convention on the sorted deltas.
 Verdict: `pass` iff `delta_ci_lower_points ≥ −2`.
 
-*Pairing limitation, recorded in the receipt.* The evaluator's remote-safe
-contract (`aggregate_result` in `scripts/test/evaluate_tool_calls.py`)
-deliberately returns only aggregate and per-category counts, not per-case
-records, so the salvaged receipts do not permit pairing the same case across
-two arms. The bootstrap is therefore unpaired-stratified, recorded as
-`pairing: "unpaired_stratified_by_category"`. An unpaired interval is wider
-than the paired interval for positively correlated arms, so the verdict is
-conservative. A paired interval would need a bounded per-case pass-indicator
-vector added to the evaluator contract; that is a separate slice and is
-deliberately not done here, because it would change the Q4 receipt schema.
+*The interval must be paired, and that is why §6.1 requires
+`case_indicators`.* Two methods are implemented and the receipt records which
+one produced the number:
+
+| `pairing` | Method | When |
+|---|---|---|
+| `paired_by_case_id` | resample case ids with replacement, average the per-case differences `b_i − c_i ∈ {−1,0,1}` | both arms supplied `case_indicators` over the identical case-id set |
+| `unpaired_stratified_by_category` | resample `case_count_c` indicators with replacement inside each category, independently per arm | fallback when either vector is absent |
+
+The fallback is not merely wider — at this corpus size it is **not decidable**.
+Measured with the shipped constants, two *identical* arms produce:
+
+| Cases | Unpaired 95% interval | Non-inferiority at margin 2 |
+|---:|---|---|
+| 37 (the current profile) | ±16.22 points | fail |
+| 1,200 (the authored corpus target) | ±3.25 points | fail |
+
+whereas the paired interval on two identical arms is exactly `[0, 0]` and
+passes. A 2-point margin is therefore unreachable without pairing at any
+realistic corpus size, so the per-arm receipt schema in §6.1 makes
+`case_indicators` the expected field and the unpaired path exists only to
+refuse honestly rather than to approve on weak evidence.
+
+This costs nothing on the Q4 path. `case_indicators` is a field of the **new**
+`comparator-eval-receipt.v1` schema, not of `real-tool-eval-receipt.v1`.
+`scripts/test/evaluate_tool_calls.py` already builds per-case `records` inside
+`run_local`; only `aggregate_result` strips them for the remote-safe contract.
+The future `remote_comparator_eval.py` projects the bounded
+`{id, category, passed}` triple from those records itself — no prompt, no
+response, no model output — and the evaluator's scoring semantics and the Q4
+receipt are untouched.
+
+Even paired, the 37-case profile is underpowered for a 2-point margin: a
+single flipped case is 2.70 points, so the interval cannot sit inside ±2 unless
+the arms agree on every case. That is a real property of the fixture, not of
+the method, and it is a further argument for `MODEL-QUALITY-CORPUS-001`.
 
 Determinism is a tested property: the same inputs and seed produce the same
 interval on every run, and the seed is recorded in the receipt.
@@ -482,8 +505,12 @@ Gated off, pending `COMPARATOR-ENGINE-001` (§2.2a):
    deliberately **not** made here.
 3. The critical-category mapping (§7) is conservative-by-default and wants an
    explicit Sol-recorded mapping.
-4. A paired bootstrap needs a bounded per-case indicator vector in the
-   evaluator contract (§7).
+4. The non-inferiority margin of 2 points is only decidable with paired
+   indicators (§7), and even paired it needs a corpus larger than 37 cases.
+   Sol should note that §11 MUST "report effect sizes and bootstrap intervals"
+   is satisfiable today, but the 2-point margin verdict on the tool-call
+   profile will read `fail` for any real difference until
+   `MODEL-QUALITY-CORPUS-001` lands.
 5. `_salvage` is inert in current source, so no receipt of any kind can be
    fetched yet. The comparator phase degrades to a typed skip until that
    transport lands.

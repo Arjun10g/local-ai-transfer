@@ -17,6 +17,7 @@ import argparse
 import json
 import math
 import random
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -38,8 +39,12 @@ DEFAULT_SEED = 20260911
 MAX_RESAMPLES = 100000
 MAX_RECEIPT_BYTES = 256 * 1024
 CRITICAL_CATEGORY_POLICY = "all_categories_conservative"
-BOOTSTRAP_METHOD = "stratified_by_category_percentile"
-BOOTSTRAP_PAIRING = "unpaired_stratified_by_category"
+BOOTSTRAP_PAIRED_METHOD = "paired_case_percentile"
+BOOTSTRAP_UNPAIRED_METHOD = "stratified_by_category_percentile"
+BOOTSTRAP_PAIRED = "paired_by_case_id"
+BOOTSTRAP_UNPAIRED = "unpaired_stratified_by_category"
+CASE_ID = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+MAX_CASES = 4096
 SKIP_REASONS = frozenset({
     "comparator_not_requested",
     "comparator_clock_insufficient",
@@ -189,6 +194,42 @@ def normalize_metrics(metrics: Any) -> dict[str, Any]:
     return {"case_count": case_count, "passed": passed, "category_summary": counts}
 
 
+def normalize_cases(value: Any, category_summary: dict[str, dict[str, int]]) -> dict[str, bool]:
+    """Accept a bounded per-case pass-indicator vector and cross-check it.
+
+    The vector is what makes a *paired* interval possible.  It carries only a
+    case identifier, its category, and a boolean: never a prompt, a response,
+    or any model output.
+    """
+
+    if not isinstance(value, list) or not 1 <= len(value) <= MAX_CASES:
+        raise ComparisonError("case_indicators_invalid")
+    indicators: dict[str, bool] = {}
+    categories: dict[str, int] = {}
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"id", "category", "passed"}:
+            raise ComparisonError("case_indicators_invalid")
+        identifier = item["id"]
+        category = item["category"]
+        passed = item["passed"]
+        if not isinstance(identifier, str) or not CASE_ID.fullmatch(identifier):
+            raise ComparisonError("case_indicators_invalid")
+        if identifier in indicators:
+            raise ComparisonError("case_indicators_invalid")
+        if not isinstance(category, str) or category not in category_summary:
+            raise ComparisonError("case_indicators_invalid")
+        if not isinstance(passed, bool):
+            raise ComparisonError("case_indicators_invalid")
+        indicators[identifier] = passed
+        categories[category] = categories.get(category, 0) + (1 if passed else 0)
+    if len(indicators) != sum(item["case_count"] for item in category_summary.values()):
+        raise ComparisonError("case_indicators_invalid")
+    for category, item in category_summary.items():
+        if categories.get(category, 0) != item["passed"]:
+            raise ComparisonError("case_indicators_invalid")
+    return indicators
+
+
 def _aligned(baseline: dict[str, Any], comparator: dict[str, Any]) -> list[str]:
     """Both arms must have scored the identical fixture shape."""
 
@@ -214,13 +255,22 @@ def _percentile_index(count: int, probability: float) -> int:
 def bootstrap_delta_interval(
     baseline: dict[str, Any], comparator: dict[str, Any], *,
     resamples: int, confidence: float, seed: int,
+    baseline_cases: dict[str, bool] | None = None,
+    comparator_cases: dict[str, bool] | None = None,
 ) -> dict[str, Any]:
-    """Stratified percentile interval for ``score(baseline) - score(comparator)``.
+    """Percentile interval for ``score(baseline) - score(comparator)``.
 
-    Cases are resampled with replacement inside each category, independently
-    for each arm, because the salvaged receipts carry category aggregates and
-    never per-case identities.  An unpaired interval is wider than the paired
-    interval it stands in for, so the resulting verdict is conservative.
+    When both arms supply a per-case pass-indicator vector over the identical
+    case-id set the interval is **paired**: one resample draws case ids with
+    replacement and averages the per-case differences.  That is the design the
+    fixture spec's 2-point non-inferiority margin assumes.
+
+    Without those vectors the interval falls back to resampling within each
+    category independently per arm.  That fallback is materially weaker: on
+    the 37-case profile two *identical* arms still produce a 95% interval of
+    about ±16 points, and even 1,200 cases only reach about ±3.25, so a
+    2-point margin is not decidable unpaired at any realistic corpus size.
+    The fallback therefore refuses rather than approves, and records why.
     """
 
     categories = _aligned(baseline, comparator)
@@ -231,6 +281,32 @@ def bootstrap_delta_interval(
         raise ComparisonError("bootstrap_resamples_invalid")
     if not 0.5 <= confidence < 1.0:
         raise ComparisonError("bootstrap_confidence_invalid")
+    tail = (1.0 - confidence) / 2.0
+    if baseline_cases is not None and comparator_cases is not None:
+        if set(baseline_cases) != set(comparator_cases) or len(baseline_cases) != total:
+            raise ComparisonError("case_indicators_misaligned")
+        differences = [
+            int(baseline_cases[identifier]) - int(comparator_cases[identifier])
+            for identifier in sorted(baseline_cases)
+        ]
+        rng = random.Random(seed)
+        scale = 100.0 / total
+        deltas = []
+        for _ in range(resamples):
+            accumulated = 0
+            for _draw in range(total):
+                accumulated += differences[rng.randrange(total)]
+            deltas.append(accumulated * scale)
+        deltas.sort()
+        return {
+            "resamples": resamples,
+            "confidence": confidence,
+            "seed": seed,
+            "method": BOOTSTRAP_PAIRED_METHOD,
+            "pairing": BOOTSTRAP_PAIRED,
+            "delta_ci_lower_points": round(deltas[_percentile_index(resamples, tail)], 6),
+            "delta_ci_upper_points": round(deltas[_percentile_index(resamples, 1.0 - tail)], 6),
+        }
     strata = [
         (
             baseline["category_summary"][category]["case_count"],
@@ -253,17 +329,14 @@ def bootstrap_delta_interval(
                     difference -= 1
         deltas.append(difference * scale)
     deltas.sort()
-    tail = (1.0 - confidence) / 2.0
-    lower = deltas[_percentile_index(resamples, tail)]
-    upper = deltas[_percentile_index(resamples, 1.0 - tail)]
     return {
         "resamples": resamples,
         "confidence": confidence,
         "seed": seed,
-        "method": BOOTSTRAP_METHOD,
-        "pairing": BOOTSTRAP_PAIRING,
-        "delta_ci_lower_points": round(lower, 6),
-        "delta_ci_upper_points": round(upper, 6),
+        "method": BOOTSTRAP_UNPAIRED_METHOD,
+        "pairing": BOOTSTRAP_UNPAIRED,
+        "delta_ci_lower_points": round(deltas[_percentile_index(resamples, tail)], 6),
+        "delta_ci_upper_points": round(deltas[_percentile_index(resamples, 1.0 - tail)], 6),
     }
 
 
@@ -288,6 +361,7 @@ def category_deltas(baseline: dict[str, Any], comparator: dict[str, Any]) -> dic
 def compare_arm(
     *, comparator_label: str, baseline_metrics: Any, comparator_metrics: Any,
     gate: dict[str, Any],
+    baseline_cases: Any = None, comparator_cases: Any = None,
 ) -> dict[str, Any]:
     """Return one fully decided comparison entry."""
 
@@ -296,6 +370,12 @@ def compare_arm(
     baseline = normalize_metrics(baseline_metrics)
     comparator = normalize_metrics(comparator_metrics)
     categories = _aligned(baseline, comparator)
+    baseline_indicators = (
+        normalize_cases(baseline_cases, baseline["category_summary"])
+        if baseline_cases is not None else None)
+    comparator_indicators = (
+        normalize_cases(comparator_cases, comparator["category_summary"])
+        if comparator_cases is not None else None)
     baseline_points = score_points(baseline["passed"], baseline["case_count"])
     comparator_points = score_points(comparator["passed"], comparator["case_count"])
     entry: dict[str, Any] = {
@@ -325,6 +405,7 @@ def compare_arm(
         baseline, comparator,
         resamples=gate["bootstrap_resamples"], confidence=gate["confidence"],
         seed=gate["seed"],
+        baseline_cases=baseline_indicators, comparator_cases=comparator_indicators,
     )
     margin = gate["non_inferiority_margin_points"]
     bootstrap["non_inferiority_margin_points"] = margin
@@ -337,6 +418,15 @@ def compare_arm(
         ("retention_verdict", "critical_category_verdict")
     ) and bootstrap["non_inferiority_verdict"] == "pass" else "fail"
     return entry
+
+
+def _indicator_vector(metrics: Any) -> list[dict[str, Any]] | None:
+    """Return the validated per-case indicator vector, when the arm carried one."""
+
+    if not isinstance(metrics, dict):
+        return None
+    indicators = metrics.get("case_indicators")
+    return indicators if isinstance(indicators, list) else None
 
 
 def _skip_entry(comparator: str, reason: str) -> dict[str, str]:
@@ -386,6 +476,8 @@ def build_comparison_receipt(
             comparisons.append(compare_arm(
                 comparator_label=label, baseline_metrics=baseline_metrics,
                 comparator_metrics=metrics, gate=gate,
+                baseline_cases=_indicator_vector(baseline_metrics),
+                comparator_cases=_indicator_vector(metrics),
             ))
     if fixture_sha256 is not None and (
             not isinstance(fixture_sha256, str) or len(fixture_sha256) != 64 or
@@ -430,7 +522,12 @@ def write_comparison_receipt(path: Path, receipt: dict[str, Any]) -> dict[str, A
 
 
 def arm_metrics_from_receipt(payload: Any) -> dict[str, Any]:
-    """Extract the aggregate metrics from one salvaged per-arm receipt."""
+    """Extract the aggregate metrics from one salvaged per-arm receipt.
+
+    ``case_indicators`` is optional in the schema but required for a paired
+    interval; when absent the comparison falls back to the weaker unpaired
+    method and records that in the receipt.
+    """
 
     if not isinstance(payload, dict) or payload.get("schema") != ARM_SCHEMA:
         raise ComparisonError("comparator_receipt_invalid")
@@ -438,7 +535,17 @@ def arm_metrics_from_receipt(payload: Any) -> dict[str, Any]:
         raise ComparisonError("comparator_receipt_invalid")
     if payload.get("arm") not in KNOWN_ARMS:
         raise ComparisonError("comparator_receipt_invalid")
-    return normalize_metrics(payload.get("metrics"))
+    metrics = normalize_metrics(payload.get("metrics"))
+    if "case_indicators" in payload:
+        normalize_cases(payload["case_indicators"], metrics["category_summary"])
+        metrics["case_indicators"] = payload["case_indicators"]
+    return metrics
+
+
+def load_arm_metrics(path: Path) -> dict[str, Any]:
+    """Read one salvaged per-arm receipt and return its aggregate metrics."""
+
+    return arm_metrics_from_receipt(_bounded_json_file(path))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -462,7 +569,7 @@ def main(argv: list[str] | None = None) -> int:
                     skipped.append(_skip_entry(arm, "comparator_receipt_missing"))
                 continue
             try:
-                arms[arm] = arm_metrics_from_receipt(_bounded_json_file(path))
+                arms[arm] = load_arm_metrics(path)
             except ComparisonError:
                 if arm == BASELINE_ARM:
                     continue
