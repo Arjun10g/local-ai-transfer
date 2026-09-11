@@ -29,6 +29,7 @@ if __package__ in {None, ""}:
 
 from scripts import j1m_runner, shadeform_lifecycle as sf
 from scripts.shadeform_teardown import teardown_exact, teardown_recovered_exact
+from scripts.test import compare_model_quality
 
 ROOT = Path(__file__).resolve().parents[1]
 _STDERR_TAIL_LIMIT = 1200
@@ -53,6 +54,40 @@ _EXTERNAL_SALVAGE_TRANSPORT_AVAILABLE = False
 # an accepted eval artifact by changing JSON configuration.
 _APPROVED_EVAL_MANIFEST_RELATIVE = Path("artifacts/qwen35-9b/model-manifest.json")
 _APPROVED_EVAL_MANIFEST_SHA256 = "3bcfe1796e2ec24c556c2455d583bb3763039aeaf9b5119ddc1c498459fbeb99"
+# The comparator arms need an engine that speaks the product HTTP contract
+# (``/v1/sessions`` plus the exact response shapes required by
+# ``scripts/test/evaluate_tool_calls.py``) *and* can load non-Q4 weights. The
+# product engine compiles the Q4 identity in
+# (``native/model_validation/model_validator.hpp``) and must not be relaxed,
+# and the pinned upstream ``llama-server`` does not speak that contract. No
+# such binary exists in this source slice, so requesting comparators is
+# refused before any provider API call rather than spending on a phase that
+# cannot produce a number. See ``model/COMPARATOR_EVAL.md`` section 2.2.
+_COMPARATOR_ENGINE_AVAILABLE = False
+# Identity anchor for the rebuilt comparators. Like the eval manifest anchor
+# above this is source-controlled acceptance data: a caller cannot turn an
+# arbitrary scan receipt into an accepted comparator through configuration.
+_APPROVED_SCAN_RECEIPT_RELATIVE = Path("artifacts/qwen35-9b/scan-receipt.json")
+_APPROVED_SCAN_RECEIPT_SHA256 = "0857899bf86527702743dd12b62ae5740cbb27fae2005da7066d1070cb341066"
+_COMPARATOR_BASELINE_ARM = "q4_k_m"
+# Retention is only meaningful with the runtime held constant, so the Q4 arm
+# is always evaluated on the same host as the comparator it is divided by.
+_COMPARATOR_SELECTIONS = {
+    "": (),
+    "q8": ("q8_0",),
+    "q8,bf16": ("q8_0", "bf16"),
+}
+# One-time comparator-engine configure plus CUDA build, and one bounded
+# evaluation per arm (the existing 480 s evaluation budget plus 240 s of
+# engine start and model load).
+_COMPARATOR_SETUP_BUDGET_SECONDS = 1500.0
+_COMPARATOR_ARM_BUDGET_SECONDS = 720.0
+_COMPARATOR_SKIP_REASONS = frozenset({
+    "comparator_not_requested", "comparator_engine_unavailable",
+    "comparator_clock_insufficient", "comparator_stage_failed",
+    "comparator_receipt_missing", "comparator_receipt_invalid",
+    "comparator_artifact_identity_mismatch", "comparator_baseline_missing",
+})
 _EVAL_DIAGNOSTIC_CODES = frozenset({
     "http_400", "http_401", "http_404", "http_408", "http_409", "http_413",
     "http_415", "http_429", "http_500", "http_503", "http_other",
@@ -516,6 +551,165 @@ def _eval_deadline_ceiling(config: dict[str, Any]) -> dict[str, float]:
     }
 
 
+def _comparator_selection(value: str | None) -> tuple[str, ...]:
+    """Parse an approved comparator request; refuse anything else.
+
+    The accepted vocabulary is deliberately a closed set rather than a parsed
+    list, so no caller can smuggle an unreviewed arm through the flag.
+    """
+
+    if value is None:
+        return ()
+    if not isinstance(value, str) or len(value) > 32:
+        raise ValueError("comparator selection is not an approved request")
+    selection = _COMPARATOR_SELECTIONS.get(value.strip())
+    if selection is None:
+        raise ValueError("comparator selection is not an approved request")
+    return selection
+
+
+def _comparator_arms(selection: tuple[str, ...]) -> tuple[str, ...]:
+    """Return every arm to evaluate; the same-runtime Q4 arm is never optional."""
+
+    return (_COMPARATOR_BASELINE_ARM, *selection) if selection else ()
+
+
+def _comparator_budget(
+    config: dict[str, Any], selection: tuple[str, ...], *,
+    setup_seconds: float = _COMPARATOR_SETUP_BUDGET_SECONDS,
+    arm_seconds: float = _COMPARATOR_ARM_BUDGET_SECONDS,
+) -> dict[str, Any]:
+    """Bound the comparator phase against the already-authorised eval clocks.
+
+    The phase runs strictly inside ``execution_deadline``, which is derived
+    from the approved ``modes.eval`` clocks, so it adds no authorised spend.
+    The projected marginal cost is recorded as evidence, never as a new cap.
+    """
+
+    for value in (setup_seconds, arm_seconds):
+        if (isinstance(value, bool) or not isinstance(value, (int, float)) or
+                not math.isfinite(value) or not 0 < value <= 36000):
+            raise ValueError("comparator budget is not a bounded positive duration")
+    arms = _comparator_arms(selection)
+    envelope = _eval_deadline_ceiling(config)
+    static_slack = envelope["run_seconds"] - envelope["ceiling_seconds"]
+    required = (float(setup_seconds) + float(arm_seconds) * len(arms)) if arms else 0.0
+    hourly = float(config["shadeform_target"]["hourly_usd"])
+    return {
+        "requested": list(selection),
+        "arms": list(arms),
+        "setup_budget_seconds": float(setup_seconds),
+        "arm_budget_seconds": float(arm_seconds),
+        "required_seconds": round(required, 3),
+        "static_slack_seconds": round(static_slack, 3),
+        "fits_static_worst_case": required <= static_slack,
+        "projected_marginal_cost_usd": round(hourly * required / 3600.0, 6),
+        "authorized_active_cost_usd": float(config["modes"]["eval"]["active_cost_usd"]),
+        "raises_authorized_cost": False,
+    }
+
+
+def _comparator_clock_available(config: dict[str, Any], execution_deadline: float) -> float:
+    """Remaining clock that the comparator phase may consume, cleanup reserved."""
+
+    cleanup = float(config["modes"]["eval"]["stage_budgets_seconds"]["cleanup_reserve"])
+    return execution_deadline - time.monotonic() - cleanup - _DELETION_RESERVE_SECONDS
+
+
+def _comparator_phase(
+    config: dict[str, Any], selection: tuple[str, ...], *,
+    execution_deadline: float | None = None,
+) -> dict[str, Any]:
+    """Decide the comparator phase. Every refusal carries a typed reason."""
+
+    budget = _comparator_budget(config, selection)
+    phase: dict[str, Any] = {
+        "engine_available": _COMPARATOR_ENGINE_AVAILABLE,
+        "requested": list(selection),
+        "arms": list(budget["arms"]),
+        "budget": budget,
+    }
+    if not selection:
+        return {**phase, "status": "not_requested", "reason": "comparator_not_requested"}
+    if not _COMPARATOR_ENGINE_AVAILABLE:
+        return {**phase, "status": "refused", "reason": "comparator_engine_unavailable"}
+    if execution_deadline is None:
+        return {**phase, "status": "planned"}
+    available = _comparator_clock_available(config, execution_deadline)
+    if available < budget["required_seconds"]:
+        return {**phase, "status": "refused", "reason": "comparator_clock_insufficient",
+                "available_seconds": round(available, 3)}
+    return {**phase, "status": "approved", "available_seconds": round(available, 3)}
+
+
+def _eval_fetch_allowlist(config: dict[str, Any], selection: tuple[str, ...]) -> list[str]:
+    """Effective salvage allowlist. Receipts only; weights are never listed."""
+
+    names = list(config["artifacts"]["eval_fetch_allowlist"])
+    if selection:
+        names.extend(f"comparator-receipt-{arm}.json" for arm in _comparator_arms(selection))
+        names.append(_APPROVED_SCAN_RECEIPT_RELATIVE.name)
+    if any(not isinstance(name, str) or name.lower().endswith(".gguf") for name in names):
+        raise ValueError("salvage allowlist may not name model weights")
+    return names
+
+
+def _product_engine_reference(lifecycle: dict[str, Any]) -> dict[str, Any] | None:
+    """Project the verified product-engine Q4 receipt for runtime-parity only."""
+
+    receipt = lifecycle.get("eval_receipt")
+    metrics = receipt.get("metrics") if isinstance(receipt, dict) else None
+    if not isinstance(metrics, dict):
+        return None
+    case_count = metrics.get("case_count")
+    passed = metrics.get("passed")
+    if (isinstance(case_count, bool) or not isinstance(case_count, int) or case_count <= 0 or
+            isinstance(passed, bool) or not isinstance(passed, int) or not 0 <= passed <= case_count):
+        return None
+    return {
+        "engine": "lae-engine",
+        "case_count": case_count,
+        "passed": passed,
+        "score_points": compare_model_quality.score_points(passed, case_count),
+    }
+
+
+def _write_comparison_receipt(
+    destination: Path, selection: tuple[str, ...], *,
+    phase_reason: str | None = None,
+    fixture_sha256: str | None = None,
+    product_engine_reference: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Turn whatever arm receipts were salvaged into the comparison verdicts.
+
+    A phase that never ran, or an arm whose receipt is missing or invalid,
+    becomes a typed skip. No number is ever computed from an absent receipt.
+    """
+
+    if phase_reason is not None and phase_reason not in _COMPARATOR_SKIP_REASONS:
+        raise ValueError("comparator skip reason is not typed")
+    gate = compare_model_quality.load_gate()
+    arms: dict[str, Any] = {}
+    skipped: list[dict[str, str]] = []
+    if phase_reason is not None:
+        skipped = [{"comparator": arm, "reason": phase_reason} for arm in selection]
+    else:
+        for arm in _comparator_arms(selection):
+            try:
+                arms[arm] = compare_model_quality.load_arm_metrics(
+                    destination / f"comparator-receipt-{arm}.json")
+            except compare_model_quality.ComparisonError:
+                continue
+    receipt = compare_model_quality.build_comparison_receipt(
+        arms=arms, requested=list(selection), gate=gate,
+        fixture_sha256=fixture_sha256, skipped=skipped,
+        product_engine_reference=product_engine_reference,
+    )
+    compare_model_quality.write_comparison_receipt(
+        destination / "comparison-receipt.json", receipt)
+    return receipt
+
+
 def _verify_eval_diagnostics(value: Any, *, errors: int, categories: set[str], category_errors: dict[str, int]) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {"schema", "total_errors", "overall", "by_category"} or value.get("schema") != "local_bmo.tool-call-eval-diagnostics.v1":
         raise ValueError("eval receipt diagnostics invalid")
@@ -916,7 +1110,15 @@ def _salvage(
     raise ValueError("external salvage transport is unavailable in this source slice")
 
 
-def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, artifact_destination: Path, mode: str = "prove", model_artifact: Path | None = None, model_manifest: Path | None = None) -> dict[str, Any]:
+def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, artifact_destination: Path, mode: str = "prove", model_artifact: Path | None = None, model_manifest: Path | None = None, evaluate_comparators: str = "") -> dict[str, Any]:
+    # Parse and refuse an unsupported comparator request before the legacy
+    # deletion preflight, config/env loading, candidate access, key generation
+    # or any provider POST. An operator who asks for a phase this source
+    # cannot produce must not pay for a run that silently drops it.
+    comparator_selection = _comparator_selection(evaluate_comparators)
+    if comparator_selection and mode != "eval":
+        raise ValueError("comparator evaluation is only available in eval mode")
+    comparator_phase: dict[str, Any] = {}
     if mode == "canary":
         # The canary is intentionally plan-only in this source slice.  Its
         # two read-only probes may become executable only after the existing
@@ -938,6 +1140,11 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
         )
         eval_artifact = _verify_eval_artifact(None, model_manifest, config)
         _eval_deadline_ceiling(config)
+        comparator_phase = _comparator_phase(config, comparator_selection)
+        if comparator_phase["status"] == "refused":
+            # Typed, pre-spend refusal. The reason is retained in the plan the
+            # operator already printed; nothing has been created at this point.
+            raise ValueError("comparator evaluation is refused before any provider call")
         # Eval is explicitly CUDA-only on the approved A100. A CPU binary or
         # missing CUDA placement receipt is rejected by the remote verifier.
     else:
@@ -977,6 +1184,8 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
         lifecycle: dict[str, Any] = {"phase_id": phase_id, "status": "starting", "mode": mode}
         if eval_artifact is not None:
             lifecycle["artifact"] = eval_artifact
+        if comparator_selection:
+            lifecycle["comparator_phase"] = comparator_phase
         def cancel(_signum: int, _frame: Any) -> None:
             raise OperatorCancelled("operator cancellation signal")
         previous_handlers = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)}
@@ -1291,7 +1500,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             _progress(progress_path, "teardown-salvage-starting", phase_id=phase_id, failed_stage=lifecycle.get("failed_stage"))
             fetch_allowlist = (
                 config["artifacts"]["local_fetch_allowlist"] if mode == "build"
-                else config["artifacts"]["eval_fetch_allowlist"] if mode == "eval"
+                else _eval_fetch_allowlist(config, comparator_selection) if mode == "eval"
                 else config["artifacts"]["prove_fetch_allowlist"]
             )
             try:
@@ -1338,9 +1547,28 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                         lifecycle["eval_receipt"] = _verify_eval_receipt(artifact_destination / "eval-receipt.json", eval_artifact)
                     except Exception as exc:
                         lifecycle["receipt_error"] = "receipt_verification_failed"
+                if lifecycle.get("comparator_cleanup_error"):
+                    # Deferred intermediate deletion that cannot be proven is a
+                    # fail-closed condition for a run that opted into it.
+                    lifecycle["receipt_error"] = lifecycle.get("receipt_error") or lifecycle["comparator_cleanup_error"]
                 if (lifecycle.get("receipt_error") or lifecycle.get("eval_artifact_receipt", {}).get("status") != "verified" or
                         lifecycle.get("eval_receipt", {}).get("status") != "verified"):
                     lifecycle["status"] = "failed"
+                if comparator_selection:
+                    try:
+                        comparison = _write_comparison_receipt(
+                            artifact_destination, comparator_selection,
+                            phase_reason=comparator_phase.get("reason"),
+                            fixture_sha256=_tool_eval_contract()["fixture_identity"]["sha256"],
+                            product_engine_reference=_product_engine_reference(lifecycle),
+                        )
+                        lifecycle["comparison"] = {
+                            "status": comparison["status"],
+                            "comparisons": len(comparison["comparisons"]),
+                            "skipped": len(comparison["skipped"]),
+                        }
+                    except Exception:
+                        lifecycle["comparison"] = {"status": "refused", "error_type": "comparison_failed"}
             # The shared teardown performs exact deletion before cost/key
             # bookkeeping and emits a receipt, while remote salvage above is
             # best-effort and independent for each allowlisted artifact.
@@ -1473,8 +1701,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mode", choices=("prove", "build", "eval", "canary"), default="prove")
     parser.add_argument("--model-artifact", type=Path, help="refused for eval; the Q4 artifact is always built remotely")
     parser.add_argument("--model-manifest", type=Path, help="approved manifest; defaults to the checked-in Q4 acceptance manifest")
+    parser.add_argument("--evaluate-comparators", default="", help="default OFF; 'q8' or 'q8,bf16' also evaluates the rebuilt higher-precision comparators")
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args(argv)
+    comparator_selection = _comparator_selection(args.evaluate_comparators)
+    if comparator_selection and args.mode != "eval":
+        raise ValueError("comparator evaluation is only available in eval mode")
     config = j1m_runner.load_config(args.config)
     plan = j1m_runner.build_plan(config, args.mode)
     plan["mode"] = args.mode
@@ -1487,6 +1719,11 @@ def main(argv: list[str] | None = None) -> int:
         plan["execution_backend"] = "cuda"
         plan["cuda_architecture"] = 80
         plan["gpu_layers"] = 99
+        if comparator_selection:
+            # Additive only: with the flag absent the plan object above is
+            # byte-for-byte what it is without this slice.
+            plan["comparator_phase"] = _comparator_phase(config, comparator_selection)
+            plan["comparator_fetch_allowlist"] = _eval_fetch_allowlist(config, comparator_selection)
     elif args.mode == "canary":
         plan["commands"] = _canary_remote_commands(config, "/scratch/j1m-canary")
         plan["artifact"] = "no model; bounded toolchain and CUDA prerequisite probes only"
@@ -1501,7 +1738,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if os.environ.get("SOL_J1M_REVIEWED") != "1":
         raise SystemExit("refusing mutation: Sol must set SOL_J1M_REVIEWED=1 after reviewing the plan")
-    print(json.dumps(execute(args.env_file, config_path=args.config, phase_id=args.phase_id, run_id=args.run_id, artifact_destination=args.artifact_destination, mode=args.mode, model_artifact=args.model_artifact, model_manifest=args.model_manifest), sort_keys=True))
+    print(json.dumps(execute(args.env_file, config_path=args.config, phase_id=args.phase_id, run_id=args.run_id, artifact_destination=args.artifact_destination, mode=args.mode, model_artifact=args.model_artifact, model_manifest=args.model_manifest, evaluate_comparators=args.evaluate_comparators), sort_keys=True))
     return 0
 
 

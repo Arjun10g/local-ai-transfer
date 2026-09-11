@@ -90,6 +90,7 @@ TEST_INVENTORY = {
     "tests/performance/test_cost_ledger_genesis.py": "lifecycle",
     "tests/performance/test_shadeform_ledger_migration_preflight.py": "lifecycle",
     "tests/performance/test_shadeform_env_security.py": "lifecycle",
+    "tests/performance/test_comparator_eval.py": "lifecycle",
     "tests/performance/test_j1m_lifecycle.py": "lifecycle",
     "tests/performance/test_model_specs.py": "model_fixture",
     "tests/performance/test_probe_and_preflight.py": "lifecycle",

@@ -495,7 +495,9 @@ class J1MConfigTests(unittest.TestCase):
 class StaticSafetyTests(unittest.TestCase):
     def test_all_j1m_execute_regressions_isolate_operator_runtime(self):
         found = direct_execute_methods(ROOT / "tests" / "performance")
-        self.assertEqual(len(found), 12)
+        # 12 lifecycle regressions plus the MODEL-COMPARATOR-EVAL-001
+        # pre-spend refusal in tests/performance/test_comparator_eval.py.
+        self.assertEqual(len(found), 13)
         self.assertTrue(
             all(item["isolated"] for item in found),
             [item for item in found if not item["isolated"]],
