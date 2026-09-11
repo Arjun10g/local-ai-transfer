@@ -278,6 +278,7 @@ test('a durable complete failure is reported as a typed blocked count and leaves
   const cases = [
     ['typed journal failure', Object.assign(new Error('blocked'), { code: 'action_journal_blocked' }), 'action_journal_blocked'],
     ['untyped failure', new Error('opaque internal detail'), 'action_journal_complete_failed'],
+    ['foreign typed failure', Object.assign(new Error('opaque internal detail'), { code: 'provider_unauthorized' }), 'action_journal_complete_failed'],
   ];
   for (const [label, failure, expected] of cases) {
     const saved = await acknowledgedDraftJournal(t);

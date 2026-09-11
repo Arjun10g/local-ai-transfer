@@ -34,10 +34,11 @@ const JOURNAL_RECEIPT_DIGEST = /^[a-f0-9]{64}$/u;
 const JOURNAL_OPERATION_ID = /^act_[a-f0-9]{32}$/u;
 const MAX_GRAPH_RESTART_CANDIDATES = 8;
 const GRAPH_RESTART_TIMEOUT_MS = 30000;
-// Bounded, lowercase, metadata-only failure identifier. A typed code from the
-// durable journal is surfaced as-is; anything else collapses to one explicit
-// code. No message, path, argument, or content ever reaches this value.
-const RESTART_FAILURE_CODE = /^[a-z][a-z0-9_]{2,63}$/u;
+// Bounded, lowercase, metadata-only failure identifier. Only a journal-owned
+// code is surfaced as-is; every other error — including a typed code from some
+// other subsystem — collapses to one explicit code. No message, path,
+// argument, or content ever reaches this value.
+const RESTART_FAILURE_CODE = /^action_journal_[a-z0-9_]{1,48}$/u;
 const restartFailureCode = error => typeof error?.code === 'string' && RESTART_FAILURE_CODE.test(error.code) ? error.code : 'action_journal_complete_failed';
 const restartUnavailable = code => Object.freeze({ state: 'unavailable', examined: 0, completed: 0, blocked: 0, code });
 const exactAuthorizationReadback = (receipt, operationId) => receipt?.operation_id === operationId && receipt?.state === 'authorized' && receipt?.sequence === 1 && JOURNAL_RECEIPT_DIGEST.test(receipt?.receipt_hash ?? '');
