@@ -142,6 +142,23 @@ class SupervisorAuthorityStaticTests(unittest.TestCase):
             for token in ("CapabilityIssuer", "issue_capability", "mint"):
                 self.assertNotIn(token, text)
         self.assertNotIn("IssuedCapability", self.hpp)
+        # The pre-existing friend ban is kept for the supervisor authority
+        # header and translation unit; it is narrowed, never deleted.  Only the
+        # launch authority header is exempt, and its friend names are pinned
+        # exactly below and enumerated in
+        # tests/native/test_windows_process_authority_static.py.
+        for text in (self.hpp, self.cpp):
+            self.assertNotIn("friend class", text)
+            self.assertNotIn("friend struct", text)
+        friends = re.findall(r"friend\s+(?:class|struct)\s+(\w+)\s*;",
+                             self.launch_header)
+        self.assertEqual(sorted(set(friends)),
+                         ["LaunchAuthority", "LaunchAuthorityIssuer"])
+        issuer = self.launch_header[
+            self.launch_header.index("class LaunchAuthorityIssuer final"):]
+        self.assertEqual(
+            re.findall(r"friend\s+(?:class|struct)\s+(\w+)\s*;", issuer),
+            ["LaunchAuthority"])
         self.assertIn("friend class LaunchAuthorityIssuer", self.launch_header)
         self.assertIn("LaunchAuthorityIssuer() = delete", self.launch_header)
 
