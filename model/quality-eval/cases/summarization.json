@@ -2336,11 +2336,12 @@
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [],
-        "max_words": 60,
+        "max_words": 63,
         "must_match": [
           "(?s)^- .*\\n- .*\\n- "
         ]
-      }
+      },
+      "notes": "Three '- ' bullet markers are three whitespace-separated tokens on top of the 60-word budget."
     },
     {
       "id": "summarization-023",
@@ -2421,13 +2422,15 @@
         "min_coverage": 1.0,
         "forbidden_facts": [
           {
-            "text": "a ninth drive is in transit",
+            "text": "a ninth drive is asserted as in transit without a hedge",
             "match": {
               "any_of": [
                 {
-                  "regex": "(?=(?s:.)*\\bninth\\w*)(?=(?s:.)*\\bdrive\\w*)(?=(?s:.)*\\btransit\\w*)"
+                  "regex": "(?=(?s:.)*\\b(?:9|ninth)\\b)(?=(?s:.)*\\bdrive\\w*)(?=(?s:.)*\\btransit\\w*)(?!(?s:.)*\\b(?:rumou?r|unconfirmed|unverified|alleged|reportedly|claim|not supported|no record|unsubstantiated)\\w*)"
                 },
-                "a ninth drive is in transit"
+                {
+                  "regex": "(?=(?s:.)*\\b(?:9|ninth)\\b)(?=(?s:.)*\\bdrive\\w*)(?=(?s:.)*\\b(?:confirmed|shipped|arrived|dispatched)\\w*)"
+                }
               ],
               "normalize": [
                 "lowercase",
@@ -2439,7 +2442,8 @@
           }
         ],
         "max_words": 60
-      }
+      },
+      "notes": "The prompt permits reporting the rumour if it is marked unconfirmed, so the forbidden item fires only on an unhedged assertion; a hedged mention satisfies key fact 3 and the forbidden matcher at the same time."
     },
     {
       "id": "summarization-024",
