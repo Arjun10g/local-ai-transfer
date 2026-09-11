@@ -538,11 +538,35 @@ def isolated_runtime():
             DRY_RUN_ROOT.rmdir()
 
 
-def _candidate(config: dict[str, Any]):
-    target = config["shadeform_target"]
+def _candidate(config: dict[str, Any], index: int = 0, **overrides: Any):
+    """Build the live catalogue row one approved target would exactly match.
+
+    ``overrides`` is how a near-miss is written: the same offer with one
+    dimension changed is what the selector must refuse, and building it from
+    the real entry keeps the near-miss honest instead of hand-typed.
+    """
+
+    target = config["shadeform_targets"][index]
+    fields = {
+        "gpu": target["gpu"],
+        "cloud": target["cloud"],
+        "region": target["region"],
+        "instance_type": target.get("instance_type", target["gpu"]),
+        "hourly_usd": float(target["hourly_usd"]),
+        "vram_gb": int(target["vram_gib"]),
+        "os_image": target.get("os_image", "ubuntu22.04_cuda12.2_shade_os"),
+        "interruptible": False,
+    }
+    fields.update(overrides)
+    return sf.Candidate(**fields)
+
+
+def _unapproved_candidate():
+    """A live offer that is not on the approved list at any index."""
+
     return sf.Candidate(
-        target["gpu"], target["cloud"], target["region"], target["gpu"],
-        float(target["hourly_usd"]), 80, "ubuntu22.04_cuda12.2_shade_os", False,
+        "H100_80G", "hyperstack", "montreal-canada-2", "H100_80G",
+        2.50, 80, "ubuntu22.04_cuda12.2_shade_os", False,
     )
 
 
@@ -561,7 +585,8 @@ def _instance_info() -> dict[str, Any]:
 
 def drive(mode: str, *, inject_failure: bool, key_root: Path | None,
           recorder: Recorder, comparators: str = "",
-          fail_eval_stage: str = "") -> dict[str, Any]:
+          fail_eval_stage: str = "",
+          catalogue: list[Any] | None = None) -> dict[str, Any]:
     """Run one complete lifecycle offline and return everything it produced.
 
     ``comparators`` drives the default-OFF comparator phase exactly as
@@ -634,7 +659,9 @@ def drive(mode: str, *, inject_failure: bool, key_root: Path | None,
             mock.patch.object(subprocess, "run", side_effect=shim),
             mock.patch.object(subprocess, "Popen", side_effect=lambda *a, **k: FakeWatchdog()),
             mock.patch.object(sf, "load_env", return_value=dict(SENTINELS)),
-            mock.patch.object(sf, "list_candidates", return_value=[_candidate(config)]),
+            mock.patch.object(sf, "list_candidates",
+                              return_value=list(catalogue) if catalogue is not None
+                              else [_candidate(config)]),
             mock.patch.object(sf, "add_ssh_key", return_value=FAKE_KEY_ID),
             mock.patch.object(sf, "verify_ssh_key_ownership", return_value={"id": FAKE_KEY_ID}),
             mock.patch.object(sf, "create_instance", return_value=FAKE_INSTANCE_ID),
@@ -697,6 +724,7 @@ def drive(mode: str, *, inject_failure: bool, key_root: Path | None,
                 for item in final.get("salvage", []) if isinstance(item, dict)
             },
             "run_identity": run_identity,
+            "selected_target": final.get("selected_target"),
             "comparator_phase": final.get("comparator_phase"),
             "comparator_cleanup_error": final.get("comparator_cleanup_error"),
             "comparator_cleanup_stages": _cleanup_stages(recorder, since=recorded_from),
@@ -804,6 +832,13 @@ def _key_outcome(run: dict[str, Any]) -> str:
         errno_value = run.get("key_directory_errno")
         detail = f"errno={errno_value}" if errno_value else "still present"
         return f"removal-failed({detail})"
+    if run.get("pre_spend_refusal"):
+        # A run refused before key generation has no key to remove. That is the
+        # stronger outcome, not a missing record -- but it only counts as such
+        # when the run really did stop before anything was created.
+        if status is None and not run.get("cost_events") and not run.get("teardown_calls"):
+            return "never-created"
+        return f"refusal-created-state({status or 'unknown'})"
     if status == "removed":
         return "removed"
     if status == "absent":
@@ -887,7 +922,8 @@ def evaluate(results: dict[str, dict[str, Any]], recorder: Recorder,
     # Judged only on the directories this invocation created, so residue from
     # an unrelated run can never hold the gate down (see the warning below).
     key_ok = all(
-        _key_outcome(run) in {"removed", "not-present"} and not run["key_root_residue"]
+        _key_outcome(run) in {"removed", "not-present", "never-created"}
+        and not run["key_root_residue"]
         for run in results.values()
     )
     add("ephemeral_key_removed_on_every_path", key_ok,
@@ -915,6 +951,11 @@ def evaluate(results: dict[str, dict[str, Any]], recorder: Recorder,
     ledger_ok = True
     ledger_detail = []
     for name, run in results.items():
+        if run.get("pre_spend_refusal"):
+            # The opposite obligation: a refused run must have written nothing.
+            ledger_ok = ledger_ok and not run["cost_events"]
+            ledger_detail.append(f"{name}=no row (refused pre-spend)")
+            continue
         pending = [event for event in run["cost_events"]
                    if event.get("status") == "pending" and event.get("instance_id") == FAKE_INSTANCE_ID]
         ledger_ok = ledger_ok and len(pending) == 1 and pending[0].get("estimated_cost_usd", 0) > 0
@@ -1010,6 +1051,8 @@ def evaluate(results: dict[str, dict[str, Any]], recorder: Recorder,
             f"{stripped} with its run binding stripped is refused as "
             f"{unbound_codes.get(stripped)!r} and never published")
 
+    _add_target_selection_checks(results, add)
+
     probe = Recorder()
     probe.record(["ssh", "-i", "/nonexistent/id_ed25519", "user@host", "df"],
                  phase="self-test", mode="self-test")
@@ -1021,6 +1064,117 @@ def evaluate(results: dict[str, dict[str, Any]], recorder: Recorder,
     add("operator_artifact_destination_is_salvage_ready", destination_ok, destination_detail)
 
     return checks
+
+
+# Every approved-target scenario this gate drives, and what each one must
+# produce.  ``expect`` is the approved-target index the run has to select;
+# ``None`` means the run must be refused before anything is created.
+_SELECTION_SCENARIOS = (
+    ("__target_primary_only__", 0),
+    ("__target_denvr_alternate__", 1),
+    ("__target_crusoe_alternate__", 2),
+    ("__target_catalogue_order_ignored__", 0),
+    ("__target_none_approved__", None),
+    ("__target_price_near_miss__", None),
+    ("__target_region_near_miss__", None),
+)
+
+
+def _selection_runs(config: dict[str, Any], key_root: Path | None) -> dict[str, dict[str, Any]]:
+    """Drive one bounded prove-mode run per approved-target scenario.
+
+    Each scenario differs only in the fake catalogue, so the thing under test
+    is the selector and nothing else.  A refusal scenario is driven the same
+    way and is required to end with no cost row at all -- "refused" only counts
+    when it is refused *before* the reservation, which is the property that
+    makes an unavailable target cost USD 0.00 instead of a wasted instance.
+    """
+
+    catalogues = {
+        "__target_primary_only__": [_candidate(config, 0)],
+        "__target_denvr_alternate__": [_candidate(config, 1)],
+        "__target_crusoe_alternate__": [_candidate(config, 2)],
+        # Catalogue order is evidence about availability, never preference:
+        # with all three present the cheapest approved entry still wins.
+        "__target_catalogue_order_ignored__": [
+            _candidate(config, 2), _candidate(config, 1), _candidate(config, 0),
+        ],
+        "__target_none_approved__": [_unapproved_candidate()],
+        # A cent off the approved rate is a different offer, not a bargain.
+        "__target_price_near_miss__": [_candidate(config, 1, hourly_usd=1.55)],
+        "__target_region_near_miss__": [_candidate(config, 2, region="culpeper-usa-2")],
+    }
+    runs: dict[str, dict[str, Any]] = {}
+    for name, expected in _SELECTION_SCENARIOS:
+        runs[name] = drive("prove", inject_failure=False, key_root=key_root,
+                           recorder=Recorder(), catalogue=catalogues[name])
+        if expected is None:
+            runs[name]["pre_spend_refusal"] = True
+    return runs
+
+
+def _add_target_selection_checks(results: dict[str, dict[str, Any]], add) -> None:
+    """Assert the ordered approved-target contract over the scenario runs."""
+
+    present = [name for name, _ in _SELECTION_SCENARIOS if name in results]
+    if len(present) != len(_SELECTION_SCENARIOS):
+        add("approved_target_selection_follows_the_list", False,
+            "approved-target scenarios were not driven")
+        return
+    selected_details = []
+    selection_ok = True
+    for name, expected in _SELECTION_SCENARIOS:
+        if expected is None:
+            continue
+        run = results[name]
+        selection = run.get("selected_target") or {}
+        index = selection.get("approved_target_index")
+        if index != expected or run.get("status") != "completed":
+            selection_ok = False
+        selected_details.append(f"{name}->#{index}")
+    add("approved_target_selection_follows_the_list", selection_ok,
+        "; ".join(selected_details))
+
+    refusal_details = []
+    refusal_ok = True
+    for name, expected in _SELECTION_SCENARIOS:
+        if expected is not None:
+            continue
+        run = results[name]
+        error = str(run.get("error") or "")
+        refused = "no approved J1M target is an eligible current catalogue candidate" in error
+        # Nothing was reserved, so nothing could be billed.
+        unspent = not run.get("cost_events") and not run.get("teardown_calls")
+        if not (refused and unspent):
+            refusal_ok = False
+        refusal_details.append(f"{name}->{'refused pre-spend' if refused and unspent else error[:60]}")
+    add("unapproved_catalogue_is_refused_pre_spend", refusal_ok,
+        "; ".join(refusal_details))
+
+    cost_ok = True
+    cost_details = []
+    for name, expected in _SELECTION_SCENARIOS:
+        if expected is None:
+            continue
+        run = results[name]
+        selection = run.get("selected_target") or {}
+        projection = selection.get("cost_projection") or {}
+        events = [event for event in run.get("cost_events", [])
+                  if event.get("status") == "pending"
+                  and event.get("instance_id") == FAKE_INSTANCE_ID]
+        rate = projection.get("hourly_usd")
+        expected_rate = float(j1m_runner.load_config()["shadeform_targets"][expected]["hourly_usd"])
+        reserved = events[0]["estimated_cost_usd"] if events else None
+        # The reservation is priced at the selected entry's own rate, and the
+        # recorded worst case stays inside the per-run cap.
+        if (rate != expected_rate or not events
+                or reserved != round(expected_rate * 0.3125, 6)
+                or projection.get("worst_case_usd", 0) > projection.get("per_run_cap_usd", 0)):
+            cost_ok = False
+        cost_details.append(
+            f"#{expected} @ ${expected_rate}/h reserved ${reserved} "
+            f"worst case ${projection.get('worst_case_usd')} <= cap ${projection.get('per_run_cap_usd')}")
+    add("selected_target_prices_every_recorded_figure", cost_ok, "; ".join(cost_details))
 
 
 def _destination_precondition(destination: Path) -> tuple[bool, str]:
@@ -1117,6 +1271,10 @@ def _run_dry_run(modes: tuple[str, ...], *, key_root: Path, receipt_path: Path |
         # And an arm receipt with its binding stripped must be refused rather
         # than becoming a number this run is about to pay for.
         results["__comparator_unbound__"] = _unbound_comparator_run(comparators, key_root)
+    # The ordered approved-target list is exercised on its own catalogues: the
+    # primary is the only entry the default fake catalogue offers, so without
+    # these the alternate path would never be executed by this gate at all.
+    results.update(_selection_runs(j1m_runner.load_config(), key_root))
     primary = modes[0]
     results["__injected_failure__"] = drive(
         primary, inject_failure=True, key_root=key_root, recorder=Recorder())
@@ -1151,7 +1309,8 @@ def _run_dry_run(modes: tuple[str, ...], *, key_root: Path, receipt_path: Path |
                               "comparators", "comparator_phase", "comparator_cleanup_error",
                               "comparator_cleanup_stages", "comparison_receipt",
                               "fail_eval_stage", "stripped_receipt",
-                              "published_identity", "run_identity"}}
+                              "published_identity", "run_identity",
+                              "selected_target", "pre_spend_refusal"}}
             for name, run in results.items()
         },
         "duration_ms": int((time.monotonic() - started) * 1000),

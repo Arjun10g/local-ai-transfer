@@ -793,6 +793,167 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# One approved Shadeform target, exactly as Sol recorded it.  Every field is
+# required so a half-specified entry fails closed rather than being matched on
+# whatever it happens to declare; the optional set is the identity a provider
+# may or may not expose, and the refusal reason that an unapproved entry owes.
+_TARGET_REQUIRED_FIELDS = frozenset({
+    "approved", "cloud", "region", "gpu", "gpu_count", "vram_gib", "hourly_usd",
+    "proving_run_hours", "active_run_cost_usd", "provider_backstop_hours",
+    "host_shutdown_backstop_hours", "external_watchdog_seconds",
+})
+_TARGET_OPTIONAL_FIELDS = frozenset({
+    "instance_type", "os_image", "interruptible", "unapproved_reason",
+})
+# The clocks every approved entry must share.  A target is a machine to rent,
+# not a schedule: an alternate that changed the backstop or the watchdog would
+# silently change the safety envelope the modes were reviewed against.
+_TARGET_SHARED_CLOCK_FIELDS = (
+    "proving_run_hours", "provider_backstop_hours",
+    "host_shutdown_backstop_hours", "external_watchdog_seconds",
+)
+_MAX_APPROVED_TARGETS = 8
+
+
+def _bounded_target_number(value: object, *, upper: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("approved J1M target carries a non-numeric field")
+    number = float(value)
+    if not math.isfinite(number) or not 0 < number <= upper:
+        raise ValueError("approved J1M target carries an out-of-range field")
+    return number
+
+
+def _validate_shadeform_target(entry: object, *, index: int) -> dict[str, Any]:
+    """Validate one approved-target entry, failing closed on anything unknown."""
+
+    if not isinstance(entry, dict):
+        raise ValueError("approved J1M target is not an object")
+    present = set(entry)
+    if not _TARGET_REQUIRED_FIELDS <= present:
+        raise ValueError("approved J1M target is missing a required field")
+    if not present <= (_TARGET_REQUIRED_FIELDS | _TARGET_OPTIONAL_FIELDS):
+        raise ValueError("approved J1M target carries an unapproved field")
+    for field in ("cloud", "region", "gpu"):
+        value = entry[field]
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", value):
+            raise ValueError("approved J1M target identity is not a bounded provider token")
+    for field in ("instance_type", "os_image"):
+        if field in entry and (
+                not isinstance(entry[field], str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", entry[field])):
+            raise ValueError("approved J1M target identity is not a bounded provider token")
+    if entry["cloud"] != entry["cloud"].lower() or entry["region"] != entry["region"].lower():
+        raise ValueError("approved J1M target cloud and region must be recorded lower-case")
+    # B-004: the eval lane's own probes refuse anything but a single 80 GiB
+    # A100 (`scripts/test/cuda_device_probe.py:67-68`), so an approved entry
+    # that is not one could only fail after the money is spent.
+    if "a100" not in entry["gpu"].lower():
+        raise ValueError("approved J1M target must be an A100 profile")
+    if entry["gpu_count"] != 1 or entry["vram_gib"] != 80:
+        raise ValueError("approved J1M target must be a single 80 GiB GPU")
+    if not isinstance(entry["approved"], bool):
+        raise ValueError("approved J1M target approval must be an explicit boolean")
+    if "interruptible" in entry and entry["interruptible"] is not False:
+        raise ValueError("approved J1M target must not be interruptible")
+    reason = entry.get("unapproved_reason")
+    if entry["approved"] and reason is not None:
+        raise ValueError("an approved J1M target must not carry a refusal reason")
+    if not entry["approved"] and (not isinstance(reason, str) or not 8 <= len(reason) <= 512):
+        raise ValueError("an unapproved J1M target must record why it is refused")
+    rate = _bounded_target_number(entry["hourly_usd"], upper=100.0)
+    proving = _bounded_target_number(entry["proving_run_hours"], upper=24.0)
+    _bounded_target_number(entry["provider_backstop_hours"], upper=24.0)
+    _bounded_target_number(entry["host_shutdown_backstop_hours"], upper=24.0)
+    _bounded_target_number(entry["external_watchdog_seconds"], upper=86400.0)
+    # The per-entry cost figures are derived, never asserted: a hand-edited
+    # alternate whose arithmetic does not follow from its own rate is refused
+    # here rather than becoming the number a reservation is written against.
+    if round(entry["active_run_cost_usd"], 6) != round(rate * proving, 6):
+        raise ValueError("approved J1M target cost is not derived from its own hourly rate")
+    return dict(entry)
+
+
+def _validate_shadeform_targets(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Validate the ordered approved-target list Sol recorded in the config."""
+
+    targets = payload.get("shadeform_targets")
+    if not isinstance(targets, list) or not 1 <= len(targets) <= _MAX_APPROVED_TARGETS:
+        raise ValueError("J1M config must carry a bounded ordered approved-target list")
+    if "shadeform_target" in payload:
+        # The singular key is the derived accessor this loader publishes, not an
+        # input. Accepting both would make "which target is primary" ambiguous.
+        raise ValueError("J1M config must record approved targets as the ordered list")
+    validated = [_validate_shadeform_target(entry, index=index)
+                 for index, entry in enumerate(targets)]
+    first = validated[0]
+    for entry in validated[1:]:
+        for field in _TARGET_SHARED_CLOCK_FIELDS:
+            if entry[field] != first[field]:
+                raise ValueError("approved J1M targets must share one reviewed clock envelope")
+    identities = [(entry["cloud"], entry["region"], entry["gpu"], entry.get("instance_type"))
+                  for entry in validated]
+    if len(set(identities)) != len(identities):
+        raise ValueError("approved J1M targets must be distinct exact identities")
+    # Ordered by price, cheapest first. The order is the policy -- it is what
+    # makes "first eligible entry wins" equivalent to "never pay more than the
+    # approved list requires" -- so a reordered list is refused, not re-sorted.
+    rates = [float(entry["hourly_usd"]) for entry in validated]
+    if rates != sorted(rates):
+        raise ValueError("approved J1M targets must be ordered cheapest first")
+    if not any(entry["approved"] for entry in validated):
+        raise ValueError("J1M config carries no approved Shadeform target")
+    return validated
+
+
+def shadeform_targets(config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return every recorded target, approved or not, in the recorded order."""
+
+    return [dict(entry) for entry in config["shadeform_targets"]]
+
+
+def approved_shadeform_targets(config: dict[str, Any]) -> list[tuple[int, dict[str, Any]]]:
+    """Return ``(index, target)`` for the approved entries, in list order.
+
+    The index is the position in the full recorded list, so an entry Sol has
+    marked unapproved does not silently renumber the ones around it.
+    """
+
+    return [(index, dict(entry))
+            for index, entry in enumerate(config["shadeform_targets"])
+            if entry["approved"]]
+
+
+def primary_shadeform_target(config: dict[str, Any]) -> dict[str, Any]:
+    """Return the first approved target: the default every plan is built on."""
+
+    return approved_shadeform_targets(config)[0][1]
+
+
+def mode_active_cost_usd(config: dict[str, Any], mode: str, hourly_usd: float) -> float:
+    """Return one mode's active-run cost projection at a given hourly rate."""
+
+    runtime = float(config["modes"][mode]["runtime_hours"])
+    return round(float(hourly_usd) * runtime, 4)
+
+
+def per_run_cap_usd(config: dict[str, Any]) -> float:
+    """Return the recorded per-run USD cap (ADR-0005 records USD 10.00)."""
+
+    policy = config.get("budget_policy", {})
+    if not isinstance(policy, dict):
+        raise ValueError("invalid J1M budget policy")
+    cap = policy.get("per_run_cap_usd")
+    if isinstance(cap, bool) or not isinstance(cap, (int, float)) or not math.isfinite(float(cap)):
+        raise ValueError("J1M budget policy must record a finite per-run USD cap")
+    total = policy.get("project_total_usd")
+    if isinstance(total, bool) or not isinstance(total, (int, float)) or not math.isfinite(float(total)):
+        raise ValueError("J1M budget policy must record a finite project total")
+    if not 0 < float(cap) <= float(total):
+        raise ValueError("J1M per-run cap must be positive and within the project total")
+    return float(cap)
+
+
 def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     payload = _bounded_json_file(path)
     if not isinstance(payload, dict) or payload.get("schema") != "local_bmo.j1m.v1":
@@ -829,7 +990,22 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     if (canary_mode.get("no_model") is not True or canary_mode.get("probe_only") is not True or
             canary_mode.get("salvage_required") is not True or canary_mode.get("teardown_required") is not True):
         raise ValueError("canary must be an explicit no-model probe-only mode")
+    targets = _validate_shadeform_targets(payload)
     validate_persisted_receipt(payload)
+    # Bind the accessor to the list entry itself, not to a copy of it, so the
+    # config has exactly one primary target rather than two that can drift.
+    primary = payload["shadeform_targets"][
+        next(index for index, entry in enumerate(targets) if entry["approved"])]
+    for name in ("prove", "build", "eval", "canary"):
+        recorded = modes[name].get("active_cost_usd")
+        if round(float(recorded), 4) != round(float(primary["hourly_usd"]) * float(modes[name]["runtime_hours"]), 4):
+            raise ValueError("J1M mode cost is not derived from the primary target rate")
+    per_run_cap_usd(payload)
+    # Backward-compatible accessor. Every existing reader of the singular key
+    # keeps reading the primary approved target and therefore keeps producing
+    # exactly the plan it produced before the list existed; the readers that
+    # must follow the *selected* entry take it as an explicit argument instead.
+    payload["shadeform_target"] = primary
     return payload
 
 
@@ -1602,8 +1778,39 @@ def run_commands(commands: list[list[str]], progress_path: Path, *, cwd: Path | 
     return all_stage_receipts
 
 
-def build_plan(config: dict[str, Any], mode: str = "prove") -> dict[str, Any]:
-    target = config["shadeform_target"]
+def selected_target_record(config: dict[str, Any], index: int) -> dict[str, Any]:
+    """Return the compact "which approved entry is this" block for evidence.
+
+    The same block is written into the plan, the lifecycle receipt, the ledger
+    reservation's candidate object and the watchdog argv, so a reviewer reading
+    any one of them can say which recorded entry was rented and why that one.
+    """
+
+    target = config["shadeform_targets"][index]
+    record = {
+        "approved_target_index": index,
+        "approved_target_count": len(approved_shadeform_targets(config)),
+        "cloud": target["cloud"],
+        "region": target["region"],
+        "gpu": target["gpu"],
+        "vram_gib": target["vram_gib"],
+        "hourly_usd": target["hourly_usd"],
+        "is_primary": index == approved_shadeform_targets(config)[0][0],
+    }
+    for field in ("instance_type", "os_image"):
+        if field in target:
+            record[field] = target[field]
+    return record
+
+
+def build_plan(config: dict[str, Any], mode: str = "prove", *,
+               target_index: int | None = None) -> dict[str, Any]:
+    approved = approved_shadeform_targets(config)
+    if target_index is None:
+        target_index = approved[0][0]
+    elif not config["shadeform_targets"][target_index]["approved"]:
+        raise ValueError("plan requested an unapproved J1M target")
+    target = config["shadeform_targets"][target_index]
     selected_mode = config["modes"][mode]
     runtime = float(selected_mode["runtime_hours"])
     rate = float(target["hourly_usd"])
@@ -1612,6 +1819,9 @@ def build_plan(config: dict[str, Any], mode: str = "prove") -> dict[str, Any]:
         "created_at_utc": utc_now(),
         "mutation": "refused: planning only; no provider API mutation",
         "candidate": target,
+        "approved_targets": shadeform_targets(config),
+        "selected_target": selected_target_record(config, target_index),
+        "target_selection": "first approved entry that exactly matches a live catalogue candidate; refused if none does",
         "active_run_cost_usd": round(rate * runtime, 4),
         "provider_backstop_cost_usd": round(rate * float(selected_mode["provider_backstop_hours"]), 4),
         "commands": command_plan(config) if mode == "build" else canary_command_plan(config) if mode == "canary" else [["python3", "scripts/j1m_runner.py", "--prove"]],

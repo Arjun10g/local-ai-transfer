@@ -23,19 +23,56 @@
     "network_capture_boundary": "The first approved run may resolve wheels from the pinned checkout and records every wheel's exact filename, size, and SHA256 in wheelhouse-lock.json; all subsequent installation is offline from that verified wheelhouse and fails closed on any mismatch."
   },
   "text_only": true,
-  "shadeform_target": {
-    "cloud": "hyperstack",
-    "region": "montreal-canada-2",
-    "gpu": "A100_80G",
-    "gpu_count": 1,
-    "vram_gib": 80,
-    "hourly_usd": 1.35,
-    "proving_run_hours": 0.25,
-    "active_run_cost_usd": 0.3375,
-    "provider_backstop_hours": 0.3125,
-    "host_shutdown_backstop_hours": 0.30,
-    "external_watchdog_seconds": 1080
-  },
+  "shadeform_targets": [
+    {
+      "approved": true,
+      "cloud": "hyperstack",
+      "region": "montreal-canada-2",
+      "gpu": "A100_80G",
+      "gpu_count": 1,
+      "vram_gib": 80,
+      "hourly_usd": 1.35,
+      "proving_run_hours": 0.25,
+      "active_run_cost_usd": 0.3375,
+      "provider_backstop_hours": 0.3125,
+      "host_shutdown_backstop_hours": 0.30,
+      "external_watchdog_seconds": 1080
+    },
+    {
+      "approved": true,
+      "cloud": "denvr",
+      "region": "houston-usa-1",
+      "gpu": "A100_80G",
+      "instance_type": "A100_sxm4_80G",
+      "os_image": "ubuntu22.04_cuda12.4_shade_os",
+      "interruptible": false,
+      "gpu_count": 1,
+      "vram_gib": 80,
+      "hourly_usd": 1.50,
+      "proving_run_hours": 0.25,
+      "active_run_cost_usd": 0.375,
+      "provider_backstop_hours": 0.3125,
+      "host_shutdown_backstop_hours": 0.30,
+      "external_watchdog_seconds": 1080
+    },
+    {
+      "approved": true,
+      "cloud": "crusoe",
+      "region": "culpeper-usa-1",
+      "gpu": "A100_80G",
+      "instance_type": "A100_80G",
+      "os_image": "ubuntu22.04_cuda12.2_shade_os",
+      "interruptible": false,
+      "gpu_count": 1,
+      "vram_gib": 80,
+      "hourly_usd": 1.65,
+      "proving_run_hours": 0.25,
+      "active_run_cost_usd": 0.4125,
+      "provider_backstop_hours": 0.3125,
+      "host_shutdown_backstop_hours": 0.30,
+      "external_watchdog_seconds": 1080
+    }
+  ],
   "modes": {
     "prove": {
       "runtime_hours": 0.25,
@@ -135,6 +172,7 @@
   },
   "budget_policy": {
     "project_total_usd": 50.0,
+    "per_run_cap_usd": 10.0,
     "pending_ledger_refuses_launch": true,
     "active_cost_is_cap_projection": true,
     "backstop_cost_is_reported_separately": true

@@ -2309,6 +2309,25 @@ def append_cost_event(event: dict[str, Any]) -> None:
         os.close(parent_descriptor)
 
 
+def configured_auto_terminate_hours(env: dict[str, str]) -> float:
+    """Return the operator's standing provider auto-delete ceiling, in hours.
+
+    This is the outer bound on how long a created instance can exist, so it is
+    also the outer bound on what one run can cost. ``_auto_delete`` uses it to
+    size the per-run backstop; a pre-spend cost projection uses it to bound the
+    bill. Only the key name and the numeric ceiling are read; no value from the
+    environment is logged or returned anywhere else.
+    """
+
+    try:
+        ceiling = float(env.get("SHADEFORM_AUTO_TERMINATE_HOURS", "2.5") or "2.5")
+    except (TypeError, ValueError) as exc:
+        raise BackstopError("SHADEFORM_AUTO_TERMINATE_HOURS must be finite and positive") from exc
+    if not math.isfinite(ceiling) or ceiling <= 0:
+        raise BackstopError("SHADEFORM_AUTO_TERMINATE_HOURS must be finite and positive")
+    return ceiling
+
+
 def configured_budget_cap_usd(env: dict[str, str]) -> float:
     """Return the exact reviewed project cap requested by configuration."""
 
@@ -2437,13 +2456,26 @@ def reserve_create_attempt(
     expected_budget_cap_usd: float,
     public_key_fingerprint: str | None = None,
     ssh_key_id: str | None = None,
+    approved_target_index: int | None = None,
 ) -> str:
-    """Atomically reserve one possible create POST before provider mutation."""
+    """Atomically reserve one possible create POST before provider mutation.
+
+    ``approved_target_index`` names which entry of the caller's ordered
+    approved-target list this reservation is for. It is recorded inside the
+    existing ``candidate`` object -- the top-level event field set and the
+    cost-event schema are unchanged -- so the ledger row says not just what was
+    rented but which approved alternate it was.
+    """
 
     validate_phase_id(phase_id)
     validate_nonce(nonce)
     if backstop_hours <= 0 or not re.fullmatch(r"[0-9a-f]{64}", public_key_sha256):
         raise ValueError("invalid create-attempt reservation inputs")
+    if approved_target_index is not None and (
+            isinstance(approved_target_index, bool)
+            or not isinstance(approved_target_index, int)
+            or not 0 <= approved_target_index <= 63):
+        raise ValueError("approved target index is not a bounded list position")
     if public_key_fingerprint is not None and re.fullmatch(r"[A-Za-z0-9+/]{43}", public_key_fingerprint) is None:
         raise ValueError("invalid SSH public-key fingerprint reservation input")
     if ssh_key_id is not None:
@@ -2460,6 +2492,8 @@ def reserve_create_attempt(
         "ssh_public_key_sha256": public_key_sha256,
         "candidate": {"cloud": candidate.cloud, "region": candidate.region, "gpu": candidate.gpu, "instance_type": candidate.instance_type, "vram_gb": candidate.vram_gb, "hourly_usd": candidate.hourly_usd},
     }
+    if approved_target_index is not None:
+        event["candidate"]["approved_target_index"] = approved_target_index
     if ssh_key_id is not None:
         # The latest event enriches the same reservation with the provider key
         # ID, without rewriting its append-only history.
@@ -3358,12 +3392,7 @@ def _auto_delete(env: dict[str, str], runtime_hours: float) -> dict[str, str]:
     if (isinstance(runtime_hours, bool) or not isinstance(runtime_hours, (int, float)) or
             not math.isfinite(float(runtime_hours)) or runtime_hours <= 0):
         raise BackstopError("runtime must be finite and positive before provider mutation")
-    try:
-        ceiling = float(env.get("SHADEFORM_AUTO_TERMINATE_HOURS", "2.5") or "2.5")
-    except (TypeError, ValueError) as exc:
-        raise BackstopError("SHADEFORM_AUTO_TERMINATE_HOURS must be finite and positive") from exc
-    if not math.isfinite(ceiling) or ceiling <= 0:
-        raise BackstopError("SHADEFORM_AUTO_TERMINATE_HOURS must be finite and positive")
+    ceiling = configured_auto_terminate_hours(env)
     hours = min(max(0.25, runtime_hours * 1.25), max(0.25, ceiling))
     # Assert the EFFECTIVE backstop against the run, not the ceiling against the
     # run. Those differ exactly where it matters: at runtime == ceiling the

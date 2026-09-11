@@ -460,9 +460,20 @@ class ComparatorBudgetTests(unittest.TestCase):
         budget = self.orchestrator._comparator_budget(self.config, ("q8_0",))
         self.assertEqual(budget["arms"], ["q4_k_m", "q8_0"])
         self.assertEqual(budget["required_seconds"], 1500.0 + 2 * 720.0)
+        # 1.35 is the primary approved target's rate, which is what the budget
+        # uses when no selected entry is supplied.
         self.assertEqual(budget["projected_marginal_cost_usd"], round(1.35 * 2940.0 / 3600.0, 6))
         self.assertEqual(budget["authorized_active_cost_usd"], self.config["modes"]["eval"]["active_cost_usd"])
         self.assertFalse(budget["raises_authorized_cost"])
+        # On an approved alternate every dollar figure follows that entry's own
+        # rate, while the clock figures -- which decide whether the phase runs
+        # at all -- are unmoved.
+        alternate = self.orchestrator._comparator_budget(self.config, ("q8_0",), hourly_usd=1.65)
+        self.assertEqual(alternate["projected_marginal_cost_usd"], round(1.65 * 2940.0 / 3600.0, 6))
+        self.assertEqual(alternate["authorized_active_cost_usd"], 3.201)
+        self.assertEqual(alternate["required_seconds"], budget["required_seconds"])
+        self.assertEqual(alternate["static_slack_seconds"], budget["static_slack_seconds"])
+        self.assertEqual(alternate["fits_static_worst_case"], budget["fits_static_worst_case"])
         both = self.orchestrator._comparator_budget(self.config, ("q8_0", "bf16"))
         self.assertEqual(both["required_seconds"], 1500.0 + 3 * 720.0)
         self.assertGreater(both["required_seconds"], budget["required_seconds"])

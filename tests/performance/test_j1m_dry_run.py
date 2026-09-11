@@ -101,9 +101,38 @@ class DryRunGateTests(unittest.TestCase):
 
     def test_the_key_is_gone_on_every_path_including_the_failed_one(self):
         for name, run in self.receipt["runs"].items():
+            if run.get("pre_spend_refusal"):
+                # An approved-target refusal stops before key generation, so
+                # there is no key to remove. Assert the stronger property --
+                # nothing was created at all -- rather than a cleanup record
+                # that could only exist if the refusal had come too late.
+                self.assertIsNone(run["key_cleanup"].get("status"), name)
+                self.assertFalse(run["key_directory_present"], name)
+                continue
             self.assertIn(run["key_cleanup"].get("status"), {"removed", "absent"}, name)
             self.assertFalse(run["key_directory_present"], name)
         self.assertEqual(sorted(self.key_root.iterdir()), [])
+
+    def test_every_approved_target_scenario_lands_where_the_list_says(self):
+        """The gate drives the alternate path, not just the primary one."""
+
+        expected = {"__target_primary_only__": 0, "__target_denvr_alternate__": 1,
+                    "__target_crusoe_alternate__": 2,
+                    "__target_catalogue_order_ignored__": 0}
+        for name, index in expected.items():
+            run = self.receipt["runs"][name]
+            self.assertEqual(run["status"], "completed", name)
+            self.assertEqual(run["selected_target"]["approved_target_index"], index, name)
+        for name in ("__target_none_approved__", "__target_price_near_miss__",
+                     "__target_region_near_miss__"):
+            run = self.receipt["runs"][name]
+            self.assertTrue(run["pre_spend_refusal"], name)
+            self.assertIsNone(run["selected_target"], name)
+        selection_checks = {item["check"]: item["status"] for item in self.receipt["checks"]}
+        for check in ("approved_target_selection_follows_the_list",
+                      "unapproved_catalogue_is_refused_pre_spend",
+                      "selected_target_prices_every_recorded_figure"):
+            self.assertEqual(selection_checks[check], "PASS", check)
 
     def test_the_comparator_phase_argv_is_accepted_and_carries_no_bearer_path(self):
         """The comparator stages are argv like any other and face the same policy."""

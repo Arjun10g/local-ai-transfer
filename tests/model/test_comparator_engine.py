@@ -750,7 +750,10 @@ class ComparatorPlanTests(unittest.TestCase):
         self.assertEqual(budget["required_seconds"],
                          self.orchestrator._COMPARATOR_SETUP_BUDGET_SECONDS
                          + self.orchestrator._COMPARATOR_ARM_BUDGET_SECONDS)
+        # The singular accessor is the primary approved target; the budget uses
+        # it only because no selected entry was supplied here.
         hourly = float(self.config["shadeform_target"]["hourly_usd"])
+        self.assertEqual(hourly, self.config["shadeform_targets"][0]["hourly_usd"])
         self.assertEqual(budget["projected_marginal_cost_usd"],
                          round(hourly * budget["required_seconds"] / 3600.0, 6))
         self.assertFalse(budget["raises_authorized_cost"])
