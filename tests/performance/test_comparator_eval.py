@@ -529,8 +529,22 @@ class ComparatorBudgetTests(unittest.TestCase):
         # The deferred deletion tail is in a finally, so it runs on the
         # refusal path too, and an unproven deletion is typed.
         self.assertIn('finally:', phase)
-        self.assertIn('comparator_cleanup_error', phase)
-        self.assertLess(phase.index('finally:'), phase.index('_comparator_cleanup_commands'))
+        self.assertIn('run_comparator_cleanup()', phase)
+        self.assertLess(phase.index('finally:'), phase.index('run_comparator_cleanup()'))
+        # And it is no longer only reachable from inside the phase. The phase's
+        # `finally` sits below the eval-stage loop's `raise`, so a failure in
+        # any later stage skipped the tail entirely and left
+        # `comparator_cleanup_error` unset. The teardown `finally` now calls the
+        # same idempotent closure, so every path after `--run` reaches it.
+        teardown = source[source.index('        finally:\n            try:\n                _persist_lifecycle'):]
+        self.assertIn('run_comparator_cleanup()', teardown)
+        self.assertLess(teardown.index('run_comparator_cleanup()'),
+                        teardown.index('lifecycle["salvage"]'))
+        closure = source[source.index('def run_comparator_cleanup()'):]
+        closure = closure[:closure.index('def deletion_confirmed()')]
+        self.assertIn('if comparator_cleanup_done or comparator_cleanup_context is None:', closure)
+        self.assertIn('comparator_cleanup_error', closure)
+        self.assertIn('_eval_timeout(execution_deadline', closure)
 
     @isolated_lifecycle_execute
     def test_execute_refuses_comparators_before_any_provider_access(self):
@@ -580,7 +594,13 @@ class ComparatorBudgetTests(unittest.TestCase):
                 destination, ("q8_0",), phase_reason="comparator_engine_unavailable",
                 fixture_sha256="c75af5200b76a504e6b603183ffcf1cbeedb93db18ec544683044b8cc9b8ac6c")
             self.assertEqual(receipt["status"], "skipped")
-            self.assertEqual(receipt["skipped"], [{"comparator": "q8_0", "reason": "comparator_engine_unavailable"}])
+            # The baseline arm is always evaluated, so its skip is recorded
+            # too: without it a refused `q4-oracle` wrote an empty `skipped`
+            # list, indistinguishable from a run that asked for nothing.
+            self.assertEqual(sorted(receipt["skipped"], key=lambda item: item["comparator"]), [
+                {"comparator": "q4_k_m", "reason": "comparator_engine_unavailable"},
+                {"comparator": "q8_0", "reason": "comparator_engine_unavailable"},
+            ])
             self.assertEqual(receipt["comparisons"], [])
             written = json.loads((destination / "comparison-receipt.json").read_text())
             self.assertEqual(written, receipt)

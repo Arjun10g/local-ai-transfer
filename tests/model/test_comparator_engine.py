@@ -702,7 +702,13 @@ class ComparatorPlanTests(unittest.TestCase):
             self.assertEqual(command[command.index("--gpu-layers") + 1], "99")
             self.assertEqual(command[command.index("--context") + 1], "8192")
             self.assertEqual(command[command.index("--backend") + 1], "cuda")
-            self.assertTrue(command[command.index("--token-file") + 1].startswith("/scratch/j1m/comparator-token-"))
+            # No token-file operand at all: it named a path on a host this
+            # process has not contacted, which `validate_persisted_argv` can
+            # never accept as a private handle, so every arm stage was refused
+            # before it could spawn. The arm driver mints its own bearer.
+            self.assertNotIn("--token-file", command)
+            self.assertFalse([part for part in command if "comparator-token" in part])
+            self.assertEqual(self.runner.validate_persisted_argv(command), command)
 
     def test_the_server_build_flags_are_the_engine_compiler_identity(self):
         flags = self.runner.comparator_server_configure_flags(self.config)
@@ -777,7 +783,10 @@ class ComparatorPlanTests(unittest.TestCase):
             receipt = self.orchestrator._write_comparison_receipt(
                 destination, ("q4_k_m",), phase_reason="comparator_clock_insufficient")
         self.assertEqual(receipt["requested"], [])
-        self.assertEqual(receipt["skipped"], [])
+        # A refused oracle request records the baseline arm's typed reason;
+        # an empty list would be indistinguishable from asking for nothing.
+        self.assertEqual(receipt["skipped"],
+                         [{"comparator": "q4_k_m", "reason": "comparator_clock_insufficient"}])
         self.assertEqual(receipt["comparisons"], [])
         self.assertEqual(receipt["status"], "skipped")
 

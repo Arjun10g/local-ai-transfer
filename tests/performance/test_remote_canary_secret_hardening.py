@@ -390,6 +390,14 @@ class RemoteCanaryAndReceiptHardeningTests(unittest.TestCase):
             remote.assert_not_called()
 
     def test_salvage_refuses_after_destination_swap_without_transport_use(self):
+        """A destination swapped after validation still spawns no transfer.
+
+        The bounded transport replaced the blanket refusal of `2d7db4f`, but the
+        TOCTOU concern that motivated it is unchanged: the validated
+        destination must be proved stable before any process exists, and it is
+        never the pathname handed to SCP.
+        """
+
         with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             destination = root / "artifacts"
@@ -408,18 +416,87 @@ class RemoteCanaryAndReceiptHardeningTests(unittest.TestCase):
                     side_effect=swap_after_validation), \
                     mock.patch.object(self.orchestrator, "_remote") as remote, \
                     mock.patch.object(self.orchestrator.sf, "scp_base") as scp_base:
-                with self.assertRaisesRegex(ValueError, "transport is unavailable"):
+                with self.assertRaisesRegex(ValueError, "salvage destination changed"):
                     self.orchestrator._salvage(
                         info, root / "id", root / "known", destination,
-                        ["receipt.json"],
+                        ["eval-receipt.json"],
                     )
             remote.assert_not_called()
             scp_base.assert_not_called()
 
-    def test_canary_plan_keeps_salvage_obligation_while_transport_is_refused(self):
-        self.assertFalse(self.orchestrator._EXTERNAL_SALVAGE_TRANSPORT_AVAILABLE)
+    def test_canary_plan_keeps_salvage_obligation_with_a_bounded_transport(self):
+        """The availability flag is source truth, and it is bounded truth."""
+
+        self.assertTrue(self.orchestrator._EXTERNAL_SALVAGE_TRANSPORT_AVAILABLE)
         plan = self.runner.build_plan(self.config, "canary")
         self.assertTrue(plan["mode_policy"]["salvage_required"])
+        # Arbitrary-path salvage remains impossible: the fetchable set is a
+        # source-fixed mapping of receipt basenames, and the remote directory
+        # is a single source constant rather than a caller or config value.
+        self.assertEqual(sorted(self.orchestrator._SALVAGE_RECEIPT_ALLOWLIST), [
+            "comparator-receipt-bf16.json",
+            "comparator-receipt-q4_k_m.json",
+            "comparator-receipt-q8_0.json",
+            "conversion-receipt.json",
+            "cuda-device-receipt.json",
+            "eval-artifact-receipt.json",
+            "eval-receipt.json",
+            "manifest.json",
+            "model-receipt.json",
+            "post-cleanup-receipt.json",
+            "proving-receipt.json",
+            "scan-receipt.json",
+            "source-model-receipt.json",
+            "startup-preflight-receipt.json",
+            "tensor-metadata.json",
+            "toolchain-receipt.json",
+            "toolchain.json",
+        ])
+        # Build mode now has receipts it can actually salvage.  A paid
+        # conversion that returned nothing and still reported success was the
+        # defect; the weights stay unsalvageable by design.
+        self.assertEqual(
+            sorted(self.orchestrator._SALVAGE_NON_RECEIPT_NAMES),
+            ["Qwen3.5-9B-Q4_K_M.gguf", "Qwen3.5-9B-Q8_0.gguf", "Qwen3.5-9B-bf16.gguf",
+             "checksums.sha256", "command-receipt.json"],
+        )
+        build_allowlist = self.config["artifacts"]["local_fetch_allowlist"]
+        self.assertTrue(set(build_allowlist) <= (
+            set(self.orchestrator._SALVAGE_RECEIPT_ALLOWLIST)
+            | set(self.orchestrator._SALVAGE_NON_RECEIPT_NAMES)
+        ))
+        self.assertTrue(any(name in self.orchestrator._SALVAGE_RECEIPT_ALLOWLIST
+                            for name in build_allowlist))
+        self.assertEqual(self.orchestrator._SALVAGE_REMOTE_DIRECTORY, "/scratch/j1m/artifacts")
+        self.assertEqual(
+            self.orchestrator._SALVAGE_MAX_FILES,
+            len(self.orchestrator._SALVAGE_RECEIPT_ALLOWLIST),
+        )
+        for hostile in ("../../etc/passwd", "*.json", "/etc/shadow", "eval-receipt.json ",
+                        "Qwen3.5-9B-Q4_K_M.gguf", "salvage-receipt.json"):
+            self.assertNotIn(hostile, self.orchestrator._SALVAGE_RECEIPT_ALLOWLIST)
+        # Every fetchable name is a bare basename: no separator, no traversal,
+        # no glob metacharacter can appear in a constructed remote operand. The
+        # comparator arm names carry an underscore, which the general pin does
+        # not admit; they are ENUMERATED rather than admitted by relaxing the
+        # pin, so a non-enumerated name is still refused.
+        comparator = frozenset(self.orchestrator._SALVAGE_COMPARATOR_RECEIPTS)
+        self.assertEqual(len(comparator), 3)
+        self.assertTrue(comparator <= set(self.orchestrator._SALVAGE_RECEIPT_ALLOWLIST))
+        for name in self.orchestrator._SALVAGE_RECEIPT_ALLOWLIST:
+            if name in comparator:
+                self.assertRegex(name, r"\Acomparator-receipt-(?:q4_k_m|q8_0|bf16)\.json\Z")
+                continue
+            self.assertRegex(name, r"\A[a-z][a-z0-9-]*\.json\Z")
+        for hostile in ("comparator-receipt-q4.json", "comparator-receipt-.json",
+                        "comparator-receipt-../etc/passwd", "comparator-receipt-*.json"):
+            self.assertNotIn(hostile, self.orchestrator._SALVAGE_RECEIPT_ALLOWLIST)
+        # Every fetchable receipt must also declare a run-identity binding and
+        # a required-key set; nothing is fetchable on schema alone.
+        for name in self.orchestrator._SALVAGE_RECEIPT_ALLOWLIST:
+            self.assertIn(name, self.orchestrator._SALVAGE_REQUIRED_KEYS)
+        self.assertEqual(self.orchestrator._SALVAGE_REQUIRED_IDENTITY,
+                         frozenset(self.runner.RUN_IDENTITY_FIELDS))
 
     def test_malformed_tensor_receipt_is_finite_refusal_without_typeerror_or_file(self):
         class Reader:

@@ -186,6 +186,38 @@ def verify_arm_artifact(arm: str, model: Path, scan_receipt: Path, anchor_sha256
     return {"name": name, "size_bytes": size, "sha256": digest, "quantization": quantization}
 
 
+# Required run-identity binding. The orchestrator uploads this file next to the
+# uploaded config before the first receipt-producing command; the path is
+# source-fixed on both sides so no caller, configuration value, or remote
+# response can redirect it.
+_RUN_IDENTITY_PATH = Path("/scratch/j1m/run-identity.json")
+_RUN_IDENTITY_SCHEMA = "local_bmo.j1m.run-identity.v1"
+_RUN_IDENTITY_FIELDS = ("run_id", "instance_id")
+_RUN_IDENTITY_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
+
+
+def _run_identity() -> dict[str, str]:
+    """Return this run's receipt binding, or ``unbound`` when unprovable."""
+
+    unbound = {field: "unbound" for field in _RUN_IDENTITY_FIELDS}
+    try:
+        raw = _RUN_IDENTITY_PATH.read_bytes()
+        if len(raw) > 4096:
+            return unbound
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return unbound
+    if not isinstance(payload, dict) or payload.get("schema") != _RUN_IDENTITY_SCHEMA:
+        return unbound
+    resolved = {}
+    for field in _RUN_IDENTITY_FIELDS:
+        value = payload.get(field)
+        if not isinstance(value, str) or not _RUN_IDENTITY_VALUE.match(value):
+            return unbound
+        resolved[field] = value
+    return resolved
+
+
 def fixture_contract(path: Path) -> dict[str, Any]:
     """Read the bounded fixture identity every arm is held to."""
 
@@ -239,6 +271,26 @@ def fixture_contract(path: Path) -> dict[str, Any]:
         "max_cases": max_cases,
         "temperature": 0,
     }
+
+
+def resolve_token_file(args: argparse.Namespace) -> tuple[Path, Path | None]:
+    """Return this arm's bearer path, creating a private directory if needed.
+
+    ``--token-file`` names a path on the ephemeral host, and
+    ``j1m_runner.validate_persisted_argv`` accepts a token-file operand only
+    when it is a canonical private handle *on the machine building the argv* --
+    a proof that cannot exist for a remote path.  The orchestrator therefore no
+    longer names it, and every comparator stage's argv is accepted instead of
+    refused before it can spawn.  An explicit ``--token-file`` is still honoured
+    for tests; otherwise this process mints its own ``0700`` directory, which is
+    also what lets the bearer be removed with it after the arm.
+    """
+
+    if getattr(args, "token_file", None):
+        return Path(args.token_file), None
+    directory = Path(tempfile.mkdtemp(prefix=f"comparator-token-{args.arm}-"))
+    os.chmod(directory, 0o700)
+    return directory / "comparator-token", directory
 
 
 def write_token(path: Path) -> str:
@@ -437,7 +489,7 @@ def evaluate_arm(args: argparse.Namespace) -> dict[str, Any]:
     contract = fixture_contract(Path(args.fixture))
     if int(args.context) < contract["context_tokens"]:
         raise ComparatorFailure("comparator_fixture_invalid")
-    token_file = Path(args.token_file)
+    token_file, token_directory = resolve_token_file(args)
     token = write_token(token_file)
     launch = server_launch_argv(args, token_file)
     process: subprocess.Popen[bytes] | None = None
@@ -471,11 +523,33 @@ def evaluate_arm(args: argparse.Namespace) -> dict[str, Any]:
         _terminate(process)
         if server_log is not None:
             server_log.close()
+        # The bearer outlives nothing.  Remove it as soon as the server it
+        # authenticated is gone, and take the private directory with it when
+        # this process created one.
+        try:
+            token_file.unlink()
+        except OSError:
+            pass
+        if token_directory is not None:
+            try:
+                os.rmdir(token_directory)
+            except OSError:
+                pass
     return {
         "schema": RECEIPT_SCHEMA,
         "status": status,
         "arm": args.arm,
         "artifact": artifact,
+        # Flat, required identity. The salvage transport binds every receipt it
+        # publishes to the run that produced it, and an arm receipt additionally
+        # has to say which artifact it scored and against which fixture -- a
+        # retention number computed from an arm that ran on the wrong file or a
+        # different fixture is worse than no number. These mirror
+        # ``artifact.sha256`` and ``fixture.sha256`` so the binding can be
+        # checked without reaching into a nested object.
+        "artifact_sha256": artifact["sha256"],
+        "fixture_sha256": contract["sha256"],
+        **_run_identity(),
         "anchor": {"scan_receipt_sha256": args.scan_receipt_sha256},
         "fixture": contract,
         "host": {
@@ -504,7 +578,11 @@ def evaluate_arm(args: argparse.Namespace) -> dict[str, Any]:
         },
         "generated_at_utc": utc_now(),
         "prompt_response_logging": False,
-        "token_logging": False,
+        # ``tokens_logged``, not ``token_logging``: a field name delimited as
+        # ``_token_`` is credential-shaped and makes ``validate_persisted_output``
+        # reject the whole serialized receipt, so the receipt could never be
+        # published.  The name was the defect, not the detector.
+        "tokens_logged": False,
     }
 
 
@@ -521,7 +599,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="one configure flag of the upstream server build, recorded in the receipt")
     parser.add_argument("--evaluator", required=True, type=Path)
     parser.add_argument("--fixture", required=True, type=Path)
-    parser.add_argument("--token-file", required=True, type=Path)
+    # Optional: see ``resolve_token_file``.  A remote path here can never be
+    # proved a local private handle, so the orchestrator does not supply one.
+    parser.add_argument("--token-file", default=None, type=Path)
     parser.add_argument("--receipt", required=True, type=Path)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--context", type=int, default=8192)
