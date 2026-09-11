@@ -388,9 +388,9 @@ StorageStatus filesystem_policy(HANDLE file, const wchar_t (&root)[4],
   std::wstring volume_path = L"\\\\.\\";
   volume_path.push_back(root[0]);
   volume_path.push_back(L':');
-  HANDLE raw_volume = CreateFileW(volume_path.c_str(), 0,
-                                  FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                  nullptr, OPEN_EXISTING, 0, nullptr);
+  HANDLE raw_volume = CreateFileW(
+      volume_path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+      OPEN_EXISTING, SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS, nullptr);
   if (raw_volume == INVALID_HANDLE_VALUE) return StorageStatus::kUnsafeVolume;
   volume.reset(raw_volume);
   return validate_volume(file, volume.get(), root, 0, false, filesystem,
@@ -413,10 +413,16 @@ bool acquire_directories(const std::wstring& canonical, PSID current_sid,
   if (paths.size() > kMaxAncestorHandles) return false;
   held.reserve(paths.size());
   for (const auto& path : paths) {
-    HANDLE raw = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES | READ_CONTROL,
-                             kDirectoryShare, nullptr, OPEN_EXISTING,
-                             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-                             nullptr);
+    // These are the first path-derived opens in the boundary, so they are the
+    // ones an impersonation defence must cover: if path validation ever
+    // regressed, an ancestor, not the leaf, would be the vector. Anonymous SQOS
+    // denies a named-pipe or UNC server any use of this token.
+    HANDLE raw = CreateFileW(
+        path.c_str(), FILE_READ_ATTRIBUTES | READ_CONTROL, kDirectoryShare,
+        nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT |
+            SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS,
+        nullptr);
     if (raw == INVALID_HANDLE_VALUE) return false;
     HeldDirectory entry;
     entry.handle.reset(raw);
@@ -959,7 +965,12 @@ StorageStatus DescriptorWalLease::prepare_inheritable_handoff(
     // DuplicateHandle writes directly into RAII storage, so allocation failure
     // occurs before duplication and every later refusal closes exactly once.
     // The duplicate is born NOT inheritable and receives only the data access
-    // the child needs: no DELETE and no READ_CONTROL cross the boundary.
+    // the child needs. The requested generic rights map to
+    // FILE_GENERIC_READ | FILE_GENERIC_WRITE, a strict subset of the source
+    // handle's access: no DELETE, no WRITE_DAC and no WRITE_OWNER cross the
+    // boundary. READ_CONTROL does cross, because STANDARD_RIGHTS_READ and
+    // STANDARD_RIGHTS_WRITE are both READ_CONTROL; that only lets the child
+    // read a DACL naming its own user.
     // Inheritance is armed later, explicitly, by the launcher.
     auto candidate = std::make_unique<DescriptorWalHandoff::Impl>();
     if (!DuplicateHandle(GetCurrentProcess(), impl_->file.get(),
@@ -1068,7 +1079,8 @@ StorageStatus acquire_storage(const StorageRequest& request,
     HANDLE raw = CreateFileW(
         path.c_str(), GENERIC_READ | GENERIC_WRITE | READ_CONTROL, kFileShare,
         create ? &security.attributes : nullptr, create ? CREATE_NEW : OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT |
+            FILE_FLAG_WRITE_THROUGH | SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS,
         nullptr);
     if (raw == INVALID_HANDLE_VALUE) return fail(open_error(create));
     candidate->file.reset(raw);
@@ -1128,9 +1140,12 @@ StorageStatus acquire_storage(const StorageRequest& request,
                       ? StorageStatus::kIdentityMismatch
                       : status);
 
-    HANDLE reopen = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES | READ_CONTROL,
-                                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                                OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    HANDLE reopen = CreateFileW(
+        path.c_str(), FILE_READ_ATTRIBUTES | READ_CONTROL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT | SECURITY_SQOS_PRESENT |
+            SECURITY_ANONYMOUS,
+        nullptr);
     if (reopen == INVALID_HANDLE_VALUE)
       return fail(StorageStatus::kReopenIdentityMismatch);
     candidate->path_reopen.reset(reopen);

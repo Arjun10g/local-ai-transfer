@@ -11,13 +11,15 @@ NTFS, retained no-follow ancestor, owner-only protected DACL, single-link,
 non-delete-pending, stable volume/file identity, and final-path checks. Create
 uses `CREATE_NEW` with the private security descriptor in the create call.
 Open requires a separately trusted volume-serial/file-ID tuple; identity read
-from the candidate path cannot authorize its own reopen. Both `CreateFileW`
-calls added by this slice set `SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS`, so
-a path-validation regression that let a named-pipe or UNC target through could
-still not be used to impersonate this token. The shared ancestor and volume
-helpers reused from the merged v1 container path are deliberately left
-unchanged here; altering them would change already-reviewed behaviour that
-this slice produces no evidence for.
+from the candidate path cannot authorize its own reopen. Every `CreateFileW`
+call in this translation unit now sets
+`SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS`, including the shared ancestor
+walk and the volume-device open, so a path-validation regression that let a
+named-pipe or UNC target through could still not be used to impersonate this
+token. The ancestor opens matter most here: they are the first path-derived
+opens in the boundary, so an ancestor, not the leaf, would be the vector. The
+flags change no behaviour for a disk-file or volume-device target and are
+therefore defence in depth only.
 
 The read/write leaf handle denies write and delete sharing for its complete
 lease lifetime. That share-mode lease is the exclusive writer boundary against
@@ -48,7 +50,12 @@ included in a receipt, log, command line, or environment variable.
 
 The duplicate is created with `bInheritHandle = FALSE` and with explicit
 `GENERIC_READ | GENERIC_WRITE` access, so it is born non-inheritable and
-carries neither `DELETE` nor `READ_CONTROL` across a future process boundary.
+carries a strict subset of the source handle's access. The requested generic
+rights map to `FILE_GENERIC_READ | FILE_GENERIC_WRITE`, so no `DELETE`, no
+`WRITE_DAC`, and no `WRITE_OWNER` cross a future process boundary.
+`READ_CONTROL` does cross, because `STANDARD_RIGHTS_READ` and
+`STANDARD_RIGHTS_WRITE` are both `READ_CONTROL`; that only lets the child read
+a DACL naming its own user.
 `DescriptorWalHandoff::arm_inheritance()` and `revoke_inheritance()` are
 separate, idempotent, typed-status steps over
 `SetHandleInformation(HANDLE_FLAG_INHERIT, ...)`, and each verifies the
@@ -96,6 +103,20 @@ leaf name permanently, because `kCreateNew` would then always return
 never learned the trusted identity tuple. Deleting a private artifact that
 this call created and never published is not a WAL repair: no frame, no
 foreign byte, and no external observer can exist yet.
+
+Holding `DELETE` on the create-path handle forces the identity-reopen handle
+to concede `FILE_SHARE_DELETE`. That concedes nothing in practice, and it must
+not be "tightened" into a self-deadlock. Windows share checks consider only
+data and delete access, so the reopen handle, which requests only
+`FILE_READ_ATTRIBUTES | READ_CONTROL`, is admitted by the first handle's
+`FILE_SHARE_READ`; conversely the reopen handle's own share mode must admit
+every access already granted to the first handle, which on the create path
+includes `DELETE`. The restriction any other process sees is the conjunction of
+both share modes, and the first handle still denies write and delete sharing to
+everyone else for the whole lease lifetime. Share bookkeeping lives on the file
+object rather than the handle, so the `DELETE` right cannot be shed after
+publication by re-duplicating and closing; it is simply never used again once
+the discard is disarmed.
 
 The reopen path never requests `DELETE`, never deletes, never truncates, and
 never writes. Failure on the reopen path preserves the file exactly as found,

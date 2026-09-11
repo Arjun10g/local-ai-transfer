@@ -22,6 +22,7 @@ CPP = ROOT / "native" / "action_journal_storage" / "windows_storage.cpp"
 HPP = ROOT / "native" / "action_journal_storage" / "windows_storage.hpp"
 DESIGN = ROOT / "native" / "action_journal_storage" / "DESCRIPTOR_WAL_BOOTSTRAP.md"
 HOST = ROOT / "host" / "agent" / "action-journal.mjs"
+HOST_SUITE = ROOT / "tests" / "host" / "descriptor-action-journal.test.mjs"
 MAX_BYTES = 32 * 1024 * 1024
 WAL_HEADER = b'{"format":"lae-action-journal-wal","version":2}\n'
 
@@ -125,6 +126,7 @@ class WindowsDescriptorJournalBootstrapStaticTests(unittest.TestCase):
         cls.hpp = bounded_text(HPP)
         cls.design = bounded_text(DESIGN)
         cls.host = bounded_text(HOST)
+        cls.host_suite = bounded_text(HOST_SUITE)
         cls.acquire = function_body(
             cls.cpp, r"StorageStatus acquire_descriptor_wal\(const DescriptorWalRequest")
         cls.handoff = function_body(
@@ -156,6 +158,14 @@ class WindowsDescriptorJournalBootstrapStaticTests(unittest.TestCase):
         self.assertEqual(len(WAL_HEADER), 48)
         self.assertIn("kDescriptorWalMaxBytes = 32ull * 1024ull * 1024ull", self.hpp)
         self.assertIn("const MAX_DESCRIPTOR_WAL_BYTES = 32 * 1024 * 1024", self.host)
+        # The Node suite keeps a third independent copy of the literal. Nothing
+        # compared it against the C++, so a drift there would not be caught.
+        host_suite = re.search(
+            r"const WAL_HEADER = Buffer\.from\('([^']+)'\);", self.host_suite)
+        self.assertIsNotNone(host_suite)
+        self.assertEqual(
+            bytes(host_suite.group(1), "utf-8").decode("unicode_escape").encode(),
+            WAL_HEADER)
         self.assertIn("kDescriptorWalHeaderBytes =\n    sizeof(kDescriptorWalHeader) - 1",
                       self.cpp)
 
@@ -182,12 +192,19 @@ class WindowsDescriptorJournalBootstrapStaticTests(unittest.TestCase):
                           "SetEndOfFile", "SetFileInformationByHandle"):
             self.assertNotIn(forbidden, self.acquire)
 
-    def test_every_create_file_call_in_this_slice_pins_anonymous_sqos(self):
-        calls = call_arguments(self.acquire, "CreateFileW")
-        self.assertEqual(len(calls), 2)
-        for call in calls:
-            self.assertIn("SECURITY_SQOS_PRESENT", call)
-            self.assertIn("SECURITY_ANONYMOUS", call)
+    def test_every_create_file_call_in_the_translation_unit_pins_anonymous_sqos(self):
+        # Every path-derived open, not only this slice's two. The shared
+        # ancestor walk runs first, so if path validation ever regressed an
+        # ancestor, not the leaf, would be the impersonation vector.
+        calls = call_arguments(self.cpp, "CreateFileW")
+        self.assertEqual(len(calls), self.cpp.count("CreateFileW("))
+        self.assertGreaterEqual(len(calls), 6)
+        for index, call in enumerate(calls):
+            with self.subTest(call=index):
+                self.assertIn("SECURITY_SQOS_PRESENT", call)
+                self.assertIn("SECURITY_ANONYMOUS", call)
+        ancestors = function_body(self.cpp, r"bool acquire_directories\(const std::wstring&")
+        self.assertIn("SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS", ancestors)
 
     def test_published_size_is_asserted_and_the_dead_store_is_gone(self):
         self.assertNotIn("candidate->size = kDescriptorWalHeaderBytes;", self.acquire)
