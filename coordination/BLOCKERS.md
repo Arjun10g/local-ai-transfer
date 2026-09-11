@@ -33,7 +33,10 @@
   argv was refused before it could spawn. The key now lives at
   `.secrets/j1m/<run-id>-<nonce>/ssh-key`. The fix is at the **operand, not the
   validator**: no validator predicate was loosened, and tests pin that the old
-  layout is still refused. All three are proven by the offline dry-run gate.
+  layout is still refused. All three are proven by the offline dry-run gate together with the unit
+  suites; the gate alone is not sufficient, since two of the properties it exists
+  for — run-identity stamping and build-mode fail-closed — leave it at 18/18 PASS
+  and are caught only by the unit tests.
 - **Corrected: the evaluation lane was never gated by
   `REMOTE_EXECUTION_ENABLED`.** That flag exists only in
   `scripts/shadeform/remote_external_tools.py` (defined `:85`, enforced `:804`
@@ -57,7 +60,9 @@
   carried by B-004, B-006 and `MODEL_DECISION.md` is therefore withdrawn: the
   correct planning figure is the marginal comparator cost inside one eval run
   (`q4-oracle` USD 0.8325, `q8` USD 1.1025, `q8,bf16` USD 1.3725, each with
-  `raises_authorized_cost: False`).
+  `raises_authorized_cost: False` — a hardcoded literal, not a computed verdict;
+  see B-004 for the computed `fits_static_worst_case: False` beside it and the
+  runtime `comparator_clock_insufficient` gate that actually decides this).
 - **Ledger migration, recorded as a source fact.** The preflight's verdict is
   not computed: `scripts/shadeform_ledger_migration_preflight.py:1110` returns
   the hardcoded literal `"safe_to_migrate_now": False`, alongside
@@ -131,10 +136,13 @@
   residue makes it fail while its own detail line reports removal — and the
   reviewer recommends fixing that before the first live run. Two corpus
   residuals must close before the corpus produces a retention or parity number.
-  The comparator cleanup tail is still skipped when a run fails before the
-  comparator phase (evidence loss, not exposure, since teardown deletes the
-  instance), and a `q4-oracle` refusal is currently untyped in the comparison
-  receipt.
+  Two further comparator-engine review findings — the deferred cleanup tail
+  being skipped when a run fails before the comparator phase, and the untyped
+  `q4-oracle` refusal — were **closed before merge** and are noted here only so
+  they are not re-opened: `run_comparator_cleanup()`
+  (`scripts/j1m_orchestrator.py:2142`) runs the deferred tail exactly once, and
+  `:1089-1097` records the baseline arm's skip so that "the one selection whose
+  refusal was untyped stops being untyped".
 - Current reproduced evidence for this baseline is recorded in
   `coordination/status/governance-refresh-v6.md` and repeated in
   `coordination/STATUS.md`; it supersedes the v5 figures below.
@@ -359,8 +367,10 @@
   this blocker must therefore carry the **marginal** comparator cost inside one
   budgeted eval run, not a separate full re-conversion: `q4-oracle` 2,220 s /
   USD 0.8325, `q8` 2,940 s / USD 1.1025, `q8,bf16` 3,660 s / USD 1.3725, each
-  reported with `raises_authorized_cost: False`. The ≥95% retention gate
-  (`execution/ACCEPTANCE_CRITERIA.md:215`) is reachable inside a single run.
+  reported with `raises_authorized_cost: False` — a hardcoded literal at `scripts/j1m_orchestrator.py:917`, not a computed verdict. The computed companion flag `fits_static_worst_case` (`:914`, `required <= static_slack`) is **False for every selection**, and whether the comparator phase runs at all is decided at run time by `_comparator_clock_available` (`:921`), which refuses with typed `comparator_clock_insufficient` (`:949`, wired at `:2489`). A budgeted run can therefore complete and pass the Q4 evaluation while skipping the comparator phase entirely — spending the money and producing no retention number. The same standard applies here as to `"safe_to_migrate_now": False`: a literal is not a verdict. The ≥95%
+  retention gate (`execution/ACCEPTANCE_CRITERIA.md:215`) is therefore reachable
+  inside a single budgeted run **only if the runtime clock gate admits the
+  comparator phase**; the static worst case does not fit.
 - Fact (canary correction, 2026-09-11, refresh v6): **the non-A100 canary
   prescribed in the workaround above is unexecutable by current code.**
   `execute()` refuses canary mode at `scripts/j1m_orchestrator.py:2023`
@@ -431,8 +441,7 @@
   is 438 bytes, one line, mode 0600. After genesis, `list_candidates` returned
   9 candidates with exactly one matching the pinned target (hyperstack /
   montreal-canada-2 / A100_80G / USD 1.35 per hour), and
-  `create_ephemeral_ssh_key` plus `assert_persisted_argv_handle` passed with
-  the key directory destroyed afterwards. **Residual, explicitly not closed:**
+  No ephemeral key was ever minted by any launch attempt: all three refused earlier — at the destination, backstop and ledger gates — before key creation was reached. `.secrets/j1m/` is empty, and that emptiness is what proves the orchestrator lifecycle never began, not that a run's key was cleaned up. Separately, Sol's **isolated** gate probe called `create_ephemeral_ssh_key` and `assert_persisted_argv_handle` once and then `destroy_ephemeral_key_directory`, which is why the directory is empty rather than absent. That probe is not the orchestrator and it minted nothing for run b. **Residual, explicitly not closed:**
   the preflight's hardcoded literal `"safe_to_migrate_now": False`
   (`scripts/shadeform_ledger_migration_preflight.py:1110`) is unchanged in
   source and the incidents-schema findings stand. A genesis does not

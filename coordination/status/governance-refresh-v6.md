@@ -296,8 +296,9 @@ in source, all three, here is the answer.
   **narrower than, and out of step with, the engine that ships** — a contract
   understating its own implementation.
 - **`MODEL_DECISION.md` describes 1,024 and 2,048, and they are unreachable.**
-  `:357-358` give a UI output default of 1,024 tokens and a hard answer cap of
-  2,048. Note these are two distinct quantities, not a range. A request
+  `:497-498` in the delivered tree — `:357-358` on `main`, since this same
+  commit inserts lines above them — give a UI output default of 1,024 tokens and
+  a hard answer cap of 2,048. Note these are two distinct quantities, not a range. A request
   carrying either is refused at parse time by the engine, not clamped.
 - **The corpus and the lanes already bind to 256**, the value the shipping
   fixture uses: `tests/model/production_tool_call_eval.json` sets
@@ -421,6 +422,13 @@ because a current-truth document that repeated them would be wrong.
 Phase B was scoped to fold in the results of `remote-eval-20260911-b`. There
 are none. What follows is the record of why, verified read-only in the tree.
 
+Process note, for accuracy: the three causes below were found one per launch
+attempt — `commands.txt:32-37` shows three sequential relaunches, each preceded
+by `gates ok` and each ending `orchestrator_exit=2` — with Sol isolating the
+failing gate after each. That is a slightly less tidy process than "stepping the
+gates in isolation" suggests, and the substance is unaffected: three refusals,
+three causes, all pre-spend at USD 0.00.
+
 ### Launch state
 
 `remote-eval-20260911-b` is **`PENDING — launch-ready, awaiting operator
@@ -442,6 +450,7 @@ inspected:
 | `.secrets/j1m/` | **empty** — zero residue, key directory destroyed |
 | `artifacts/qwen35-9b/remote-eval-20260911-b/` | exists, mode **0700**, **0 entries** |
 | Score / oracle delta / retention ratio | **none** |
+| Untracked residue in the `main` checkout | one path, `artifacts/qwen35-9b/remote-eval-20260911-a/` (a 5,430-byte `plan-eval.json`, no secret-shaped content), at directory mode **0755** against run-b's 0700 — disclosed in run-b's own git-status row; the operator may want the mode aligned |
 | Remote hash re-verification of the Q4 identity | **none** — recorded identity figures remain static file inspection |
 
 ### Three pre-spend refusals, traced by stepping the gates in isolation
@@ -455,13 +464,16 @@ All three returned typed `input_rejected` before any provider call, at USD 0.00.
    `ValueError`, surfaced as
    `artifact destination must live under the trusted output root`.
    **This is not a code defect.** Refusing an ambiguous destination before
-   anything is billable is correct and must not be loosened. It is worth noting
-   that the launch command recorded in the run-b summary §5 and in its
-   `commands.txt:24` still reads
-   `--artifact-destination artifacts/qwen35-9b/remote-eval-20260911-b` — the
-   relative form that caused this refusal — so the ready command must have an
-   absolute destination substituted before it is run. Ergonomic follow-up:
-   `J1M-CLI-RELATIVE-DESTINATION-001` (UNCLAIMED, S4).
+   anything is billable is correct and must not be loosened. The recorded launch command **has since
+   been corrected** by Sol: run-b summary §5 and `commands.txt:24` now read
+   `--artifact-destination "$PWD/artifacts/qwen35-9b/remote-eval-20260911-b"`,
+   corroborated by the absolute `dest=` in `commands.txt:34` and by the summary's
+   new §7 "Sol post-staging corrections". Re-read after that correction; an
+   earlier draft of this packet quoted the superseded relative form. The open
+   defect is therefore **not** that the recorded command still carries a relative
+   path, but that the CLI accepts one at all: ergonomic follow-up
+   `J1M-CLI-RELATIVE-DESTINATION-001` (UNCLAIMED, S4), whose premise is the
+   original staging error, not the current file.
 2. **Provider backstop.** `.secrets/shadeform.env` carried
    `SHADEFORM_AUTO_TERMINATE_HOURS=2` against a 1.94 h eval plan. Verified:
    `scripts/shadeform_lifecycle.py:190` sets `MIN_BACKSTOP_MARGIN = 1.10` and
@@ -470,8 +482,9 @@ All three returned typed `input_rejected` before any provider call, at USD 0.00.
    ceiling to 3, which the code itself frames as the right kind of act —
    `:3384` calls it "a standing safety limit, so this is a decision, not a knob
    to turn to make a run fit". Worst case becomes 3 h × USD 1.35 = **USD 4.05**,
-   inside the USD 10.00 run cap. **Key names only are recorded anywhere in this
-   refresh; no value from that file was read, printed, or reproduced.**
+   inside the USD 10.00 run cap. **Only key names and that non-secret numeric ceiling
+   are recorded anywhere in this refresh; no credential value from that file was
+   read, printed, or reproduced.**
 3. **Legacy cost ledger.** Verified: `sf.list_candidates` validates
    `experiments/runtime/cost-ledger.jsonl` against
    `local_bmo.shadeform.cost-event.v2` (`scripts/shadeform_lifecycle.py:80`),
@@ -530,9 +543,9 @@ be misread as closing the source defect.
 
 `list_candidates` (read-only) returned **9 candidates**, exactly **one**
 matching the pinned target — hyperstack / montreal-canada-2 / A100_80G /
-USD 1.35 per hour. `create_ephemeral_ssh_key` and
-`assert_persisted_argv_handle` both passed, and the ephemeral key directory was
-destroyed leaving **zero residue**, which the empty `.secrets/j1m/` confirms.
+USD 1.35 per hour.
+
+No ephemeral key was ever minted by any launch attempt: all three refused earlier — at the destination, backstop and ledger gates — before key creation was reached. `.secrets/j1m/` is empty, and that emptiness is what proves the orchestrator lifecycle never began, not that a run's key was cleaned up. Separately, Sol's **isolated** gate probe called `create_ephemeral_ssh_key` and `assert_persisted_argv_handle` once and then `destroy_ephemeral_key_directory`, which is why the directory is empty rather than absent. That probe is not the orchestrator and it minted nothing for run b.
 Nothing beyond the read-only catalogue query contacted a provider.
 
 ### Two dry-run gaps, recorded as follow-ups
@@ -548,6 +561,79 @@ argv surface, not the environment the run will actually meet, and ADR-0005's
 validation section now says so. Both follow-ups are scoped read-only — validate
 and report, never rewrite the real ledger, never adjust the real ceiling, and
 never read a secret value.
+
+## Independent audit disposition
+
+The independent S0/S4 docs and evidence-scope audit of tip `97aec49` returned
+`ACCEPT_WITH_REQUIRED_FIXES` with no BLOCKER: **3 MAJOR, 8 MINOR, 6 NIT, all
+wording**. All fourteen reproducible measurements, nine source citations and
+nine pieces of ledger metadata reproduced exactly on the auditor's own runs. No
+gate cell, overall-state line, blocker `State:`, `Workaround:` or `Impact:` line
+moved. Every MAJOR and MINOR is applied here, plus the cheap NITs.
+
+- **MAJOR 1 — the key mint/destroy claim is withdrawn.** The refresh said
+  `create_ephemeral_ssh_key` passed and the key directory "was destroyed leaving
+  zero residue", which asserts a lifecycle step that never ran and inverts what
+  the empty directory proves. Corrected in all five places to keep two distinct
+  facts both true: **no ephemeral key was ever minted by any launch attempt** —
+  all three refused earlier, at the destination, backstop and ledger gates,
+  before key creation was reached — and, separately, Sol's **isolated** gate
+  probe minted and destroyed one key, which is why `.secrets/j1m/` is empty
+  rather than absent. Nothing now implies the orchestrator reached key creation.
+- **MAJOR 2 — the `commands.txt:24` quotation is corrected.** Sol corrected the
+  recorded command after this packet's Phase A read: run-b summary §5 and
+  `commands.txt:24` now carry the absolute
+  `"$PWD/artifacts/qwen35-9b/remote-eval-20260911-b"`, corroborated by the
+  absolute `dest=` at `commands.txt:34` and by the summary's new §7 "Sol
+  post-staging corrections". Both files were re-read. Every "still reads
+  relative" statement is corrected, and the now-redundant operator instruction
+  is dropped. `J1M-CLI-RELATIVE-DESTINATION-001` **stays** — the CLI should
+  resolve relative paths against `ROOT` — but its premise is re-anchored to the
+  original staging error rather than to the current file.
+- **MAJOR 3 — the comparator budgeting claim is no longer a literal presented
+  as a verdict.** The refresh quoted `raises_authorized_cost: False` four times;
+  that is a hardcoded literal at `scripts/j1m_orchestrator.py:917`. The
+  *computed* companion `fits_static_worst_case` (`:914`, `required <=
+  static_slack`) is False for every selection, and the runtime gate
+  `_comparator_clock_available` (`:921`) can refuse the phase with typed
+  `comparator_clock_insufficient` (`:949`, wired `:2489`). So **a paid run can
+  complete, pass the Q4 evaluation, and still return no retention number.**
+  Every occurrence now carries that mechanism, and "reachable inside a single
+  budgeted run" is softened to "only if the runtime clock gate admits the
+  comparator phase; the static worst case does not fit". This is the same
+  standard the refresh already applies seven times to
+  `"safe_to_migrate_now": False` — the auditor was right that it was applied to
+  one literal and not the other.
+- **MINORs applied (8/8).** The false self-certification is narrowed to "no
+  *credential* value" (the non-secret ceiling `=2` genuinely is reproduced); the
+  dry-run gate is credited with **one** of the three refusals rather than two,
+  since its other find was the artifact-destination mode; **two findings closed
+  before merge** — the deferred comparator cleanup tail and the untyped
+  `q4-oracle` refusal — are now marked closed with their source sites
+  (`:2142`, `:1089-1097`) instead of recorded as open residuals; three dropped
+  qualifiers are restored (the key survives one narrow `signal.signal` window,
+  the dry-run gate needs the unit suites for two of its own properties, and the
+  comparator arms are "plan- and argv-complete", never executed); the ADR's
+  zero-pending-owner figure is marked **post-adjudication**, resolving its
+  internal contradiction with the 65-pending/22-owner line; the
+  `MODEL_DECISION.md` line citation is corrected to `:497-498` in the delivered
+  tree, since this commit itself shifts it; and §10's two overstated agreement
+  claims are fixed — `action_id` bounds differ across the three, and a **fourth**
+  declaration in the frozen contract `contracts/external-tools/v0.1.0.json:72`
+  agrees on names while constraining `parameters` more tightly, untested.
+- **NITs applied.** The untracked run-a residue in the `main` checkout is now
+  recorded rather than certified around; "stepping the gates in isolation" is
+  re-described as one cause per attempt, which is what `commands.txt:32-37`
+  shows; two imprecise ADR citations are corrected and the ADR Status line now
+  carries its own non-advancement caveat, matching ADR-0003 and ADR-0004; and
+  the 8,192 parameter bound is described as characters (UTF-16 code units),
+  not bytes.
+- **NIT 17 not applied, deliberately.** The broad tail of review residuals the
+  auditor lists — corpus RES-3/RES-4/SYSTEMATIC-4 and the 0.6% all-residual
+  rate, the comparator-engine literal-extractor and `wait_for_health` NITs, the
+  key-handle same-uid race, and the `/private/tmp` suite-placement finding — is
+  left for Sol to triage into rows. None is required before merge by any report,
+  and inventing rows for them here would overstate this refresh's mandate.
 
 ## Blockers
 
@@ -588,9 +674,9 @@ never read a secret value.
 
 This refresh is complete and `READY_FOR_REVIEW`. The next action is not this
 session's: **a human decides whether to approve the launch** of
-`remote-eval-20260911-b`, whose command is ready in the run-b summary §5 —
-substituting an absolute `--artifact-destination`, since the recorded form is
-relative and would be refused pre-spend.
+`remote-eval-20260911-b`, whose command is ready to run unchanged in the run-b
+summary §5 and `commands.txt`, now carrying the corrected absolute
+`--artifact-destination`.
 
 When the run executes, its numbers arrive as a **separate addendum**, not as an
 edit to this packet's evidence: the actual cost against the recorded USD 10.00

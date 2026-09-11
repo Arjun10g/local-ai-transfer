@@ -33,11 +33,11 @@
   `--evaluate-comparators` retain the arms long enough to evaluate them, and
   the cleanup tail is moved rather than dropped. The ≥95% retention criterion
   (`execution/ACCEPTANCE_CRITERIA.md:215`) is therefore reachable inside a
-  single budgeted eval run, and B-004/B-006 cost planning should carry the
-  marginal comparator cost, not a full re-conversion. Measured marginal
-  projections from the merged slice: `q4-oracle` 2,220 s / USD 0.8325, `q8`
-  2,940 s / USD 1.1025, `q8,bf16` 3,660 s / USD 1.3725, each reported with
-  `raises_authorized_cost: False`.
+  single budgeted eval run **only if the runtime clock gate admits the comparator
+  phase**, and B-004/B-006 cost planning should carry the marginal comparator
+  cost, not a full re-conversion. Measured marginal projections from the merged
+  slice: `q4-oracle` 2,220 s / USD 0.8325, `q8` 2,940 s / USD 1.1025, `q8,bf16`
+  3,660 s / USD 1.3725, each reported with `raises_authorized_cost: False` — a hardcoded literal at `scripts/j1m_orchestrator.py:917`, not a computed verdict. The computed companion flag `fits_static_worst_case` (`:914`, `required <= static_slack`) is **False for every selection**, and whether the comparator phase runs at all is decided at run time by `_comparator_clock_available` (`:921`), which refuses with typed `comparator_clock_insufficient` (`:949`, wired at `:2489`). A budgeted run can therefore complete and pass the Q4 evaluation while skipping the comparator phase entirely — spending the money and producing no retention number. The same standard applies here as to `"safe_to_migrate_now": False`: a literal is not a verdict.
 - **Corrected: the evaluation lane is not blocked by `REMOTE_EXECUTION_ENABLED`
   and does not need a Hugging Face token.** `REMOTE_EXECUTION_ENABLED` exists
   only in `scripts/shadeform/remote_external_tools.py` (defined `:85`, enforced

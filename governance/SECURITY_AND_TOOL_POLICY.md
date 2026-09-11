@@ -234,14 +234,27 @@ Rules:
 }
 ```
 
-The shape is pinned identically in three shipping places: the advertised
+The shape is pinned in three shipping places: the advertised
 catalogue (`tests/model/production_tool_call_eval.json`, the 33-tool shipping
 profile), the tool definition and input schema
 (`host/tools/local/process-run.mjs:23-25`, `processDefinition.parameters` and
 `.input_schema`), and the controller's argument validator
-(`host/agent/controller.mjs:127`). In all three, `action_id` is a string of
-1–64 characters and is the only required field; `parameters` is an object; and
-`additionalProperties` is `false` at the top level.
+(`host/agent/controller.mjs:127`). In all three, `action_id` is the only
+required field, `parameters` is an object, and `additionalProperties` is `false`
+at the top level. Two of the three also declare `minLength: 1` alongside
+`maxLength: 64`; `host/agent/controller.mjs:127` declares `maxLength` only,
+which is not a hole because the runtime validator at
+`host/tools/local/process-run.mjs:83` enforces `{min: 1, max: 64}` regardless.
+
+The tool is declared a **fourth** time, in the frozen contract
+`contracts/external-tools/v0.1.0.json:72`. It agrees on the field names — which
+is what this correction turns on — but constrains the nested `parameters` object
+more tightly than the three above do, using `additionalProperties: false`,
+`maxProperties: 16` and a key pattern where they use
+`additionalProperties: true`. **No test compares the two**
+(`tests/host/external-tools.test.mjs` checks only top-level
+`additionalProperties` and a tool count), so the divergence is recorded here
+rather than left uncited.
 
 The model never chooses an executable. `action_id` selects one **fixed,
 operator-configured action**, and the operator's configuration — not the model —
@@ -267,7 +280,8 @@ Rules:
   `installutil` — and refuse script-extension targets (`.bat`, `.cmd`, `.ps1`,
   `.vbs`, `.js`, `.hta`, and the rest of that family).
 - Bound the configuration itself: at most 32 actions, 32 arguments per action,
-  64-character parameter names, and 8,192-byte parameter values.
+  64-character parameter names, and 8,192-character parameter values (the bound
+  is `value.length`, i.e. UTF-16 code units, not bytes).
 - Validate each argument and total length.
 - Spawn directly without shell.
 - Use an approved working directory.

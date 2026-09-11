@@ -1,6 +1,7 @@
 # ADR-0005 — Standing provider-run spend authorization and program cost caps
 
-- **Status:** Accepted
+- **Status:** Accepted — authorizes bounded spend only; formal gate approval
+  remains required and no phase or release gate is advanced by this ADR
 - **Date:** 2026-09-11
 - **Decision owner:** S0 Sol
 - **Authors/reviewers:** S0 Sol (decision); S2 and S4 (lifecycle and cost
@@ -104,7 +105,7 @@ Ranked before options were considered:
   approval. Mitigated by stating the opposite explicitly here and in every
   document that references this ADR.
 - **Evidence:** the settled legacy ledger is USD 6.767912 across 108 rows and
-  43 distinct identities, with a pending-owner count of exactly zero; the
+  43 distinct identities, with a post-adjudication pending-owner count of zero — the legacy file itself carries 65 pending rows across 22 pending-only owners, which Sol adjudicated historical; the
   dry-run gate proves the argv surface at USD 0.00 over 142 recorded argv with
   0 refused; salvage, exact teardown, and exact-instance deletion verification
   are source-present and merged.
@@ -129,8 +130,10 @@ Ranked before options were considered:
    the lifecycle already enforces, and with the USD 43.232088 that remains once
    the settled legacy spend of USD 6.767912 is subtracted from it. Note that
    USD 43.232088 is a *derived* figure (50.00 − 6.767912), not a field stored
-   in the ledger; the ledger's own settled total is USD 6.767912 with zero
-   pending reservations.
+   in the ledger; the ledger's own settled total is USD 6.767912, and the zero
+   pending-owner count is the post-adjudication figure Sol passed to the genesis
+   rather than a raw property of the legacy file, which carries 65 pending rows
+   across 22 pending-only owners.
 3. **Per-run caps are recorded per run.** Each run carries its own explicitly
    recorded cost and wall-clock cap. For the next run, `remote-eval-20260911-b`,
    Sol set **USD 10.00 and 4 hours**.
@@ -169,7 +172,7 @@ it.
 The cap is not only bookkeeping. The lifecycle already treats the whole-project
 cost control as a launch precondition: candidate selection "subtracts what the
 ledger already records and refuses to launch while any prior row's cost is
-unaccounted" (`scripts/shadeform_lifecycle.py:18-21`). Recording USD 50 as the
+unaccounted" (`scripts/shadeform_lifecycle.py:19-21`). Recording USD 50 as the
 program cap therefore lands on a control that fails closed on its own, which is
 what criterion 1 requires.
 
@@ -280,7 +283,8 @@ from.
 
 It also removed the blocker that had stopped **every** run. `sf.list_candidates`
 validates the ledger against `local_bmo.shadeform.cost-event.v2`
-(`scripts/shadeform_lifecycle.py:80`), and the 2026-09-04 file failed
+(the schema constant is `scripts/shadeform_lifecycle.py:80`; the
+canonicalization refusal is raised at `:1989`), and the 2026-09-04 file failed
 canonicalization at line 1 with `stored cost event is not canonical` (`:1989`).
 That was the concrete, reproducible form of the abstract `SAFE_TO_MIGRATE_NOW`
 / `legacy_schema_or_owner_binding_missing` condition governance had been

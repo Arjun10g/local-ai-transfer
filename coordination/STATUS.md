@@ -35,8 +35,9 @@
     `MIN_BACKSTOP_MARGIN = 1.10`; the refusal is a typed `BackstopError`
     (`:3374-3386`). Sol raised the ceiling to 3, a deliberate decision rather
     than a fitted knob — the code says so itself at `:3384` — putting the worst
-    case at 3 h × USD 1.35 = USD 4.05, inside the USD 10.00 run cap. Key names
-    only are recorded here; no value from that file is reproduced anywhere.
+    case at 3 h × USD 1.35 = USD 4.05, inside the USD 10.00 run cap. Only key
+    names and that non-secret numeric ceiling are recorded here; **no credential
+    value** from that file was read, printed, or reproduced anywhere.
   - *Legacy cost ledger.* `sf.list_candidates` validates
     `experiments/runtime/cost-ledger.jsonl` against
     `local_bmo.shadeform.cost-event.v2`
@@ -71,9 +72,7 @@
 - **Pre-spend gates after genesis, all read-only or local.**
   `list_candidates` returned **9 candidates**, exactly one matching the pinned
   target (hyperstack / montreal-canada-2 / A100_80G / USD 1.35 per hour).
-  `create_ephemeral_ssh_key` and `assert_persisted_argv_handle` both pass, and
-  the key directory was destroyed leaving zero residue. Nothing beyond the
-  read-only catalogue query contacted a provider.
+  No ephemeral key was ever minted by any launch attempt: all three refused earlier, at the destination, backstop and ledger gates, before key creation was reached. `.secrets/j1m/` is empty, and that emptiness is what proves the orchestrator lifecycle never began — not that a run's key was cleaned up. Separately, Sol's **isolated** gate probe called `create_ephemeral_ssh_key` and `assert_persisted_argv_handle` once, then `destroy_ephemeral_key_directory`, which is why the directory is empty rather than absent. That probe is not the orchestrator, and it minted nothing for run b. Nothing beyond the read-only catalogue query contacted a provider.
 - **Two offline dry-run gaps recorded as follow-ups.** The gate passed at 142
   argv / 0 refused while two live blockers stood, because it exercises a fake
   environment and a fake ledger. It did not check the real environment's
@@ -138,7 +137,10 @@
   rationale of `2d7db4f` is preserved by never giving SCP the validated
   destination — transfers land in a private staging directory and are published
   by no-follow descriptor. The ephemeral SSH key moves to
-  `.secrets/j1m/<run-id>-<nonce>/ssh-key` and is destroyed on every exit path;
+  `.secrets/j1m/<run-id>-<nonce>/ssh-key` and is destroyed on every exit path
+  except one narrow window: between the handle proof and the protected region a
+  `signal.signal` `ValueError` raised off the main thread leaves the per-run key
+  directory in place, at 0700/0600 and gitignored;
   the validators are byte-unchanged, and tests pin that the old temporary-
   directory layout is still refused, so the fix is at the operand rather than
   the gate. Build, prove and eval now fail when a required receipt is missing,
@@ -150,8 +152,10 @@
   exceptions, no lifecycle receipt had ever been written. The key operand shape
   failed the canonical-private-handle rule `validate_persisted_argv` has
   enforced since `991b70e`, refusing every ssh/scp argv before it could spawn.
-  Two of the three were found by the offline dry-run gate, which is the point
-  of having one.
+  One of the three — the `_persist_lifecycle` `NameError` — was found by the
+  offline dry-run gate. The gate's other find was the artifact-destination mode,
+  which is not one of these three; the key-operand refusal was self-disclosed by
+  the salvage packet and the salvage refusal was the deliberate `2d7db4f` state.
 - **First launch attempt stopped pre-spend.** On 2026-09-11
   `remote-eval-20260911-a` stopped at the pre-launch gate at **USD 0.00**. No
   instance was created, no provider mutation of any kind was issued,
@@ -172,7 +176,7 @@
   use. (c) bf16, Q8_0 and Q4 are rebuilt in **every** eval run
   (`scripts/j1m_runner.py:1420-1422`), so the "must budget a full
   re-conversion" planning statement in B-004, B-006 and `MODEL_DECISION.md` is
-  withdrawn in favour of the marginal comparator cost. (d) The ledger migration
+  withdrawn in favour of the marginal comparator cost — but only if the runtime clock gate admits the comparator phase: `fits_static_worst_case` (`scripts/j1m_orchestrator.py:914`) is computed False for every selection, the frequently quoted `raises_authorized_cost: False` (`:917`) is a hardcoded literal rather than a verdict, and `_comparator_clock_available` (`:921`) can refuse the phase at run time with typed `comparator_clock_insufficient` (`:949`), so a budgeted run can pass the Q4 evaluation, spend the money, and still return no retention number. (d) The ledger migration
   preflight's verdict is not computed: `"safe_to_migrate_now": False` is a
   hardcoded literal at
   `scripts/shadeform_ledger_migration_preflight.py:1110`, alongside
@@ -209,7 +213,11 @@
   component accepts that shape; the advertised catalogue, the tool definition
   (`host/tools/local/process-run.mjs:23-25`) and the controller validator
   (`host/agent/controller.mjs:127`) all use `action_id` plus an optional
-  `parameters` object with `additionalProperties: false`. Per Sol's ruling the
+  `parameters` object, agreeing on the field names and on top-level
+  `additionalProperties: false`. A fourth definition in the frozen contract
+  `contracts/external-tools/v0.1.0.json:72` agrees on the names but constrains
+  the nested `parameters` object more tightly than the three do; nothing tests
+  the pair. Per Sol's ruling the
   shipping catalogue is authoritative and §10 is corrected to it, including
   removal of the obsolete PowerShell subcommand-policy text — the shipping
   implementation refuses PowerShell and every other interpreter outright. No
