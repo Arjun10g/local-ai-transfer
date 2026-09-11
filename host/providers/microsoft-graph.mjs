@@ -31,8 +31,14 @@ const PROOF_DEADLINE_MARGIN_MS = 2500;
 // Never start a proof request that cannot plausibly complete inside the
 // remaining budget, and never let one outlive that budget.
 const MIN_PROOF_REQUEST_MS = 250;
-// Matches `MicrosoftDeviceCodeCredential.getAccessToken`'s own refresh margin.
-const TOKEN_LIVENESS_MARGIN_MS = 60000;
+// The cached token must outlive the whole pass AND stay above
+// `MicrosoftDeviceCodeCredential.getAccessToken`'s own 60 s refresh threshold
+// for its entire duration: 30 s controller pass deadline + 60 s refresh
+// margin. Matching only the 60 s refresh margin is not enough — a token with
+// 60-90 s of life passes the guard, then crosses the refresh threshold
+// mid-pass, and `getAccessToken` clears the cache, which clears the session
+// and revokes the operator's capability grants.
+const TOKEN_LIVENESS_MARGIN_MS = 90000;
 const DRAFT_PROOF_SELECT = 'id,subject,body,toRecipients,ccRecipients,internetMessageHeaders,changeKey';
 const ACCOUNT_OBJECT_ID = /^(?=.{1,512}$)[^\s\p{Cc}\p{Cf}]+$/u;
 // Graph message/chat creation and sent timestamps are documented as UTC.

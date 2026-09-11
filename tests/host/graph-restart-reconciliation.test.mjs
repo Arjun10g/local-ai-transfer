@@ -254,6 +254,29 @@ test('a restart pass reads authorization state without mutating it and never iss
   assert.equal((await saved.journal.detail(saved.binding.operation_id)).state, 'completed');
 });
 
+test('a token that cannot outlive the pass and the credential refresh threshold is refused', async t => {
+  // `now` is 0 for this fixture, so `expiresAt` is the remaining lifetime.
+  // 75 s clears `getAccessToken`'s own 60 s refresh threshold today but would
+  // cross it during the 30 s pass, so the precondition must refuse it.
+  for (const [label, remainingMs, expected] of [['75 s remaining', 75000, 0], ['120 s remaining', 120000, 1]]) {
+    const saved = await acknowledgedDraftJournal(t);
+    const revoked = [];
+    const grantStore = { get: () => null, revoke: capability => { revoked.push(capability); return true; }, subscribe: () => () => {} };
+    const identity = graphFixture(); await identity.provider.startAuth();
+    const marker = `${saved.binding.operation_id}:${saved.binding.operation_digest}:${identity.provider.getAccountFingerprint()}`;
+    const fixture = graphFixture({ drafts: [providerDraft({ id: 'draft-liveness', marker })] });
+    Object.assign(fixture.provider, { grantStore });
+    await fixture.provider.startAuth();
+    fixture.provider.credentialSource.cached = { ...fixture.provider.credentialSource.cached, expiresAt: remainingMs };
+    const before = fixture.calls.length;
+    const controller = new ConversationController({ engine, actionJournal: saved.journal, toolRegistry: createMicrosoftGraphTools(fixture.provider) });
+    assert.deepEqual(await controller.reconcileRestartActions(), { state: 'completed', examined: 1, completed: expected, blocked: 0, code: null }, label);
+    assert.equal(fixture.calls.length > before, expected === 1, label);
+    assert.deepEqual(revoked, [], label);
+    assert.equal((await saved.journal.detail(saved.binding.operation_id)).state, expected === 1 ? 'completed' : 'acknowledged', label);
+  }
+});
+
 test('an auth epoch change during a pass blocks completion even when the same account is re-verified', async t => {
   const saved = await acknowledgedDraftJournal(t);
   let releaseList; const listGate = new Promise(resolve => { releaseList = resolve; });
