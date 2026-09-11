@@ -372,7 +372,8 @@ export class MicrosoftGraphProvider {
   // plus at most `MAX_MAIL_PROOF_CANDIDATES` GETs per call. `exhausted` means
   // the deadline stopped the walk: that is an inconclusive result, never
   // evidence of absence. `folder` and `select` are host-internal literals; no
-  // model, provider, or operator value reaches them.
+  // model, provider, or operator value reaches them, and `$top` is applied
+  // last so a caller's `listQuery` can never widen the shared candidate cap.
   async collectMailProof({ folder, listQuery, select, project = projectionDraft, marker, matches, signal, deadline = null }) {
     // An absent or malformed marker can never identify a host-written
     // operation, and must never be allowed to equal a projection's own absent
@@ -380,7 +381,7 @@ export class MicrosoftGraphProvider {
     if (!OPERATION_MARKER.test(marker ?? '')) return { values: null, truncated: false, exhausted: false };
     const listBudget = this.proofRequestBudget(deadline);
     if (!listBudget.allowed) return { values: null, truncated: false, exhausted: true };
-    const response = await this.request({ method: 'GET', path: `${API}/me/mailFolders/${folder}/messages`, query: { '$top': MAX_MAIL_PROOF_CANDIDATES, ...listQuery }, signal, timeoutMs: listBudget.timeoutMs });
+    const response = await this.request({ method: 'GET', path: `${API}/me/mailFolders/${folder}/messages`, query: { ...listQuery, '$top': MAX_MAIL_PROOF_CANDIDATES }, signal, timeoutMs: listBudget.timeoutMs });
     const collection = proofCollection(response.body, MAX_MAIL_PROOF_CANDIDATES); if (!collection.values || collection.truncated) return { values: collection.values, truncated: collection.truncated, exhausted: false };
     const ids = uniqueProofMap(collection.values, value => validResource(value) ? { id: value.id } : null); if (!ids) return { values: null, truncated: false, exhausted: false };
     const found = [];
