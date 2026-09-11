@@ -299,9 +299,13 @@ class WindowsProcessTransactionStaticTests(unittest.TestCase):
         self.assertNotIn("SupervisorState&", signature)
         self.assertNotIn("JournalAuthorityOwner", signature)
         body = self.tx[self.tx.index("LaunchReceipt execute_process_transaction"):]
+        self.assertIn("plan.authority.has_value()", body)
+        self.assertIn("validate_for_admission", body)
         self.assertIn("if (!authority.consume())", body)
-        self.assertLess(body.index("authority.consume"),
-                        body.index("if (!kProcessLaunchAvailable"))
+        self.assertLess(body.index("validate_for_admission"),
+                        body.index("authority.consume"))
+        self.assertLess(body.index("if (!kProcessLaunchAvailable"),
+                        body.index("authority.consume"))
 
     def test_process_authority_is_move_only_and_one_use(self):
         authority = self.cpp[self.cpp.index("struct ProcessLaunchAuthority"):

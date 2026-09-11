@@ -1,7 +1,8 @@
 #pragma once
 
-// Deliberately unlinked source boundary. This header is not included by the
-// host or CMake until the full Windows identity and containment review passes.
+// Deliberately inert source boundary. authority.cpp (and this header) are
+// transitively covered only by the default-OFF inert Windows compile-check;
+// they are outside the host, product CMake, package, and runtime graphs.
 #if !defined(_WIN32)
 #error "the supervisor authority is Windows-only and unavailable here"
 #endif
@@ -38,6 +39,7 @@ inline constexpr bool kProductionAvailable =
     kReleaseManifestPinned && kSelfAuthenticodePinned &&
     kPackageIdentityPinned && kCancellableIoProven &&
     kDurableJournalAuthority &&
+    kNestedJobPolicyProven &&
     kBrokerIssuedIdentityProven && kRetainedExecutingSectionIdentityProven &&
     kRetainedWorkingDirectoryIdentityProven;
 inline constexpr bool kProcessLaunchAvailable =
