@@ -406,7 +406,11 @@ class ComparatorFlagTests(unittest.TestCase):
 
     def test_remote_commands_and_uploads_are_untouched(self):
         commands = self.orchestrator._eval_remote_commands(self.config, "/scratch/j1m")
-        self.assertEqual(len(commands), 14)
+        # 14 before J1M-HOST-PRIVACY-001; the extra stage is the `chmod 700`
+        # that follows the plan's own `mkdir -p`.
+        self.assertEqual(len(commands), 15)
+        self.assertEqual(commands[1][:2], ["chmod", "700"])
+        self.assertEqual(commands[0][2:], commands[1][2:])
         flattened = " ".join(part for command in commands for part in command)
         self.assertNotIn("comparator", flattened)
         self.assertNotIn("retain", flattened)

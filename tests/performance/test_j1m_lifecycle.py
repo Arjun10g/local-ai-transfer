@@ -1909,7 +1909,18 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertEqual(payload["stage"], "eval-stage-starting")
         self.assertEqual(payload["operation_stage"], "eval-bootstrap:mkdir")
 
-    def test_remote_failure_does_not_retain_stdout_evidence(self):
+    def test_remote_failure_retains_only_a_credential_screened_stdout_tail(self):
+        """J1M-HOST-PRIVACY-001 changed this contract deliberately.
+
+        Retaining no stdout at all is what made run j1m-eval-20260911-remote-d
+        unreadable: the remote runner prints its typed JSON refusal on stdout,
+        so the lifecycle receipt recorded `exit 2` with an empty stderr tail
+        and no diagnosis for a run that had already been billed. A failed
+        stage now keeps a bounded stdout tail -- but only one that survives
+        the same credential screening every other persisted value gets, so a
+        credential-shaped line still never reaches the receipt.
+        """
+
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_remote_output")
         completed = subprocess.CompletedProcess(
             ["probe"],
@@ -1921,7 +1932,7 @@ class StaticSafetyTests(unittest.TestCase):
             receipt = orchestrator._remote(["probe"], timeout=1)
         self.assertEqual(receipt["status"], "failed")
         self.assertEqual(receipt["exit_code"], 2)
-        self.assertNotIn("stdout_tail", receipt)
+        self.assertEqual(receipt["stdout_tail"], "<redacted>")
         self.assertNotIn("do-not-retain", json.dumps(receipt))
 
     def test_eval_stage_labels_distinguish_python_and_cmake_operations(self):
@@ -2011,13 +2022,29 @@ class StaticSafetyTests(unittest.TestCase):
             list_candidates.assert_not_called()
             create_key.assert_not_called()
 
-    def test_orchestrator_failed_remote_receipt_does_not_retain_stdout(self):
+    def test_orchestrator_stdout_tail_is_bounded_typed_and_failure_only(self):
+        """The typed refusal has to be readable; a completed stage keeps nothing."""
+
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_no_stdout")
-        result = types.SimpleNamespace(returncode=2, stdout="model response SECRET_PROMPT", stderr="safe failure")
+        refusal = json.dumps({"error_code": "input_rejected", "status": "refused"}, sort_keys=True)
+        result = types.SimpleNamespace(returncode=2, stdout=refusal, stderr="")
         with mock.patch.object(orchestrator.subprocess, "run", return_value=result):
             receipt = orchestrator._remote(["ssh", "host", "eval"], timeout=1)
-        self.assertNotIn("stdout_tail", receipt)
-        self.assertNotIn("SECRET_PROMPT", json.dumps(receipt))
+        # This is the exact stdout j1m_runner._safe_cli printed on run
+        # j1m-eval-20260911-remote-d, which the receipt could not show.
+        self.assertEqual(receipt["stdout_tail"], refusal)
+        self.assertEqual(receipt["error_type"], "remote_exit")
+
+        succeeded = types.SimpleNamespace(returncode=0, stdout="a" * 5000, stderr="")
+        with mock.patch.object(orchestrator.subprocess, "run", return_value=succeeded):
+            completed_receipt = orchestrator._remote(["ssh", "host", "eval"], timeout=1)
+        self.assertNotIn("stdout_tail", completed_receipt)
+
+        noisy = types.SimpleNamespace(returncode=2, stdout="b" * 5000, stderr="")
+        with mock.patch.object(orchestrator.subprocess, "run", return_value=noisy):
+            bounded = orchestrator._remote(["ssh", "host", "eval"], timeout=1)
+        self.assertEqual(len(bounded["stdout_tail"]), orchestrator._STDERR_TAIL_LIMIT)
+        self.assertLessEqual(len(bounded["stdout_tail"]), 2048)
 
     def test_remote_prove_uses_the_uploaded_config(self):
         orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "j1m_orchestrator_prove_argv")
@@ -2081,11 +2108,15 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertIn((ROOT / "tests/native/runtime_tests.cpp", "/scratch/j1m/engine/tests/native/runtime_tests.cpp", False), uploads)
         self.assertIn((ROOT / "tests/native/model_validator_tests.cpp", "/scratch/j1m/engine/tests/native/model_validator_tests.cpp", False), uploads)
         source = (ROOT / "scripts/j1m_orchestrator.py").read_text(encoding="utf-8")
-        self.assertIn("eval_commands[:3]", source)
-        self.assertIn("eval_commands[3:]", source)
+        # [:3]/[3:] before J1M-HOST-PRIVACY-001; the bootstrap now carries the
+        # `chmod 700` that makes the created tree owner-private.
+        self.assertIn("eval_commands[:4]", source)
+        self.assertIn("eval_commands[4:]", source)
         commands = orchestrator._eval_remote_commands(j1m.load_config(), "/scratch/j1m")
-        self.assertEqual(commands[1][:2], ["sudo", "apt-get"])
-        self.assertEqual(commands[2][:5], ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install"])
+        self.assertEqual(commands[0][:2], ["mkdir", "-p"])
+        self.assertEqual(commands[1][:2], ["chmod", "700"])
+        self.assertEqual(commands[2][:2], ["sudo", "apt-get"])
+        self.assertEqual(commands[3][:5], ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install"])
         j1m_index = next(index for index, command in enumerate(commands) if "j1m_runner.py" in command[1])
         toolchain_indices = [index for index, command in enumerate(commands) if "remote_toolchain_probe.py" in command[1]]
         self.assertEqual(len(toolchain_indices), 2)

@@ -674,7 +674,11 @@ class ComparatorPlanTests(unittest.TestCase):
     def test_the_deadline_ceiling_is_untouched_by_the_comparator_phase(self):
         envelope = self.orchestrator._eval_deadline_ceiling(self.config)
         self.assertEqual(envelope["upload_count"], 15.0)
-        self.assertEqual(round(envelope["run_seconds"] - envelope["ceiling_seconds"], 3), 309.0)
+        # 309.0 before J1M-HOST-PRIVACY-001. The host-privacy fix adds two
+        # bounded 30 s stages -- one `chmod 700` in the workspace preflight and
+        # one in the eval bootstrap -- so the static slack is 60 s smaller. The
+        # comparator phase still contributes nothing to this envelope.
+        self.assertEqual(round(envelope["run_seconds"] - envelope["ceiling_seconds"], 3), 249.0)
 
     def test_the_arm_stages_are_argv_arrays_with_no_bearer_and_a_loopback_port(self):
         commands = self.orchestrator._comparator_remote_commands(self.config, "/scratch/j1m", ("q8_0", "bf16"))
