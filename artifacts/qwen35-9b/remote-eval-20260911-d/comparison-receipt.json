@@ -1,0 +1,34 @@
+{
+  "baseline": null,
+  "case_count": null,
+  "comparisons": [],
+  "critical_category_policy": "all_categories_conservative",
+  "fixture_sha256": "c75af5200b76a504e6b603183ffcf1cbeedb93db18ec544683044b8cc9b8ac6c",
+  "gate": {
+    "bootstrap_resamples": 10000,
+    "confidence": 0.95,
+    "critical_category_max_drop_points": 8.0,
+    "non_inferiority_margin_points": 2.0,
+    "quality_comparator": "same-source-q8-or-higher",
+    "retention_min_percent": 95.0,
+    "runtime_oracle": "pinned-upstream-same-artifact",
+    "seed": 20260911
+  },
+  "generated_at_utc": "2026-09-11T20:29:30.146514+00:00",
+  "product_engine_reference": null,
+  "requested": [
+    "q8_0"
+  ],
+  "schema": "local_bmo.j1m.comparison-receipt.v1",
+  "skipped": [
+    {
+      "comparator": "q4_k_m",
+      "reason": "comparator_receipt_missing"
+    },
+    {
+      "comparator": "q8_0",
+      "reason": "comparator_baseline_missing"
+    }
+  ],
+  "status": "skipped"
+}

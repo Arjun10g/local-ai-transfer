@@ -1,0 +1,90 @@
+{
+  "allowlist": [
+    "comparator-receipt-bf16.json",
+    "comparator-receipt-q4_k_m.json",
+    "comparator-receipt-q8_0.json",
+    "conversion-receipt.json",
+    "cuda-device-receipt.json",
+    "eval-artifact-receipt.json",
+    "eval-receipt.json",
+    "manifest.json",
+    "model-receipt.json",
+    "post-cleanup-receipt.json",
+    "proving-receipt.json",
+    "scan-receipt.json",
+    "source-model-receipt.json",
+    "startup-preflight-receipt.json",
+    "tensor-metadata.json",
+    "toolchain-receipt.json",
+    "toolchain.json"
+  ],
+  "caps": {
+    "max_files": 17,
+    "min_free_bytes": 71303168,
+    "per_file_bytes": 2097152,
+    "per_file_timeout_seconds": 60.0,
+    "total_bytes": 35651584,
+    "wall_clock_seconds": 300.0
+  },
+  "completed": 0,
+  "duration_ms": 3046,
+  "failed": 8,
+  "files": [
+    {
+      "error_code": "salvage_transport_failed",
+      "exit_code": 1,
+      "name": "eval-receipt.json",
+      "status": "salvage_failed"
+    },
+    {
+      "error_code": "salvage_transport_failed",
+      "exit_code": 1,
+      "name": "startup-preflight-receipt.json",
+      "status": "salvage_failed"
+    },
+    {
+      "error_code": "salvage_transport_failed",
+      "exit_code": 1,
+      "name": "eval-artifact-receipt.json",
+      "status": "salvage_failed"
+    },
+    {
+      "error_code": "salvage_not_private_regular_file",
+      "name": "toolchain-receipt.json",
+      "status": "salvage_failed"
+    },
+    {
+      "error_code": "salvage_transport_failed",
+      "exit_code": 1,
+      "name": "cuda-device-receipt.json",
+      "status": "salvage_failed"
+    },
+    {
+      "error_code": "salvage_transport_failed",
+      "exit_code": 1,
+      "name": "comparator-receipt-q4_k_m.json",
+      "status": "salvage_failed"
+    },
+    {
+      "error_code": "salvage_transport_failed",
+      "exit_code": 1,
+      "name": "comparator-receipt-q8_0.json",
+      "status": "salvage_failed"
+    },
+    {
+      "error_code": "salvage_transport_failed",
+      "exit_code": 1,
+      "name": "scan-receipt.json",
+      "status": "salvage_failed"
+    }
+  ],
+  "host_key_proof": "two-stable-bounded-scans-residual-tofu",
+  "host_key_reproof": "acquisition-digest",
+  "known_hosts_sha256": "eedd2a61c57f81832909c1f40652d29447d4f36405e23937875b7698d21d6ae8",
+  "remote_directory": "/scratch/j1m/artifacts",
+  "requested": 8,
+  "schema": "local_bmo.j1m.salvage-receipt.v1",
+  "status": "salvage_failed",
+  "total_bytes": 0,
+  "transport": "scp-argv-bounded-source-allowlist-v1"
+}
