@@ -1,6 +1,101 @@
 # Model Decision Record — Qwen3.5-9B Q4_K_M
 
-## Current governance truth — 2026-09-11 (refresh v5)
+## Current governance truth — 2026-09-11 (refresh v6)
+
+- Audited integrated source baseline is exact
+  `main@f89c1684ea051e1c9c92f944cb080d424a086f55`, the last source merge. The
+  docs descendants `1e341e9`, `aa1087a`, `25a0d95`, `74a43d0`, `335211f`,
+  `1b22a40` and this refresh are documentation descendants, not
+  self-referential source hashes. The previous baseline `263f114` and the v5
+  block below are historical and superseded. Release/full access remains
+  `BLOCKED` / `NOT_READY`; no phase or release gate is advanced here.
+- **The model still has not been tested against the profile it must ship
+  against.** The shipping profile remains 33 tools and 37 cases
+  (`tests/model/production_tool_call_eval.json`, SHA-256
+  `c75af5200b76a504e6b603183ffcf1cbeedb93db18ec544683044b8cc9b8ac6c`), with
+  `max_cases=64` a ceiling rather than a request to trim, and it has no
+  recorded score. The 2026-09-04 figures (28/34 retired canary, 13/32 retired
+  production profile) were measured on CUDA/A100, never on CPU and never on
+  Intel Vulkan, and are not current acceptance.
+- **Corrected: the comparators are rebuilt in every eval run, so no separate
+  re-conversion budget is required.** The v5 statement that a future quality
+  run "must budget a full Shadeform re-conversion rather than an evaluation
+  alone" was wrong about the cost shape. `command_plan`
+  (`scripts/j1m_runner.py:1379`) unconditionally emits all three conversion
+  stages in the same plan that produces the deployable Q4 —
+  `Qwen3.5-9B-bf16.gguf` at `:1420`, `Qwen3.5-9B-Q8_0.gguf` at `:1421`, and the
+  Q4_K_M quantize from the bf16 at `:1422`. What the deleted-comparator fact
+  actually established is narrower: the comparators are *deleted at the end of
+  the run* by the cleanup tail (`comparator_cleanup_plan`, `:1311`), so only
+  their hashes survive in `artifacts/qwen35-9b/scan-receipt.json`. The merged
+  comparator work makes that tail deferrable rather than unavoidable: the
+  runner's `--retain-comparators` and the orchestrator's default-OFF
+  `--evaluate-comparators` retain the arms long enough to evaluate them, and
+  the cleanup tail is moved rather than dropped. The ≥95% retention criterion
+  (`execution/ACCEPTANCE_CRITERIA.md:215`) is therefore reachable inside a
+  single budgeted eval run, and B-004/B-006 cost planning should carry the
+  marginal comparator cost, not a full re-conversion. Measured marginal
+  projections from the merged slice: `q4-oracle` 2,220 s / USD 0.8325, `q8`
+  2,940 s / USD 1.1025, `q8,bf16` 3,660 s / USD 1.3725, each reported with
+  `raises_authorized_cost: False`.
+- **Corrected: the evaluation lane is not blocked by `REMOTE_EXECUTION_ENABLED`
+  and does not need a Hugging Face token.** `REMOTE_EXECUTION_ENABLED` exists
+  only in `scripts/shadeform/remote_external_tools.py` (defined `:85`, enforced
+  `:804`, `:1255`) and gates only the hostile-tools QA lane. The J1M evaluation
+  lane's mutation gate is `SOL_J1M_REVIEWED=1`
+  (`scripts/j1m_orchestrator.py:2840-2841`). Separately, the lane reproduces
+  the Q4 from the **public** pinned revision with no credential: `HF_TOKEN` is
+  not a member of `MUTATION_ENV_KEYS`
+  (`scripts/shadeform_lifecycle.py:134-152`), and the orchestrator states the
+  rule inline at `:2410-2412` — "Qwen3.5-9B is public at the pinned revision.
+  Do not place HF_TOKEN on the ephemeral host". Any statement that Hugging Face
+  credential rotation blocks model evaluation is withdrawn. SI-002 rotation
+  remains required for any *authenticated* Hugging Face use, and that
+  requirement is unchanged.
+- **Spend.** ADR-0005 records the user's standing authorization to launch
+  bounded provider runs for this program, a program hard cap of USD 50, and
+  per-run caps recorded per run (`remote-eval-20260911-b`: USD 10.00 / 4 h).
+  The lifecycle sequence is unchanged and still fail-closed at every step.
+  Authorized spend is not evidence and is not gate approval.
+- **Quality corpus: authored and merged**, superseding the v5 "not authored"
+  statement. 1,336 cases across 13 categories, reproduced in this worktree at
+  exit 0 in both validator modes, against a 1,180 floor and a 1,298 target.
+  Hash-derived splits (`sha256(id) % 100`) are 271 train / 250 dev / 815 test.
+  Every scoring proposition carries an inline deterministic `match` object —
+  271 fact items (207 `key_facts` + 64 `forbidden_facts`) plus 284 rubric
+  items, 555 in total — so pass/fail is computed by string and regex
+  evaluation with no model, judge, or human rater in the path. Independent
+  audit returned `ACCEPT_FOR_MERGE` after repairs, with a residual
+  scoring-affecting defect estimate of **0.2%** (3 cases). That residual errs
+  in the safe, under-crediting direction only: it can reject a correct answer
+  but cannot let a violation through. One further residual (stemmed
+  conjunction matchers blind to negation) errs the other way and is excluded
+  from the 0.2%; both must be closed before the corpus produces a retention or
+  parity number. The corpus advances no gate by itself.
+- **`max_output_tokens`: the enforced engine bound is authoritative for the
+  MVP.** Three values disagreed. What is actually enforced today is the
+  engine's, and only the engine's: `native/server/chat_request.cpp:269` rejects
+  any request outside `1..256` with `max_tokens out of range`, and defaults to
+  8 when the field is absent (`:271`). `contracts/engine-api/contract.json:4`
+  declares `"max_tokens": 64` and its `README.md:47` says "an integer from 1
+  through 64"; nothing enforces that 64 at runtime, and it is now narrower than
+  and out of step with the shipping engine. Sol's ruling: **the enforced engine
+  contract bound (1..256) is authoritative for the MVP.** The corpus, the
+  shipping fixture, and the lane validators
+  (`scripts/j1m_orchestrator.py:500`, `scripts/test/evaluate_tool_calls.py:335`)
+  already bind to it. The larger deep-mode budgets recorded under "Default
+  generation profiles" below are **aspirational, not current truth**, and
+  reaching them requires an engine-api version bump through
+  `INTERFACE_CHANGE_REQUESTS.md` — not a documentation edit. The
+  `contracts/engine-api` 64 is likewise stale against the engine and should be
+  reconciled by the same version bump.
+
+## HISTORICAL / SUPERSEDED governance truth — 2026-09-11 (refresh v5)
+
+> Historical interval snapshot for `main@263f114`; superseded by the refresh v6
+> block above wherever it states current truth. In particular its
+> "must budget a full Shadeform re-conversion" and "quality corpus is not
+> authored" statements are corrected above.
 
 - Audited integrated source baseline is exact
   `main@263f11413d1746044a6cc13062ad2b1f821c4d11`, the last source merge. The
@@ -350,12 +445,24 @@ The runtime must expose weight, attention-KV, recurrent-state, scratch, cache, G
 
 ## Default generation profiles
 
+> **ASPIRATIONAL — not enforced today (marked 2026-09-11, refresh v6).** The
+> output-token budgets in this section exceed what the shipping engine accepts.
+> `native/server/chat_request.cpp:269` enforces `1..256` and rejects anything
+> outside it with `max_tokens out of range`; a request carrying 1,024 or 2,048
+> is refused at parse time, not clamped. Per Sol's ruling the enforced engine
+> bound is authoritative for the MVP, and these larger budgets are retained as
+> the intended post-MVP target. Raising them requires an engine-api version
+> bump recorded through `coordination/INTERFACE_CHANGE_REQUESTS.md`, together
+> with reconciling `contracts/engine-api/contract.json`, whose declared
+> `max_tokens: 64` is itself stale against the engine. Nothing in this section
+> may be cited as current capability.
+
 ### Interactive mode
 
 - `thinking: false`
 - Context: 8,192
-- UI output default: 1,024 tokens
-- Hard answer cap: 2,048 tokens
+- UI output default: 1,024 tokens *(aspirational; engine enforces ≤ 256)*
+- Hard answer cap: 2,048 tokens *(aspirational; engine enforces ≤ 256)*
 - Streaming: enabled
 - Active generation: one
 - Prefix cache: enabled only after parity and privacy validation
@@ -375,7 +482,8 @@ The runtime must expose weight, attention-KV, recurrent-state, scratch, cache, G
 
 - `thinking: true`
 - User-initiated or policy-approved task routing
-- Separate reasoning and answer budgets
+- Separate reasoning and answer budgets *(aspirational; both are bounded today
+  by the engine's single enforced `max_tokens` ≤ 256)*
 - Global wall-clock and cancellation limits
 - Same tool/security policy as interactive mode
 - Reasoning text not persisted in ordinary logs
