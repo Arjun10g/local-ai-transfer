@@ -158,6 +158,104 @@ NON_ENGLISH_RE = re.compile(
 )
 
 # --------------------------------------------------------------------------
+# Deterministic proposition matcher
+# --------------------------------------------------------------------------
+#
+# `summarization` key/forbidden facts and `instruction` rubric items are natural
+# language, so they need a pinned matcher or the score depends on a judge. The
+# fixture spec calls for "compact deterministic contract fixtures", so there is no
+# LLM or human rater anywhere in this path: every item carries a `match` object and
+# the functions below are the whole of its semantics.
+
+NORMALIZE_STEPS = ("lowercase", "collapse_ws", "strip_punct", "numerals")
+
+# Spelled-out forms folded to digits so a matcher can be written with digits only.
+NUMBER_WORDS = {
+    "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+    "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
+    "eleven": "11", "twelve": "12", "thirteen": "13", "fourteen": "14",
+    "fifteen": "15", "sixteen": "16", "seventeen": "17", "eighteen": "18",
+    "nineteen": "19", "twenty": "20", "thirty": "30", "forty": "40", "fifty": "50",
+    "sixty": "60", "seventy": "70", "eighty": "80", "ninety": "90",
+    "hundred": "100", "thousand": "1000",
+}
+_NUMBER_WORD_RE = re.compile(r"\b(" + "|".join(sorted(NUMBER_WORDS, key=len, reverse=True)) + r")\b")
+_PUNCT_RE = re.compile(r"[^\w\s]")
+_WS_RE = re.compile(r"\s+")
+
+
+def normalize_text(text: str, steps: list[str] | tuple[str, ...]) -> str:
+    """Apply the requested steps in the fixed canonical NORMALIZE_STEPS order."""
+    selected = [step for step in NORMALIZE_STEPS if step in steps]
+    result = text
+    if "lowercase" in selected:
+        result = result.lower()
+    if "collapse_ws" in selected:
+        result = _WS_RE.sub(" ", result).strip()
+    if "strip_punct" in selected:
+        result = _PUNCT_RE.sub(" ", result)
+    if "numerals" in selected:
+        result = _NUMBER_WORD_RE.sub(lambda m: NUMBER_WORDS[m.group(1).lower()], result)
+    # strip_punct and numerals can reintroduce runs, so collapse once more.
+    if "collapse_ws" in selected:
+        result = _WS_RE.sub(" ", result).strip()
+    return result
+
+
+def match_variant(answer: str, variant: Any, steps: list[str] | tuple[str, ...]) -> bool:
+    """One any_of variant against an already-normalized answer.
+
+    A plain string matches as a substring and is normalized the same way as the
+    answer. A {"regex": ...} variant is matched with re.search and is NOT
+    normalized, so the pattern must already be written in normalized form; anchor
+    with \\A / \\Z for a whole-answer predicate.
+    """
+    if isinstance(variant, dict):
+        return re.search(variant["regex"], answer, re.DOTALL) is not None
+    return normalize_text(str(variant), steps) in answer
+
+
+def match_item(answer: str, match: dict) -> bool:
+    """True when ANY variant matches. Callers invert it for a forbidden item."""
+    steps = match.get("normalize", [])
+    normalized = normalize_text(answer, steps)
+    return any(match_variant(normalized, variant, steps) for variant in match.get("any_of", []))
+
+
+def check_match_object(match: Any, path: str) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(match, dict):
+        return [f"{path}: match must be an object"]
+    variants = match.get("any_of")
+    if not isinstance(variants, list) or not variants:
+        return [f"{path}.any_of: at least one variant is required"]
+    steps = match.get("normalize")
+    if not isinstance(steps, list):
+        return [f"{path}.normalize: an array is required (use [] for a raw-text matcher)"]
+    for index, variant in enumerate(variants):
+        if isinstance(variant, dict):
+            pattern = variant.get("regex")
+            if not isinstance(pattern, str):
+                errors.append(f"{path}.any_of[{index}].regex: a string is required")
+                continue
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                errors.append(f"{path}.any_of[{index}].regex: does not compile ({exc.msg})")
+        elif not isinstance(variant, str) or not variant.strip():
+            errors.append(f"{path}.any_of[{index}]: a non-empty string or a regex object is required")
+    # A normalized matcher is paraphrase-sensitive, so it needs alternatives. A raw
+    # structural matcher (normalize: []) is an exact predicate and one is correct.
+    if steps and len(variants) < 2:
+        errors.append(
+            f"{path}.any_of: a normalized matcher needs at least two variants "
+            "(synonym, numeral/word form, singular/plural); use normalize [] for an exact "
+            "structural regex"
+        )
+    return errors
+
+
+# --------------------------------------------------------------------------
 # Bounded JSON Schema (draft 2020-12) subset interpreter
 # --------------------------------------------------------------------------
 
@@ -621,6 +719,14 @@ def check_case(
                 re.compile(pattern)
             except re.error:
                 errors.append(f"{case_path}.expected.must_match[{index}]: not a compilable regular expression")
+        # Presence of `match` is required by the schema; its contents are checked here.
+        for index, item in enumerate(expected.get("rubric", []) or []):
+            if isinstance(item, dict) and "match" in item:
+                errors.extend(check_match_object(item["match"], f"{case_path}.expected.rubric[{index}].match"))
+        for key in ("key_facts", "forbidden_facts"):
+            for index, item in enumerate(expected.get(key, []) or []):
+                if isinstance(item, dict) and "match" in item:
+                    errors.extend(check_match_object(item["match"], f"{case_path}.expected.{key}[{index}].match"))
         for index, marker in enumerate(expected.get("violation_markers", []) or []):
             try:
                 re.compile(marker)

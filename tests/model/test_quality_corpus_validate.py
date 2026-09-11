@@ -574,6 +574,168 @@ class ProportionTests(unittest.TestCase):
         self.assertTrue(any("below the spec minimum" in e for e in strict))
 
 
+
+def _fact(text, **match):
+    base = {"any_of": [text, {"regex": "(?=(?s:.)*\\bfact\\w*)"}],
+            "normalize": ["lowercase", "collapse_ws", "strip_punct", "numerals"]}
+    base.update(match)
+    return {"text": text, "match": base}
+
+
+def _summarization_case(case_id, **overrides):
+    case = {
+        "id": case_id,
+        "category": "summarization",
+        "difficulty": "easy",
+        "split": V.derive_split(case_id),
+        "messages": [{"role": "user", "content": "Summarize the note in at most 20 words."}],
+        "settings": _interactive(),
+        "expected": {
+            "metric": "key_fact_coverage_and_hallucination",
+            "key_facts": [_fact("the hash matched"), _fact("the smoke test passed")],
+            "min_coverage": 1.0,
+            "forbidden_facts": [],
+            "max_words": 20,
+        },
+    }
+    case.update(overrides)
+    if "split" not in overrides:
+        case["split"] = V.derive_split(case["id"])
+    return case
+
+
+class NormalizeTests(unittest.TestCase):
+    def test_steps_apply_in_canonical_order_regardless_of_list_order(self):
+        text = "  The   Artifact HASH, matched!  "
+        forward = V.normalize_text(text, ["lowercase", "collapse_ws", "strip_punct"])
+        reverse = V.normalize_text(text, ["strip_punct", "collapse_ws", "lowercase"])
+        self.assertEqual(forward, reverse)
+        self.assertEqual(forward, "the artifact hash matched")
+
+    def test_each_step_in_isolation(self):
+        self.assertEqual(V.normalize_text("AbC", ["lowercase"]), "abc")
+        self.assertEqual(V.normalize_text(" a \n b ", ["collapse_ws"]), "a b")
+        self.assertEqual(V.normalize_text("a,b.c", ["strip_punct", "collapse_ws"]), "a b c")
+        self.assertEqual(V.normalize_text("four crashes", ["numerals"]), "4 crashes")
+
+    def test_no_steps_is_the_identity(self):
+        raw = "  Line one\n- Bullet!  "
+        self.assertEqual(V.normalize_text(raw, []), raw)
+
+    def test_numerals_respects_word_boundaries(self):
+        self.assertEqual(V.normalize_text("someone atoned", ["numerals"]), "someone atoned")
+
+
+class MatcherSemanticsTests(unittest.TestCase):
+    STEPS = ["lowercase", "collapse_ws", "strip_punct", "numerals"]
+
+    def test_string_variant_is_a_substring_match_on_the_normalized_answer(self):
+        match = {"any_of": ["hash matched", "digest agreed"], "normalize": self.STEPS}
+        self.assertTrue(V.match_item("The HASH, matched cleanly.", match))
+        self.assertFalse(V.match_item("The build failed.", match))
+
+    def test_regex_variant_uses_search_and_is_not_normalized(self):
+        match = {"any_of": [{"regex": r"(?=(?s:.)*\bhash\w*)(?=(?s:.)*\bmatch\w*)"}],
+                 "normalize": self.STEPS}
+        self.assertTrue(V.match_item("Matching digests: the hash is fine.", match))
+        self.assertFalse(V.match_item("The hash is missing.", match))
+
+    def test_any_of_is_a_disjunction(self):
+        match = {"any_of": ["alpha", "beta"], "normalize": ["lowercase"]}
+        self.assertTrue(V.match_item("BETA only", match))
+        self.assertTrue(V.match_item("ALPHA only", match))
+        self.assertFalse(V.match_item("gamma only", match))
+
+    def test_forbidden_semantics_are_the_caller_inverting_match_item(self):
+        match = {"any_of": ["approved by the security team"], "normalize": self.STEPS}
+        self.assertFalse(V.match_item("The hash matched.", match))       # forbidden item passes
+        self.assertTrue(V.match_item("Approved by the Security Team.", match))  # violation
+
+    def test_numeral_word_forms_unify(self):
+        match = {"any_of": ["4 crashes"], "normalize": self.STEPS}
+        self.assertTrue(V.match_item("There were four crashes.", match))
+        self.assertTrue(V.match_item("There were 4 crashes.", match))
+
+    def test_raw_structural_regex_sees_newlines_and_markers(self):
+        match = {"any_of": [{"regex": r"\A(?:- [^\n]*(?:\n|\Z)){3}\Z"}], "normalize": []}
+        self.assertTrue(V.match_item("- a\n- b\n- c", match))
+        self.assertFalse(V.match_item("- a\n- b", match))
+
+    def test_absence_predicate_via_lookahead(self):
+        match = {"any_of": [{"regex": r"\A(?!(?s:.)*\bsimply\b)(?!(?s:.)*\bjust\b)(?s:.)*\Z"}],
+                 "normalize": ["lowercase"]}
+        self.assertTrue(V.match_item("Read the file and report.", match))
+        self.assertFalse(V.match_item("Simply read the file.", match))
+
+
+class MatchObjectValidationTests(unittest.TestCase):
+    def test_empty_any_of_is_rejected(self):
+        errors = V.check_match_object({"any_of": [], "normalize": []}, "p")
+        self.assertTrue(any("at least one variant" in e for e in errors), errors)
+
+    def test_missing_any_of_is_rejected(self):
+        self.assertTrue(V.check_match_object({"normalize": []}, "p"))
+
+    def test_uncompilable_regex_is_rejected(self):
+        errors = V.check_match_object({"any_of": [{"regex": "(unclosed"}], "normalize": []}, "p")
+        self.assertTrue(any("does not compile" in e for e in errors), errors)
+
+    def test_non_string_variant_is_rejected(self):
+        errors = V.check_match_object({"any_of": ["  "], "normalize": []}, "p")
+        self.assertTrue(any("non-empty string" in e for e in errors), errors)
+
+    def test_normalized_matcher_needs_two_variants(self):
+        errors = V.check_match_object({"any_of": ["only one"], "normalize": ["lowercase"]}, "p")
+        self.assertTrue(any("at least two variants" in e for e in errors), errors)
+
+    def test_raw_structural_matcher_may_carry_one_variant(self):
+        self.assertEqual(V.check_match_object({"any_of": [{"regex": r"\A.\Z"}], "normalize": []}, "p"), [])
+
+    def test_non_object_match_is_rejected(self):
+        self.assertTrue(V.check_match_object("nope", "p"))
+
+
+class FactMatchCorpusTests(unittest.TestCase):
+    def test_schema_requires_match_on_every_fact(self):
+        corpus = TemporaryCorpus()
+        self.addCleanup(corpus.close)
+        case = _summarization_case("summarization-001")
+        case["expected"]["key_facts"] = ["a bare string is no longer a fact"] * 2
+        corpus.write("summarization", [case])
+        errors = corpus.errors()
+        self.assertTrue(any("expected type object" in e for e in errors), errors)
+
+    def test_bad_regex_inside_a_fact_is_reported(self):
+        corpus = TemporaryCorpus()
+        self.addCleanup(corpus.close)
+        case = _summarization_case("summarization-001")
+        case["expected"]["key_facts"][0]["match"]["any_of"] = [{"regex": "(oops"}, "fallback"]
+        corpus.write("summarization", [case])
+        self.assertTrue(any("does not compile" in e for e in corpus.errors()))
+
+    def test_valid_fact_shape_passes(self):
+        corpus = TemporaryCorpus()
+        self.addCleanup(corpus.close)
+        corpus.write("summarization", [_summarization_case("summarization-001")])
+        self.assertEqual(corpus.errors(), [])
+
+    def test_committed_summarization_facts_all_carry_a_self_matching_matcher(self):
+        path = REPO_ROOT / V.CASES_RELATIVE / "summarization.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        items = 0
+        for case in document["cases"]:
+            for key in ("key_facts", "forbidden_facts"):
+                for item in case["expected"][key]:
+                    self.assertIn("text", item, msg=case["id"])
+                    self.assertIn("match", item, msg=case["id"])
+                    self.assertEqual(V.check_match_object(item["match"], case["id"]), [])
+                    # The proposition itself must satisfy its own matcher, or the
+                    # matcher does not describe the proposition.
+                    self.assertTrue(V.match_item(item["text"], item["match"]),
+                                    msg=f"{case['id']}: {key} matcher does not match its own text")
+                    items += 1
+        self.assertGreaterEqual(items, 271)
+
 class CatalogueTests(unittest.TestCase):
     def test_production_catalogue_is_thirty_three_tools(self):
         catalogue = V.tool_catalogue(REPO_ROOT)

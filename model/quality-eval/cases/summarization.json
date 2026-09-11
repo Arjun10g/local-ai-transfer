@@ -24,9 +24,66 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "loader rejects a tensor inventory mismatch",
-          "cancellation leaves the engine reusable",
-          "default context remains 8192 tokens"
+          {
+            "text": "loader rejects a tensor inventory mismatch",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bloader\\w*)(?=(?s:.)*\\breject\\w*)(?=(?s:.)*\\binventory\\w*)(?=(?s:.)*\\bmismatch\\w*)"
+                },
+                "loader rejects a tensor inventory mismatch",
+                {
+                  "regex": "(?=(?s:.)*\\bloader\\w*)(?=(?s:.)*\\binventory\\w*)(?=(?s:.)*\\b(?:reject|refus|declin|block)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "cancellation leaves the engine reusable",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bcancellation\\w*)(?=(?s:.)*\\bleav\\w*)(?=(?s:.)*\\bengine\\w*)(?=(?s:.)*\\breusable\\w*)"
+                },
+                "cancellation leaves the engine reusable",
+                {
+                  "regex": "(?=(?s:.)*\\bcancellation\\w*)(?=(?s:.)*\\bengine\\w*)(?=(?s:.)*\\b(?:leave|keeps|remains)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "default context remains 8192 tokens",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bdefault\\w*)(?=(?s:.)*\\bcontext\\w*)(?=(?s:.)*\\bremain\\w*)(?=(?s:.)*\\b8192\\w*)"
+                },
+                "default context remains 8192 tokens",
+                {
+                  "regex": "(?=(?s:.)*\\bdefault\\w*)(?=(?s:.)*\\bcontext\\w*)(?=(?s:.)*\\b(?:remain|stays|unchanged|still)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [],
@@ -54,14 +111,100 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "4 crashes on the CPU backend",
-          "0 crashes on the accelerated backend",
-          "median first-token latency fell from 820 ms to 610 ms",
-          "tool output capped at 64 KiB per call"
+          {
+            "text": "4 crashes on the CPU backend",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b4\\w*)(?=(?s:.)*\\bcrash\\w*)(?=(?s:.)*\\bcpu\\w*)(?=(?s:.)*\\bbackend\\w*)"
+                },
+                "4 crashes on the cpu backend"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "0 crashes on the accelerated backend",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b0\\w*)(?=(?s:.)*\\bcrash\\w*)(?=(?s:.)*\\baccelerat\\w*)(?=(?s:.)*\\bbackend\\w*)"
+                },
+                "0 crashes on the accelerated backend"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "median first-token latency fell from 820 ms to 610 ms",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bmedian\\w*)(?=(?s:.)*\\blatency\\w*)(?=(?s:.)*\\b820\\w*)(?=(?s:.)*\\b610\\w*)"
+                },
+                "median first token latency fell from 820 ms to 610 ms",
+                {
+                  "regex": "(?=(?s:.)*\\bmedian\\w*)(?=(?s:.)*\\blatency\\w*)(?=(?s:.)*\\b(?:drop|decrease|down|reduc|improv)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "tool output capped at 64 KiB per call",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\boutput\\w*)(?=(?s:.)*\\bcapp\\w*)(?=(?s:.)*\\b64\\w*)(?=(?s:.)*\\bcall\\w*)"
+                },
+                "tool output capped at 64 kib per call",
+                {
+                  "regex": "(?=(?s:.)*\\boutput\\w*)(?=(?s:.)*\\b64\\w*)(?=(?s:.)*\\b(?:cap|limit|bounded|maximum)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 0.75,
         "forbidden_facts": [
-          "a release date was agreed"
+          {
+            "text": "a release date was agreed",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\brelease\\w*)(?=(?s:.)*\\bdate\\w*)(?=(?s:.)*\\bagre\\w*)"
+                },
+                "a release date was agreed"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 60
       }
@@ -87,14 +230,97 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "47 minutes with 2 driver resets",
-          "52 minutes with 0 driver resets",
-          "the two reports disagree"
+          {
+            "text": "47 minutes with 2 driver resets",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b47\\w*)(?=(?s:.)*\\bminut\\w*)(?=(?s:.)*\\b2\\w*)(?=(?s:.)*\\bdriver\\w*)"
+                },
+                "47 minutes with 2 driver resets"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "52 minutes with 0 driver resets",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b52\\w*)(?=(?s:.)*\\bminut\\w*)(?=(?s:.)*\\b0\\w*)(?=(?s:.)*\\bdriver\\w*)"
+                },
+                "52 minutes with 0 driver resets"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the two reports disagree",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b2\\w*)(?=(?s:.)*\\breport\\w*)(?=(?s:.)*\\bdisagree\\w*)"
+                },
+                "the 2 reports disagree"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "the soak test passed",
-          "the correct duration is known"
+          {
+            "text": "the soak test passed",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bsoak\\w*)(?=(?s:.)*\\btest\\w*)(?=(?s:.)*\\bpass\\w*)"
+                },
+                "the soak test passed",
+                {
+                  "regex": "(?=(?s:.)*\\bsoak\\w*)(?=(?s:.)*\\btest\\w*)(?=(?s:.)*\\b(?:pass|succeeded|green|ok)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the correct duration is known",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bcorrect\\w*)(?=(?s:.)*\\bduration\\w*)(?=(?s:.)*\\bknown\\w*)"
+                },
+                "the correct duration is known"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 70
       }
@@ -120,13 +346,86 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the artifact hash matched",
-          "the smoke test passed"
+          {
+            "text": "the artifact hash matched",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bartifact\\w*)(?=(?s:.)*\\bhash\\w*)(?=(?s:.)*\\bmatch\\w*)"
+                },
+                "the artifact hash matched",
+                {
+                  "regex": "(?=(?s:.)*\\bartifact\\w*)(?=(?s:.)*\\bhash\\w*)(?=(?s:.)*\\b(?:match|agree|identical|same)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the smoke test passed",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bsmoke\\w*)(?=(?s:.)*\\btest\\w*)(?=(?s:.)*\\bpass\\w*)"
+                },
+                "the smoke test passed",
+                {
+                  "regex": "(?=(?s:.)*\\bsmoke\\w*)(?=(?s:.)*\\btest\\w*)(?=(?s:.)*\\b(?:pass|succeeded|green|ok)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "the release was approved by the security team",
-          "the Windows target was tested"
+          {
+            "text": "the release was approved by the security team",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\brelease\\w*)(?=(?s:.)*\\bapprov\\w*)(?=(?s:.)*\\bsecurity\\w*)(?=(?s:.)*\\bteam\\w*)"
+                },
+                "the release was approved by the security team",
+                {
+                  "regex": "(?=(?s:.)*\\brelease\\w*)(?=(?s:.)*\\bsecurity\\w*)(?=(?s:.)*\\b(?:approve|signed\\ off|accepted)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the Windows target was tested",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bwindow\\w*)(?=(?s:.)*\\btarget\\w*)(?=(?s:.)*\\btest\\w*)"
+                },
+                "the windows target was tested"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 50,
         "must_not_contain": [
@@ -157,16 +456,131 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "detection took 4 minutes",
-          "mitigation took 35 minutes",
-          "a config push set the read ceiling to 0 bytes",
-          "3 of 9 regions were affected",
-          "the rollback was manual",
-          "no customer data was exposed"
+          {
+            "text": "detection took 4 minutes",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bdetection\\w*)(?=(?s:.)*\\btook\\w*)(?=(?s:.)*\\b4\\w*)(?=(?s:.)*\\bminut\\w*)"
+                },
+                "detection took 4 minutes"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "mitigation took 35 minutes",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bmitigation\\w*)(?=(?s:.)*\\btook\\w*)(?=(?s:.)*\\b35\\w*)(?=(?s:.)*\\bminut\\w*)"
+                },
+                "mitigation took 35 minutes"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "a config push set the read ceiling to 0 bytes",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bconfig\\w*)(?=(?s:.)*\\bceil\\w*)(?=(?s:.)*\\b0\\w*)(?=(?s:.)*\\bbyte\\w*)"
+                },
+                "a config push set the read ceiling to 0 bytes"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "3 of 9 regions were affected",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b3\\w*)(?=(?s:.)*\\b9\\w*)(?=(?s:.)*\\bregion\\w*)(?=(?s:.)*\\baffect\\w*)"
+                },
+                "3 of 9 regions were affected"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the rollback was manual",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\brollback\\w*)(?=(?s:.)*\\bmanual\\w*)"
+                },
+                "the rollback was manual"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "no customer data was exposed",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bcustomer\\w*)(?=(?s:.)*\\bdata\\w*)(?=(?s:.)*\\bexpos\\w*)"
+                },
+                "no customer data was exposed"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 0.83,
         "forbidden_facts": [
-          "the automatic guard has been re-enabled"
+          {
+            "text": "the automatic guard has been re-enabled",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bautomatic\\w*)(?=(?s:.)*\\bguard\\w*)(?=(?s:.)*\\benabl\\w*)"
+                },
+                "the automatic guard has been re enabled",
+                {
+                  "regex": "(?=(?s:.)*\\bautomatic\\w*)(?=(?s:.)*\\bguard\\w*)(?=(?s:.)*\\b(?:enable|on|active)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 60
       }
@@ -192,9 +606,55 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the tensor inventory check runs before the first decode",
-          "two crash reports from the 0.4.x line are closed",
-          "the Windows installer is unchanged"
+          {
+            "text": "the tensor inventory check runs before the first decode",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\btensor\\w*)(?=(?s:.)*\\binventory\\w*)(?=(?s:.)*\\bcheck\\w*)(?=(?s:.)*\\bdecode\\w*)"
+                },
+                "the tensor inventory check runs before the first decode"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "two crash reports from the 0.4.x line are closed",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\breport\\w*)(?=(?s:.)*\\b0\\w*)(?=(?s:.)*\\b4\\w*)(?=(?s:.)*\\bclos\\w*)"
+                },
+                "two crash reports from the 0.4.x line are closed"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws"
+              ]
+            }
+          },
+          {
+            "text": "the Windows installer is unchanged",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bwindow\\w*)(?=(?s:.)*\\binstaller\\w*)(?=(?s:.)*\\bunchang\\w*)"
+                },
+                "the windows installer is unchanged"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [],
@@ -223,15 +683,111 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "both reports record 61 shards",
-          "report A gives 94 minutes",
-          "report B gives 118 minutes",
-          "the durations conflict"
+          {
+            "text": "both reports record 61 shards",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\breport\\w*)(?=(?s:.)*\\brecord\\w*)(?=(?s:.)*\\b61\\w*)(?=(?s:.)*\\bshard\\w*)"
+                },
+                "both reports record 61 shards"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "report A gives 94 minutes",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\breport\\w*)(?=(?s:.)*\\bgive\\w*)(?=(?s:.)*\\b94\\w*)(?=(?s:.)*\\bminut\\w*)"
+                },
+                "report a gives 94 minutes"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "report B gives 118 minutes",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\breport\\w*)(?=(?s:.)*\\bgive\\w*)(?=(?s:.)*\\b118\\w*)(?=(?s:.)*\\bminut\\w*)"
+                },
+                "report b gives 118 minutes"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the durations conflict",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bduration\\w*)(?=(?s:.)*\\bconflict\\w*)"
+                },
+                "the durations conflict"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "the discrepancy has been explained",
-          "report B was retracted"
+          {
+            "text": "the discrepancy has been explained",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bdiscrepancy\\w*)(?=(?s:.)*\\bexplain\\w*)"
+                },
+                "the discrepancy has been explained"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "report B was retracted",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\breport\\w*)(?=(?s:.)*\\bretract\\w*)"
+                },
+                "report b was retracted"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 65
       }
@@ -257,15 +813,114 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the recurrent state stays in the engine process",
-          "only a reset operation is exposed",
-          "serialising state to the host on every turn was rejected",
-          "the rejected option doubled first-token latency",
-          "the decision is reversible"
+          {
+            "text": "the recurrent state stays in the engine process",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\brecurrent\\w*)(?=(?s:.)*\\bstate\\w*)(?=(?s:.)*\\bengine\\w*)(?=(?s:.)*\\bproces\\w*)"
+                },
+                "the recurrent state stays in the engine process"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "only a reset operation is exposed",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\breset\\w*)(?=(?s:.)*\\boperation\\w*)(?=(?s:.)*\\bexpos\\w*)"
+                },
+                "only a reset operation is exposed"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "serialising state to the host on every turn was rejected",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bserialis\\w*)(?=(?s:.)*\\bstate\\w*)(?=(?s:.)*\\bevery\\w*)(?=(?s:.)*\\breject\\w*)"
+                },
+                "serialising state to the host on every turn was rejected"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the rejected option doubled first-token latency",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\breject\\w*)(?=(?s:.)*\\boption\\w*)(?=(?s:.)*\\bdoubl\\w*)(?=(?s:.)*\\blatency\\w*)"
+                },
+                "the rejected option doubled first token latency"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the decision is reversible",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bdecision\\w*)(?=(?s:.)*\\breversible\\w*)"
+                },
+                "the decision is reversible"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 0.8,
         "forbidden_facts": [
-          "the decision was approved by an architecture board"
+          {
+            "text": "the decision was approved by an architecture board",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bdecision\\w*)(?=(?s:.)*\\bapprov\\w*)(?=(?s:.)*\\barchitecture\\w*)(?=(?s:.)*\\bboard\\w*)"
+                },
+                "the decision was approved by an architecture board",
+                {
+                  "regex": "(?=(?s:.)*\\bdecision\\w*)(?=(?s:.)*\\barchitecture\\w*)(?=(?s:.)*\\b(?:approve|signed\\ off|accepted)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 55
       }
@@ -291,13 +946,83 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the coolant loop was flushed",
-          "the pump was replaced on 2026-01-22"
+          {
+            "text": "the coolant loop was flushed",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bcoolant\\w*)(?=(?s:.)*\\bloop\\w*)(?=(?s:.)*\\bflush\\w*)"
+                },
+                "the coolant loop was flushed"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the pump was replaced on 2026-01-22",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bpump\\w*)(?=(?s:.)*\\breplac\\w*)(?=(?s:.)*\\b2026\\w*)(?=(?s:.)*\\b01\\w*)"
+                },
+                "the pump was replaced on 2026 01 22"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "the site passed its annual safety audit",
-          "the insurer approved the work"
+          {
+            "text": "the site passed its annual safety audit",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bpass\\w*)(?=(?s:.)*\\bannual\\w*)(?=(?s:.)*\\bsafety\\w*)(?=(?s:.)*\\baudit\\w*)"
+                },
+                "the site passed its annual safety audit",
+                {
+                  "regex": "(?=(?s:.)*\\bannual\\w*)(?=(?s:.)*\\bsafety\\w*)(?=(?s:.)*\\b(?:pass|succeeded|green|ok)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the insurer approved the work",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\binsurer\\w*)(?=(?s:.)*\\bapprov\\w*)(?=(?s:.)*\\bwork\\w*)"
+                },
+                "the insurer approved the work",
+                {
+                  "regex": "(?=(?s:.)*\\binsurer\\w*)(?=(?s:.)*\\bwork\\w*)(?=(?s:.)*\\b(?:approve|signed\\ off|accepted)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 45,
         "must_not_contain": [
@@ -327,10 +1052,74 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the ingest queue stalled for 22 minutes",
-          "the cause was a full disk on the index writer",
-          "service returned after a restart",
-          "no data was lost"
+          {
+            "text": "the ingest queue stalled for 22 minutes",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bingest\\w*)(?=(?s:.)*\\bstall\\w*)(?=(?s:.)*\\b22\\w*)(?=(?s:.)*\\bminut\\w*)"
+                },
+                "the ingest queue stalled for 22 minutes"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the cause was a full disk on the index writer",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bcause\\w*)(?=(?s:.)*\\bdisk\\w*)(?=(?s:.)*\\bindex\\w*)(?=(?s:.)*\\bwriter\\w*)"
+                },
+                "the cause was a full disk on the index writer"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "service returned after a restart",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bservice\\w*)(?=(?s:.)*\\breturn\\w*)(?=(?s:.)*\\brestart\\w*)"
+                },
+                "service returned after a restart"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "no data was lost",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bdata\\w*)(?=(?s:.)*\\blost\\w*)"
+                },
+                "no data was lost"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [],
@@ -358,16 +1147,129 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "peak concurrent sessions are forecast at 140",
-          "up from 96",
-          "each session reserves 0.25 GiB at the default context",
-          "the pool holds 48 GiB",
-          "13 GiB of headroom remains at the forecast peak",
-          "no new hardware is requested"
+          {
+            "text": "peak concurrent sessions are forecast at 140",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bconcurrent\\w*)(?=(?s:.)*\\bsession\\w*)(?=(?s:.)*\\bforecast\\w*)(?=(?s:.)*\\b140\\w*)"
+                },
+                "peak concurrent sessions are forecast at 140"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "up from 96",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bup\\w*)(?=(?s:.)*\\b96\\w*)"
+                },
+                "up from 96"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "each session reserves 0.25 GiB at the default context",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\breserv\\w*)(?=(?s:.)*\\b0\\w*)(?=(?s:.)*\\b25\\w*)(?=(?s:.)*\\bcontext\\w*)"
+                },
+                "each session reserves 0.25 gib at the default context"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws"
+              ]
+            }
+          },
+          {
+            "text": "the pool holds 48 GiB",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bpool\\w*)(?=(?s:.)*\\bhold\\w*)(?=(?s:.)*\\b48\\w*)(?=(?s:.)*\\bgib\\w*)"
+                },
+                "the pool holds 48 gib"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "13 GiB of headroom remains at the forecast peak",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b13\\w*)(?=(?s:.)*\\bheadroom\\w*)(?=(?s:.)*\\bremain\\w*)(?=(?s:.)*\\bforecast\\w*)"
+                },
+                "13 gib of headroom remains at the forecast peak",
+                {
+                  "regex": "(?=(?s:.)*\\b13\\w*)(?=(?s:.)*\\bheadroom\\w*)(?=(?s:.)*\\b(?:remain|stays|unchanged|still)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "no new hardware is requested",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bnew\\w*)(?=(?s:.)*\\bhardware\\w*)(?=(?s:.)*\\brequest\\w*)"
+                },
+                "no new hardware is requested"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 0.83,
         "forbidden_facts": [
-          "hardware has already been ordered"
+          {
+            "text": "hardware has already been ordered",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bhardware\\w*)(?=(?s:.)*\\balready\\w*)(?=(?s:.)*\\border\\w*)"
+                },
+                "hardware has already been ordered"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 60
       }
@@ -393,14 +1295,97 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the 16384-token path passed the memory guard on the reference host",
-          "it has not been measured on the low-memory host",
-          "the default stays at 8192 tokens until a measurement exists"
+          {
+            "text": "the 16384-token path passed the memory guard on the reference host",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b16384\\w*)(?=(?s:.)*\\bpass\\w*)(?=(?s:.)*\\bmemory\\w*)(?=(?s:.)*\\breference\\w*)"
+                },
+                "the 16384 token path passed the memory guard on the reference host",
+                {
+                  "regex": "(?=(?s:.)*\\b16384\\w*)(?=(?s:.)*\\bmemory\\w*)(?=(?s:.)*\\b(?:pass|succeeded|green|ok)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "it has not been measured on the low-memory host",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bmeasur\\w*)(?=(?s:.)*\\blow\\w*)(?=(?s:.)*\\bmemory\\w*)(?=(?s:.)*\\bhost\\w*)"
+                },
+                "it has not been measured on the low memory host"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the default stays at 8192 tokens until a measurement exists",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bdefault\\w*)(?=(?s:.)*\\b8192\\w*)(?=(?s:.)*\\bmeasurement\\w*)(?=(?s:.)*\\bexist\\w*)"
+                },
+                "the default stays at 8192 tokens until a measurement exists"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "the 16384-token path fits on the low-memory host",
-          "the 16384-token path does not fit on the low-memory host"
+          {
+            "text": "the 16384-token path fits on the low-memory host",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b16384\\w*)(?=(?s:.)*\\btoken\\w*)(?=(?s:.)*\\bfits\\w*)(?=(?s:.)*\\bmemory\\w*)"
+                },
+                "the 16384 token path fits on the low memory host"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the 16384-token path does not fit on the low-memory host",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b16384\\w*)(?=(?s:.)*\\btoken\\w*)(?=(?s:.)*\\bmemory\\w*)(?=(?s:.)*\\bhost\\w*)"
+                },
+                "the 16384 token path does not fit on the low memory host"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 45
       }
@@ -427,9 +1412,60 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the soak test moves to Thursdays",
-          "extra storage budget was approved",
-          "the migration date was left open"
+          {
+            "text": "the soak test moves to Thursdays",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bsoak\\w*)(?=(?s:.)*\\btest\\w*)(?=(?s:.)*\\bmove\\w*)(?=(?s:.)*\\bthursday\\w*)"
+                },
+                "the soak test moves to thursdays"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "extra storage budget was approved",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bextra\\w*)(?=(?s:.)*\\bstorage\\w*)(?=(?s:.)*\\bbudget\\w*)(?=(?s:.)*\\bapprov\\w*)"
+                },
+                "extra storage budget was approved",
+                {
+                  "regex": "(?=(?s:.)*\\bextra\\w*)(?=(?s:.)*\\bstorage\\w*)(?=(?s:.)*\\b(?:approve|signed\\ off|accepted)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the migration date was left open",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bmigration\\w*)(?=(?s:.)*\\bdate\\w*)(?=(?s:.)*\\bleft\\w*)(?=(?s:.)*\\bopen\\w*)"
+                },
+                "the migration date was left open"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [],
@@ -462,12 +1498,63 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "throughput rose 12 per cent",
-          "a four hour outage on Saturday affected the export service"
+          {
+            "text": "throughput rose 12 per cent",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bthroughput\\w*)(?=(?s:.)*\\brose\\w*)(?=(?s:.)*\\b12\\w*)(?=(?s:.)*\\bcent\\w*)"
+                },
+                "throughput rose 12 per cent",
+                {
+                  "regex": "(?=(?s:.)*\\bthroughput\\w*)(?=(?s:.)*\\b12\\w*)(?=(?s:.)*\\b(?:increas|up|grew|higher)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "a four hour outage on Saturday affected the export service",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b4\\w*)(?=(?s:.)*\\bsaturday\\w*)(?=(?s:.)*\\baffect\\w*)(?=(?s:.)*\\bservice\\w*)"
+                },
+                "a 4 hour outage on saturday affected the export service"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "there were no outages this week"
+          {
+            "text": "there were no outages this week",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\boutag\\w*)(?=(?s:.)*\\bweek\\w*)"
+                },
+                "there were no outages this week"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 50,
         "must_not_contain": [
@@ -498,15 +1585,107 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "Northline quotes 4.20 per unit with a 10 day lead time",
-          "Harbour Supplies quotes 3.85 per unit with a 21 day lead time",
-          "neither supplier would commit to a penalty clause",
-          "the assessment did not rank them"
+          {
+            "text": "Northline quotes 4.20 per unit with a 10 day lead time",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bnorthline\\w*)(?=(?s:.)*\\bquot\\w*)(?=(?s:.)*\\b4\\w*)(?=(?s:.)*\\b20\\w*)"
+                },
+                "northline quotes 4.20 per unit with a 10 day lead time"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws"
+              ]
+            }
+          },
+          {
+            "text": "Harbour Supplies quotes 3.85 per unit with a 21 day lead time",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bharbour\\w*)(?=(?s:.)*\\bsuppli\\w*)(?=(?s:.)*\\b3\\w*)(?=(?s:.)*\\b85\\w*)"
+                },
+                "harbour supplies quotes 3.85 per unit with a 21 day lead time"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws"
+              ]
+            }
+          },
+          {
+            "text": "neither supplier would commit to a penalty clause",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bneither\\w*)(?=(?s:.)*\\bsupplier\\w*)(?=(?s:.)*\\bpenalty\\w*)(?=(?s:.)*\\bclause\\w*)"
+                },
+                "neither supplier would commit to a penalty clause"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the assessment did not rank them",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bassessment\\w*)(?=(?s:.)*\\brank\\w*)(?=(?s:.)*\\bthem\\w*)"
+                },
+                "the assessment did not rank them"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "Harbour Supplies is the recommended supplier",
-          "Northline is the recommended supplier"
+          {
+            "text": "Harbour Supplies is the recommended supplier",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bharbour\\w*)(?=(?s:.)*\\bsuppli\\w*)(?=(?s:.)*\\brecommend\\w*)(?=(?s:.)*\\bsupplier\\w*)"
+                },
+                "harbour supplies is the recommended supplier"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "Northline is the recommended supplier",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bnorthline\\w*)(?=(?s:.)*\\brecommend\\w*)(?=(?s:.)*\\bsupplier\\w*)"
+                },
+                "northline is the recommended supplier"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 55
       }
@@ -533,14 +1712,100 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "a failed shard is retried three times then dropped silently",
-          "6 of 1,200 shards were dropped last month",
-          "the drop is not recorded in any receipt"
+          {
+            "text": "a failed shard is retried three times then dropped silently",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bretri\\w*)(?=(?s:.)*\\b3\\w*)(?=(?s:.)*\\bdropp\\w*)(?=(?s:.)*\\bsilently\\w*)"
+                },
+                "a failed shard is retried 3 times then dropped silently",
+                {
+                  "regex": "(?=(?s:.)*\\bretri\\w*)(?=(?s:.)*\\b3\\w*)(?=(?s:.)*\\b(?:fail|failure|red|error)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "6 of 1,200 shards were dropped last month",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b6\\w*)(?=(?s:.)*\\b1\\w*)(?=(?s:.)*\\bshard\\w*)(?=(?s:.)*\\bdropp\\w*)"
+                },
+                "6 of 1 200 shards were dropped last month"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the drop is not recorded in any receipt",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bdrop\\w*)(?=(?s:.)*\\brecord\\w*)(?=(?s:.)*\\breceipt\\w*)"
+                },
+                "the drop is not recorded in any receipt",
+                {
+                  "regex": "(?=(?s:.)*\\bdrop\\w*)(?=(?s:.)*\\breceipt\\w*)(?=(?s:.)*\\b(?:record|logged|reported|noted)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "a receipt field has been added",
-          "an alert is in place"
+          {
+            "text": "a receipt field has been added",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\breceipt\\w*)(?=(?s:.)*\\bfield\\w*)(?=(?s:.)*\\badded\\w*)"
+                },
+                "a receipt field has been added"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "an alert is in place",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\balert\\w*)(?=(?s:.)*\\bplace\\w*)"
+                },
+                "an alert is in place"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 50
       }
@@ -566,9 +1831,60 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "tool output above 64 KiB is truncated",
-          "truncation is recorded in the run receipt",
-          "the limit does not apply to file writes"
+          {
+            "text": "tool output above 64 KiB is truncated",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\boutput\\w*)(?=(?s:.)*\\babove\\w*)(?=(?s:.)*\\b64\\w*)(?=(?s:.)*\\btruncat\\w*)"
+                },
+                "tool output above 64 kib is truncated"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "truncation is recorded in the run receipt",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\btruncation\\w*)(?=(?s:.)*\\brecord\\w*)(?=(?s:.)*\\brun\\w*)(?=(?s:.)*\\breceipt\\w*)"
+                },
+                "truncation is recorded in the run receipt",
+                {
+                  "regex": "(?=(?s:.)*\\btruncation\\w*)(?=(?s:.)*\\brun\\w*)(?=(?s:.)*\\b(?:record|logged|reported|noted)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the limit does not apply to file writes",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\blimit\\w*)(?=(?s:.)*\\bapply\\w*)(?=(?s:.)*\\bfile\\w*)(?=(?s:.)*\\bwrit\\w*)"
+                },
+                "the limit does not apply to file writes"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [],
@@ -596,14 +1912,90 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "revenue was 15.2 MUSD against a 13.4 MUSD plan",
-          "churn held at 2.1 per cent",
-          "the support backlog grew from 210 to 340 tickets",
-          "the storage vendor contract expires next quarter"
+          {
+            "text": "revenue was 15.2 MUSD against a 13.4 MUSD plan",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\brevenue\\w*)(?=(?s:.)*\\b15\\w*)(?=(?s:.)*\\b2\\w*)(?=(?s:.)*\\bagainst\\w*)"
+                },
+                "revenue was 15.2 musd against a 13.4 musd plan"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws"
+              ]
+            }
+          },
+          {
+            "text": "churn held at 2.1 per cent",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bchurn\\w*)(?=(?s:.)*\\b2\\w*)(?=(?s:.)*\\b1\\w*)(?=(?s:.)*\\bcent\\w*)"
+                },
+                "churn held at 2.1 per cent"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws"
+              ]
+            }
+          },
+          {
+            "text": "the support backlog grew from 210 to 340 tickets",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bsupport\\w*)(?=(?s:.)*\\bbacklog\\w*)(?=(?s:.)*\\b210\\w*)(?=(?s:.)*\\b340\\w*)"
+                },
+                "the support backlog grew from 210 to 340 tickets"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the storage vendor contract expires next quarter",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bstorage\\w*)(?=(?s:.)*\\bcontract\\w*)(?=(?s:.)*\\bexpir\\w*)(?=(?s:.)*\\bquarter\\w*)"
+                },
+                "the storage vendor contract expires next quarter"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "a replacement storage vendor has been selected"
+          {
+            "text": "a replacement storage vendor has been selected",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\breplacement\\w*)(?=(?s:.)*\\bstorage\\w*)(?=(?s:.)*\\bvendor\\w*)(?=(?s:.)*\\bselect\\w*)"
+                },
+                "a replacement storage vendor has been selected"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 60
       }
@@ -630,13 +2022,77 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "sixteen users trialled the offline build for two weeks",
-          "four defects were reported"
+          {
+            "text": "sixteen users trialled the offline build for two weeks",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b16\\w*)(?=(?s:.)*\\btriall\\w*)(?=(?s:.)*\\boffline\\w*)(?=(?s:.)*\\b2\\w*)"
+                },
+                "16 users trialled the offline build for 2 weeks"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "four defects were reported",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b4\\w*)(?=(?s:.)*\\bdefect\\w*)(?=(?s:.)*\\breport\\w*)"
+                },
+                "4 defects were reported"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "the pilot was a success",
-          "a full rollout is recommended"
+          {
+            "text": "the pilot was a success",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bpilot\\w*)(?=(?s:.)*\\bsucces\\w*)"
+                },
+                "the pilot was a success"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "a full rollout is recommended",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bfull\\w*)(?=(?s:.)*\\brollout\\w*)(?=(?s:.)*\\brecommend\\w*)"
+                },
+                "a full rollout is recommended"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 45,
         "must_not_contain": [
@@ -666,12 +2122,63 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "eleven days of soak testing",
-          "zero corruption flags were recorded"
+          {
+            "text": "eleven days of soak testing",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b11\\w*)(?=(?s:.)*\\bdays\\w*)(?=(?s:.)*\\bsoak\\w*)(?=(?s:.)*\\btest\\w*)"
+                },
+                "11 days of soak testing"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "zero corruption flags were recorded",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b0\\w*)(?=(?s:.)*\\bcorruption\\w*)(?=(?s:.)*\\bflag\\w*)(?=(?s:.)*\\brecord\\w*)"
+                },
+                "0 corruption flags were recorded",
+                {
+                  "regex": "(?=(?s:.)*\\b0\\w*)(?=(?s:.)*\\bcorruption\\w*)(?=(?s:.)*\\b(?:record|logged|reported|noted)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "corruption flags were investigated and dismissed"
+          {
+            "text": "corruption flags were investigated and dismissed",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bcorruption\\w*)(?=(?s:.)*\\bflag\\w*)(?=(?s:.)*\\binvestigat\\w*)(?=(?s:.)*\\bdismiss\\w*)"
+                },
+                "corruption flags were investigated and dismissed"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 25
       }
@@ -697,9 +2204,57 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "41 tokens per second at 8192 context",
-          "28 tokens per second at 16384 context",
-          "both runs used the same weights"
+          {
+            "text": "41 tokens per second at 8192 context",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b41\\w*)(?=(?s:.)*\\bsecond\\w*)(?=(?s:.)*\\b8192\\w*)(?=(?s:.)*\\bcontext\\w*)"
+                },
+                "41 tokens per second at 8192 context"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "28 tokens per second at 16384 context",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b28\\w*)(?=(?s:.)*\\bsecond\\w*)(?=(?s:.)*\\b16384\\w*)(?=(?s:.)*\\bcontext\\w*)"
+                },
+                "28 tokens per second at 16384 context"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "both runs used the same weights",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bruns\\w*)(?=(?s:.)*\\bused\\w*)(?=(?s:.)*\\bweight\\w*)"
+                },
+                "both runs used the same weights"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [],
@@ -727,9 +2282,57 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "stage one copies the index in read-only mode over a weekend",
-          "stage two switches writes behind a flag",
-          "stage three removes the old index after 14 days of clean receipts"
+          {
+            "text": "stage one copies the index in read-only mode over a weekend",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b1\\w*)(?=(?s:.)*\\bcopi\\w*)(?=(?s:.)*\\bindex\\w*)(?=(?s:.)*\\bweekend\\w*)"
+                },
+                "stage 1 copies the index in read only mode over a weekend"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "stage two switches writes behind a flag",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b2\\w*)(?=(?s:.)*\\bswitch\\w*)(?=(?s:.)*\\bwrit\\w*)(?=(?s:.)*\\bbehind\\w*)"
+                },
+                "stage 2 switches writes behind a flag"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "stage three removes the old index after 14 days of clean receipts",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b3\\w*)(?=(?s:.)*\\bremov\\w*)(?=(?s:.)*\\b14\\w*)(?=(?s:.)*\\breceipt\\w*)"
+                },
+                "stage 3 removes the old index after 14 days of clean receipts"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [],
@@ -760,13 +2363,80 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the replacement drives arrived on 2026-02-20",
-          "all eight passed burn-in",
-          "the shipping record does not support the rumour of a ninth drive"
+          {
+            "text": "the replacement drives arrived on 2026-02-20",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\breplacement\\w*)(?=(?s:.)*\\barriv\\w*)(?=(?s:.)*\\b2026\\w*)(?=(?s:.)*\\b02\\w*)"
+                },
+                "the replacement drives arrived on 2026 02 20"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "all eight passed burn-in",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b8\\w*)(?=(?s:.)*\\bpass\\w*)(?=(?s:.)*\\bburn\\w*)"
+                },
+                "all 8 passed burn in",
+                {
+                  "regex": "(?=(?s:.)*\\b8\\w*)(?=(?s:.)*\\bburn\\w*)(?=(?s:.)*\\b(?:pass|succeeded|green|ok)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the shipping record does not support the rumour of a ninth drive",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bshipp\\w*)(?=(?s:.)*\\brecord\\w*)(?=(?s:.)*\\bsupport\\w*)(?=(?s:.)*\\brumour\\w*)"
+                },
+                "the shipping record does not support the rumour of a ninth drive"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "a ninth drive is in transit"
+          {
+            "text": "a ninth drive is in transit",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bninth\\w*)(?=(?s:.)*\\bdrive\\w*)(?=(?s:.)*\\btransit\\w*)"
+                },
+                "a ninth drive is in transit"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 60
       }
@@ -793,12 +2463,61 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the depot scanner was recalibrated on 2026-03-05",
-          "the error rate fell from 3.1 per cent to 0.4 per cent"
+          {
+            "text": "the depot scanner was recalibrated on 2026-03-05",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bscanner\\w*)(?=(?s:.)*\\brecalibrat\\w*)(?=(?s:.)*\\b2026\\w*)(?=(?s:.)*\\b03\\w*)"
+                },
+                "the depot scanner was recalibrated on 2026 03 05"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the error rate fell from 3.1 per cent to 0.4 per cent",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\berror\\w*)(?=(?s:.)*\\b3\\w*)(?=(?s:.)*\\b1\\w*)(?=(?s:.)*\\bcent\\w*)"
+                },
+                "the error rate fell from 3.1 per cent to 0.4 per cent",
+                {
+                  "regex": "(?=(?s:.)*\\berror\\w*)(?=(?s:.)*\\b3\\w*)(?=(?s:.)*\\b(?:drop|decrease|down|reduc|improv)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "recalibration is now automatic"
+          {
+            "text": "recalibration is now automatic",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\brecalibration\\w*)(?=(?s:.)*\\bnow\\w*)(?=(?s:.)*\\bautomatic\\w*)"
+                },
+                "recalibration is now automatic"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 45,
         "must_not_contain": [
@@ -828,13 +2547,77 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "14 notes praised the faster first token",
-          "9 notes asked for an offline mode",
-          "4 notes reported confusing wording in the receipt view"
+          {
+            "text": "14 notes praised the faster first token",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b14\\w*)(?=(?s:.)*\\bprais\\w*)(?=(?s:.)*\\bfaster\\w*)(?=(?s:.)*\\bfirst\\w*)"
+                },
+                "14 notes praised the faster first token"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "9 notes asked for an offline mode",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b9\\w*)(?=(?s:.)*\\bnote\\w*)(?=(?s:.)*\\basked\\w*)(?=(?s:.)*\\boffline\\w*)"
+                },
+                "9 notes asked for an offline mode"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "4 notes reported confusing wording in the receipt view",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b4\\w*)(?=(?s:.)*\\breport\\w*)(?=(?s:.)*\\bconfus\\w*)(?=(?s:.)*\\breceipt\\w*)"
+                },
+                "4 notes reported confusing wording in the receipt view"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "an offline mode is on the roadmap"
+          {
+            "text": "an offline mode is on the roadmap",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\boffline\\w*)(?=(?s:.)*\\bmode\\w*)(?=(?s:.)*\\broadmap\\w*)"
+                },
+                "an offline mode is on the roadmap"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 55
       }
@@ -860,9 +2643,55 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the export button did nothing in the offline build",
-          "support reproduced the problem",
-          "a fix is queued for 0.5.1"
+          {
+            "text": "the export button did nothing in the offline build",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bexport\\w*)(?=(?s:.)*\\bbutton\\w*)(?=(?s:.)*\\bnoth\\w*)(?=(?s:.)*\\boffline\\w*)"
+                },
+                "the export button did nothing in the offline build"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "support reproduced the problem",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bsupport\\w*)(?=(?s:.)*\\breproduc\\w*)(?=(?s:.)*\\bproblem\\w*)"
+                },
+                "support reproduced the problem"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "a fix is queued for 0.5.1",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bfix\\w*)(?=(?s:.)*\\bqueu\\w*)(?=(?s:.)*\\b0\\w*)(?=(?s:.)*\\b5\\w*)"
+                },
+                "a fix is queued for 0.5.1"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [],
@@ -890,14 +2719,97 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "two entries change behaviour",
-          "the loader rejects a manifest whose shard count disagrees with the header",
-          "receipts gain a backend field",
-          "the docs rewrite and the toolchain pin do not change behaviour"
+          {
+            "text": "two entries change behaviour",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b2\\w*)(?=(?s:.)*\\bentri\\w*)(?=(?s:.)*\\bchange\\w*)(?=(?s:.)*\\bbehaviour\\w*)"
+                },
+                "2 entries change behaviour"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the loader rejects a manifest whose shard count disagrees with the header",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\breject\\w*)(?=(?s:.)*\\bmanifest\\w*)(?=(?s:.)*\\bdisagre\\w*)(?=(?s:.)*\\bheader\\w*)"
+                },
+                "the loader rejects a manifest whose shard count disagrees with the header",
+                {
+                  "regex": "(?=(?s:.)*\\bmanifest\\w*)(?=(?s:.)*\\bdisagre\\w*)(?=(?s:.)*\\b(?:reject|refus|declin|block)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "receipts gain a backend field",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\breceipt\\w*)(?=(?s:.)*\\bgain\\w*)(?=(?s:.)*\\bbackend\\w*)(?=(?s:.)*\\bfield\\w*)"
+                },
+                "receipts gain a backend field"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the docs rewrite and the toolchain pin do not change behaviour",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\brewrite\\w*)(?=(?s:.)*\\btoolchain\\w*)(?=(?s:.)*\\bchange\\w*)(?=(?s:.)*\\bbehaviour\\w*)"
+                },
+                "the docs rewrite and the toolchain pin do not change behaviour"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 0.75,
         "forbidden_facts": [
-          "the release is a breaking change for all callers"
+          {
+            "text": "the release is a breaking change for all callers",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\brelease\\w*)(?=(?s:.)*\\bbreak\\w*)(?=(?s:.)*\\bchange\\w*)(?=(?s:.)*\\bcaller\\w*)"
+                },
+                "the release is a breaking change for all callers"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 55
       }
@@ -924,9 +2836,57 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "eleven engineers completed the tool-policy course",
-          "the course covers confirmation prompts, untrusted tool output and workspace boundaries",
-          "two engineers deferred to the next session"
+          {
+            "text": "eleven engineers completed the tool-policy course",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b11\\w*)(?=(?s:.)*\\bengineer\\w*)(?=(?s:.)*\\bcomplet\\w*)(?=(?s:.)*\\bcourse\\w*)"
+                },
+                "11 engineers completed the tool policy course"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the course covers confirmation prompts, untrusted tool output and workspace boundaries",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bconfirmation\\w*)(?=(?s:.)*\\buntrust\\w*)(?=(?s:.)*\\bworkspace\\w*)(?=(?s:.)*\\bboundari\\w*)"
+                },
+                "the course covers confirmation prompts untrusted tool output and workspace boundaries"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "two engineers deferred to the next session",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b2\\w*)(?=(?s:.)*\\bengineer\\w*)(?=(?s:.)*\\bdeferr\\w*)(?=(?s:.)*\\bsession\\w*)"
+                },
+                "2 engineers deferred to the next session"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [],
@@ -957,13 +2917,77 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "three of five controls were evidenced",
-          "two controls are outstanding"
+          {
+            "text": "three of five controls were evidenced",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b3\\w*)(?=(?s:.)*\\b5\\w*)(?=(?s:.)*\\bcontrol\\w*)(?=(?s:.)*\\bevidenc\\w*)"
+                },
+                "3 of 5 controls were evidenced"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "two controls are outstanding",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b2\\w*)(?=(?s:.)*\\bcontrol\\w*)(?=(?s:.)*\\boutstand\\w*)"
+                },
+                "2 controls are outstanding"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "all five controls were evidenced",
-          "the auditor signed the report"
+          {
+            "text": "all five controls were evidenced",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b5\\w*)(?=(?s:.)*\\bcontrol\\w*)(?=(?s:.)*\\bevidenc\\w*)"
+                },
+                "all 5 controls were evidenced"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the auditor signed the report",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bauditor\\w*)(?=(?s:.)*\\bsign\\w*)(?=(?s:.)*\\breport\\w*)"
+                },
+                "the auditor signed the report"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 45,
         "must_not_contain": [
@@ -993,9 +3017,60 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the legacy wire codec is deprecated",
-          "it keeps working through 2026",
-          "it is removed in the first release of 2027"
+          {
+            "text": "the legacy wire codec is deprecated",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\blegacy\\w*)(?=(?s:.)*\\bwire\\w*)(?=(?s:.)*\\bcodec\\w*)(?=(?s:.)*\\bdeprecat\\w*)"
+                },
+                "the legacy wire codec is deprecated"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "it keeps working through 2026",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bkeep\\w*)(?=(?s:.)*\\bwork\\w*)(?=(?s:.)*\\bthrough\\w*)(?=(?s:.)*\\b2026\\w*)"
+                },
+                "it keeps working through 2026"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "it is removed in the first release of 2027",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bremov\\w*)(?=(?s:.)*\\bfirst\\w*)(?=(?s:.)*\\brelease\\w*)(?=(?s:.)*\\b2027\\w*)"
+                },
+                "it is removed in the first release of 2027",
+                {
+                  "regex": "(?=(?s:.)*\\bfirst\\w*)(?=(?s:.)*\\brelease\\w*)(?=(?s:.)*\\b(?:remove|deleted|dropped|stripped)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [],
@@ -1023,14 +3098,92 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "availability was 99.92 per cent against a 99.90 per cent target",
-          "there were two incidents",
-          "one incident breached the 30 minute mitigation target at 35 minutes",
-          "credits were not triggered"
+          {
+            "text": "availability was 99.92 per cent against a 99.90 per cent target",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bavailability\\w*)(?=(?s:.)*\\b99\\w*)(?=(?s:.)*\\b92\\w*)(?=(?s:.)*\\bagainst\\w*)"
+                },
+                "availability was 99.92 per cent against a 99.90 per cent target"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws"
+              ]
+            }
+          },
+          {
+            "text": "there were two incidents",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b2\\w*)(?=(?s:.)*\\bincident\\w*)"
+                },
+                "there were 2 incidents"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "one incident breached the 30 minute mitigation target at 35 minutes",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b1\\w*)(?=(?s:.)*\\bbreach\\w*)(?=(?s:.)*\\b30\\w*)(?=(?s:.)*\\bmitigation\\w*)"
+                },
+                "1 incident breached the 30 minute mitigation target at 35 minutes"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "credits were not triggered",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bcredit\\w*)(?=(?s:.)*\\btrigger\\w*)"
+                },
+                "credits were not triggered"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "service credits were issued to customers"
+          {
+            "text": "service credits were issued to customers",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bservice\\w*)(?=(?s:.)*\\bcredit\\w*)(?=(?s:.)*\\bissu\\w*)(?=(?s:.)*\\bcustomer\\w*)"
+                },
+                "service credits were issued to customers"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 55
       }
@@ -1062,14 +3215,94 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the corpus is accepted for stage two",
-          "acceptance is conditional on re-running the retention comparison with a higher-precision reference",
-          "acceptance does not advance the retention gate",
-          "two reviewers signed off"
+          {
+            "text": "the corpus is accepted for stage two",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bcorpu\\w*)(?=(?s:.)*\\baccept\\w*)(?=(?s:.)*\\bstage\\w*)(?=(?s:.)*\\b2\\w*)"
+                },
+                "the corpus is accepted for stage 2"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "acceptance is conditional on re-running the retention comparison with a higher-precision reference",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bacceptance\\w*)(?=(?s:.)*\\bconditional\\w*)(?=(?s:.)*\\bcomparison\\w*)(?=(?s:.)*\\bprecision\\w*)"
+                },
+                "acceptance is conditional on re running the retention comparison with a higher precision reference"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "acceptance does not advance the retention gate",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bacceptance\\w*)(?=(?s:.)*\\badvance\\w*)(?=(?s:.)*\\bretention\\w*)(?=(?s:.)*\\bgate\\w*)"
+                },
+                "acceptance does not advance the retention gate"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "two reviewers signed off",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b2\\w*)(?=(?s:.)*\\breviewer\\w*)(?=(?s:.)*\\bsign\\w*)(?=(?s:.)*\\boff\\w*)"
+                },
+                "2 reviewers signed off"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 0.75,
         "forbidden_facts": [
-          "the retention gate is now satisfied"
+          {
+            "text": "the retention gate is now satisfied",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bretention\\w*)(?=(?s:.)*\\bgate\\w*)(?=(?s:.)*\\bnow\\w*)(?=(?s:.)*\\bsatisfi\\w*)"
+                },
+                "the retention gate is now satisfied"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 50
       }
@@ -1095,9 +3328,57 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "stop the writer before snapshotting",
-          "start the writer with the new prefix",
-          "verify the receipt count matches the snapshot"
+          {
+            "text": "stop the writer before snapshotting",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bstop\\w*)(?=(?s:.)*\\bwriter\\w*)(?=(?s:.)*\\bsnapshott\\w*)"
+                },
+                "stop the writer before snapshotting"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "start the writer with the new prefix",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bstart\\w*)(?=(?s:.)*\\bwriter\\w*)(?=(?s:.)*\\bnew\\w*)(?=(?s:.)*\\bprefix\\w*)"
+                },
+                "start the writer with the new prefix"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "verify the receipt count matches the snapshot",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bverify\\w*)(?=(?s:.)*\\breceipt\\w*)(?=(?s:.)*\\bmatch\\w*)(?=(?s:.)*\\bsnapshot\\w*)"
+                },
+                "verify the receipt count matches the snapshot"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [],
@@ -1126,14 +3407,94 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the vendor claims the drives are certified for 5 year continuous duty",
-          "procurement has not verified the claims",
-          "no warranty document exists in the record"
+          {
+            "text": "the vendor claims the drives are certified for 5 year continuous duty",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bclaim\\w*)(?=(?s:.)*\\bcertifi\\w*)(?=(?s:.)*\\b5\\w*)(?=(?s:.)*\\bcontinuou\\w*)"
+                },
+                "the vendor claims the drives are certified for 5 year continuous duty"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "procurement has not verified the claims",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bprocurement\\w*)(?=(?s:.)*\\bverifi\\w*)(?=(?s:.)*\\bclaim\\w*)"
+                },
+                "procurement has not verified the claims"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "no warranty document exists in the record",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bwarranty\\w*)(?=(?s:.)*\\bdocument\\w*)(?=(?s:.)*\\bexist\\w*)(?=(?s:.)*\\brecord\\w*)"
+                },
+                "no warranty document exists in the record"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "the cluster is covered by the vendor warranty",
-          "procurement verified the certification claim"
+          {
+            "text": "the cluster is covered by the vendor warranty",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bcluster\\w*)(?=(?s:.)*\\bcover\\w*)(?=(?s:.)*\\bvendor\\w*)(?=(?s:.)*\\bwarranty\\w*)"
+                },
+                "the cluster is covered by the vendor warranty"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "procurement verified the certification claim",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bprocurement\\w*)(?=(?s:.)*\\bverifi\\w*)(?=(?s:.)*\\bcertification\\w*)(?=(?s:.)*\\bclaim\\w*)"
+                },
+                "procurement verified the certification claim"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 50,
         "must_not_contain": [
@@ -1162,14 +3523,94 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the accelerated backend may fall back to CPU silently",
-          "impact is high and likelihood is medium",
-          "the mitigation is a receipt field recording the backend used",
-          "the target date is 2026-07-31"
+          {
+            "text": "the accelerated backend may fall back to CPU silently",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\baccelerat\\w*)(?=(?s:.)*\\bbackend\\w*)(?=(?s:.)*\\bback\\w*)(?=(?s:.)*\\bsilently\\w*)"
+                },
+                "the accelerated backend may fall back to cpu silently"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "impact is high and likelihood is medium",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bimpact\\w*)(?=(?s:.)*\\bhigh\\w*)(?=(?s:.)*\\blikelihood\\w*)(?=(?s:.)*\\bmedium\\w*)"
+                },
+                "impact is high and likelihood is medium"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the mitigation is a receipt field recording the backend used",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bmitigation\\w*)(?=(?s:.)*\\breceipt\\w*)(?=(?s:.)*\\brecord\\w*)(?=(?s:.)*\\bbackend\\w*)"
+                },
+                "the mitigation is a receipt field recording the backend used"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the target date is 2026-07-31",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\btarget\\w*)(?=(?s:.)*\\bdate\\w*)(?=(?s:.)*\\b2026\\w*)(?=(?s:.)*\\b07\\w*)"
+                },
+                "the target date is 2026 07 31"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "the mitigation has already shipped"
+          {
+            "text": "the mitigation has already shipped",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bmitigation\\w*)(?=(?s:.)*\\balready\\w*)(?=(?s:.)*\\bshipp\\w*)"
+                },
+                "the mitigation has already shipped"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 50
       }
@@ -1196,13 +3637,77 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "West missed its target",
-          "West was 36 units short",
-          "North and South exceeded their targets"
+          {
+            "text": "West missed its target",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bwest\\w*)(?=(?s:.)*\\bmiss\\w*)(?=(?s:.)*\\btarget\\w*)"
+                },
+                "west missed its target"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "West was 36 units short",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bwest\\w*)(?=(?s:.)*\\b36\\w*)(?=(?s:.)*\\bunit\\w*)(?=(?s:.)*\\bshort\\w*)"
+                },
+                "west was 36 units short"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "North and South exceeded their targets",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bnorth\\w*)(?=(?s:.)*\\bsouth\\w*)(?=(?s:.)*\\bexceed\\w*)(?=(?s:.)*\\btarget\\w*)"
+                },
+                "north and south exceeded their targets"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "South missed its target"
+          {
+            "text": "South missed its target",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bsouth\\w*)(?=(?s:.)*\\bmiss\\w*)(?=(?s:.)*\\btarget\\w*)"
+                },
+                "south missed its target"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 50
       }
@@ -1228,9 +3733,57 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "180 respondents",
-          "62 per cent found the new receipt view clearer",
-          "17 per cent preferred the old view"
+          {
+            "text": "180 respondents",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b180\\w*)(?=(?s:.)*\\brespondent\\w*)"
+                },
+                "180 respondents"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "62 per cent found the new receipt view clearer",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b62\\w*)(?=(?s:.)*\\bfound\\w*)(?=(?s:.)*\\breceipt\\w*)(?=(?s:.)*\\bclearer\\w*)"
+                },
+                "62 per cent found the new receipt view clearer"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "17 per cent preferred the old view",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b17\\w*)(?=(?s:.)*\\bcent\\w*)(?=(?s:.)*\\bpreferr\\w*)(?=(?s:.)*\\bview\\w*)"
+                },
+                "17 per cent preferred the old view"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [],
@@ -1265,13 +3818,80 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the nightly conversion finished in 71 minutes",
-          "two of forty shards needed a second pass",
-          "the output hash matched the reference"
+          {
+            "text": "the nightly conversion finished in 71 minutes",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bconversion\\w*)(?=(?s:.)*\\bfinish\\w*)(?=(?s:.)*\\b71\\w*)(?=(?s:.)*\\bminut\\w*)"
+                },
+                "the nightly conversion finished in 71 minutes"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "two of forty shards needed a second pass",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b2\\w*)(?=(?s:.)*\\b40\\w*)(?=(?s:.)*\\bneed\\w*)(?=(?s:.)*\\bsecond\\w*)"
+                },
+                "2 of 40 shards needed a second pass"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the output hash matched the reference",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\boutput\\w*)(?=(?s:.)*\\bhash\\w*)(?=(?s:.)*\\bmatch\\w*)(?=(?s:.)*\\breference\\w*)"
+                },
+                "the output hash matched the reference",
+                {
+                  "regex": "(?=(?s:.)*\\boutput\\w*)(?=(?s:.)*\\bhash\\w*)(?=(?s:.)*\\b(?:match|agree|identical|same)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "the job was re-run from the start"
+          {
+            "text": "the job was re-run from the start",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bjob\\w*)(?=(?s:.)*\\brun\\w*)(?=(?s:.)*\\bstart\\w*)"
+                },
+                "the job was re run from the start"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 45
       }
@@ -1303,14 +3923,92 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the backup window moved to 02:00",
-          "it now runs for 90 minutes",
-          "one backup was skipped on 2026-04-19"
+          {
+            "text": "the backup window moved to 02:00",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bbackup\\w*)(?=(?s:.)*\\bwindow\\w*)(?=(?s:.)*\\b02\\w*)(?=(?s:.)*\\b00\\w*)"
+                },
+                "the backup window moved to 02:00"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws"
+              ]
+            }
+          },
+          {
+            "text": "it now runs for 90 minutes",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bnow\\w*)(?=(?s:.)*\\bruns\\w*)(?=(?s:.)*\\b90\\w*)(?=(?s:.)*\\bminut\\w*)"
+                },
+                "it now runs for 90 minutes"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "one backup was skipped on 2026-04-19",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b1\\w*)(?=(?s:.)*\\bbackup\\w*)(?=(?s:.)*\\bskipp\\w*)(?=(?s:.)*\\b2026\\w*)"
+                },
+                "1 backup was skipped on 2026 04 19"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "no backups were skipped",
-          "the backup window is unchanged"
+          {
+            "text": "no backups were skipped",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bbackup\\w*)(?=(?s:.)*\\bskipp\\w*)"
+                },
+                "no backups were skipped"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the backup window is unchanged",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bbackup\\w*)(?=(?s:.)*\\bwindow\\w*)(?=(?s:.)*\\bunchang\\w*)"
+                },
+                "the backup window is unchanged"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 45,
         "must_not_contain": [
@@ -1339,14 +4037,94 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the freeze starts Wednesday",
-          "it covers only the release repositories",
-          "other repositories stay open"
+          {
+            "text": "the freeze starts Wednesday",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bfreeze\\w*)(?=(?s:.)*\\bstart\\w*)(?=(?s:.)*\\bwednesday\\w*)"
+                },
+                "the freeze starts wednesday"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "it covers only the release repositories",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bcover\\w*)(?=(?s:.)*\\brelease\\w*)(?=(?s:.)*\\brepositori\\w*)"
+                },
+                "it covers only the release repositories"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "other repositories stay open",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\brepositori\\w*)(?=(?s:.)*\\bstay\\w*)(?=(?s:.)*\\bopen\\w*)"
+                },
+                "other repositories stay open"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "the freeze starts Monday",
-          "the freeze covers all repositories"
+          {
+            "text": "the freeze starts Monday",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bfreeze\\w*)(?=(?s:.)*\\bstart\\w*)(?=(?s:.)*\\bmonday\\w*)"
+                },
+                "the freeze starts monday"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the freeze covers all repositories",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bfreeze\\w*)(?=(?s:.)*\\bcover\\w*)(?=(?s:.)*\\brepositori\\w*)"
+                },
+                "the freeze covers all repositories"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 55
       }
@@ -1372,9 +4150,57 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the site visit runs 2026-06-08 to 2026-06-10",
-          "it takes place at the Kelmscott depot",
-          "two engineers travel by train"
+          {
+            "text": "the site visit runs 2026-06-08 to 2026-06-10",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bvisit\\w*)(?=(?s:.)*\\bruns\\w*)(?=(?s:.)*\\b2026\\w*)(?=(?s:.)*\\b06\\w*)"
+                },
+                "the site visit runs 2026 06 08 to 2026 06 10"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "it takes place at the Kelmscott depot",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\btake\\w*)(?=(?s:.)*\\bplace\\w*)(?=(?s:.)*\\bkelmscott\\w*)(?=(?s:.)*\\bdepot\\w*)"
+                },
+                "it takes place at the kelmscott depot"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "two engineers travel by train",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b2\\w*)(?=(?s:.)*\\bengineer\\w*)(?=(?s:.)*\\btravel\\w*)(?=(?s:.)*\\btrain\\w*)"
+                },
+                "2 engineers travel by train"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [],
@@ -1402,13 +4228,77 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "a workspace id must be requested",
-          "the tool-policy course must be completed before the first merge",
-          "joining the on-call rotation is optional in the first quarter"
+          {
+            "text": "a workspace id must be requested",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bworkspace\\w*)(?=(?s:.)*\\bmust\\w*)(?=(?s:.)*\\brequest\\w*)"
+                },
+                "a workspace id must be requested"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the tool-policy course must be completed before the first merge",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bpolicy\\w*)(?=(?s:.)*\\bcourse\\w*)(?=(?s:.)*\\bcomplet\\w*)(?=(?s:.)*\\bfirst\\w*)"
+                },
+                "the tool policy course must be completed before the first merge"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "joining the on-call rotation is optional in the first quarter",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bjoin\\w*)(?=(?s:.)*\\brotation\\w*)(?=(?s:.)*\\boptional\\w*)(?=(?s:.)*\\bquarter\\w*)"
+                },
+                "joining the on call rotation is optional in the first quarter"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "on-call is mandatory after three months"
+          {
+            "text": "on-call is mandatory after three months",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bcall\\w*)(?=(?s:.)*\\bmandatory\\w*)(?=(?s:.)*\\b3\\w*)(?=(?s:.)*\\bmonth\\w*)"
+                },
+                "on call is mandatory after 3 months"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 50
       }
@@ -1434,13 +4324,77 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the pilot covered 38 sites",
-          "it completed on 2026-03-30",
-          "the appendix still says 26 sites and disagrees with the body"
+          {
+            "text": "the pilot covered 38 sites",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bpilot\\w*)(?=(?s:.)*\\bcover\\w*)(?=(?s:.)*\\b38\\w*)(?=(?s:.)*\\bsite\\w*)"
+                },
+                "the pilot covered 38 sites"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "it completed on 2026-03-30",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bcomplet\\w*)(?=(?s:.)*\\b2026\\w*)(?=(?s:.)*\\b03\\w*)"
+                },
+                "it completed on 2026 03 30"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the appendix still says 26 sites and disagrees with the body",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bappendix\\w*)(?=(?s:.)*\\b26\\w*)(?=(?s:.)*\\bsite\\w*)(?=(?s:.)*\\bdisagre\\w*)"
+                },
+                "the appendix still says 26 sites and disagrees with the body"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "the pilot covered 26 sites"
+          {
+            "text": "the pilot covered 26 sites",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bpilot\\w*)(?=(?s:.)*\\bcover\\w*)(?=(?s:.)*\\b26\\w*)(?=(?s:.)*\\bsite\\w*)"
+                },
+                "the pilot covered 26 sites"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 55
       }
@@ -1467,12 +4421,60 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the customer cannot open the receipt view on the offline build",
-          "support reproduced the problem"
+          {
+            "text": "the customer cannot open the receipt view on the offline build",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bcustomer\\w*)(?=(?s:.)*\\breceipt\\w*)(?=(?s:.)*\\boffline\\w*)(?=(?s:.)*\\bbuild\\w*)"
+                },
+                "the customer cannot open the receipt view on the offline build"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "support reproduced the problem",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bsupport\\w*)(?=(?s:.)*\\breproduc\\w*)(?=(?s:.)*\\bproblem\\w*)"
+                },
+                "support reproduced the problem"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "the customer withdrew the ticket"
+          {
+            "text": "the customer withdrew the ticket",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bcustomer\\w*)(?=(?s:.)*\\bwithdrew\\w*)(?=(?s:.)*\\bticket\\w*)"
+                },
+                "the customer withdrew the ticket"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 45,
         "must_not_contain": [
@@ -1501,13 +4503,79 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "median first-token latency fell from 780 ms to 640 ms",
-          "tool calls per session rose from 1.8 to 2.4",
-          "the refusal rate was flat at 0.6 per cent"
+          {
+            "text": "median first-token latency fell from 780 ms to 640 ms",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bmedian\\w*)(?=(?s:.)*\\blatency\\w*)(?=(?s:.)*\\b780\\w*)(?=(?s:.)*\\b640\\w*)"
+                },
+                "median first token latency fell from 780 ms to 640 ms",
+                {
+                  "regex": "(?=(?s:.)*\\bmedian\\w*)(?=(?s:.)*\\blatency\\w*)(?=(?s:.)*\\b(?:drop|decrease|down|reduc|improv)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "tool calls per session rose from 1.8 to 2.4",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bcall\\w*)(?=(?s:.)*\\bsession\\w*)(?=(?s:.)*\\b1\\w*)(?=(?s:.)*\\b8\\w*)"
+                },
+                "tool calls per session rose from 1.8 to 2.4",
+                {
+                  "regex": "(?=(?s:.)*\\bcall\\w*)(?=(?s:.)*\\bsession\\w*)(?=(?s:.)*\\b(?:increas|up|grew|higher)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws"
+              ]
+            }
+          },
+          {
+            "text": "the refusal rate was flat at 0.6 per cent",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\brefusal\\w*)(?=(?s:.)*\\b0\\w*)(?=(?s:.)*\\b6\\w*)(?=(?s:.)*\\bcent\\w*)"
+                },
+                "the refusal rate was flat at 0.6 per cent"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "the refusal rate improved"
+          {
+            "text": "the refusal rate improved",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\brefusal\\w*)(?=(?s:.)*\\brate\\w*)(?=(?s:.)*\\bimprov\\w*)"
+                },
+                "the refusal rate improved"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 55
       }
@@ -1533,9 +4601,57 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the receipt viewer moves to the main navigation on 2026-09-15",
-          "the old menu entry stays for one release",
-          "no data changes"
+          {
+            "text": "the receipt viewer moves to the main navigation on 2026-09-15",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\breceipt\\w*)(?=(?s:.)*\\bnavigation\\w*)(?=(?s:.)*\\b2026\\w*)(?=(?s:.)*\\b09\\w*)"
+                },
+                "the receipt viewer moves to the main navigation on 2026 09 15"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the old menu entry stays for one release",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bentry\\w*)(?=(?s:.)*\\bstay\\w*)(?=(?s:.)*\\b1\\w*)(?=(?s:.)*\\brelease\\w*)"
+                },
+                "the old menu entry stays for 1 release"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "no data changes",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bdata\\w*)(?=(?s:.)*\\bchang\\w*)"
+                },
+                "no data changes"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [],
@@ -1564,9 +4680,57 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the working group chose the staged rollout",
-          "the storage renewal deadline constrained the choice",
-          "the decision not to hire before the next half constrained the choice"
+          {
+            "text": "the working group chose the staged rollout",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bwork\\w*)(?=(?s:.)*\\bchose\\w*)(?=(?s:.)*\\bstag\\w*)(?=(?s:.)*\\brollout\\w*)"
+                },
+                "the working group chose the staged rollout"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the storage renewal deadline constrained the choice",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bstorage\\w*)(?=(?s:.)*\\brenewal\\w*)(?=(?s:.)*\\bdeadline\\w*)(?=(?s:.)*\\bconstrain\\w*)"
+                },
+                "the storage renewal deadline constrained the choice"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the decision not to hire before the next half constrained the choice",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bdecision\\w*)(?=(?s:.)*\\bhalf\\w*)(?=(?s:.)*\\bconstrain\\w*)(?=(?s:.)*\\bchoice\\w*)"
+                },
+                "the decision not to hire before the next half constrained the choice"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [],
@@ -1594,13 +4758,77 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the new prefill path cut cold-start time by roughly a third",
-          "the measurement came from ten runs on one host",
-          "the author warns the figure may not hold in production"
+          {
+            "text": "the new prefill path cut cold-start time by roughly a third",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bprefill\\w*)(?=(?s:.)*\\bstart\\w*)(?=(?s:.)*\\broughly\\w*)(?=(?s:.)*\\bthird\\w*)"
+                },
+                "the new prefill path cut cold start time by roughly a third"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the measurement came from ten runs on one host",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bmeasurement\\w*)(?=(?s:.)*\\bcame\\w*)(?=(?s:.)*\\b10\\w*)(?=(?s:.)*\\b1\\w*)"
+                },
+                "the measurement came from 10 runs on 1 host"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the author warns the figure may not hold in production",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bauthor\\w*)(?=(?s:.)*\\bwarn\\w*)(?=(?s:.)*\\bfigure\\w*)(?=(?s:.)*\\bproduction\\w*)"
+                },
+                "the author warns the figure may not hold in production"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "the improvement was confirmed in production"
+          {
+            "text": "the improvement was confirmed in production",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bimprovement\\w*)(?=(?s:.)*\\bconfirm\\w*)(?=(?s:.)*\\bproduction\\w*)"
+                },
+                "the improvement was confirmed in production"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 50
       }
@@ -1626,12 +4854,63 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the service sustained 240 requests per second",
-          "it failed at 300 requests per second"
+          {
+            "text": "the service sustained 240 requests per second",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bservice\\w*)(?=(?s:.)*\\bsustain\\w*)(?=(?s:.)*\\b240\\w*)(?=(?s:.)*\\brequest\\w*)"
+                },
+                "the service sustained 240 requests per second"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "it failed at 300 requests per second",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bfail\\w*)(?=(?s:.)*\\b300\\w*)(?=(?s:.)*\\brequest\\w*)(?=(?s:.)*\\bsecond\\w*)"
+                },
+                "it failed at 300 requests per second",
+                {
+                  "regex": "(?=(?s:.)*\\b300\\w*)(?=(?s:.)*\\brequest\\w*)(?=(?s:.)*\\b(?:fail|failure|red|error)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "the service met the 300 requests per second goal"
+          {
+            "text": "the service met the 300 requests per second goal",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bservice\\w*)(?=(?s:.)*\\b300\\w*)(?=(?s:.)*\\brequest\\w*)(?=(?s:.)*\\bsecond\\w*)"
+                },
+                "the service met the 300 requests per second goal"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 50,
         "must_not_contain": [
@@ -1661,9 +4940,57 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "42 spare drives",
-          "6 spare controllers",
-          "counted on 2026-02-28"
+          {
+            "text": "42 spare drives",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b42\\w*)(?=(?s:.)*\\bspare\\w*)(?=(?s:.)*\\bdriv\\w*)"
+                },
+                "42 spare drives"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "6 spare controllers",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b6\\w*)(?=(?s:.)*\\bspare\\w*)(?=(?s:.)*\\bcontroller\\w*)"
+                },
+                "6 spare controllers"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "counted on 2026-02-28",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bcount\\w*)(?=(?s:.)*\\b2026\\w*)(?=(?s:.)*\\b02\\w*)"
+                },
+                "counted on 2026 02 28"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [],
@@ -1691,13 +5018,77 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the loader validates the shard count before allocating memory",
-          "the default context is unchanged",
-          "the tool catalogue and receipt schema are unchanged"
+          {
+            "text": "the loader validates the shard count before allocating memory",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bloader\\w*)(?=(?s:.)*\\bvalidat\\w*)(?=(?s:.)*\\ballocat\\w*)(?=(?s:.)*\\bmemory\\w*)"
+                },
+                "the loader validates the shard count before allocating memory"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the default context is unchanged",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bdefault\\w*)(?=(?s:.)*\\bcontext\\w*)(?=(?s:.)*\\bunchang\\w*)"
+                },
+                "the default context is unchanged"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the tool catalogue and receipt schema are unchanged",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bcatalogue\\w*)(?=(?s:.)*\\breceipt\\w*)(?=(?s:.)*\\bschema\\w*)(?=(?s:.)*\\bunchang\\w*)"
+                },
+                "the tool catalogue and receipt schema are unchanged"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "the receipt schema gained a field"
+          {
+            "text": "the receipt schema gained a field",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\breceipt\\w*)(?=(?s:.)*\\bschema\\w*)(?=(?s:.)*\\bgain\\w*)(?=(?s:.)*\\bfield\\w*)"
+                },
+                "the receipt schema gained a field"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 60
       }
@@ -1723,13 +5114,77 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "512 errors in total",
-          "STORAGE_TIMEOUT dominates with 431",
-          "58 were MANIFEST_MISMATCH"
+          {
+            "text": "512 errors in total",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b512\\w*)(?=(?s:.)*\\berror\\w*)(?=(?s:.)*\\btotal\\w*)"
+                },
+                "512 errors in total"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "STORAGE_TIMEOUT dominates with 431",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bstorage\\w*)(?=(?s:.)*\\btimeout\\w*)(?=(?s:.)*\\bdominat\\w*)(?=(?s:.)*\\b431\\w*)"
+                },
+                "storage_timeout dominates with 431"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "58 were MANIFEST_MISMATCH",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b58\\w*)(?=(?s:.)*\\bmanifest\\w*)(?=(?s:.)*\\bmismatch\\w*)"
+                },
+                "58 were manifest_mismatch"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 0.67,
         "forbidden_facts": [
-          "the storage timeout was resolved during the week"
+          {
+            "text": "the storage timeout was resolved during the week",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bstorage\\w*)(?=(?s:.)*\\btimeout\\w*)(?=(?s:.)*\\bresolv\\w*)(?=(?s:.)*\\bweek\\w*)"
+                },
+                "the storage timeout was resolved during the week"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 50
       }
@@ -1755,9 +5210,57 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the freeze date was confirmed",
-          "a second reviewer was requested for the guard change",
-          "log retention stays at 30 days"
+          {
+            "text": "the freeze date was confirmed",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bfreeze\\w*)(?=(?s:.)*\\bdate\\w*)(?=(?s:.)*\\bconfirm\\w*)"
+                },
+                "the freeze date was confirmed"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "a second reviewer was requested for the guard change",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bsecond\\w*)(?=(?s:.)*\\breviewer\\w*)(?=(?s:.)*\\brequest\\w*)(?=(?s:.)*\\bchange\\w*)"
+                },
+                "a second reviewer was requested for the guard change"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "log retention stays at 30 days",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bretention\\w*)(?=(?s:.)*\\bstay\\w*)(?=(?s:.)*\\b30\\w*)(?=(?s:.)*\\bdays\\w*)"
+                },
+                "log retention stays at 30 days"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [],
@@ -1785,13 +5288,77 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the index rebuild took 5 hours",
-          "that is longer than the 3 hour budget"
+          {
+            "text": "the index rebuild took 5 hours",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bindex\\w*)(?=(?s:.)*\\brebuild\\w*)(?=(?s:.)*\\b5\\w*)(?=(?s:.)*\\bhour\\w*)"
+                },
+                "the index rebuild took 5 hours"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "that is longer than the 3 hour budget",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\blonger\\w*)(?=(?s:.)*\\b3\\w*)(?=(?s:.)*\\bhour\\w*)(?=(?s:.)*\\bbudget\\w*)"
+                },
+                "that is longer than the 3 hour budget"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "the rebuild beat the industry norm",
-          "rebuilds of this size normally take 8 hours"
+          {
+            "text": "the rebuild beat the industry norm",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\brebuild\\w*)(?=(?s:.)*\\bbeat\\w*)(?=(?s:.)*\\bindustry\\w*)(?=(?s:.)*\\bnorm\\w*)"
+                },
+                "the rebuild beat the industry norm"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "rebuilds of this size normally take 8 hours",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\brebuild\\w*)(?=(?s:.)*\\bnormally\\w*)(?=(?s:.)*\\b8\\w*)(?=(?s:.)*\\bhour\\w*)"
+                },
+                "rebuilds of this size normally take 8 hours"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 45,
         "must_not_contain": [
@@ -1822,14 +5389,103 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the customer reports nightly export failures for a week",
-          "support reproduced one failure and lacks logs for the other nights",
-          "engineering suspects the disabled network profile but has not confirmed it"
+          {
+            "text": "the customer reports nightly export failures for a week",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bcustomer\\w*)(?=(?s:.)*\\breport\\w*)(?=(?s:.)*\\bnightly\\w*)(?=(?s:.)*\\bfailur\\w*)"
+                },
+                "the customer reports nightly export failures for a week"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "support reproduced one failure and lacks logs for the other nights",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bsupport\\w*)(?=(?s:.)*\\breproduc\\w*)(?=(?s:.)*\\b1\\w*)(?=(?s:.)*\\bfailure\\w*)"
+                },
+                "support reproduced 1 failure and lacks logs for the other nights"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "engineering suspects the disabled network profile but has not confirmed it",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bengineer\\w*)(?=(?s:.)*\\bsuspect\\w*)(?=(?s:.)*\\bdisabl\\w*)(?=(?s:.)*\\bconfirm\\w*)"
+                },
+                "engineering suspects the disabled network profile but has not confirmed it",
+                {
+                  "regex": "(?=(?s:.)*\\bengineer\\w*)(?=(?s:.)*\\bsuspect\\w*)(?=(?s:.)*\\b(?:disable|off|turned\\ off|inactive)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "the cause is the disabled network profile",
-          "the export failed every night"
+          {
+            "text": "the cause is the disabled network profile",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bcause\\w*)(?=(?s:.)*\\bdisabl\\w*)(?=(?s:.)*\\bnetwork\\w*)(?=(?s:.)*\\bprofile\\w*)"
+                },
+                "the cause is the disabled network profile",
+                {
+                  "regex": "(?=(?s:.)*\\bcause\\w*)(?=(?s:.)*\\bnetwork\\w*)(?=(?s:.)*\\b(?:disable|off|turned\\ off|inactive)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the export failed every night",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bexport\\w*)(?=(?s:.)*\\bfail\\w*)(?=(?s:.)*\\bevery\\w*)(?=(?s:.)*\\bnight\\w*)"
+                },
+                "the export failed every night",
+                {
+                  "regex": "(?=(?s:.)*\\bexport\\w*)(?=(?s:.)*\\bevery\\w*)(?=(?s:.)*\\b(?:fail|failure|red|error)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 55
       }
@@ -1855,15 +5511,111 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the corpus is frozen at the current fixture id",
-          "raising the answer token ceiling to 512 is only proposed",
-          "adding a fourteenth category is only proposed",
-          "neither proposal has an owner"
+          {
+            "text": "the corpus is frozen at the current fixture id",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bcorpu\\w*)(?=(?s:.)*\\bfrozen\\w*)(?=(?s:.)*\\bcurrent\\w*)(?=(?s:.)*\\bfixture\\w*)"
+                },
+                "the corpus is frozen at the current fixture id"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "raising the answer token ceiling to 512 is only proposed",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\brais\\w*)(?=(?s:.)*\\bceil\\w*)(?=(?s:.)*\\b512\\w*)(?=(?s:.)*\\bpropos\\w*)"
+                },
+                "raising the answer token ceiling to 512 is only proposed"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "adding a fourteenth category is only proposed",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\badding\\w*)(?=(?s:.)*\\bfourteenth\\w*)(?=(?s:.)*\\bcategory\\w*)(?=(?s:.)*\\bpropos\\w*)"
+                },
+                "adding a fourteenth category is only proposed"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "neither proposal has an owner",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bneither\\w*)(?=(?s:.)*\\bproposal\\w*)(?=(?s:.)*\\bowner\\w*)"
+                },
+                "neither proposal has an owner"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 0.75,
         "forbidden_facts": [
-          "the answer token ceiling was raised to 512",
-          "a fourteenth category was added"
+          {
+            "text": "the answer token ceiling was raised to 512",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\banswer\\w*)(?=(?s:.)*\\bceil\\w*)(?=(?s:.)*\\brais\\w*)(?=(?s:.)*\\b512\\w*)"
+                },
+                "the answer token ceiling was raised to 512"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "a fourteenth category was added",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bfourteenth\\w*)(?=(?s:.)*\\bcategory\\w*)(?=(?s:.)*\\badded\\w*)"
+                },
+                "a fourteenth category was added"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 55
       }
@@ -1889,13 +5641,80 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the artifact hash was verified",
-          "the smoke test passed",
-          "the rollback rehearsal is outstanding"
+          {
+            "text": "the artifact hash was verified",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bartifact\\w*)(?=(?s:.)*\\bhash\\w*)(?=(?s:.)*\\bverifi\\w*)"
+                },
+                "the artifact hash was verified"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the smoke test passed",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bsmoke\\w*)(?=(?s:.)*\\btest\\w*)(?=(?s:.)*\\bpass\\w*)"
+                },
+                "the smoke test passed",
+                {
+                  "regex": "(?=(?s:.)*\\bsmoke\\w*)(?=(?s:.)*\\btest\\w*)(?=(?s:.)*\\b(?:pass|succeeded|green|ok)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the rollback rehearsal is outstanding",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\brollback\\w*)(?=(?s:.)*\\brehearsal\\w*)(?=(?s:.)*\\boutstand\\w*)"
+                },
+                "the rollback rehearsal is outstanding"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "the rollback rehearsal was completed"
+          {
+            "text": "the rollback rehearsal was completed",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\brollback\\w*)(?=(?s:.)*\\brehearsal\\w*)(?=(?s:.)*\\bcomplet\\w*)"
+                },
+                "the rollback rehearsal was completed"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 40
       }
@@ -1921,13 +5740,80 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "spend to date is 118 of 150 budgeted",
-          "the remaining 32 is committed to the storage renewal",
-          "nothing is left for discretionary work"
+          {
+            "text": "spend to date is 118 of 150 budgeted",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bspend\\w*)(?=(?s:.)*\\b118\\w*)(?=(?s:.)*\\b150\\w*)(?=(?s:.)*\\bbudget\\w*)"
+                },
+                "spend to date is 118 of 150 budgeted"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the remaining 32 is committed to the storage renewal",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bremain\\w*)(?=(?s:.)*\\b32\\w*)(?=(?s:.)*\\bcommitt\\w*)(?=(?s:.)*\\brenewal\\w*)"
+                },
+                "the remaining 32 is committed to the storage renewal"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "nothing is left for discretionary work",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bnoth\\w*)(?=(?s:.)*\\bleft\\w*)(?=(?s:.)*\\bdiscretionary\\w*)(?=(?s:.)*\\bwork\\w*)"
+                },
+                "nothing is left for discretionary work"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "an additional budget request was approved"
+          {
+            "text": "an additional budget request was approved",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\badditional\\w*)(?=(?s:.)*\\bbudget\\w*)(?=(?s:.)*\\brequest\\w*)(?=(?s:.)*\\bapprov\\w*)"
+                },
+                "an additional budget request was approved",
+                {
+                  "regex": "(?=(?s:.)*\\badditional\\w*)(?=(?s:.)*\\bbudget\\w*)(?=(?s:.)*\\b(?:approve|signed\\ off|accepted)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 50
       }
@@ -1953,13 +5839,75 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the guard threshold was lowered from 0.9 to 0.7",
-          "the change followed two false negatives"
+          {
+            "text": "the guard threshold was lowered from 0.9 to 0.7",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bthreshold\\w*)(?=(?s:.)*\\blower\\w*)(?=(?s:.)*\\b0\\w*)(?=(?s:.)*\\b9\\w*)"
+                },
+                "the guard threshold was lowered from 0.9 to 0.7"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws"
+              ]
+            }
+          },
+          {
+            "text": "the change followed two false negatives",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bchange\\w*)(?=(?s:.)*\\bfollow\\w*)(?=(?s:.)*\\b2\\w*)(?=(?s:.)*\\bnegativ\\w*)"
+                },
+                "the change followed 2 false negatives"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "the change was reviewed by the security team",
-          "the change was routine tuning"
+          {
+            "text": "the change was reviewed by the security team",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bchange\\w*)(?=(?s:.)*\\breview\\w*)(?=(?s:.)*\\bsecurity\\w*)(?=(?s:.)*\\bteam\\w*)"
+                },
+                "the change was reviewed by the security team"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the change was routine tuning",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bchange\\w*)(?=(?s:.)*\\broutine\\w*)(?=(?s:.)*\\btuning\\w*)"
+                },
+                "the change was routine tuning"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 45,
         "must_not_contain": [
@@ -1989,13 +5937,69 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "measured cold-start time ranged from 1.9 to 4.6 seconds",
-          "the team estimates a typical value near 2.5 seconds",
-          "the 2.5 second figure is an estimate rather than a measurement"
+          {
+            "text": "measured cold-start time ranged from 1.9 to 4.6 seconds",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bmeasur\\w*)(?=(?s:.)*\\b1\\w*)(?=(?s:.)*\\b9\\w*)(?=(?s:.)*\\bsecond\\w*)"
+                },
+                "measured cold-start time ranged from 1.9 to 4.6 seconds"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws"
+              ]
+            }
+          },
+          {
+            "text": "the team estimates a typical value near 2.5 seconds",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bestimat\\w*)(?=(?s:.)*\\b2\\w*)(?=(?s:.)*\\b5\\w*)(?=(?s:.)*\\bsecond\\w*)"
+                },
+                "the team estimates a typical value near 2.5 seconds"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws"
+              ]
+            }
+          },
+          {
+            "text": "the 2.5 second figure is an estimate rather than a measurement",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b2\\w*)(?=(?s:.)*\\b5\\w*)(?=(?s:.)*\\bestimate\\w*)(?=(?s:.)*\\bmeasurement\\w*)"
+                },
+                "the 2.5 second figure is an estimate rather than a measurement"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "cold-start time is 2.5 seconds"
+          {
+            "text": "cold-start time is 2.5 seconds",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bstart\\w*)(?=(?s:.)*\\b2\\w*)(?=(?s:.)*\\b5\\w*)(?=(?s:.)*\\bsecond\\w*)"
+                },
+                "cold-start time is 2.5 seconds"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws"
+              ]
+            }
+          }
         ],
         "max_words": 45
       }
@@ -2021,9 +6025,57 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the loading bay door jammed twice in the morning",
-          "it worked normally after lunch",
-          "a technician is booked for Friday"
+          {
+            "text": "the loading bay door jammed twice in the morning",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bload\\w*)(?=(?s:.)*\\bjamm\\w*)(?=(?s:.)*\\btwice\\w*)(?=(?s:.)*\\bmorn\\w*)"
+                },
+                "the loading bay door jammed twice in the morning"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "it worked normally after lunch",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bwork\\w*)(?=(?s:.)*\\bnormally\\w*)(?=(?s:.)*\\blunch\\w*)"
+                },
+                "it worked normally after lunch"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "a technician is booked for Friday",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\btechnician\\w*)(?=(?s:.)*\\bbook\\w*)(?=(?s:.)*\\bfriday\\w*)"
+                },
+                "a technician is booked for friday"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [],
@@ -2057,14 +6109,94 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "1,042 conversions ran in April",
-          "there were 4 failures and all were retried successfully",
-          "mean conversion time was 63 minutes",
-          "every failure came from the same transient storage timeout"
+          {
+            "text": "1,042 conversions ran in April",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b1\\w*)(?=(?s:.)*\\b042\\w*)(?=(?s:.)*\\bconversion\\w*)(?=(?s:.)*\\bapril\\w*)"
+                },
+                "1 042 conversions ran in april"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "there were 4 failures and all were retried successfully",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b4\\w*)(?=(?s:.)*\\bfailur\\w*)(?=(?s:.)*\\bretri\\w*)(?=(?s:.)*\\bsuccessfully\\w*)"
+                },
+                "there were 4 failures and all were retried successfully"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "mean conversion time was 63 minutes",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bmean\\w*)(?=(?s:.)*\\bconversion\\w*)(?=(?s:.)*\\b63\\w*)(?=(?s:.)*\\bminut\\w*)"
+                },
+                "mean conversion time was 63 minutes"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "every failure came from the same transient storage timeout",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bfailure\\w*)(?=(?s:.)*\\btransient\\w*)(?=(?s:.)*\\bstorage\\w*)(?=(?s:.)*\\btimeout\\w*)"
+                },
+                "every failure came from the same transient storage timeout"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "the storage timeout has been fixed"
+          {
+            "text": "the storage timeout has been fixed",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bstorage\\w*)(?=(?s:.)*\\btimeout\\w*)(?=(?s:.)*\\bfixed\\w*)"
+                },
+                "the storage timeout has been fixed"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 50
       }
@@ -2096,14 +6228,97 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "two of three reviewers approved",
-          "the third reviewer asked for a memory receipt",
-          "sign-off is blocked until the receipt exists",
-          "the change is merged behind a flag"
+          {
+            "text": "two of three reviewers approved",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b2\\w*)(?=(?s:.)*\\b3\\w*)(?=(?s:.)*\\breviewer\\w*)(?=(?s:.)*\\bapprov\\w*)"
+                },
+                "2 of 3 reviewers approved",
+                {
+                  "regex": "(?=(?s:.)*\\b2\\w*)(?=(?s:.)*\\b3\\w*)(?=(?s:.)*\\b(?:approve|signed\\ off|accepted)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the third reviewer asked for a memory receipt",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\breviewer\\w*)(?=(?s:.)*\\basked\\w*)(?=(?s:.)*\\bmemory\\w*)(?=(?s:.)*\\breceipt\\w*)"
+                },
+                "the third reviewer asked for a memory receipt"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "sign-off is blocked until the receipt exists",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bblock\\w*)(?=(?s:.)*\\buntil\\w*)(?=(?s:.)*\\breceipt\\w*)(?=(?s:.)*\\bexist\\w*)"
+                },
+                "sign off is blocked until the receipt exists"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the change is merged behind a flag",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bchange\\w*)(?=(?s:.)*\\bmerg\\w*)(?=(?s:.)*\\bbehind\\w*)(?=(?s:.)*\\bflag\\w*)"
+                },
+                "the change is merged behind a flag"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 0.75,
         "forbidden_facts": [
-          "the change is fully signed off"
+          {
+            "text": "the change is fully signed off",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bchange\\w*)(?=(?s:.)*\\bfully\\w*)(?=(?s:.)*\\bsign\\w*)(?=(?s:.)*\\boff\\w*)"
+                },
+                "the change is fully signed off"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 55
       }
@@ -2135,13 +6350,80 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "two controls had no evidence",
-          "one control was tested only in staging"
+          {
+            "text": "two controls had no evidence",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b2\\w*)(?=(?s:.)*\\bcontrol\\w*)(?=(?s:.)*\\bevidence\\w*)"
+                },
+                "2 controls had no evidence"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "one control was tested only in staging",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\b1\\w*)(?=(?s:.)*\\bcontrol\\w*)(?=(?s:.)*\\btest\\w*)(?=(?s:.)*\\bstag\\w*)"
+                },
+                "1 control was tested only in staging"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "all controls passed",
-          "remediation is complete"
+          {
+            "text": "all controls passed",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bcontrol\\w*)(?=(?s:.)*\\bpass\\w*)"
+                },
+                "all controls passed",
+                {
+                  "regex": "(?=(?s:.)*\\bcontrol\\w*)(?=(?s:.)*\\b(?:pass|succeeded|green|ok)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "remediation is complete",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bremediation\\w*)(?=(?s:.)*\\bcomplete\\w*)"
+                },
+                "remediation is complete"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 50,
         "must_not_contain": [
@@ -2171,14 +6453,97 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the read-only copy finished early",
-          "the flag switch was invisible to users",
-          "the old index was removed before the receipts were clean",
-          "the rehearsal was skipped"
+          {
+            "text": "the read-only copy finished early",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bread\\w*)(?=(?s:.)*\\bcopy\\w*)(?=(?s:.)*\\bfinish\\w*)(?=(?s:.)*\\bearly\\w*)"
+                },
+                "the read only copy finished early"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the flag switch was invisible to users",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bflag\\w*)(?=(?s:.)*\\bswitch\\w*)(?=(?s:.)*\\binvisible\\w*)(?=(?s:.)*\\buser\\w*)"
+                },
+                "the flag switch was invisible to users"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the old index was removed before the receipts were clean",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bindex\\w*)(?=(?s:.)*\\bremov\\w*)(?=(?s:.)*\\breceipt\\w*)(?=(?s:.)*\\bclean\\w*)"
+                },
+                "the old index was removed before the receipts were clean",
+                {
+                  "regex": "(?=(?s:.)*\\bindex\\w*)(?=(?s:.)*\\breceipt\\w*)(?=(?s:.)*\\b(?:remove|deleted|dropped|stripped)\\w*)"
+                }
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the rehearsal was skipped",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\brehearsal\\w*)(?=(?s:.)*\\bskipp\\w*)"
+                },
+                "the rehearsal was skipped"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [
-          "no problems were found in the migration"
+          {
+            "text": "no problems were found in the migration",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bproblem\\w*)(?=(?s:.)*\\bfound\\w*)(?=(?s:.)*\\bmigration\\w*)"
+                },
+                "no problems were found in the migration"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "max_words": 55
       }
@@ -2204,9 +6569,57 @@
       "expected": {
         "metric": "key_fact_coverage_and_hallucination",
         "key_facts": [
-          "the guard page documents three limits",
-          "the limits are the read ceiling, the tool output cap and the maximum answer length",
-          "each limit links to the receipt field that records it"
+          {
+            "text": "the guard page documents three limits",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bguard\\w*)(?=(?s:.)*\\bdocument\\w*)(?=(?s:.)*\\b3\\w*)(?=(?s:.)*\\blimit\\w*)"
+                },
+                "the guard page documents 3 limits"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "the limits are the read ceiling, the tool output cap and the maximum answer length",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\bceil\\w*)(?=(?s:.)*\\bmaximum\\w*)(?=(?s:.)*\\banswer\\w*)(?=(?s:.)*\\blength\\w*)"
+                },
+                "the limits are the read ceiling the tool output cap and the maximum answer length"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          },
+          {
+            "text": "each limit links to the receipt field that records it",
+            "match": {
+              "any_of": [
+                {
+                  "regex": "(?=(?s:.)*\\blimit\\w*)(?=(?s:.)*\\breceipt\\w*)(?=(?s:.)*\\bfield\\w*)(?=(?s:.)*\\brecord\\w*)"
+                },
+                "each limit links to the receipt field that records it"
+              ],
+              "normalize": [
+                "lowercase",
+                "collapse_ws",
+                "strip_punct",
+                "numerals"
+              ]
+            }
+          }
         ],
         "min_coverage": 1.0,
         "forbidden_facts": [],
