@@ -1265,6 +1265,68 @@ def comparator_cleanup_plan(output: str = "/scratch/j1m/artifacts", runner: str 
     ]
 
 
+COMPARATOR_SERVER_BUILD_ROOT = "/scratch/llama-server-build"
+
+
+def comparator_server_configure_flags(config: dict[str, Any]) -> list[str]:
+    """Configure flags for the pinned upstream ``llama-server``.
+
+    The compiler identity is deliberately the *same* as the product engine's
+    CUDA eval build (``Release``, the same ``CMAKE_CUDA_ARCHITECTURES`` and
+    the same ``CMAKE_CUDA_COMPILER``), because the comparator arms are only
+    a meaningful oracle when the runtime differs in the weights and nothing
+    else.  Everything the evaluator does not use is off: no tests, no
+    examples, no unified app, no embedded web UI -- and in particular
+    ``LLAMA_USE_PREBUILT_UI=OFF`` and ``LLAMA_OPENSSL=OFF``, so the build
+    fetches nothing and the binary carries no HTTPS client.
+
+    The returned list is recorded verbatim in the per-arm receipt, so the
+    flags a published number was produced under are auditable from the
+    receipt alone.
+    """
+
+    eval_mode = config["modes"]["eval"]
+    return [
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DGGML_CUDA=ON",
+        f"-DCMAKE_CUDA_ARCHITECTURES={eval_mode['cuda_architecture']}",
+        f"-DCMAKE_CUDA_COMPILER={eval_mode['cuda_compiler']}",
+        "-DLLAMA_BUILD_COMMON=ON",
+        "-DLLAMA_BUILD_TOOLS=ON",
+        "-DLLAMA_BUILD_SERVER=ON",
+        "-DLLAMA_BUILD_TESTS=OFF",
+        "-DLLAMA_BUILD_EXAMPLES=OFF",
+        "-DLLAMA_BUILD_APP=OFF",
+        "-DLLAMA_BUILD_UI=OFF",
+        "-DLLAMA_USE_PREBUILT_UI=OFF",
+        "-DLLAMA_OPENSSL=OFF",
+    ]
+
+
+def comparator_server_binary(build_root: str = COMPARATOR_SERVER_BUILD_ROOT) -> str:
+    """Path of the built upstream server. Upstream emits tools into ``bin/``."""
+
+    return f"{build_root}/bin/llama-server"
+
+
+def comparator_server_plan(config: dict[str, Any], *, runner: str = "scripts/j1m_runner.py", config_path: str = "model/conversion/j1m-config.json", build_root: str = COMPARATOR_SERVER_BUILD_ROOT) -> list[list[str]]:
+    """One-time upstream ``llama-server`` build from the pinned revision.
+
+    A separate build tree from the conversion build (which is CPU-only and
+    has ``LLAMA_BUILD_SERVER=OFF``) and from the product engine build (whose
+    ``native/CMakeLists.txt`` pins ``LLAMA_BUILD_SERVER OFF ... FORCE``).
+    The pinned revision is re-verified immediately before configuring, so an
+    unexpected checkout refuses rather than building unknown sources.
+    """
+
+    llama = config["llama_cpp"]
+    return [
+        ["python3", runner, "--config", config_path, "--verify-llama", llama["checkout"], llama["revision"]],
+        ["cmake", "-S", llama["checkout"], "-B", build_root, *comparator_server_configure_flags(config)],
+        ["cmake", "--build", build_root, "--target", "llama-server", "--parallel", str(config["modes"]["eval"]["build_parallelism"])],
+    ]
+
+
 def command_plan(config: dict[str, Any], source: str = "/scratch/hf/Qwen3.5-9B", output: str = "/scratch/j1m/artifacts", runner: str = "scripts/j1m_runner.py", config_path: str = "model/conversion/j1m-config.json", source_lock: str | None = None, *, retain_comparators: bool = False) -> list[list[str]]:
     llama = config["llama_cpp"]
     converter = f"{llama['checkout']}/convert_hf_to_gguf.py"
