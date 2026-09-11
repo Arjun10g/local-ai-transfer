@@ -210,6 +210,10 @@ on 2026-09-11. Numbers are exact.
   SKIP.
 - `git diff --check main...HEAD`: no output, **exit 0**.
 - `git status --short`: empty (**0 lines**).
+- The two `duration_ms` values above are single machine-specific wall-clock
+  observations, kept per the governance-refresh-v4 convention; they are not
+  reproducible evidence. The test counts are. All counts were re-confirmed
+  unchanged at tip.
 - Machine: local source workspace, Darwin arm64, Node v25.9.0, Python 3.14.6.
   No native build, no model, no network, no provider contact.
 - Artifact/index: none. Numbers above are raw runner output.
