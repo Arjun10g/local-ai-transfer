@@ -21,8 +21,12 @@ converts, or that the provider honours its contract.  This gate answers one
 question -- "would any command in this run be refused locally?" -- and a PASS
 means the run gets as far as the network.
 
-No network, no provider call, no process launch, no spend.  Run it as the final
-pre-launch step of the live-run lane:
+No network, no provider call, no spend.  The one thing that does execute is the
+host-tree simulation: the plan's own ``mkdir``/``chmod`` text, replayed by
+``/bin/sh`` against a temporary directory standing in for ``/scratch``, because
+a ``0755`` directory on the host is invisible to every local validator and cost
+one paid run its entire receipt set.  Run it as the final pre-launch step of the
+live-run lane:
 
     python3 scripts/j1m_dry_run.py --mode eval
 
@@ -41,13 +45,14 @@ import os
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 import types
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from unittest import mock
 
@@ -1063,6 +1068,36 @@ def evaluate(results: dict[str, dict[str, Any]], recorder: Recorder,
     destination_ok, destination_detail = _destination_precondition(default_destination)
     add("operator_artifact_destination_is_salvage_ready", destination_ok, destination_detail)
 
+    simulated = host_tree_simulation(umask_prefix=sf.remote_shell_prefix())
+    add("host_tree_simulation_accepts_every_private_write",
+        not simulated["refused"] and simulated["created_file_mode"] == "0600"
+        and len(simulated["written_paths"]) == 2,
+        f"{simulated['commands_replayed']} directory command(s) replayed under "
+        f"'{simulated['umask_prefix']}' against a 0755 stand-in /scratch; "
+        f"{simulated['probed_paths']} receipt path(s) accepted by "
+        f"_private_ancestor_snapshot, {len(simulated['written_paths'])} published by "
+        f"_private_atomic_write, a file created by the plan's own shell is "
+        f"{simulated['created_file_mode']}; refused: "
+        f"{[item['path'] for item in simulated['refused']] or 'none'}")
+
+    # The same simulation against the shape run j1m-eval-20260911-remote-d
+    # actually executed: the image's default umask and no explicit chmod.
+    # A gate that cannot reproduce the failure it was written for proves
+    # nothing, so this one has to come back refusing.
+    control = host_tree_simulation(
+        umask_prefix=_IMAGE_DEFAULT_UMASK_PREFIX, legacy=True)
+    add("host_tree_simulation_reproduces_the_run_d_refusal",
+        bool(control["refused"]) and control["created_file_mode"] != "0600"
+        and not control["written_paths"],
+        f"replaying the failed run's own plan (umask 022, mkdir without chmod, "
+        f"no progress directory) "
+        f"refuses all {control['probed_paths']} receipt path(s) and both "
+        f"publish attempts ({len(control['refused'])} refusals) with "
+        f"{sorted({item['error'] for item in control['refused']})} "
+        f"and creates {control['created_file_mode']} files -- exactly the "
+        f"exit-2 runner refusal and the 0644 salvage_not_private_regular_file "
+        f"booked on 2026-09-11 for USD 3.273486")
+
     return checks
 
 
@@ -1203,6 +1238,161 @@ def _add_target_selection_checks(results: dict[str, dict[str, Any]], add) -> Non
         f"hourly=${budget.get('hourly_usd')} "
         f"marginal=${budget.get('projected_marginal_cost_usd')} "
         f"authorized=${budget.get('authorized_active_cost_usd')}")
+
+
+# ------------------------------------------------------ offline host tree
+
+
+# The only programs this harness will execute while replaying the remote plan.
+# Everything else in the plan (apt, cmake, python3, sudo, cp, df, test) is
+# recorded and never run, exactly as in the rest of this gate.
+_HOST_REPLAYABLE_PROGRAMS = frozenset({"mkdir", "chmod", "touch"})
+# The image default the failed run inherited, for the control replay.
+_IMAGE_DEFAULT_UMASK_PREFIX = ("umask", "022", "&&")
+_UMASK_PROBE_NAME = "umask-probe.json"
+# The exact directory-creating commands run ``j1m-eval-20260911-remote-d``
+# executed, transcribed from ``main@a0aa02cbf1be459df0eda1c4ecff2ae2e9741f9d``:
+# ``j1m_orchestrator.execute()``'s ``workspace_stages`` created only
+# ``/scratch/j1m``, and ``_eval_remote_commands()[0]`` created the six eval
+# directories.  Neither chmodded anything, and nothing in that plan created
+# the runner's own progress directory at all.  Kept verbatim as the control
+# for the simulation: a gate that cannot reproduce the failure it was written
+# for proves nothing.
+_RUN_D_HOST_COMMANDS = (
+    ["mkdir", "-p", "/scratch/j1m"],
+    ["mkdir", "-p", "/scratch/j1m/model", "/scratch/j1m/engine/native",
+     "/scratch/j1m/engine/vendor", "/scratch/j1m/engine/scripts",
+     "/scratch/j1m/engine/tests/native", "/scratch/j1m/artifacts"],
+)
+
+
+def _host_replay_commands(config: dict[str, Any], *, legacy: bool) -> list[list[str]]:
+    """Every directory command the live plan runs on the host, in plan order.
+
+    Taken from the production plan builders, never retyped here, so a plan
+    that stops creating a directory or stops making it private fails this
+    gate instead of failing on a paid host.  ``legacy=True`` replays the
+    transcribed run-d plan instead.
+    """
+
+    remote_root = "/scratch/j1m"
+    if legacy:
+        replayable = [list(argv) for argv in _RUN_D_HOST_COMMANDS]
+    else:
+        progress_relative = str(config["resources"]["progress_path"])
+        commands = [argv for _name, argv in orchestrator._remote_workspace_stages(
+            "hostuser", remote_root, progress_relative)]
+        commands.extend(orchestrator._eval_remote_commands(
+            config, remote_root, orchestrator._comparator_selection(DEFAULT_COMPARATORS)))
+        replayable = [argv for argv in commands
+                      if argv and argv[0] in _HOST_REPLAYABLE_PROGRAMS]
+    # One synthetic probe, appended after the plan: an ordinary file creation
+    # under the replayed umask, so "would a receipt written by a host-side
+    # tool be 0600?" is answered by the shell rather than by assertion.
+    replayable.append(["touch", f"{remote_root}/artifacts/{_UMASK_PROBE_NAME}"])
+    return replayable
+
+
+def _host_receipt_targets(config: dict[str, Any]) -> list[str]:
+    """Every host path the runner or a probe must be able to publish to."""
+
+    remote_root = "/scratch/j1m"
+    host_root = PurePosixPath(remote_root).parent
+    names = orchestrator._eval_fetch_allowlist(
+        config, orchestrator._comparator_selection(DEFAULT_COMPARATORS))
+    return [
+        # The runner's own progress marker: written before the first stage of
+        # `--run`, from `ROOT / resources.progress_path`, where `ROOT` is the
+        # uploaded runner's grandparent -- /scratch, not /scratch/j1m.
+        str(host_root / config["resources"]["progress_path"]),
+        f"{remote_root}/artifacts/command-receipt.json",
+        *[f"{remote_root}/artifacts/{name}" for name in names],
+    ]
+
+
+def host_tree_simulation(*, umask_prefix: tuple[str, ...] | list[str],
+                         legacy: bool = False) -> dict[str, Any]:
+    """Replay the plan's host directory commands under a stand-in ``/scratch``.
+
+    The failure this exists for is not reachable by argv inspection: run
+    ``j1m-eval-20260911-remote-d`` built a perfectly valid plan whose commands
+    were all accepted by every local validator, and then created ``0755``
+    directories on the host because the remote login shell carried the image's
+    ``umask 022``.  The runner's own private writer refused its first write
+    and exited 2; the probe receipts landed ``0644`` and the salvage refused
+    them.  Nothing local could see any of that.
+
+    So the plan's directory-creating commands are executed here, as shell text,
+    against a temporary directory standing in for ``/scratch`` -- deliberately
+    created ``0755`` and owned by this user, the shape an image's own
+    ``/scratch`` has after the plan chowns it -- and the result is judged with
+    the *production* privacy predicates: ``_private_ancestor_snapshot`` for
+    every receipt path the run will publish, and a real ``_private_atomic_write``
+    for the two the runner writes first.
+    """
+
+    config = j1m_runner.load_config()
+    commands = _host_replay_commands(config, legacy=legacy)
+    prefix = list(umask_prefix)
+    scratch = Path(tempfile.mkdtemp(prefix="j1m-host-sim-"))
+    try:
+        # The trusted root is a policy boundary, not a private directory: the
+        # snapshot requires it to be owned by this user and not group/other
+        # writable, which 0755 satisfies. Starting at 0755 proves that.
+        os.chmod(scratch, 0o755)
+
+        def host(path: str) -> Path:
+            if not path.startswith("/scratch"):
+                raise DryRunError("host simulation may only replay /scratch paths")
+            return Path(str(scratch) + path[len("/scratch"):])
+
+        replayed: list[str] = []
+        for argv in commands:
+            text = " ".join(prefix + [
+                str(host(part)) if part.startswith("/scratch") else part
+                for part in argv])
+            result = subprocess.run(
+                ["/bin/sh", "-c", text], check=False, capture_output=True,
+                text=True, timeout=60, cwd=str(scratch),
+            )
+            replayed.append(" ".join(prefix + argv))
+            if result.returncode != 0:
+                raise DryRunError(
+                    f"host simulation could not replay {argv[0]!r} "
+                    f"(exit {result.returncode})")
+
+        probe = host(f"/scratch/j1m/artifacts/{_UMASK_PROBE_NAME}")
+        probe_mode = f"{stat.S_IMODE(os.stat(probe).st_mode):04o}"
+        os.unlink(probe)
+
+        refused: list[dict[str, str]] = []
+        targets = _host_receipt_targets(config)
+        for target in targets:
+            try:
+                j1m_runner._private_ancestor_snapshot(host(target), scratch)
+            except ValueError as exc:
+                refused.append({"path": target, "error": str(exc)})
+        # The two the runner itself writes first are proven by writing them.
+        written: list[str] = []
+        for target in targets[:2]:
+            try:
+                j1m_runner._private_atomic_write(
+                    host(target), b'{"host-simulation": true}\n', trusted_root=scratch)
+                written.append(target)
+            except ValueError as exc:
+                refused.append({"path": target, "error": str(exc)})
+        return {
+            "umask_prefix": " ".join(prefix) or "<none>",
+            "plan": "run-d" if legacy else "current",
+            "commands_replayed": len(replayed),
+            "root_mode": "0755",
+            "probed_paths": len(targets),
+            "written_paths": written,
+            "created_file_mode": probe_mode,
+            "refused": refused,
+        }
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def _destination_precondition(destination: Path) -> tuple[bool, str]:

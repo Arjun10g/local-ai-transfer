@@ -390,6 +390,39 @@ def _run_identity() -> dict[str, str]:
     return resolved
 
 
+# Host-side receipts are fetched by the bounded salvage transport, which
+# refuses anything that is not an owner-private single-link regular file
+# (``salvage_not_private_regular_file``).  Run ``j1m-eval-20260911-remote-d``
+# published its probe receipt ``0644`` under the image's default ``umask 022``
+# and the salvage refused it, correctly, at teardown.  The mode is therefore
+# set explicitly here instead of being inherited from whatever umask the
+# remote shell happened to carry, and the parent directory is made ``0700`` so
+# no other account can observe or replace a receipt between publication and
+# fetch.  Publication stays atomic: a private temporary file in the same
+# directory, fsynced, then ``os.replace``d over the final name.
+def _publish_private_receipt(output: Path, encoded: bytes) -> None:
+    """Atomically publish one receipt as a 0600 file in a 0700 directory."""
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(output.parent, 0o700)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{output.name}.", dir=os.fspath(output.parent))
+    try:
+        os.fchmod(descriptor, stat.S_IRUSR | stat.S_IWUSR)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, output)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
 def _write_preflight_receipt(
     path: Path,
     preflight: dict[str, Any] | None = None,
@@ -435,22 +468,7 @@ def _write_preflight_receipt(
     encoded = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
     if len(encoded) > MAX_PREFLIGHT_RECEIPT_BYTES:
         raise ValueError("engine_model_preflight_invalid")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary: str | None = None
-    try:
-        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=os.fspath(path.parent))
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(encoded)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        temporary = None
-    finally:
-        if temporary is not None:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
+    _publish_private_receipt(path, encoded)
     return summary
 
 
@@ -1162,22 +1180,7 @@ def main(argv: list[str] | None = None) -> int:
     if len(encoded) > MAX_RECEIPT_BYTES:
         receipt = {"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "failed", "error_code": "evaluator_receipt_invalid", "prompt_response_logging": False, "tokens_logged": False, **_run_identity()}
         encoded = (json.dumps(receipt, sort_keys=True) + "\n").encode("ascii")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary: str | None = None
-    try:
-        descriptor, temporary = tempfile.mkstemp(prefix=f".{output.name}.", dir=os.fspath(output.parent))
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(encoded)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, output)
-        temporary = None
-    finally:
-        if temporary is not None:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
+    _publish_private_receipt(output, encoded)
     print(json.dumps({"schema": receipt["schema"], "status": receipt["status"], "metrics": receipt.get("metrics")}, sort_keys=True))
     return status
 

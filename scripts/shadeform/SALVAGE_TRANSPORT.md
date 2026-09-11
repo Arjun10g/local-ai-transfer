@@ -15,6 +15,15 @@ transport carries "receipts bound to this run's id, instance, and approved
 artifact identity" is now true of every fetchable name rather than three of
 them.
 
+Companion document: `scripts/shadeform/HOST_PRIVACY.md`
+(`J1M-HOST-PRIVACY-001`) covers how a receipt comes to exist on the host in a
+state this transport will accept. Run `j1m-eval-20260911-remote-d` proved the
+two halves are separable: the transport worked exactly as specified and still
+returned 0 of 8 receipts, because the host had written them `0644` under the
+image's default `umask 022` and the runner had refused to write the rest at
+all. The `salvage_not_private_regular_file` refusal in §5 is unchanged by that
+slice; only what the host produces changed.
+
 ## 1. Why salvage exists at all
 
 A J1M remote run does its real work on an ephemeral, paid Shadeform instance.
