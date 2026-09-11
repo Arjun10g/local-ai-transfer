@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest import mock
 
 from scripts.test import compare_model_quality as comparison
+from tests.performance.lifecycle_test_isolation import isolated_lifecycle_execute
 
 ROOT = Path(__file__).resolve().parents[2]
 CATEGORIES = {
@@ -459,6 +460,7 @@ class ComparatorBudgetTests(unittest.TestCase):
             self.assertNotIn("reason", ample)
             self.assertGreaterEqual(ample["available_seconds"], required)
 
+    @isolated_lifecycle_execute
     def test_execute_refuses_comparators_before_any_provider_access(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             config_path = Path(directory) / "j1m-config.json"
