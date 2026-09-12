@@ -1181,7 +1181,20 @@ def main(argv: list[str] | None = None) -> int:
         receipt = {"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "failed", "error_code": "evaluator_receipt_invalid", "prompt_response_logging": False, "tokens_logged": False, **_run_identity()}
         encoded = (json.dumps(receipt, sort_keys=True) + "\n").encode("ascii")
     _publish_private_receipt(output, encoded)
-    print(json.dumps({"schema": receipt["schema"], "status": receipt["status"], "metrics": receipt.get("metrics")}, sort_keys=True))
+    # The orchestrator records this line as the failed stage's stdout tail, and
+    # it was the only channel that survived teardown on run j1m-eval-20260912-b
+    # -- where it reported status "failed" and metrics null while the reason sat
+    # in `error_code`, which this summary dropped. Both fields are drawn from
+    # the finite SAFE_ERROR_CODES vocabulary and carry no host or model text.
+    summary = {"schema": receipt["schema"], "status": receipt["status"], "metrics": receipt.get("metrics")}
+    for field in ("error_code", "error_type"):
+        if receipt.get(field) is not None:
+            summary[field] = receipt[field]
+    if isinstance(receipt.get("preflight"), dict):
+        summary["preflight"] = receipt["preflight"]
+    if isinstance(receipt.get("child"), dict):
+        summary["child"] = receipt["child"]
+    print(json.dumps(summary, sort_keys=True))
     return status
 
 

@@ -1321,6 +1321,42 @@ def _comparator_stage_timeout(config: dict[str, Any], command: list[str]) -> flo
     return float(config["modes"]["eval"]["stage_budgets_seconds"]["evaluation"])
 
 
+# A receipt that records a FAILURE cannot carry the fields that only exist
+# once the work succeeded.  `eval-receipt.json` required artifact, fixture,
+# engine, model_preflight, toolchain and metrics, all of which
+# `remote_model_eval` writes only on the success path, so the single receipt
+# that explains a failed paid run was refused precisely BECAUSE it was a
+# failure -- `salvage_required_key_missing` on run j1m-eval-20260912-b, which
+# reached the last of 16 eval stages. Completeness for a failure receipt means
+# naming the failure, so that is what is required instead.
+# The relaxation is keyed on an EXPLICIT failure vocabulary, never on "not one
+# of the statuses I think mean success".  Producer receipts carry descriptive
+# success statuses -- `conversion-complete`,
+# `checksums-and-tensor-inventory-verified` -- and an inferred rule silently
+# reclassified those as failures and stopped salvaging them.
+_SALVAGE_FAILURE_STATUSES: frozenset[str] = frozenset({
+    "failed", "not_started", "rejected", "timeout", "oversize", "terminated",
+})
+
+
+def _salvage_required_keys(name: str, payload: dict[str, Any]) -> frozenset[str]:
+    """Required keys for one receipt, given the outcome it records."""
+
+    required = _SALVAGE_REQUIRED_KEYS[name]
+    status = payload.get("status")
+    if (isinstance(status, str) and status in _SALVAGE_FAILURE_STATUSES
+            and isinstance(payload.get("error_code"), str) and payload["error_code"]):
+        # Completeness for a failure receipt means NAMING the failure, so the
+        # evidence demanded is `error_code` rather than the artifact, engine,
+        # preflight, toolchain and metrics fields that exist only once the work
+        # succeeded. Requiring those refused the one receipt that explains a
+        # failed paid run precisely because it was a failure --
+        # `salvage_required_key_missing` on run j1m-eval-20260912-b, which
+        # reached the last of 16 eval stages with the model built and verified.
+        return (required & {"schema", "status"}) | {"error_code"}
+    return required
+
+
 def _eval_fetch_allowlist(config: dict[str, Any], selection: tuple[str, ...]) -> list[str]:
     """Effective salvage allowlist. Receipts only; weights are never listed."""
 
@@ -1972,7 +2008,7 @@ def _salvage_validated_payload(
         raise _SalvageRefusal("salvage_not_an_object")
     if payload.get("schema") != _SALVAGE_RECEIPT_ALLOWLIST[name]:
         raise _SalvageRefusal("salvage_schema_mismatch")
-    if not _SALVAGE_REQUIRED_KEYS[name] <= set(payload):
+    if not _salvage_required_keys(name, payload) <= set(payload):
         raise _SalvageRefusal("salvage_required_key_missing")
     try:
         j1m_runner.validate_persisted_receipt(payload)

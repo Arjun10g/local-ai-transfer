@@ -202,3 +202,56 @@ class ReceiptRehearsalTests(unittest.TestCase):
         )
         payload = json.loads((self.work / "progress.json").read_text(encoding="utf-8"))
         self.assertEqual(payload["stage"], "stage-27-failed")
+
+
+class FailedEvalReceiptSalvageTests(unittest.TestCase):
+    """A failed paid run must be able to return the receipt that explains it.
+
+    Run j1m-eval-20260912-b reached the last of 16 eval stages -- the model was
+    rebuilt and hash-verified on the host, CUDA was verified, the engine was
+    built -- and `remote_model_eval` then failed. Its receipt was refused as
+    `salvage_required_key_missing`, because `eval-receipt.json` required
+    artifact, fixture, engine, model_preflight, toolchain and metrics: fields
+    `remote_model_eval` writes only on the success path. The one receipt that
+    explains a failure was rejected for being one.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "salvage_keys_orchestrator")
+
+    def test_a_failure_receipt_that_names_its_error_is_accepted(self):
+        payload = {"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "failed",
+                   "error_code": "engine_model_preflight_failed", "error_type": "ValueError",
+                   "run_id": "J1M-EVAL-38B", "instance_id": "b928e587"}
+        required = self.orchestrator._salvage_required_keys("eval-receipt.json", payload)
+        self.assertLessEqual(required, set(payload))
+        self.assertIn("error_code", required)
+
+    def test_a_failure_receipt_that_names_nothing_is_still_refused(self):
+        payload = {"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "failed"}
+        required = self.orchestrator._salvage_required_keys("eval-receipt.json", payload)
+        self.assertFalse(required <= set(payload))
+
+    def test_a_successful_receipt_still_owes_its_full_evidence(self):
+        payload = {"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "verified",
+                   "error_code": "ignored"}
+        self.assertEqual(self.orchestrator._salvage_required_keys("eval-receipt.json", payload),
+                         self.orchestrator._SALVAGE_REQUIRED_KEYS["eval-receipt.json"])
+
+    def test_descriptive_success_statuses_are_not_read_as_failures(self):
+        """`conversion-complete` is a success, and an inferred rule broke it."""
+
+        for status in ("conversion-complete", "checksums-and-tensor-inventory-verified",
+                       "verified", "completed_with_failures"):
+            payload = {"schema": "x", "status": status, "error_code": "spurious"}
+            self.assertEqual(
+                self.orchestrator._salvage_required_keys("tensor-metadata.json", payload),
+                self.orchestrator._SALVAGE_REQUIRED_KEYS["tensor-metadata.json"], status)
+
+    def test_the_host_summary_reports_the_error_code(self):
+        """The stdout tail was the only channel that survived teardown."""
+
+        source = (ROOT / "scripts/test/remote_model_eval.py").read_text(encoding="utf-8")
+        self.assertIn('for field in ("error_code", "error_type"):', source)
+        self.assertIn("summary[field] = receipt[field]", source)
