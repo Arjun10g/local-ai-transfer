@@ -412,6 +412,39 @@ def validate_persisted_argv(argv: object) -> list[str]:
     return list(argv)
 
 
+def _is_json_shaped(text: str) -> bool:
+    """Whether text PRESENTS itself as JSON and must therefore parse cleanly.
+
+    `text[0] in '[{"' ` was too coarse. The model's own Jinja chat template
+    opens `{%- set ... %}`, so it was required to be valid JSON and refused
+    when it was not -- which failed plan stage 27 of run
+    `j1m-eval-20260911-remote-h` after the model had already been downloaded,
+    converted and quantized.
+
+    Loosening this to "parse if you can, shrug if you cannot" would be a real
+    weakening: text that genuinely presents as JSON must still be refused when
+    it does not parse, or a lenient downstream reader could read an ambiguous
+    document differently than this validator did. So the decision is made on
+    the first TWO significant characters, which is what separates a JSON
+    container from a template or a stray brace: `{` followed by `"` or `}`,
+    `[` followed by a JSON value start, or a quoted string.
+    """
+
+    stripped = text.strip()
+    if not stripped:
+        return False
+    head = stripped[0]
+    rest = stripped[1:].lstrip()
+    following = rest[0] if rest else ""
+    if head == '"':
+        return True
+    if head == "{":
+        return following in '"}'
+    if head == "[":
+        return following == "" or following in '"{[]-0123456789tfn'
+    return False
+
+
 def _precheck_json_bytes(raw: bytes) -> None:
     """Reject oversized JSON structure before the decoder allocates it."""
 
@@ -619,7 +652,7 @@ def validate_persisted_output(value: object) -> str:
         if _credential_like_text(line.strip(), literal_percent=True) is not None:
             raise ValueError("credential-like command output rejected before persistence")
     stripped = text.strip()
-    if stripped and stripped[0] in "[{\"":
+    if _is_json_shaped(stripped):
         try:
             decoded = _bounded_json_loads(stripped)
         except (json.JSONDecodeError, RecursionError, UnicodeError, ValueError) as exc:
@@ -668,11 +701,25 @@ def _validate_persisted_value(value: object, *, depth: int, state: dict[str, int
         if len(text) > _RECEIPT_MAX_STRING_CHARS:
             raise ValueError("receipt string exceeds its bound")
         for line in text.splitlines() or [text]:
-            if _credential_like_text(line.strip()) is not None:
+            # A receipt STRING VALUE is free-text data -- a log tail, a path, a
+            # template -- exactly like command output, and the same
+            # `literal_percent` rule applies. The model's own Jinja chat
+            # template is the case that proves it: every line is `{%- ... %}`,
+            # so percent-decoding the template refused the tensor-metadata
+            # receipt that embeds it, and with it plan stage 27 of run
+            # `j1m-eval-20260911-remote-h` -- after the model had already been
+            # downloaded, converted and quantized. The 2026-09-04 build wrote
+            # that same receipt successfully, before percent decoding landed
+            # on 2026-09-08 in 991b70e.
+            #
+            # Percent-ENCODED credentials are still decoded and caught; only a
+            # stray `%` is read as a percent sign. Receipt KEYS stay strict
+            # above: they are identifiers and have no business carrying one.
+            if _credential_like_text(line.strip(), literal_percent=True) is not None:
                 raise ValueError("credential-like command output rejected before persistence")
         if parse_json_strings:
             stripped = text.strip()
-            if stripped and stripped[0] in "[{\"":
+            if _is_json_shaped(stripped):
                 try:
                     decoded = _bounded_json_loads(stripped)
                 except (json.JSONDecodeError, RecursionError, UnicodeError, ValueError) as exc:
@@ -2010,12 +2057,20 @@ def _failed_plan_summary(receipts: list[dict[str, Any]]) -> dict[str, Any]:
         "exit_code": failed.get("exit_code"),
         "error_type": str(failed.get("error_type") or ""),
     })
-    tail = str(failed.get("stderr_tail") or "")[-400:]
-    try:
-        validate_persisted_output(tail)
-        summary["stderr_tail"] = tail
-    except (ValueError, UnicodeError):
-        summary["stderr_tail"] = "<redacted>"
+    # Both streams: a nested `j1m_runner` refusal is printed on STDOUT by
+    # `_safe_cli`, so a stderr-only summary reported `exit 2` with nothing
+    # attached -- which is exactly what run `j1m-eval-20260911-remote-h` did
+    # at plan stage 27.
+    for field in ("stderr_tail", "stdout_tail"):
+        tail = str(failed.get(field) or "")[-400:]
+        if not tail:
+            continue
+        try:
+            validate_persisted_output(tail)
+            summary[field] = tail
+        except (ValueError, UnicodeError):
+            summary[field] = "<redacted>"
+    summary.setdefault("stderr_tail", "")
     return summary
 
 
@@ -2129,9 +2184,13 @@ def main(argv: list[str] | None = None) -> int:
             payload = with_run_identity({"schema": "local_bmo.j1m.tensor-metadata.v1", "status": "verified", "text_only": True, "tensor_count": len(tensors), "tensors": tensors, "gguf_metadata": fields, "vision_projection_present": vision_projection_present, "chat_template_sha256": hashlib.sha256(chat_template.encode("utf-8")).hexdigest()})
         except Exception as exc:
             # Do not persist a failure payload containing untrusted producer
-            # metadata or tensor names. The caller gets the bounded exception;
-            # a finite placeholder is reserved for command-output receipts.
-            raise ValueError("credential-like producer receipt rejected") from None
+            # metadata or tensor names, and do not surface the exception's own
+            # message, which can quote them. The exception CLASS is a finite
+            # identifier and is safe -- and it is the difference between "the
+            # GGUF step failed" and a diagnosis. The old blanket wording named
+            # credentials for every cause, which sent the run-h investigation
+            # after a credential that was never there.
+            raise ValueError(f"producer receipt rejected: {type(exc).__name__}") from None
         _write_validated_json(metadata_path, payload)
         return 0
     if args.scan:

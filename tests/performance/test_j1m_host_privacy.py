@@ -383,11 +383,23 @@ class FailedStageStdoutTests(unittest.TestCase):
         """
 
         limit = self.orchestrator._STDERR_TAIL_LIMIT
+        # A brace followed by ordinary text does not PRESENT as JSON, so it is
+        # kept verbatim -- the receipt still persists, and the diagnosis is no
+        # longer thrown away to protect a write that was never at risk.
         fragment = "p" * 100 + "{" + "q" * (limit - 1)
         self.assertTrue(fragment[-limit:].startswith("{"))
         receipt = self._remote(returncode=2, stdout=fragment, stderr="")
-        self.assertEqual(receipt["stdout_tail"], "<redacted>")
+        self.assertEqual(receipt["stdout_tail"], fragment[-limit:])
         self.orchestrator.j1m_runner.validate_persisted_receipt(receipt)
+
+        # A fragment that DOES present as JSON and cannot parse is still
+        # redacted: a lenient reader could interpret it differently than this
+        # validator did, and the receipt must remain writable either way.
+        shaped = "p" * 100 + '{"a": "' + "q" * (limit - len('{"a": "'))
+        self.assertTrue(shaped[-limit:].lstrip().startswith("{"))
+        shaped_receipt = self._remote(returncode=2, stdout=shaped, stderr="")
+        self.assertEqual(shaped_receipt["stdout_tail"], "<redacted>")
+        self.orchestrator.j1m_runner.validate_persisted_receipt(shaped_receipt)
 
         whole = '{"metrics": {"' + "a" * 4000 + '": 1}}'
         kept = self._remote(returncode=2, stdout=whole, stderr="")["stdout_tail"]
@@ -694,3 +706,63 @@ class CommandOutputDecodeTests(unittest.TestCase):
         payload = ("━ filler 50%\n" * 20000) + "HF_TOKEN=hf_abcdefghijklmnopqrstuvwxyz012345\n" + ("━ more\n" * 20000)
         with self.assertRaises(ValueError):
             self._tail(payload)
+
+
+class TensorMetadataReceiptTests(unittest.TestCase):
+    """The receipt plan stage 27 writes must be writable.
+
+    Run `j1m-eval-20260911-remote-h` completed 26 of 27 plan stages -- the
+    model was downloaded, converted to bf16 and q8, and quantized to Q4_K_M --
+    and then failed writing `tensor-metadata.json`, because the GGUF's
+    embedded Jinja chat template opens `{%- set ... %}`. Every `%` was read as
+    a malformed percent escape, and the leading `{` made the template look
+    like JSON that had to parse. USD 3.27, after all the real work was done.
+    """
+
+    def setUp(self):
+        self.runner = load(ROOT / "scripts/j1m_runner.py", "tensor_metadata_runner")
+
+    def test_the_real_tensor_metadata_payload_validates(self):
+        """Pinned against the artifact the 2026-09-04 build actually produced."""
+
+        payload = json.loads((ROOT / "artifacts/qwen35-9b/tensor-metadata.json").read_text(encoding="utf-8"))
+        template = payload["gguf_metadata"]["tokenizer.chat_template"]
+        # Guard the guard: this fixture must still exercise both defects.
+        self.assertIn("%", template)
+        self.assertTrue(template.lstrip().startswith("{"))
+        state = {"nodes": 0}
+        self.runner._validate_persisted_value(payload, depth=1, state=state, parse_json_strings=True)
+        self.assertLess(state["nodes"], self.runner._RECEIPT_MAX_NODES)
+
+    def test_json_shaped_text_must_still_parse_but_a_template_need_not(self):
+        shaped = ('{"a": 1}', '{ "a": 1 }', '[1, 2]', '[]', '{}', '"quoted"')
+        for text in shaped:
+            self.assertTrue(self.runner._is_json_shaped(text), text)
+        free = ("{%- set x = 1 %}", "{not json at all", "{3584, 3584}", "", "plain text")
+        for text in free:
+            self.assertFalse(self.runner._is_json_shaped(text), text)
+        # `[[` is a genuine nested-array opening, so shell text like
+        # `[[ -f x ]]` is treated as JSON-shaped and refused. That is the
+        # conservative side of the line and costs only a redaction: a command
+        # tail degrades to a marker rather than failing a stage that exited 0.
+        self.assertTrue(self.runner._is_json_shaped("[[ -f x ]]"))
+        handle = tempfile.TemporaryFile()
+        self.addCleanup(handle.close)
+        handle.write(b"[[ -f x ]] not json\n")
+        self.assertEqual(self.runner._bounded_command_tail(handle),
+                         self.runner._UNREPRESENTABLE_OUTPUT)
+
+    def test_hostile_json_shaped_output_is_still_refused(self):
+        for hostile in ('{"safe": 1, "safe": 2}', '{"safe": NaN}', '{"safe": 1e309}',
+                        '{"safe": "unterminated}', "[" + "{" * 40 + "0" + "}" * 40 + "]",
+                        '{"HF_TOKEN": "hf_abcdefghijklmnopqrstuvwxyz012345"}'):
+            with self.assertRaises(ValueError, msg=hostile[:40]):
+                self.runner.validate_persisted_output(hostile)
+
+    def test_a_credential_in_a_template_shaped_string_is_still_refused(self):
+        """Accepting `%` as literal must not become a way to smuggle one."""
+
+        for hostile in ("{%- set t = 'HF_TOKEN=hf_abcdefghijklmnopqrstuvwxyz012345' %}",
+                        "{%- if token%3Dsecret %}"):
+            with self.assertRaises(ValueError, msg=hostile[:40]):
+                self.runner.validate_persisted_output(hostile)
