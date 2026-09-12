@@ -602,7 +602,18 @@ class ComparatorBudgetTests(unittest.TestCase):
         stream = io.StringIO()
         with contextlib.redirect_stdout(stream):
             self.assertEqual(self.orchestrator._safe_cli(["--mode", "prove", "--evaluate-comparators", "q8"]), 2)
-        self.assertEqual(json.loads(stream.getvalue()), {"status": "refused", "error_code": "input_rejected"})
+        refusal = json.loads(stream.getvalue())
+        # The finite code and status are the contract and do not change. The
+        # refusal also names its cause now, because every pre-spend gate exits
+        # through here and `input_rejected` alone cost an hour per launch to
+        # trace. `error_type` is a bounded identifier; `reason` appears only
+        # when it screens clean against the persisted-diagnostic validator.
+        self.assertEqual(refusal["status"], "refused")
+        self.assertEqual(refusal["error_code"], "input_rejected")
+        self.assertEqual(refusal["error_type"], "ValueError")
+        self.assertEqual(refusal["reason"], "comparator evaluation is only available in eval mode")
+        self.orchestrator.j1m_runner.validate_persisted_output(refusal["reason"])
+        self.assertEqual(set(refusal), {"status", "error_code", "error_type", "reason"})
 
     def test_comparison_receipt_is_written_with_a_typed_skip_when_nothing_ran(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -3189,8 +3189,25 @@ def _safe_cli(argv: list[str] | None = None) -> int:
         return main(argv)
     except SystemExit:
         raise
-    except Exception:
-        print(json.dumps({"status": "refused", "error_code": "input_rejected"}, sort_keys=True))
+    except Exception as exc:
+        # The finite refusal code stays the contract. What it never carried is
+        # WHICH refusal, and every pre-spend gate in `execute` funnels through
+        # here: a launch that stopped before any provider call printed
+        # `input_rejected` and nothing else, so each one cost an hour of
+        # stepping the gates by hand to rediscover a one-line cause. The
+        # exception CLASS is a bounded identifier and is always safe; the
+        # message is included only when it screens clean against the same
+        # validator every persisted diagnostic uses, so a path or credential
+        # in an exception string is replaced rather than printed.
+        refusal = {"status": "refused", "error_code": "input_rejected",
+                   "error_type": type(exc).__name__}
+        try:
+            message = str(exc)[:200]
+            j1m_runner.validate_persisted_output(message)
+            refusal["reason"] = message
+        except (ValueError, UnicodeError):
+            pass
+        print(json.dumps(refusal, sort_keys=True))
         return 2
 
 

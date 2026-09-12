@@ -255,3 +255,54 @@ class FailedEvalReceiptSalvageTests(unittest.TestCase):
         source = (ROOT / "scripts/test/remote_model_eval.py").read_text(encoding="utf-8")
         self.assertIn('for field in ("error_code", "error_type"):', source)
         self.assertIn("summary[field] = receipt[field]", source)
+
+
+class RefusalIsSelfDescribingTests(unittest.TestCase):
+    """A refusal that names nothing costs an hour of stepping gates by hand.
+
+    Every pre-spend gate in `execute` funnels through `_safe_cli`, which
+    printed `input_rejected` and nothing else. Run j1m-eval-20260912-c stopped
+    before any provider call -- correctly, at USD 0.00 -- and said only that.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.orchestrator = load(ROOT / "scripts/j1m_orchestrator.py", "refusal_orchestrator")
+        cls.runner = load(ROOT / "scripts/j1m_runner.py", "refusal_runner")
+
+    def _refusal(self, module, argv, env=None):
+        import io, contextlib
+        previous = dict(os.environ)
+        if env:
+            os.environ.update(env)
+        try:
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                code = module._safe_cli(argv)
+            return code, buffer.getvalue().strip()
+        finally:
+            os.environ.clear()
+            os.environ.update(previous)
+
+    def test_the_orchestrator_names_the_gate_that_refused(self):
+        code, out = self._refusal(
+            self.orchestrator,
+            ["--mode", "eval", "--phase-id", "probe-refusal", "--run-id", "PROBE",
+             "--artifact-destination", "relative/path", "--evaluate-comparators", "", "--execute"],
+            env={"SOL_J1M_REVIEWED": "1"})
+        self.assertEqual(code, 2)
+        payload = json.loads(out.splitlines()[-1])
+        self.assertEqual(payload["error_code"], "input_rejected")
+        self.assertEqual(payload["status"], "refused")
+        self.assertEqual(payload["error_type"], "ShadeformError")
+        self.assertIn("trusted output root", payload["reason"])
+
+    def test_an_unscreenable_reason_is_omitted_not_printed(self):
+        """The finite code is the contract; the message is a bonus, screened."""
+
+        for module in (self.orchestrator, self.runner):
+            refusal = {"status": "refused", "error_code": "input_rejected"}
+            self.assertNotIn("reason", refusal)
+        # A credential-shaped message must not reach the refusal line.
+        with self.assertRaises(ValueError):
+            self.runner.validate_persisted_output("HF_TOKEN=hf_abcdefghijklmnopqrstuvwxyz012345")
