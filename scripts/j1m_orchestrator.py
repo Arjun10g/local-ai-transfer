@@ -419,7 +419,7 @@ def _persist_lifecycle(phase_id: str, lifecycle: dict[str, Any]) -> None:
         raise ValueError("lifecycle receipt serialization refused") from exc
     if len(payload) > MAX_RECEIPT_BYTES:
         raise ValueError("lifecycle receipt exceeds bound")
-    j1m_runner.validate_persisted_output(payload)
+    j1m_runner.validate_persisted_document(payload, max_bytes=MAX_RECEIPT_BYTES)
     sf.private_durable_atomic_write(path, payload, label="J1M lifecycle receipt")
 
 
@@ -1981,7 +1981,7 @@ def _salvage_validated_payload(
         # receipt that fails it was previously recorded as the generic
         # ``salvage_failed`` from the outer handler -- which said nothing about
         # why a paid run came back with no receipt.
-        j1m_runner.validate_persisted_output(raw)
+        j1m_runner.validate_persisted_document(raw)
     except ValueError:
         raise _SalvageRefusal("salvage_receipt_content_refused") from None
     # Run-identity binding is REQUIRED, not opportunistic.  Every allowlisted

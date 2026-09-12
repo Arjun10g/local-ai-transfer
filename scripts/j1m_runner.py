@@ -739,6 +739,44 @@ def validate_persisted_receipt(value: object) -> object:
     return value
 
 
+def validate_persisted_document(payload: bytes | str, *, max_bytes: int | None = None) -> None:
+    """Screen a whole serialized DOCUMENT about to be written or published.
+
+    `validate_persisted_output` is the rule for ONE string value: besides the
+    credential screen it enforces `_RECEIPT_MAX_STRING_CHARS` (64 KiB) and
+    parses anything JSON-shaped. Applied to a serialized document it caps
+    every receipt at 64 KiB regardless of content -- which is why
+    `tensor-metadata.json`, 69,029 bytes for this model's 427 tensors, could
+    never be written, and why plan stage 27 failed on two paid runs at USD
+    3.27 each. The same cap sat on the lifecycle receipt and on every receipt
+    the salvage transport fetches, so a `command-receipt.json` that grew past
+    64 KiB would have come back `salvage_receipt_content_refused`.
+
+    The document bound is `_RECEIPT_MAX_BYTES`; the credential screen still
+    runs over every line, and decoding stays strict so non-UTF-8 is refused.
+    """
+
+    data = payload.encode("utf-8") if isinstance(payload, str) else payload
+    if not isinstance(data, (bytes, bytearray)):
+        raise ValueError("persisted document is invalid")
+    if len(data) > (max_bytes if max_bytes is not None else _RECEIPT_MAX_BYTES):
+        raise ValueError("persisted document exceeds its bounded size")
+    text = bytes(data).decode("utf-8", errors="strict")
+    stripped = text.strip()
+    if _is_json_shaped(stripped):
+        # Screen the document the way its own fields are screened, so
+        # serializing a payload can never change the verdict on it. A
+        # line-by-line pass over serialized JSON is strictly HARSHER than the
+        # field pass, because `"name": "value"` reads as an assignment: it
+        # rejected `"special_token_fixture_version"` -- a tokenizer field in
+        # `model-manifest.json` -- as a credential, while the same string
+        # passes as a key. Every string and key is still screened here; only
+        # the punctuation JSON adds is no longer evidence.
+        validate_persisted_receipt(_bounded_json_loads(stripped))
+        return
+    _screen_streamed_output(text)
+
+
 def _write_validated_json(path: Path, payload: object, *, trusted_root: Path | None = None) -> None:
     """Validate a producer payload completely before creating its receipt."""
 
@@ -747,7 +785,9 @@ def _write_validated_json(path: Path, payload: object, *, trusted_root: Path | N
         serialized = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     except (TypeError, ValueError, RecursionError) as exc:
         raise ValueError("receipt serialization refused") from exc
-    validate_persisted_output(serialized)
+    # Re-parsing the JSON here would be redundant: `validate_persisted_receipt`
+    # above already walked every field of this exact payload.
+    validate_persisted_document(serialized)
     _private_atomic_write(
         path, serialized.encode("utf-8"),
         trusted_root=trusted_root or PRIVATE_OUTPUT_ROOT,
@@ -767,7 +807,7 @@ def _private_atomic_write(path: Path, payload: bytes, *, trusted_root: Path | No
         raise ValueError("private output payload exceeds its bound")
     # Keep the helper itself an invariant boundary: no caller can accidentally
     # create a parent/temp file before content validation is complete.
-    validate_persisted_output(payload)
+    validate_persisted_document(payload)
     if not path.is_absolute() or path != Path(os.path.abspath(path)) or not path.name:
         raise ValueError("private output path must be absolute and normalized")
     if os.name != "posix" or not all(
@@ -1553,7 +1593,7 @@ def write_artifacts(output_dir: Path, names: list[str], *, source_lock: Path = S
     _write_validated_json(output_dir / "manifest.json", manifest)
     checksum_names = [item["name"] for item in manifest["artifacts"]] + ["manifest.json"]
     checksums = "".join(f"{_sha256(output_dir / name)}  {name}\n" for name in checksum_names)
-    validate_persisted_output(checksums)
+    validate_persisted_document(checksums)
     _private_atomic_write(output_dir / "checksums.sha256", checksums.encode("utf-8"))
     return manifest
 
@@ -2011,7 +2051,7 @@ def write_progress(path: Path, stage: str, *, trusted_root: Path | None = None, 
         serialized = json.dumps(payload, sort_keys=True) + "\n"
     except (TypeError, ValueError, RecursionError) as exc:
         raise ValueError("progress serialization refused") from exc
-    validate_persisted_output(serialized)
+    validate_persisted_document(serialized)
     _private_atomic_write(path, serialized.encode("utf-8"),
                           trusted_root=trusted_root or PRIVATE_OUTPUT_ROOT)
 
@@ -2254,8 +2294,23 @@ def _safe_cli(argv: list[str] | None = None) -> int:
         return main(argv)
     except SystemExit:
         raise
-    except Exception:
-        print(json.dumps({"status": "refused", "error_code": "input_rejected"}, sort_keys=True))
+    except Exception as exc:
+        # The finite refusal code stays the contract. What was missing is any
+        # way to tell WHICH refusal: runs `...-h` and `...-20260912-a` both
+        # reported `input_rejected` from plan stage 27 and nothing else, at
+        # USD 3.27 each, while the reason sat in an exception no one could see.
+        # The exception CLASS is a bounded identifier and is always safe; the
+        # message is included only when it screens clean against the same
+        # validator every persisted diagnostic uses.
+        refusal = {"status": "refused", "error_code": "input_rejected",
+                   "error_type": type(exc).__name__}
+        try:
+            message = str(exc)[:200]
+            validate_persisted_output(message)
+            refusal["reason"] = message
+        except (ValueError, UnicodeError):
+            pass
+        print(json.dumps(refusal, sort_keys=True))
         return 2
 
 

@@ -96,6 +96,7 @@ TEST_INVENTORY = {
     "tests/performance/test_j1m_approved_targets.py": "lifecycle",
     "tests/performance/test_j1m_dry_run.py": "lifecycle",
     "tests/performance/test_j1m_host_privacy.py": "lifecycle",
+    "tests/performance/test_j1m_receipt_rehearsal.py": "lifecycle",
     "tests/performance/test_j1m_key_handle.py": "lifecycle",
     "tests/performance/test_j1m_lifecycle.py": "lifecycle",
     "tests/performance/test_j1m_salvage_transport.py": "lifecycle",
