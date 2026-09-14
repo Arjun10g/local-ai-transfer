@@ -113,6 +113,34 @@ timeout and its own subprocess kill timeout, and `evaluate_tool_calls.py` caps
 own bounds on CPU. **Scoring the shipping profile needs the CUDA host the lane
 was designed around — which is now unblocked, and is the user's launch to make.**
 
+## End-to-end scoring evidence, on the smaller fixture
+
+The shipping fixture cannot be scored on this machine, but the 11-tool dev
+fixture (`tests/model/tool_call_eval.json`, ~1.4 k-token prompts) can carry the
+path far enough to prove it works. Four cases against the rebuilt engine:
+
+    canary: passed=true, prompt_tokens=1414, error_code=null
+    case_count=4, passed=1, failed=0, errors=3
+    error_diagnostics: {"http_503_not_ready": 2, "transport_timeout": 1}
+
+**The canary passed.** It had never passed before — every prior run recorded
+`prompt_tokens: null` with `http_400`. The engine now accepts the request,
+tokenizes 1,414 prompt tokens and returns a well-formed response with usage,
+and one case scored a genuine `pass` through the full path: request → model →
+XML tool call → parser → scoring. That is the whole pipeline working, which no
+run had ever demonstrated.
+
+**The widened vocabulary earned itself on its first real use.** Two errors came
+back as `http_503_not_ready` — not the bare `http_503` the old code would have
+recorded. The engine was in neither `READY` nor `BUSY`
+(`http_server.cpp:423`), so it was in one of `LOADING_MODEL`, `WARMING`,
+`DEGRADED`, `STOPPING` or `FAILED`. **The trigger is specific to this machine
+and should not be read as a defect in the lane:** the preceding case exhausted
+the 600 s client timeout, so the evaluator abandoned a request the engine was
+still generating, and the engine did not answer the next two as `READY`. On a
+host that finishes a case in seconds this sequence does not arise. Which state
+it actually reached was not determined here, and is filed rather than guessed.
+
 ## Follow-up recorded, not folded in
 
 `request_too_large` is published as HTTP 413 in
@@ -123,3 +151,9 @@ Had it been contract-conformant, the old receipts would have read `http_413`
 and the size class of the failure would have been obvious without any of this
 work. It is a pre-existing contract-visible status change, orthogonal to this
 blocker, so it is filed as its own unclaimed row rather than smuggled in here.
+
+`ENGINE-ABANDONED-REQUEST-STATE-001` records the `http_503_not_ready`
+observation above: after a client abandons an in-flight generation, the engine
+answered the next requests from a non-`READY`, non-`BUSY` state. Observed once,
+on an underpowered host, with the cause not established — so it is filed as an
+investigation with its evidence, not asserted as a defect.

@@ -32,6 +32,15 @@
   `evaluate_tool_calls.py` caps that at 600 s. **Scoring the shipping profile
   needs the CUDA host the lane was designed around. It is now unblocked, and
   the launch remains the operator's.**
+- **The pipeline is proven end to end, on the fixture this machine can
+  finish.** Against the 11-tool dev fixture the canary **passed** with
+  `prompt_tokens: 1414` — it had never passed before, every prior run recording
+  `prompt_tokens: null` with `http_400` — and one case scored a genuine pass
+  through request → model → XML tool call → parser → scoring. No run had ever
+  demonstrated that path working. The widened vocabulary also earned itself on
+  first use, returning `http_503_not_ready` where the old token said only
+  `http_503`; that observation is filed as
+  `ENGINE-ABANDONED-REQUEST-STATE-001`.
 - Release/full access remains `BLOCKED` / `NOT_READY`. No blocker `State:`
   line changes and nothing here advances a gate.
 - One follow-up recorded rather than folded in:
