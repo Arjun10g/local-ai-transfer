@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import http.client
 import json
 import math
 import os
@@ -51,13 +52,38 @@ TOKEN_MAX_BYTES = 4096
 RESPONSE_MAX_BYTES = 1024 * 1024
 MODEL_OUTPUT_MAX_CHARS = 65536
 CANARY_MESSAGE_CHARS = 2400
+ERROR_BODY_MAX_BYTES = 4096
+HTTP_DIAGNOSTIC_STATUSES = (400, 401, 404, 408, 409, 413, 415, 429, 500, 503)
+# The engine's own closed error vocabulary: every code published in
+# contracts/error-codes/error-codes.json, plus the transport-level codes the
+# HTTP front door emits before a request reaches the contract surface
+# (native/server/http_server.cpp). Only a code in this set is ever retained
+# from a response body, so an error body can widen the diagnostic to a known
+# token but can never introduce text of its own.
+ENGINE_ERROR_CODES = frozenset({
+    "unauthorized", "not_found", "method_not_allowed", "invalid_json",
+    "invalid_request", "request_too_large", "not_ready", "busy",
+    "request_cancelled", "shutdown", "internal_error",
+    "model_path_not_absolute", "model_symlink_forbidden", "model_size_mismatch",
+    "model_hash_mismatch", "model_mmproj_forbidden", "gguf_magic_invalid",
+    "gguf_version_unsupported", "model_architecture_mismatch",
+    "invalid_request_line", "invalid_headers", "invalid_content_length",
+    "unsupported_transfer_encoding", "missing_content_length", "unexpected_body",
+    "surplus_body", "invalid_content_type", "headers_too_large",
+    "invalid_session_id", "invalid_request_id", "request_timeout",
+    "response_too_large",
+})
+# A status alone could not say WHICH rule refused the request: every 2026-09-12
+# eval run reported 37 identical `http_400` and the receipt could not name the
+# engine's `request_too_large` behind them. The vocabulary stays finite -- it is
+# the cross product of two closed sets, not free text from the wire.
 DIAGNOSTIC_CODES = frozenset({
     "http_400", "http_401", "http_404", "http_408", "http_409", "http_413",
     "http_415", "http_429", "http_500", "http_503", "http_other",
     "transport_url", "transport_timeout", "transport_os", "parse_json",
     "parse_session_shape", "parse_response_shape", "context_overflow",
     "endpoint", "token", "unknown",
-})
+} | {f"http_{status}_{code}" for status in HTTP_DIAGNOSTIC_STATUSES for code in ENGINE_ERROR_CODES})
 QUALITY_CODES = frozenset({
     "forbidden_tool_name", "malformed_call", "unknown_tool", "malformed_parameter",
     "parameter_too_large", "invalid_json_argument", "invalid_tool_schema",
@@ -885,10 +911,44 @@ def _transport(name: str):
     raise ValueError("transport_unknown")
 
 
+def _engine_error_code(error: BaseException) -> str | None:
+    """Return the engine's own error code from a bounded error body, or None.
+
+    The body is read under a hard byte bound and the code is returned only if
+    it is a member of :data:`ENGINE_ERROR_CODES`, so nothing the wire chooses
+    can reach the receipt. Any failure to read or parse simply yields None and
+    the caller falls back to the status-only code.
+    """
+
+    read = getattr(error, "read", None)
+    if read is None:
+        return None
+    try:
+        body = read(ERROR_BODY_MAX_BYTES + 1)
+    except (OSError, ValueError, http.client.HTTPException):
+        return None
+    if not isinstance(body, (bytes, bytearray)) or len(body) > ERROR_BODY_MAX_BYTES:
+        return None
+    try:
+        payload = json.loads(bytes(body).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    detail = payload.get("error")
+    if not isinstance(detail, dict):
+        return None
+    code = detail.get("code")
+    return code if isinstance(code, str) and code in ENGINE_ERROR_CODES else None
+
+
 def _error_diagnostic(error: BaseException, *, http_status: int | None = None) -> str:
     """Map a request failure to a finite, secret-free diagnostic code."""
     if http_status is not None:
-        return f"http_{http_status}" if http_status in {400, 401, 404, 408, 409, 413, 415, 429, 500, 503} else "http_other"
+        if http_status not in HTTP_DIAGNOSTIC_STATUSES:
+            return "http_other"
+        code = _engine_error_code(error)
+        return f"http_{http_status}_{code}" if code is not None else f"http_{http_status}"
     if isinstance(error, json.JSONDecodeError):
         return "parse_json"
     if isinstance(error, TimeoutError):

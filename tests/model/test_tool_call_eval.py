@@ -1,5 +1,6 @@
 import unittest
 import hashlib
+import re
 import os
 import io
 import json
@@ -11,7 +12,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.test.evaluate_tool_calls import (
+    DIAGNOSTIC_CODES,
+    ENGINE_ERROR_CODES,
+    ERROR_BODY_MAX_BYTES,
     FIXTURE_MAX_BYTES,
+    HTTP_DIAGNOSTIC_STATUSES,
     MAX_EVAL_CASES,
     MODEL_OUTPUT_MAX_CHARS,
     RESPONSE_MAX_BYTES,
@@ -23,6 +28,7 @@ from scripts.test.evaluate_tool_calls import (
     load_bearer_token,
     load_fixture,
     main,
+    _error_diagnostic,
     parse_tool_call,
     run_local,
     validate_fixture,
@@ -507,6 +513,105 @@ class ToolCallEvaluatorTests(unittest.TestCase):
         for argument in (("--max-cases", "0"), ("--max-cases", str(MAX_EVAL_CASES + 1)), ("--timeout", "0"), ("--timeout", "601"), ("--timeout", "nan"), ("--engine-pid", "0")):
             with self.subTest(argument=argument), self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
                 main(["--dry-run", *argument])
+
+
+class EngineToolBoundTests(unittest.TestCase):
+    """The engine must admit the tool surface the product actually ships.
+
+    A bound of 32 against a 33-tool product refused every request with
+    `request_too_large` before the model saw a single token, which is how the
+    2026-09-12 evaluation scored 0/37 with 37 identical `http_400` codes.
+    """
+
+    ROOT = Path(__file__).resolve().parents[2]
+
+    def _source_bound(self, name):
+        source = (self.ROOT / "native" / "server" / "chat_request.cpp").read_text(encoding="utf-8")
+        match = re.search(rf"constexpr size_t {name} = (\d+);", source)
+        self.assertIsNotNone(match, f"{name} is no longer a literal constant")
+        return int(match.group(1))
+
+    def test_engine_bound_contract_and_shipping_surface_agree(self):
+        contract = json.loads((self.ROOT / "contracts" / "engine-api" / "contract.json").read_text(encoding="utf-8"))
+        published = contract["chat_request"]["tools"]["max"]
+        implemented = self._source_bound("kMaxTools")
+        shipped = len(load_fixture(Path(__file__).with_name("production_tool_call_eval.json"))["tools"])
+        self.assertEqual(implemented, published, "engine source and published contract disagree on the tool bound")
+        self.assertGreaterEqual(published, shipped, "the published bound refuses the shipping tool surface")
+        # The generic array rule fires at kMaxMessages elements for EVERY array,
+        # so a tool bound at or above it could never be the rule that refuses an
+        # oversized tool list -- the diagnosis would name the wrong boundary.
+        self.assertLess(published, self._source_bound("kMaxMessages"))
+
+    def test_shipping_tool_surface_is_covered_with_headroom(self):
+        shipped = len(load_fixture(Path(__file__).with_name("production_tool_call_eval.json"))["tools"])
+        contract = json.loads((self.ROOT / "contracts" / "engine-api" / "contract.json").read_text(encoding="utf-8"))
+        self.assertGreater(contract["chat_request"]["tools"]["max"], shipped, "no headroom above the shipping surface")
+
+
+class ErrorDiagnosticTests(unittest.TestCase):
+    """A refused request must name the rule that refused it.
+
+    The status alone is not a diagnosis: `invalid_request`, `invalid_headers`
+    and `request_too_large` all arrive as 400 and only the body separates them.
+    """
+
+    ROOT = Path(__file__).resolve().parents[2]
+
+    def _http_error(self, status, body):
+        error = urllib.error.HTTPError("http://127.0.0.1:49912/v1/chat/completions", status, "error", {}, io.BytesIO(body))
+        self.addCleanup(error.close)
+        return error
+
+    def test_engine_code_widens_the_diagnostic(self):
+        error = self._http_error(400, b'{"error":{"code":"request_too_large","request_id":"r-1"}}')
+        self.assertEqual(_error_diagnostic(error, http_status=400), "http_400_request_too_large")
+        self.assertIn("http_400_request_too_large", DIAGNOSTIC_CODES)
+
+    def test_every_code_the_engine_emits_is_in_the_vocabulary(self):
+        emitted = set()
+        for path in (self.ROOT / "native" / "server" / "http_server.cpp", self.ROOT / "native" / "server" / "chat_request.cpp"):
+            source = path.read_text(encoding="utf-8")
+            emitted.update(re.findall(r'\\"code\\":\\"([a-z_]+)\\"', source))
+            emitted.update(re.findall(r'fail\(\d+, "([a-z_]+)"\)', source))
+            emitted.update(re.findall(r'error_code = "([a-z_]+)"', source))
+        self.assertTrue(emitted, "no engine error codes were found to check")
+        self.assertEqual(emitted - ENGINE_ERROR_CODES, set(), "the engine emits a code the evaluator would discard")
+
+    def test_the_receipt_validator_shares_the_vocabulary(self):
+        self.assertEqual(ENGINE_ERROR_CODES, remote_model_eval.EVAL_ENGINE_ERROR_CODES)
+        self.assertEqual(DIAGNOSTIC_CODES, remote_model_eval.EVAL_DIAGNOSTIC_CODES)
+        self.assertEqual(set(HTTP_DIAGNOSTIC_STATUSES), set(remote_model_eval.EVAL_HTTP_DIAGNOSTIC_STATUSES))
+
+    def test_the_wire_cannot_introduce_its_own_token(self):
+        for body in (
+            b'{"error":{"code":"not_a_real_code"}}',
+            b'{"error":{"code":"Bearer sk-secret-value"}}',
+            b'{"error":{"code":7}}',
+            b'{"error":"request_too_large"}',
+            b'[]',
+            b'not json at all',
+            b'\xff\xfe not utf-8',
+            b'',
+        ):
+            with self.subTest(body=body):
+                diagnostic = _error_diagnostic(self._http_error(400, body), http_status=400)
+                self.assertEqual(diagnostic, "http_400")
+                self.assertIn(diagnostic, DIAGNOSTIC_CODES)
+
+    def test_an_oversized_error_body_is_not_read(self):
+        padding = b'{"error":{"code":"request_too_large"},"pad":"' + b"x" * (ERROR_BODY_MAX_BYTES + 64) + b'"}'
+        self.assertEqual(_error_diagnostic(self._http_error(400, padding), http_status=400), "http_400")
+
+    def test_a_status_outside_the_closed_set_stays_generic(self):
+        error = self._http_error(418, b'{"error":{"code":"invalid_request"}}')
+        self.assertEqual(_error_diagnostic(error, http_status=418), "http_other")
+
+    def test_every_emitted_diagnostic_is_a_member_of_the_vocabulary(self):
+        for status in HTTP_DIAGNOSTIC_STATUSES:
+            for code in sorted(ENGINE_ERROR_CODES):
+                error = self._http_error(status, json.dumps({"error": {"code": code}}).encode())
+                self.assertIn(_error_diagnostic(error, http_status=status), DIAGNOSTIC_CODES)
 
 
 if __name__ == "__main__":

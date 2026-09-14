@@ -61,13 +61,29 @@ SAFE_ERROR_CODES = frozenset({
     "q4_artifact_missing_or_wrong_name", "source_pin_invalid", "source_revision_mismatch",
     "toolchain_receipt_invalid",
 })
+EVAL_HTTP_DIAGNOSTIC_STATUSES = (400, 401, 404, 408, 409, 413, 415, 429, 500, 503)
+# Mirrors ENGINE_ERROR_CODES in scripts/test/evaluate_tool_calls.py; the two
+# move together, and tests/model/test_tool_call_eval.py pins that they agree.
+EVAL_ENGINE_ERROR_CODES = frozenset({
+    "unauthorized", "not_found", "method_not_allowed", "invalid_json",
+    "invalid_request", "request_too_large", "not_ready", "busy",
+    "request_cancelled", "shutdown", "internal_error",
+    "model_path_not_absolute", "model_symlink_forbidden", "model_size_mismatch",
+    "model_hash_mismatch", "model_mmproj_forbidden", "gguf_magic_invalid",
+    "gguf_version_unsupported", "model_architecture_mismatch",
+    "invalid_request_line", "invalid_headers", "invalid_content_length",
+    "unsupported_transfer_encoding", "missing_content_length", "unexpected_body",
+    "surplus_body", "invalid_content_type", "headers_too_large",
+    "invalid_session_id", "invalid_request_id", "request_timeout",
+    "response_too_large",
+})
 EVAL_DIAGNOSTIC_CODES = frozenset({
     "http_400", "http_401", "http_404", "http_408", "http_409", "http_413",
     "http_415", "http_429", "http_500", "http_503", "http_other",
     "transport_url", "transport_timeout", "transport_os", "parse_json",
     "parse_session_shape", "parse_response_shape", "context_overflow",
     "endpoint", "token", "unknown",
-})
+} | {f"http_{status}_{code}" for status in EVAL_HTTP_DIAGNOSTIC_STATUSES for code in EVAL_ENGINE_ERROR_CODES})
 EVAL_QUALITY_CODES = frozenset({
     "forbidden_tool_name", "malformed_call", "unknown_tool", "malformed_parameter",
     "parameter_too_large", "invalid_json_argument", "invalid_tool_schema",

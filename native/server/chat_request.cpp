@@ -15,7 +15,12 @@ constexpr size_t kMaxString = 32768;
 constexpr size_t kMaxMessages = 64;
 constexpr size_t kMaxObjectFields = 64;
 constexpr size_t kMaxMessageFields = 8;
-constexpr size_t kMaxTools = 32;
+// The shipping tool surface is 33 definitions (22 external + 11 local), so a
+// bound of 32 refused every product request before the model saw it. The
+// ceiling carries roadmap headroom while staying strictly below the parser's
+// generic 64-element array limit, so an oversized tool list is refused by the
+// tool-specific rule rather than the generic one.
+constexpr size_t kMaxTools = 48;
 
 struct JsonValue {
   enum class Type { Null, Bool, Number, String, Array, Object } type = Type::Null;

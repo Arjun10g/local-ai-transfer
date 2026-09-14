@@ -1,5 +1,44 @@
 # Blockers
 
+## Update — 2026-09-14 — `EVAL-HTTP400-DIAGNOSTIC-001` closed
+
+- **The defect that guaranteed 0/37 is fixed, and it was a bound, not a
+  protocol error.** `native/server/chat_request.cpp` capped `tools` at 32
+  while the product's own tool surface is exactly 33 (22 external + 11 local),
+  so `parse_chat_request` returned `request_too_large` and the server answered
+  400 for every request — 37 identical `http_400`, canary included, before the
+  model was asked anything. **The same bound refused the real assistant's tool
+  list, so this was a shipping defect and not an evaluation-harness defect.**
+  The published contract agreed with the engine rather than the product, so the
+  bound was wrong in `chat_request.cpp`, `contracts/engine-api/contract.json`
+  and its README together; all three now read 48, which carries headroom while
+  staying below the parser's generic 64-element array rule.
+- **Diagnosed and proven for USD 0.00**, by compiling the production parser
+  alone against the exact wire bytes of one fixture case: `FAIL
+  code=request_too_large` before, `OK tools=33` after. No host, no provider, no
+  spend. Ledger unchanged: booked USD 13.31 of the USD 50 cap.
+- **The evaluator can now name the rule that refused it.** `_error_diagnostic`
+  emits `http_400_request_too_large` instead of a bare `http_400`, from a
+  vocabulary that stays finite — the cross product of the ten permitted
+  statuses and the engine's own published code set, with anything else
+  discarded, so no wire-chosen text reaches a receipt.
+- **There is still no score on the shipping 33/37 profile.** This removes the
+  defect that made a paid run worthless; it measures nothing. Locally the
+  rebuilt engine returns no `http_400` at all — cases now reach the model and
+  fail `transport_timeout`, because this 8 GiB machine pages the 5.6 GB
+  artifact from disk at ~200 s per case. A full local 37-case run also cannot
+  fit the harness's own bounds, since `remote_model_eval.py` uses one number
+  as both the evaluator's per-request timeout and its kill timeout and
+  `evaluate_tool_calls.py` caps that at 600 s. **Scoring the shipping profile
+  needs the CUDA host the lane was designed around. It is now unblocked, and
+  the launch remains the operator's.**
+- Release/full access remains `BLOCKED` / `NOT_READY`. No blocker `State:`
+  line changes and nothing here advances a gate.
+- One follow-up recorded rather than folded in:
+  `ENGINE-PARSE-STATUS-CONFORMANCE-001` — the engine answers the published
+  413 code `request_too_large` with a 400 on the parse path, which is why the
+  size class of this failure stayed invisible for days.
+
 ## Current governance snapshot — 2026-09-11 (refresh v7)
 
 - Exact integrated source head is `c469ed1`. Two source integrations this

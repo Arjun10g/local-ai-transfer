@@ -55,7 +55,7 @@ message text but retains the complete ordered history and session boundary. A st
 response is `text/event-stream`, one JSON chunk per line (`data: ...\n\n`), and
 response is `text/event-stream`, one JSON chunk per line (`data: ...\n\n`), and
 terminates with `data: [DONE]\n\n`. Every response includes `X-Request-Id`.
-`tools` is optional and bounded to 32 OpenAI-compatible function definitions. Each
+`tools` is optional and bounded to 48 OpenAI-compatible function definitions. Each
 definition has exactly `type:function` and a function `name`, `description`, and
 object-valued JSON-schema `parameters`; malformed or oversized schemas are rejected.
 The native real backend passes these definitions to the model-embedded, pinned
