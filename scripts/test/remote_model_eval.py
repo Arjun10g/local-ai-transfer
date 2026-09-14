@@ -368,6 +368,28 @@ _RUN_IDENTITY_FIELDS = ("run_id", "instance_id")
 _RUN_IDENTITY_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 
 
+def _without_run_identity(payload: dict[str, Any]) -> set[str]:
+    """Return a receipt's key set with the run-identity binding removed.
+
+    Every host-side receipt has carried `run_id` and `instance_id` since the
+    run-identity slice, but the exact-key-set checks below were written before
+    it and were never updated. `cuda-device-receipt.json` and
+    `toolchain-receipt.json` are written by sibling probes in THIS run and both
+    gained the two fields, so `set(payload) != {...}` failed on receipts that
+    were perfectly valid: run j1m-eval-20260912-b reached the last of 16 eval
+    stages, with the model rebuilt and hash-verified and CUDA verified, and
+    then refused its own CUDA receipt as `cuda_device_receipt_invalid`.
+
+    The orchestrator already resolves this the same way
+    (`j1m_orchestrator._without_run_identity`): the binding is REQUIRED at the
+    salvage fetch boundary, where an untrusted receipt is first published, and
+    accepted by verifiers downstream of that proof. Strictness is otherwise
+    unchanged -- any key that is not part of the binding still fails.
+    """
+
+    return set(payload) - set(_RUN_IDENTITY_FIELDS)
+
+
 def _run_identity() -> dict[str, str]:
     """Return this run's receipt binding, or ``unbound`` when unprovable."""
 
@@ -976,7 +998,7 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any], dea
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ValueError("cuda_device_receipt_invalid") from exc
         device = cuda_receipt.get("device") if isinstance(cuda_receipt, dict) else None
-        if (not isinstance(cuda_receipt, dict) or set(cuda_receipt) != {"schema", "status", "selector", "device_count", "device", "source"} or
+        if (not isinstance(cuda_receipt, dict) or _without_run_identity(cuda_receipt) != {"schema", "status", "selector", "device_count", "device", "source"} or
                 cuda_receipt.get("schema") != "local_bmo.j1m.cuda-device-receipt.v1" or cuda_receipt.get("status") != "verified" or cuda_receipt.get("selector") != getattr(args, "cuda_device_name", "") or cuda_receipt.get("device_count") != 1 or cuda_receipt.get("source") != "nvidia-smi bounded query" or
                 not isinstance(device, dict) or set(device) != {"index", "name", "memory_total_mib", "driver_version"} or "a100" not in str(device.get("name", "")).lower() or not isinstance(device.get("index"), int) or isinstance(device.get("index"), bool) or device["index"] < 0 or not isinstance(device.get("name"), str) or not 1 <= len(device["name"]) <= 160 or not isinstance(device.get("driver_version"), str) or not 1 <= len(device["driver_version"]) <= 80 or not isinstance(device.get("memory_total_mib"), int) or device["memory_total_mib"] < 70000):
             raise ValueError("cuda_device_receipt_invalid")
@@ -987,7 +1009,7 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any], dea
     versions = toolchain.get("versions") if isinstance(toolchain, dict) else None
     minimums = {"python3": (3, 8), "git": (2, 30), "cmake": (3, 18), "g++": (9, 0), "nvcc": (12, 0)}
     if (not isinstance(toolchain, dict) or toolchain.get("schema") != "local_bmo.j1m.remote-toolchain-receipt.v1" or
-            toolchain.get("status") != "verified" or set(toolchain) != {"schema", "status", "required", "versions", "packages", "package_install"} or
+            toolchain.get("status") != "verified" or _without_run_identity(toolchain) != {"schema", "status", "required", "versions", "packages", "package_install"} or
             not isinstance(versions, dict) or set(versions) != set(minimums) or
             toolchain.get("required") != {name: f">={major}.{minor}" for name, (major, minor) in minimums.items()} or
             toolchain.get("package_install") != "ubuntu apt repositories; exact resolved package versions captured by dpkg-query"):

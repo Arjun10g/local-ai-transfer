@@ -306,3 +306,41 @@ class RefusalIsSelfDescribingTests(unittest.TestCase):
         # A credential-shaped message must not reach the refusal line.
         with self.assertRaises(ValueError):
             self.runner.validate_persisted_output("HF_TOKEN=hf_abcdefghijklmnopqrstuvwxyz012345")
+
+
+class HostConsumerAcceptsRunIdentityTests(unittest.TestCase):
+    """Receipts gained a run-identity binding; their consumers never learned.
+
+    The run-identity slice added `run_id` and `instance_id` to every host-side
+    receipt. `j1m_orchestrator._without_run_identity` was introduced for its
+    consumers, but `remote_model_eval` kept `set(payload) != {...}` -- so the
+    CUDA and toolchain receipts written by sibling probes in the SAME run were
+    rejected as invalid. Run j1m-eval-20260912-b reached the last of 16 eval
+    stages, with the model rebuilt and hash-verified on the host and CUDA
+    verified, and then refused its own CUDA receipt.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.evaluator = load(ROOT / "scripts/test/remote_model_eval.py", "identity_consumer_eval")
+        cls.salvaged = ROOT / "artifacts/qwen35-9b/remote-eval-20260912-b"
+
+    def test_the_real_salvaged_receipts_satisfy_their_consumer(self):
+        """Pinned against the exact files the failed paid run brought back."""
+
+        expected = {
+            "cuda-device-receipt.json": {"schema", "status", "selector", "device_count", "device", "source"},
+            "toolchain-receipt.json": {"schema", "status", "required", "versions", "packages", "package_install"},
+        }
+        for name, keys in expected.items():
+            payload = json.loads((self.salvaged / name).read_text(encoding="utf-8"))
+            # Guard the guard: the fixture must still carry the binding.
+            self.assertTrue(set(payload) & set(self.evaluator._RUN_IDENTITY_FIELDS), name)
+            self.assertEqual(self.evaluator._without_run_identity(payload), keys, name)
+
+    def test_an_unexpected_field_is_still_rejected(self):
+        payload = {"schema": "x", "status": "verified", "selector": "CUDA0", "device_count": 1,
+                   "device": {}, "source": "s", "run_id": "r", "instance_id": "i", "sneaky": 1}
+        self.assertNotEqual(
+            self.evaluator._without_run_identity(payload),
+            {"schema", "status", "selector", "device_count", "device", "source"})
