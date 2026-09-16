@@ -887,5 +887,67 @@ class ShadeformTeardownDurabilityTests(unittest.TestCase):
         request.assert_not_called()
 
 
+class ProviderSettledCostTests(unittest.TestCase):
+    """Settle from what the provider charged, with the ceiling as upper bound.
+
+    The deterministic ceiling books hourly x (backstop ceiling - created_at).
+    Measured against the provider on 2026-09-14 that overstated nine settled
+    instances 6.6x in aggregate and up to 192x individually, which made the
+    USD 50 cap refuse launches at under 14% real spend.
+    """
+
+    def _info(self, payload):
+        return mock.patch.object(sf, "instance_info", return_value=payload)
+
+    def test_provider_cost_estimate_is_used(self):
+        with self._info({"id": "i-1", "status": "deleted", "cost_estimate": 0.4479}):
+            self.assertEqual(
+                teardown._provider_settled_cost("k", "phase-a", "i-1", deadline=None), 0.4479)
+
+    def test_a_string_amount_is_accepted(self):
+        with self._info({"id": "i-1", "cost_estimate": "0.017100"}):
+            self.assertEqual(
+                teardown._provider_settled_cost("k", "phase-a", "i-1", deadline=None), 0.0171)
+
+    def test_zero_is_a_real_answer_not_a_missing_one(self):
+        # An instance that never reached active is charged genuinely nothing,
+        # however long it existed. That must settle at 0.0, not fall back.
+        with self._info({"id": "i-1", "status": "deleted", "cost_estimate": 0}):
+            self.assertEqual(
+                teardown._provider_settled_cost("k", "phase-a", "i-1", deadline=None), 0.0)
+
+    def test_total_spend_is_never_read(self):
+        # total_spend is the same number NEGATED -- a signed balance debit.
+        # Reading it yields a negative "spend"; only cost_estimate is valid.
+        with self._info({"id": "i-1", "total_spend": "-0.4479"}):
+            self.assertIsNone(
+                teardown._provider_settled_cost("k", "phase-a", "i-1", deadline=None))
+        with self._info({"id": "i-1", "cost_estimate": -0.4479}):
+            self.assertIsNone(
+                teardown._provider_settled_cost("k", "phase-a", "i-1", deadline=None))
+
+    def test_unreachable_or_malformed_provider_keeps_the_ceiling(self):
+        # None is not a failure: the caller falls back to the deterministic
+        # ceiling, so crash-safety is unchanged when the provider is silent.
+        with mock.patch.object(sf, "instance_info", side_effect=RuntimeError("boom")):
+            self.assertIsNone(
+                teardown._provider_settled_cost("k", "phase-a", "i-1", deadline=None))
+        for payload in ({"id": "i-1"}, {"id": "i-1", "cost_estimate": None},
+                        {"id": "i-1", "cost_estimate": "not-a-number"},
+                        {"id": "i-1", "cost_estimate": True}, "not-a-dict"):
+            with self.subTest(payload=payload), self._info(payload):
+                self.assertIsNone(
+                    teardown._provider_settled_cost("k", "phase-a", "i-1", deadline=None))
+
+    def test_ceiling_remains_an_upper_bound_in_source(self):
+        # The clamp is inline in _teardown_exact_locked, so this pins the
+        # property by source: the provider figure may only LOWER the booking.
+        # A wrong or hostile provider value must never inflate one.
+        source = Path(teardown.__file__).read_text(encoding="utf-8")
+        self.assertIn("provider_cost = _provider_settled_cost(", source)
+        self.assertIn("if provider_cost is not None and provider_cost < settled_cost:", source)
+        self.assertIn("settled_cost = provider_cost", source)
+
+
 if __name__ == "__main__":
     unittest.main()

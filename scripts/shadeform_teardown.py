@@ -605,6 +605,48 @@ def _load_deletion_intent(phase_id: str, record: shadeform.OwnedResource) -> dic
     return confirmed
 
 
+def _provider_settled_cost(api_key: str, phase_id: str, exact: str, *, deadline: float | None) -> float | None:
+    """Return the provider's own charge for this instance, or None.
+
+    The deterministic ceiling is conservative by construction: it books
+    `hourly_usd x (backstop ceiling - created_at)`. Measured against the
+    provider on 2026-09-14 that overstated nine settled instances by 6.6x in
+    aggregate and by up to 192x individually -- one run booked USD 3.2735
+    against an actual USD 0.0171. Two causes: the ceiling is not the metered
+    time, and billing starts at `active_at` while settlement measures from
+    `created_at`, so several minutes of boot are booked on every run and never
+    charged. An instance that never reaches active has `active_at` null and is
+    charged nothing at all, however long it existed.
+
+    Read `cost_estimate`. **`total_spend` is the SAME number negated** -- it is
+    a signed balance debit, so reading it yields a negative "spend" and a
+    nonsensical total.
+
+    Returning None is not a failure: the caller keeps the deterministic ceiling,
+    so an unreachable provider still settles without a wall-clock read and the
+    crash-safety property that ceiling exists for is unchanged.
+    """
+
+    try:
+        info = shadeform.instance_info(api_key, phase_id, exact, timeout=30.0)
+    except Exception:
+        return None
+    if not isinstance(info, dict):
+        return None
+    raw = info.get("cost_estimate")
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, str):
+        try:
+            raw = float(raw)
+        except ValueError:
+            return None
+    if not isinstance(raw, (int, float)):
+        return None
+    value = round(float(raw), 6)
+    return value if shadeform._valid_cost(value) else None
+
+
 def _deterministic_confirmation_timestamp(intent: dict[str, object]) -> str:
     """Return the precommitted provider backstop, never retry wall time.
 
@@ -924,6 +966,22 @@ def _teardown_exact_locked(phase_id: str, exact: str, *, env_file: Path, salvage
             settled_cost = round(record.hourly_usd * elapsed_hours, 6)
             if not shadeform._valid_cost(settled_cost):
                 raise ValueError("computed settled cost is not finite and nonnegative")
+            # The one direction this can be wrong, recorded rather than left
+            # for a reader to rediscover: if an instance ever outlived its
+            # backstop, the real charge would exceed the ceiling and this books
+            # the ceiling -- an UNDER-booking. That is exactly what happens
+            # today, because today always books the ceiling, so this is not a
+            # regression and min() establishes no guarantee against it. The
+            # provider's own auto_delete carries both a date_threshold and a
+            # spend_threshold, which is why the case is remote.
+            # Prefer the provider's own charge, but never above the ceiling:
+            # the deterministic figure remains an UPPER BOUND, so a wrong or
+            # hostile provider value cannot inflate a booking past today's
+            # behaviour, while a truthful one lowers it toward what was
+            # actually billed. Unreachable provider keeps the ceiling.
+            provider_cost = _provider_settled_cost(api_key, phase_id, exact, deadline=deadline)
+            if provider_cost is not None and provider_cost < settled_cost:
+                settled_cost = provider_cost
             shadeform.append_cost_event({
                 "instance_id": exact,
                 "phase_id": phase_id,
