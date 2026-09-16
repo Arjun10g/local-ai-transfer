@@ -275,7 +275,7 @@ class ComparisonReceiptTests(unittest.TestCase):
         receipt = comparison.build_comparison_receipt(
             arms={"q4_k_m": arm_metrics(BASELINE), "q8_0": arm_metrics(STRONGER)},
             requested=["q8_0"], gate=self.gate,
-            fixture_sha256="c75af5200b76a504e6b603183ffcf1cbeedb93db18ec544683044b8cc9b8ac6c",
+            fixture_sha256="d3c4d457800e8f1c04a4f3dcfaabe7897af8c7473d90b4bf0fdbfbf00225a452",
             product_engine_reference={"engine": "lae-engine", "case_count": 37, "passed": 28, "score_points": comparison.score_points(28, 37)},
         )
         required = {
@@ -620,7 +620,7 @@ class ComparatorBudgetTests(unittest.TestCase):
             destination = Path(directory)
             receipt = self.orchestrator._write_comparison_receipt(
                 destination, ("q8_0",), phase_reason="comparator_engine_unavailable",
-                fixture_sha256="c75af5200b76a504e6b603183ffcf1cbeedb93db18ec544683044b8cc9b8ac6c")
+                fixture_sha256="d3c4d457800e8f1c04a4f3dcfaabe7897af8c7473d90b4bf0fdbfbf00225a452")
             self.assertEqual(receipt["status"], "skipped")
             # The baseline arm is always evaluated, so its skip is recorded
             # too: without it a refused `q4-oracle` wrote an empty `skipped`

@@ -108,7 +108,7 @@ const descriptions = {
   'time.now': 'Return local wall-clock and UTC time.', 'system.get_info': 'Return bounded local runtime information.', 'clipboard.read': 'Read the local clipboard when supported.',
   'fs.list': 'List entries in an approved workspace directory.', 'fs.read_text': 'Read bounded UTF-8 text from an approved workspace file.', 'fs.search_text': 'Search literal text in approved workspace files.',
   'fs.write_new': 'Create a new file in an approved workspace.', 'fs.apply_patch': 'Apply a guarded replacement or patch to an approved workspace file.', 'clipboard.write': 'Write text to the local clipboard when supported.',
-  'app.open': 'Open an allowlisted local application.', 'browser.open_url': 'Open an HTTPS URL after local policy checks.', 'process.run_allowlisted': 'Run one fixed operator-configured local process action.'
+  'app.open': 'Open an allowlisted local application.', 'browser.open_url': 'Open an HTTPS URL in the user’s browser and stop there. Navigation only: it returns no session id, and the page cannot afterwards be read or interacted with.', 'process.run_allowlisted': 'Run one fixed operator-configured local process action.'
 };
 const parameterSchema = name => {
   const schemas = {

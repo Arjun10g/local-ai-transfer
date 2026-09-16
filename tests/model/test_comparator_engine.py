@@ -563,7 +563,7 @@ class ArmResultTests(unittest.TestCase):
 
     def test_the_fixture_contract_is_the_pinned_production_profile(self):
         self.assertEqual(self.contract["sha256"],
-                         "c75af5200b76a504e6b603183ffcf1cbeedb93db18ec544683044b8cc9b8ac6c")
+                         "d3c4d457800e8f1c04a4f3dcfaabe7897af8c7473d90b4bf0fdbfbf00225a452")
         self.assertEqual(self.contract["case_count"], 37)
         self.assertEqual(self.contract["tool_count"], 33)
         self.assertEqual(self.contract["context_tokens"], 8192)

@@ -35,7 +35,7 @@ const browserSchemas = Object.freeze({
 });
 
 const descriptions = Object.freeze({
-  'browser.session_start': 'Open a public HTTPS page in a new visible temporary browser session.',
+  'browser.session_start': 'Begin an inspectable browser session at an HTTPS page, returning a browser_session_id for later inspect, follow, fill and activate calls. Use only when the page must afterwards be read or interacted with.',
   'browser.inspect_links': 'Inspect bounded visible links from the current browser page.',
   'browser.inspect_page': 'Inspect bounded visible page text and safe interactive controls.',
   'browser.follow_link': 'Follow one previously inspected public HTTPS link after confirmation.',
