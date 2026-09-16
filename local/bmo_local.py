@@ -44,6 +44,9 @@ from scripts.test import evaluate_tool_calls as ev  # noqa: E402
 DEFAULT_FIXTURE = ROOT / "tests" / "model" / "production_tool_call_eval.json"
 MODEL_SHA256 = "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b"
 MODEL_SIZE = 5629109088
+# The evaluator's own ceiling is 600 s, which remote runs rely on; see
+# `run_local`'s `timeout_ceiling`.
+LOCAL_TIMEOUT_CEILING = 3600
 
 
 def _utc() -> str:
@@ -83,11 +86,11 @@ class Engine:
         if self.args.threads is not None:
             cmd += ["--threads", str(self.args.threads)]
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        log = open(self.log_path, "wb")
         t0 = time.monotonic()
         # stderr goes to a file so a chatty backend can never fill a pipe and
-        # deadlock the engine.
-        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log)
+        # deadlock the engine. The engine keeps its own inherited handle.
+        with open(self.log_path, "wb") as log:
+            self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log)
         self.proc.stdin.write(self.token.encode())
         self.proc.stdin.close()  # the engine reads the token to EOF
         line: list[bytes] = []
@@ -182,6 +185,8 @@ def cmd_smoke(args: argparse.Namespace) -> int:
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
+    if not 0 < args.timeout <= LOCAL_TIMEOUT_CEILING:
+        sys.exit(f"--timeout must be between 0 and {LOCAL_TIMEOUT_CEILING} seconds")
     fixture = ev.load_fixture(Path(args.fixture))
     receipt = {"schema": "local_bmo.local-eval.v1", "started_at_utc": _utc(), "host": _host(),
                "backend": args.backend, "context": args.context, "fixture_sha256": None,
@@ -217,7 +222,8 @@ def cmd_eval(args: argparse.Namespace) -> int:
                             "passed": sum(r["passed"] for r in results), "case_count": len(results)})
         else:
             result = ev.run_local(fixture, endpoint, eng.token, timeout=args.timeout,
-                                  max_cases=len(fixture["cases"]), engine_pid=eng.proc.pid)
+                                  max_cases=len(fixture["cases"]), engine_pid=eng.proc.pid,
+                                  timeout_ceiling=LOCAL_TIMEOUT_CEILING)
             receipt.update({"mode": "full", **ev.aggregate_result(result)})
         receipt["eval_seconds"] = round(time.monotonic() - t0, 1)
     _write(receipt, args.out)

@@ -61,6 +61,30 @@ class ReceiptPrivacyTests(unittest.TestCase):
             self.assertIs(data["prompt_response_logging"], False)
             self.assertEqual(set(data["cases"][0]), {"id", "category", "passed", "reason", "seconds"})
 
+    def test_full_eval_scores_every_case_with_the_long_timeout(self):
+        # The evaluator refuses timeouts above its remote ceiling of 600 s and
+        # then returns an empty result, so a launcher that did not raise the
+        # ceiling would "score" 0 of 0 on the Dell without an obvious error.
+        seen = []
+
+        def fake_post(endpoint, token, payload, timeout, include_usage=False):
+            seen.append(timeout)
+            return ("ready", 5812) if include_usage else SECRET_OUTPUT
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "receipt.json"
+            with mock.patch.object(bmo_local, "Engine", FakeEngine), \
+                    mock.patch.object(bmo_local.ev, "_post", side_effect=fake_post), \
+                    mock.patch.object(bmo_local.ev, "_rss_kib", return_value=None), \
+                    redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self.assertEqual(bmo_local.main(["eval", "--engine", "x", "--model", "y", "--out", str(out)]), 0)
+            receipt = out.read_text(encoding="utf-8")
+        data = json.loads(receipt)
+        self.assertEqual(data["case_count"], 37)
+        self.assertEqual(data["errors"], 0)
+        self.assertEqual(set(seen), {1800})
+        self.assertNotIn("MODEL-RAW-OUTPUT", receipt)
+
     def test_unknown_case_ids_are_refused(self):
         with mock.patch.object(bmo_local, "Engine", FakeEngine), redirect_stdout(io.StringIO()), \
                 self.assertRaises(SystemExit):

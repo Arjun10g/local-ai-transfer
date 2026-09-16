@@ -1122,8 +1122,15 @@ def run_local(
     fixture: dict[str, Any], endpoint: str, token: str, *, timeout: float,
     max_cases: int, engine_pid: int | None = None,
     transport: str = TRANSPORT_PRODUCT_ENGINE,
+    timeout_ceiling: float = 600,
 ) -> dict[str, Any]:
+    # `timeout_ceiling` stays 600 for every remote caller, whose stage budgets
+    # are derived from it. Only the local testing kit (local/bmo_local.py)
+    # raises it: a laptop CPU can need longer than 600 s to read a case's
+    # ~5,800-token prompt, and a client that gives up leaves the engine busy.
     try:
+        if not math.isfinite(timeout_ceiling) or not 0 < timeout_ceiling <= 3600:
+            raise ValueError("timeout_ceiling_invalid")
         if transport not in TRANSPORTS:
             raise ValueError("transport_unknown")
         post = _transport(transport)
@@ -1131,7 +1138,7 @@ def run_local(
         validate_fixture(fixture)
         if isinstance(max_cases, bool) or not isinstance(max_cases, int) or not 1 <= max_cases <= MAX_EVAL_CASES:
             raise ValueError("max_cases_invalid")
-        if not math.isfinite(timeout) or not 0 < timeout <= 600:
+        if not math.isfinite(timeout) or not 0 < timeout <= timeout_ceiling:
             raise ValueError("timeout_invalid")
         if engine_pid is not None and (isinstance(engine_pid, bool) or not isinstance(engine_pid, int) or engine_pid <= 0):
             raise ValueError("engine_pid_invalid")
