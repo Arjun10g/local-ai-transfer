@@ -15,12 +15,13 @@
   fail-closed refusal of targets whose image has never worked; `8bb0834`
   pre-activation stages named. Evidence in `27f9093`; ADR-0006 amended in
   `1bf63ea`.
-- **L1 is the only gate with a measurement: 32/37, 0 errors**, on the
-  superseded fixture `c75af520...`. Below the 90% single-tool end-to-end bar;
-  every failure attributed by case. The tool-definition fixes change the
-  fixture to `d3c4d457...`, so any later score is a comparison against
-  32/37 and a rise is evidence the product's tool descriptions improved,
-  not that the model did.
+- **L1: 34/37, 0 errors** (`j1m-eval-20260916-a`, fixture `d3c4d457...`),
+  up from 32/37 on the superseded fixture. Single-tool end-to-end now clears
+  the 90% bar — by one case — but retention is unmeasured, so L1 stays
+  `EVIDENCE_INCOMPLETE`. The rise is evidence the product's tool-use
+  instructions improved, not that the model did. Two fixes are consistent
+  with the gain; the encoding rule fixed neither case it targeted, and three
+  cases still fail (`TOOL-CALL-REMAINING-FAILURES-001`).
 - **The ledger now tells the truth going forward.** It over-booked 7.2x
   (43.50 booked vs 6.03 charged). New runs settle at the provider's charge;
   historical rows remain overstated by ~USD 31 and are an open, unclaimed
@@ -34,6 +35,8 @@
   measured. L2 is unbuilt; the confirmation infrastructure it needs already
   exists and is tested (`LOCAL-TERMINAL-CONFIRM-001`). L3 is mostly built and
   needs target evidence. Release remains `BLOCKED` / `NOT_READY`.
+- **Spend.** The measurement run settled at USD 0.451 against a 3.27
+  ceiling, the settlement fix working as intended.
 
 ## SCOPE CHANGE — 2026-09-14 — read this before anything below
 

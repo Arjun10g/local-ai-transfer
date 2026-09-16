@@ -1,0 +1,11 @@
+{
+  "instance_id": "d4f2bb71-e6ab-47a8-b887-909a1ba392eb",
+  "manifest_lock_sha256": "3bcfe1796e2ec24c556c2455d583bb3763039aeaf9b5119ddc1c498459fbeb99",
+  "manifest_sha256": "3bcfe1796e2ec24c556c2455d583bb3763039aeaf9b5119ddc1c498459fbeb99",
+  "name": "Qwen3.5-9B-Q4_K_M.gguf",
+  "run_id": "J1M-EVAL-37I",
+  "schema": "local_bmo.j1m.remote-eval-artifact-receipt.v1",
+  "sha256": "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b",
+  "size_bytes": 5629109088,
+  "status": "verified"
+}
