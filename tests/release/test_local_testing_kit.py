@@ -150,6 +150,12 @@ class KitShapeTests(unittest.TestCase):
         ignored = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
         self.assertIn("local/bin/", ignored)
 
+    def test_clone_keeps_the_fixture_bytes_the_a100_run_hashed(self):
+        # Git for Windows converts line endings by default, which would change
+        # fixture_sha256 on the Dell although the cases are identical.
+        readme = (ROOT / "local" / "windows" / "README.md").read_text(encoding="utf-8")
+        self.assertIn("git clone -c core.autocrlf=false bmo.bundle", readme)
+
     def test_eval_waits_longer_than_a_cpu_prefill(self):
         # A ~5,800-token prompt can take minutes on a laptop CPU, and a client
         # that gives up leaves the engine answering 503 until it finishes.

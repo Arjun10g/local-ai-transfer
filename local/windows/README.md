@@ -31,9 +31,14 @@ Reopen PowerShell after installing, so PATH changes apply.
 The repository has no remote, so it travels as a git bundle made on the Mac:
 
 ```powershell
-git clone bmo.bundle local_assistant_engine_plan_qwen35
+git clone -c core.autocrlf=false bmo.bundle local_assistant_engine_plan_qwen35
 cd local_assistant_engine_plan_qwen35
 ```
+
+`core.autocrlf=false` keeps every file byte-identical to the Mac. Without it
+Git for Windows rewrites line endings, which changes the eval fixture's hash,
+and the receipt's `fixture_sha256` would no longer match the A100 run's
+`d3c4d457…` even though the cases are the same.
 
 Copy the model separately (USB or network share) — it is not in git:
 
