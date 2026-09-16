@@ -1,0 +1,7 @@
+{
+  "error_type": "nvcc_unavailable",
+  "instance_id": "509e358d-54ba-472f-81bb-67621b17a607",
+  "run_id": "J1M-EVAL-37F",
+  "schema": "local_bmo.j1m.remote-toolchain-receipt.v1",
+  "status": "refused"
+}

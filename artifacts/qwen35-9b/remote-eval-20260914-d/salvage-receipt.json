@@ -1,0 +1,81 @@
+{
+  "allowlist": [
+    "comparator-receipt-bf16.json",
+    "comparator-receipt-q4_k_m.json",
+    "comparator-receipt-q8_0.json",
+    "conversion-receipt.json",
+    "cuda-device-receipt.json",
+    "eval-artifact-receipt.json",
+    "eval-receipt.json",
+    "manifest.json",
+    "model-receipt.json",
+    "post-cleanup-receipt.json",
+    "proving-receipt.json",
+    "scan-receipt.json",
+    "source-model-receipt.json",
+    "startup-preflight-receipt.json",
+    "tensor-metadata.json",
+    "toolchain-receipt.json",
+    "toolchain.json"
+  ],
+  "caps": {
+    "max_files": 17,
+    "min_free_bytes": 71303168,
+    "per_file_bytes": 2097152,
+    "per_file_timeout_seconds": 60.0,
+    "total_bytes": 35651584,
+    "wall_clock_seconds": 300.0
+  },
+  "completed": 1,
+  "duration_ms": 4786,
+  "failed": 5,
+  "files": [
+    {
+      "error_code": "salvage_transport_failed",
+      "exit_code": 1,
+      "name": "eval-receipt.json",
+      "status": "salvage_failed"
+    },
+    {
+      "error_code": "salvage_transport_failed",
+      "exit_code": 1,
+      "name": "startup-preflight-receipt.json",
+      "status": "salvage_failed"
+    },
+    {
+      "error_code": "salvage_transport_failed",
+      "exit_code": 1,
+      "name": "eval-artifact-receipt.json",
+      "status": "salvage_failed"
+    },
+    {
+      "exit_code": 0,
+      "name": "toolchain-receipt.json",
+      "schema": "local_bmo.j1m.remote-toolchain-receipt.v1",
+      "sha256": "6c8e3d50faf5378687c4175dd8f1d1ebd2383c6a0f3671c6aa21e604e10f4904",
+      "size_bytes": 204,
+      "status": "completed"
+    },
+    {
+      "error_code": "salvage_transport_failed",
+      "exit_code": 1,
+      "name": "cuda-device-receipt.json",
+      "status": "salvage_failed"
+    },
+    {
+      "error_code": "salvage_refused_non_receipt",
+      "name": "command-receipt.json",
+      "refusal_class": "not_schema_bound",
+      "status": "salvage_failed"
+    }
+  ],
+  "host_key_proof": "two-stable-bounded-scans-residual-tofu",
+  "host_key_reproof": "acquisition-digest",
+  "known_hosts_sha256": "1bdec679ea0e42bfd7cee148cbc3dddb4d6ce39f3ad500d7da1fb5e738db5006",
+  "remote_directory": "/scratch/j1m/artifacts",
+  "requested": 6,
+  "schema": "local_bmo.j1m.salvage-receipt.v1",
+  "status": "salvage_failed",
+  "total_bytes": 204,
+  "transport": "scp-argv-bounded-source-allowlist-v1"
+}

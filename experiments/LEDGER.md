@@ -35,4 +35,11 @@ deletion. A `pending` cost blocks all subsequent provisioning.
 | 2026-09-12 | j1m-eval-20260911-remote-h | 478c254f-af51-4343-93a6-82968d9beb5b | A100_80G | $1.3500 | J1M-EVAL-37H | deleted | $3.2735 | 0.0 |
 | 2026-09-12 | j1m-eval-20260912-a | 56889450-9b0c-470e-80be-fcaa55e2f3a2 | A100_80G | $1.3500 | J1M-EVAL-38A | deleted | $3.2735 | 0.0 |
 | 2026-09-12 | j1m-eval-20260912-b | b928e587-73ad-4646-a489-0418c1b9d98f | A100_80G | $1.3500 | J1M-EVAL-38B | deleted | $3.2735 | 0.0 |
-| 2026-09-12 | j1m-eval-20260912-c | 6158ddd6-86c5-4572-bb75-225507b6a27b | A100_80G | $1.3500 | J1M-EVAL-38C | delete-failed | pending | 0.0 |
+| 2026-09-12 | j1m-eval-20260912-c | 6158ddd6-86c5-4572-bb75-225507b6a27b | A100_80G | $1.3500 | J1M-EVAL-38C | deleted | $3.2735 | 0.0 |
+| 2026-09-14 | j1m-eval-20260914-a | 766fcf10-ec25-436d-831d-7460d1b56b8f | A100_80G | $1.3500 | J1M-EVAL-37A | deleted | $3.2735 | 0.0 |
+| 2026-09-14 | j1m-eval-20260914-b | a6abd624-5e0a-4024-ae30-0da929068162 | A100_80G | $1.5000 | J1M-EVAL-37B | deleted | $3.6372 | 0.0 |
+| 2026-09-14 | j1m-eval-20260914-c | 3b18e2ac-1613-4d86-b421-8384e4d6d4f3 | A100_80G | $1.3500 | J1M-EVAL-37C | deleted | $0.4398 | 0.0 |
+| 2026-09-14 | j1m-eval-20260914-d | 0d66d87a-07bb-46ab-a37c-999d7a4391f6 | A100_80G | $1.5000 | J1M-EVAL-37D | deleted | $0.0315 | 0.0 |
+| 2026-09-14 | j1m-eval-20260914-e | 4a0c0afb-6774-427f-bea6-f86c28d2b5fb | A100_80G | $1.5000 | J1M-EVAL-37E | deleted | $0.0288 | 0.0 |
+| 2026-09-14 | j1m-eval-20260914-f | 509e358d-54ba-472f-81bb-67621b17a607 | A100_80G | $1.5000 | J1M-EVAL-37F | deleted | $0.0311 | 0.0 |
+| 2026-09-14 | j1m-eval-20260914-g | 83e9d5fa-cbab-4960-a408-8be9089244ce | A100_80G | $1.3500 | J1M-EVAL-37G | deleted | $0.0000 | 0.0 |
