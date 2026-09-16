@@ -18,6 +18,8 @@ struct BackendConfig {
   // Bounded Vulkan offload policy. CPU ignores this; intel-vulkan requires
   // an explicit positive value and never silently falls back.
   unsigned gpu_layers = 20;
+  // CPU threads for prefill and generation; 0 means every logical thread.
+  unsigned threads = 0;
   std::string vulkan_device_name;
   std::string cuda_device_name;
   std::shared_ptr<ModelValidationLease> model_lease;

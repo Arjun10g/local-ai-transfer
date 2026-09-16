@@ -56,7 +56,8 @@ std::string LlamaBackend::runtime_info_json() const {
   if (!impl_->context) return "{}";
   return std::string("{\"context_tokens\":") + std::to_string(llama_n_ctx(impl_->context)) +
          ",\"n_batch\":" + std::to_string(llama_n_batch(impl_->context)) +
-         ",\"n_ubatch\":" + std::to_string(llama_n_ubatch(impl_->context)) + "}";
+         ",\"n_ubatch\":" + std::to_string(llama_n_ubatch(impl_->context)) +
+         ",\"n_threads\":" + std::to_string(llama_n_threads(impl_->context)) + "}";
 }
 
 void LlamaBackend::initialize(const BackendConfig& config) {
@@ -150,7 +151,8 @@ void LlamaBackend::initialize(const BackendConfig& config) {
   context_params.n_batch = batch_config.n_batch;
   context_params.n_ubatch = batch_config.n_ubatch;
   context_params.n_seq_max = 1;
-  context_params.n_threads = static_cast<int32_t>(std::max(1u, std::thread::hardware_concurrency()));
+  context_params.n_threads = static_cast<int32_t>(
+      config.threads != 0 ? config.threads : std::max(1u, std::thread::hardware_concurrency()));
   context_params.n_threads_batch = context_params.n_threads;
   context_params.abort_callback = abort_callback;
   context_params.abort_callback_data = &impl_->cancellation;

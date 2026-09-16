@@ -60,6 +60,13 @@ def main():
         result = subprocess.run(args, capture_output=True, text=True, timeout=2)
         if result.returncode != 2 or "bearer token source" not in result.stderr:
             raise AssertionError(f"missing/empty token was accepted: {args!r} rc={result.returncode} stderr={result.stderr!r}")
+    for value in ("0", "257", "-1", "4x", ""):
+        result = subprocess.run([executable, "serve", "--port", "0", "--threads", value], capture_output=True, text=True, timeout=2)
+        if result.returncode != 2 or "invalid numeric argument" not in result.stderr:
+            raise AssertionError(f"out-of-range --threads {value!r} was accepted: rc={result.returncode} stderr={result.stderr!r}")
+    result = subprocess.run([executable, "serve", "--port", "0", "--threads", "256"], capture_output=True, text=True, timeout=2)
+    if result.returncode != 2 or "bearer token source" not in result.stderr:
+        raise AssertionError(f"--threads 256 did not parse through to the token check: stderr={result.stderr!r}")
     if not use_stdin_token:
         with tempfile.TemporaryDirectory() as directory:
             insecure = Path(directory) / "insecure-token"
