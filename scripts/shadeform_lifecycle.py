@@ -3637,8 +3637,24 @@ def verify_instance_ownership(
     required = {"local-bmo-j1m", f"ep-phase-{phase_id}", f"ep-run-{nonce}"}
     if not required.issubset(tag_set):
         raise ShadeformError("provider ownership tags do not match this phase and nonce")
-    if ssh_key_id is not None and validate_resource_id(info.get("ssh_key_id"), field="instance SSH key id") != validate_resource_id(ssh_key_id, field="expected SSH key id"):
-        raise ShadeformError("provider instance is attached to a different SSH key")
+    if ssh_key_id is not None:
+        # A deleted instance has no key attached, and the provider reports that
+        # by blanking the field rather than omitting it.  Requiring a well-formed
+        # ID there made this verification impossible to pass for an instance the
+        # provider had already deleted, which in turn made the teardown branch
+        # that reconciles a dispatched-but-unconfirmed deletion unreachable in
+        # exactly the crash window it exists to close.  A blank field is relaxed
+        # only when the provider itself reports the instance as gone; identity is
+        # still fully established above by the exact ID, the nonce-bound name and
+        # the phase/run tags.  A live instance, or any non-blank mismatch, remains
+        # a hard refusal, which is what protects SSH and HF custody.
+        observed_key = info.get("ssh_key_id")
+        detached_by_deletion = (
+            observed_key in {None, ""}
+            and str(info.get("status", "")).lower() in {"deleted", "absent"}
+        )
+        if not detached_by_deletion and validate_resource_id(observed_key, field="instance SSH key id") != validate_resource_id(ssh_key_id, field="expected SSH key id"):
+            raise ShadeformError("provider instance is attached to a different SSH key")
     if expected_cloud is not None and str(info.get("cloud", "")).lower() != expected_cloud.lower():
         raise ShadeformError("provider instance cloud does not match the approved candidate")
     if expected_region is not None and str(info.get("region", "")).lower() != expected_region.lower():

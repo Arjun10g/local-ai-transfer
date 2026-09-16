@@ -593,6 +593,27 @@ class StaticSafetyTests(unittest.TestCase):
         with self.assertRaises(sf.ShadeformError):
             sf.verify_instance_ownership(info, instance_id="instance-owned-1", phase_id="phase-a", nonce=nonce, ssh_key_id="key-owned-1")
 
+    def test_deleted_instance_key_is_detached_not_mismatched(self):
+        from scripts import shadeform_lifecycle as sf
+        nonce = "0123456789abcdef0123456789abcdef"
+        base = {"id": "instance-owned-1", "name": f"ep-j1m-{nonce}", "tags": ["local-bmo-j1m", "ep-phase-phase-a", f"ep-run-{nonce}"]}
+        # The provider blanks the key field once it has deleted the instance.
+        # Verification must survive that, or teardown can never reconcile a
+        # deletion it dispatched but did not record.
+        for status in ("deleted", "absent"):
+            for blank in ("", None):
+                sf.verify_instance_ownership({**base, "status": status, "ssh_key_id": blank}, instance_id="instance-owned-1", phase_id="phase-a", nonce=nonce, ssh_key_id="key-owned-1")
+        # A blank key is relaxed only on an authoritatively gone instance, and a
+        # non-blank mismatch stays a refusal whatever the status says.
+        for status in ("active", "deleting", "pending"):
+            with self.assertRaises(ValueError):
+                sf.verify_instance_ownership({**base, "status": status, "ssh_key_id": ""}, instance_id="instance-owned-1", phase_id="phase-a", nonce=nonce, ssh_key_id="key-owned-1")
+        with self.assertRaises(sf.ShadeformError):
+            sf.verify_instance_ownership({**base, "status": "deleted", "ssh_key_id": "key-someone-else"}, instance_id="instance-owned-1", phase_id="phase-a", nonce=nonce, ssh_key_id="key-owned-1")
+        # Relaxing the key must not relax anything else about identity.
+        with self.assertRaises(sf.ShadeformError):
+            sf.verify_instance_ownership({**base, "status": "deleted", "ssh_key_id": "", "tags": ["local-bmo-j1m"]}, instance_id="instance-owned-1", phase_id="phase-a", nonce=nonce, ssh_key_id="key-owned-1")
+
     def test_malformed_owned_ledger_refuses_before_provider_delete(self):
         from scripts import shadeform_lifecycle as sf
         from scripts import shadeform_teardown as teardown
