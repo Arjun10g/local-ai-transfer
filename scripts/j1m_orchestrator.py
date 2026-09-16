@@ -2735,6 +2735,14 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 provider_delete_deadline_utc=str(auto_delete["date_threshold"]),
                 started_at_utc=create_intent_started,
             )
+            # `failed_stage` falls back to "unknown" when no stage was ever
+            # named, so a run that died before activation reported the absence
+            # of a receipt it was never in a position to write rather than the
+            # step that failed. Run `j1m-eval-20260914-g` did exactly that: a
+            # provider launch error surfaced as failed_stage "unknown" plus
+            # "eval receipt was not salvaged before teardown", which is the
+            # downstream symptom, not the cause.
+            lifecycle["stage"] = "provider:create"
             try:
                 sf.preflight_legacy_deletion_evidence(phase_id)
                 instance_id = sf.create_instance(api_key, env, phase_id=phase_id, run_id=run_id, candidate=candidate, ssh_key_id=key_id, nonce=nonce, max_runtime_hours=runtime, auto_delete_contract=auto_delete)
@@ -2778,6 +2786,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             # but settle it to zero only after both durable writes and the
             # watchdog are in place.
             sf.append_cost_event({"instance_id": attempt_id, "phase_id": phase_id, "ownership_nonce": nonce, "status": "settled", "actual_cost_usd": 0.0, "reservation": "pre-create-attempt-reconciled"})
+            lifecycle["stage"] = "provider:wait-active"
             j1m_runner.write_progress(progress_path, "wait-active-starting", phase_id=phase_id)
             wait_budget = int(_eval_timeout(execution_deadline, float(config["modes"][mode].get("activation_timeout_seconds", 1800))))
             info = sf.wait_active(api_key, phase_id, instance_id, timeout_seconds=wait_budget)
