@@ -99,6 +99,7 @@ TEST_INVENTORY = {
     "tests/performance/test_j1m_receipt_rehearsal.py": "lifecycle",
     "tests/performance/test_j1m_key_handle.py": "lifecycle",
     "tests/performance/test_j1m_lifecycle.py": "lifecycle",
+    "tests/performance/test_j1m_eval_receipt_identity.py": "lifecycle",
     "tests/performance/test_j1m_salvage_transport.py": "lifecycle",
     "tests/performance/test_model_specs.py": "model_fixture",
     "tests/performance/test_probe_and_preflight.py": "lifecycle",
@@ -120,6 +121,7 @@ TEST_INVENTORY = {
 REVIEWED_TEST_SUPPORT_FILES = frozenset({
     "tests/__init__.py",
     "tests/model/__init__.py",
+    "tests/performance/fixtures/eval-receipt-run-identity.json",
     "tests/model/production_tool_call_eval.json",
     "tests/model/qwen_xml_vectors.json",
     "tests/model/tool_call_eval.json",

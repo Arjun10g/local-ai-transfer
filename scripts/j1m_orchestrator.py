@@ -1569,6 +1569,28 @@ def _without_run_identity(payload: dict[str, Any]) -> set[str]:
     return set(payload) - set(j1m_runner.RUN_IDENTITY_FIELDS)
 
 
+def _record_receipt_error(lifecycle: dict[str, Any], exc: BaseException) -> None:
+    """Keep the finite code, but name the rule that refused the receipt.
+
+    `receipt_verification_failed` on its own cost a full paid run's diagnosis:
+    run `j1m-eval-20260914-a` scored 32/37 on a real A100, salvaged its receipt,
+    and still reported `failed` with no record of which of a dozen checks had
+    rejected it -- the cause had to be found by importing the verifier and
+    re-running it by hand. The exception CLASS is a bounded identifier and is
+    always safe; the message is included only when it screens clean against the
+    same validator every persisted diagnostic uses, exactly as `_safe_cli` does.
+    """
+
+    lifecycle["receipt_error"] = "receipt_verification_failed"
+    lifecycle["receipt_error_type"] = type(exc).__name__
+    try:
+        message = str(exc)[:200]
+        j1m_runner.validate_persisted_output(message)
+        lifecycle["receipt_error_reason"] = message
+    except (ValueError, UnicodeError):
+        pass
+
+
 def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]:
     """Accept only the bounded aggregate receipt produced by remote eval."""
 
@@ -1611,7 +1633,7 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
         raise ValueError("eval receipt model preflight invalid")
     metrics = payload.get("metrics")
     metric_keys = {"case_count", "passed", "failed", "errors", "peak_rss_kib", "category_summary"}
-    optional_metric_keys = {"canary", "error_diagnostics", "quality_diagnostics"}
+    optional_metric_keys = {"canary", "error_diagnostics", "quality_diagnostics", "failed_cases"}
     if (not isinstance(metrics, dict) or not metric_keys <= set(metrics) or set(metrics) - metric_keys - optional_metric_keys or
             payload.get("status") not in {"verified", "completed_with_failures", "failed"} or
             any(isinstance(metrics.get(key), bool) or not isinstance(metrics.get(key), int) or metrics[key] < 0 for key in ("case_count", "passed", "failed", "errors"))):
@@ -1623,6 +1645,29 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     expected_category_counts = eval_contract["category_counts"]
     if metrics["case_count"] != expected_count or not isinstance(summary, dict) or set(summary) != expected_categories:
         raise ValueError("eval receipt metrics invalid")
+    # `failed_cases` names WHICH cases did not pass. It is bounded to the
+    # fixture's own id, a category and a finite reason code -- never prompt or
+    # response text -- and its length must equal failed+errors, which ties the
+    # attribution to the aggregate it explains. Run `j1m-eval-20260914-a`
+    # scored 32/37 with no way to tell which five failed.
+    failed_cases = metrics.get("failed_cases")
+    if failed_cases is not None:
+        if (not isinstance(failed_cases, list) or len(failed_cases) != metrics["failed"] + metrics["errors"] or
+                len(failed_cases) > expected_count):
+            raise ValueError("eval receipt failed-case attribution invalid")
+        seen_ids: set[str] = set()
+        for entry in failed_cases:
+            if not isinstance(entry, dict) or set(entry) != {"id", "category", "reason"}:
+                raise ValueError("eval receipt failed-case attribution invalid")
+            case_id = entry["id"]
+            if (not isinstance(case_id, str) or not 1 <= len(case_id) <= 64 or
+                    not re.fullmatch(r"[A-Za-z0-9._-]+", case_id) or case_id in seen_ids):
+                raise ValueError("eval receipt failed-case attribution invalid")
+            seen_ids.add(case_id)
+            for key in ("category", "reason"):
+                value = entry[key]
+                if not isinstance(value, str) or not 1 <= len(value) <= 64 or any(ord(char) < 0x20 for char in value):
+                    raise ValueError("eval receipt failed-case attribution invalid")
     category_total = 0
     for category in expected_categories:
         item = summary[category]
@@ -1669,7 +1714,15 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
             raise ValueError("eval receipt engine identity mismatch")
     cuda_device = payload.get("cuda_device")
     device = cuda_device.get("device") if isinstance(cuda_device, dict) else None
-    if (not isinstance(cuda_device, dict) or set(cuda_device) != {"schema", "status", "selector", "device_count", "device", "source"} or
+    # The nested probe receipt carries the same run-identity binding the
+    # top-level allowance above already accepts, because the probe that writes
+    # it stamps its own run and instance.  Demanding an exact set here rejected
+    # the evaluation's own attestation and failed a lifecycle whose eval had in
+    # fact completed and scored -- the same defect as the top-level one, one
+    # level down.  The core attestation keys stay mandatory and nothing else is
+    # tolerated, so a receipt missing its placement evidence is still refused.
+    cuda_required = {"schema", "status", "selector", "device_count", "device", "source"}
+    if (not isinstance(cuda_device, dict) or _without_run_identity(cuda_device) != cuda_required or
             cuda_device.get("schema") != "local_bmo.j1m.cuda-device-receipt.v1" or cuda_device.get("status") != "verified" or cuda_device.get("selector") != "CUDA0" or cuda_device.get("device_count") != 1 or
             not isinstance(device, dict) or set(device) != {"index", "name", "memory_total_mib", "driver_version"} or "a100" not in str(device.get("name", "")).lower() or not isinstance(device.get("memory_total_mib"), int) or device["memory_total_mib"] < 70000):
         raise ValueError("eval receipt CUDA placement attestation invalid")
@@ -1683,7 +1736,10 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     toolchain = payload.get("toolchain")
     versions = toolchain.get("versions") if isinstance(toolchain, dict) else None
     minimums = {"python3": (3, 8), "git": (2, 30), "cmake": (3, 18), "g++": (9, 0), "nvcc": (12, 0)}
-    if (not isinstance(toolchain, dict) or set(toolchain) != {"schema", "status", "required", "versions", "packages", "package_install"} or
+    # Same run-identity allowance as the CUDA attestation above: the remote
+    # probe stamps its own run and instance into the receipt it writes.
+    toolchain_required = {"schema", "status", "required", "versions", "packages", "package_install"}
+    if (not isinstance(toolchain, dict) or _without_run_identity(toolchain) != toolchain_required or
             toolchain.get("schema") != "local_bmo.j1m.remote-toolchain-receipt.v1" or toolchain.get("status") != "verified" or
             not isinstance(versions, dict) or set(versions) != set(minimums)):
         raise ValueError("eval receipt toolchain evidence invalid")
@@ -1722,6 +1778,9 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     selected_metrics["error_diagnostics"] = diagnostics
     selected_metrics["canary"] = canary
     selected_metrics["quality_diagnostics"] = quality_diagnostics
+    if failed_cases is not None:
+        # Carried through as validated, so a consumer can name the failures.
+        selected_metrics["failed_cases"] = [dict(entry) for entry in failed_cases]
     selected_versions = {name: dict(versions[name]) for name in minimums}
     selected_packages = {name: packages[name] for name in expected_packages}
     return {
@@ -2959,7 +3018,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                         try:
                             lifecycle["preflight_receipt"] = _verify_startup_preflight_receipt(artifact_destination / "startup-preflight-receipt.json", eval_artifact)
                         except Exception as exc:
-                            lifecycle["receipt_error"] = "receipt_verification_failed"
+                            _record_receipt_error(lifecycle, exc)
                     if lifecycle.get("preflight_receipt", {}).get("status") != "verified":
                         lifecycle["receipt_error"] = lifecycle.get("receipt_error", "startup preflight did not verify")
                 saved_receipt = next((item for item in lifecycle["salvage"] if item.get("name") == "eval-receipt.json" and item.get("status") == "completed"), None)
@@ -2969,7 +3028,7 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     try:
                         lifecycle["eval_receipt"] = _verify_eval_receipt(artifact_destination / "eval-receipt.json", eval_artifact)
                     except Exception as exc:
-                        lifecycle["receipt_error"] = "receipt_verification_failed"
+                        _record_receipt_error(lifecycle, exc)
                 if lifecycle.get("comparator_cleanup_error"):
                     # Deferred intermediate deletion that cannot be proven is a
                     # fail-closed condition for a run that opted into it.

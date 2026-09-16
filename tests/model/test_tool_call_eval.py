@@ -313,7 +313,11 @@ class ToolCallEvaluatorTests(unittest.TestCase):
         with patch("scripts.test.evaluate_tool_calls._post", side_effect=fake_post):
             produced = run_local(fixture, "http://127.0.0.1:1/v1/chat/completions", "test-token-20260904", timeout=0.1, max_cases=1)
         aggregate = __import__("scripts.test.evaluate_tool_calls", fromlist=["aggregate_result"]).aggregate_result(produced)
-        self.assertEqual(set(aggregate), {"case_count", "passed", "failed", "errors", "peak_rss_kib", "category_summary", "canary", "error_diagnostics", "quality_diagnostics"})
+        self.assertEqual(set(aggregate), {"case_count", "passed", "failed", "errors", "peak_rss_kib", "category_summary", "canary", "error_diagnostics", "quality_diagnostics", "failed_cases"})
+        # Every case passed here, so the attribution must be empty rather than
+        # absent -- a run that passes still states that it attributed nothing.
+        self.assertEqual(aggregate["failed_cases"], [])
+        self.assertNotIn("cases", aggregate)
         parsed, all_passed, has_failure = remote_model_eval._parse_evaluator_result(
             {"status": "completed", "exit_code": 0, "stdout": json.dumps(aggregate)},
             expected_case_count=1, expected_categories={"tool_selection"}, require_diagnostics=True,

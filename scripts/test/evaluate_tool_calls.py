@@ -1213,12 +1213,28 @@ def run_local(
 
 
 def aggregate_result(result: dict[str, Any]) -> dict[str, Any]:
-    """Return only the remote-safe metrics contract, excluding case details."""
-    return {key: result[key] for key in (
+    """Return only the remote-safe metrics contract, excluding case details.
+
+    One deliberate exception: `failed_cases` names WHICH cases did not pass.
+    Run `j1m-eval-20260914-a` scored 32/37 and the five failures were
+    unattributable -- the histogram said `malformed_call` twice without saying
+    where, so fixing them needed another paid run. The disclosure is the
+    narrowest thing that closes that: only non-passing cases, and only the
+    fixture's own `id` (already public in the tracked fixture), its `category`
+    (one of six), and `reason` (a member of the finite quality/diagnostic
+    vocabularies). No prompt, no response, no token count, and no latency --
+    so `prompt_response_logging: False` remains exactly as true as before.
+    """
+    aggregate = {key: result[key] for key in (
         "case_count", "passed", "failed", "errors", "peak_rss_kib",
         "category_summary", "canary", "error_diagnostics",
         "quality_diagnostics",
     )}
+    aggregate["failed_cases"] = [
+        {"id": item["id"], "category": item["category"], "reason": item["reason"]}
+        for item in result["cases"] if item["status"] != "pass"
+    ]
+    return aggregate
 
 
 def load_bearer_token(token_file: Path | None, token_env: str) -> str:

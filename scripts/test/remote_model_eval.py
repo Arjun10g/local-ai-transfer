@@ -51,6 +51,7 @@ SAFE_ERROR_CODES = frozenset({
     "evaluator_fixture_categories_invalid", "evaluator_fixture_count_invalid",
     "evaluator_fixture_invalid", "evaluator_fixture_too_large", "evaluator_fixture_unreadable",
     "evaluator_metrics_invalid", "evaluator_metrics_total_invalid", "evaluator_process_failed",
+    "evaluator_failed_cases_invalid",
     "evaluator_exit_status_mismatch", "evaluator_receipt_invalid", "evaluator_rss_invalid",
     "evaluator_diagnostics_invalid", "evaluator_diagnostics_total_invalid", "evaluator_diagnostics_code_invalid",
     "evaluator_quality_diagnostics_invalid", "evaluator_quality_diagnostics_total_invalid", "evaluator_quality_diagnostics_code_invalid",
@@ -917,11 +918,40 @@ def _validate_canary_coherence(canary: dict[str, Any], *, metrics: dict[str, Any
         raise ValueError("evaluator_canary_invalid")
 
 
+def _validate_failed_cases(value: Any, *, expected_failed: int, expected_errors: int, expected_categories: set[str]) -> list[dict[str, Any]]:
+    """Accept the bounded attribution of WHICH cases did not pass.
+
+    Deliberately narrow: the fixture's own case id, its category, and a finite
+    reason code. Anything else in an entry is refused, so this can never become
+    a channel for prompt or response text. The count must equal failed+errors,
+    which ties the attribution to the aggregate it explains.
+    """
+
+    if not isinstance(value, list) or len(value) != expected_failed + expected_errors or len(value) > MAX_EVAL_CASES:
+        raise ValueError("evaluator_failed_cases_invalid")
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"id", "category", "reason"}:
+            raise ValueError("evaluator_failed_cases_invalid")
+        case_id = item["id"]
+        if not isinstance(case_id, str) or not 1 <= len(case_id) <= 64 or not re.fullmatch(r"[A-Za-z0-9._-]+", case_id) or case_id in seen:
+            raise ValueError("evaluator_failed_cases_invalid")
+        seen.add(case_id)
+        if expected_categories and item["category"] not in expected_categories:
+            raise ValueError("evaluator_failed_cases_invalid")
+        if item["reason"] not in EVAL_QUALITY_CODES and item["reason"] not in EVAL_DIAGNOSTIC_CODES:
+            raise ValueError("evaluator_failed_cases_invalid")
+    return [dict(item) for item in value]
+
+
 def _validate_metrics(metrics: Any, *, expected_case_count: int = 8, expected_categories: set[str] | None = None, expected_category_counts: dict[str, int] | None = None, expected_tool_count: int = 11, expected_context_tokens: int = 2048, expected_output_reserve_tokens: int = 64, require_diagnostics: bool = False) -> dict[str, Any]:
     if not isinstance(metrics, dict):
         raise ValueError("evaluator_metrics_invalid")
     counts = ("case_count", "passed", "failed", "errors")
-    if require_diagnostics and set(metrics) != set(counts) | {"peak_rss_kib", "category_summary", "canary", "error_diagnostics", "quality_diagnostics"}:
+    # `failed_cases` is optional so a receipt written before the attribution
+    # change, or by an older evaluator, is not retroactively invalid. Any OTHER
+    # unexpected key is still refused.
+    if require_diagnostics and set(metrics) - {"failed_cases"} != set(counts) | {"peak_rss_kib", "category_summary", "canary", "error_diagnostics", "quality_diagnostics"}:
         raise ValueError("evaluator_metrics_invalid")
     if any(isinstance(metrics.get(key), bool) or not isinstance(metrics.get(key), int) or metrics[key] < 0 for key in counts):
         raise ValueError("evaluator_metrics_invalid")
@@ -960,6 +990,8 @@ def _validate_metrics(metrics: Any, *, expected_case_count: int = 8, expected_ca
         result["canary"] = _validate_canary(metrics["canary"], expected_tool_count=expected_tool_count, expected_context_tokens=expected_context_tokens, expected_output_reserve_tokens=expected_output_reserve_tokens)
         _validate_canary_coherence(result["canary"], metrics=metrics, summary=summary, diagnostics=result["error_diagnostics"], expected_case_count=expected_case_count, expected_categories=expected_categories or set())
         result["quality_diagnostics"] = _validate_quality_diagnostics(metrics["quality_diagnostics"], expected_failed=metrics["failed"], expected_categories=expected_categories or set(), category_failed={category: summary[category]["failed"] for category in (expected_categories or set())})
+        if "failed_cases" in metrics:
+            result["failed_cases"] = _validate_failed_cases(metrics["failed_cases"], expected_failed=metrics["failed"], expected_errors=metrics["errors"], expected_categories=expected_categories or set())
     elif "error_diagnostics" in metrics or "canary" in metrics or "quality_diagnostics" in metrics:
         if "error_diagnostics" in metrics:
             result["error_diagnostics"] = _validate_diagnostics(metrics["error_diagnostics"], expected_errors=metrics["errors"], expected_categories=expected_categories or set(), category_errors={category: summary[category]["errors"] for category in (expected_categories or set())})
@@ -1118,7 +1150,7 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any], dea
             "model_preflight": {**model_preflight, **preflight_summary},
             **({"cuda_device": cuda_receipt} if cuda_receipt is not None else {}),
             "toolchain": toolchain,
-            "metrics": {key: metrics[key] for key in ("case_count", "passed", "failed", "errors", "peak_rss_kib", "category_summary", "canary", "error_diagnostics", "quality_diagnostics")},
+            "metrics": {key: metrics[key] for key in ("case_count", "passed", "failed", "errors", "peak_rss_kib", "category_summary", "canary", "error_diagnostics", "quality_diagnostics", "failed_cases")},
             **({"child": child_status} if child_status is not None else {}),
             "duration_ms": round((time.monotonic() - started) * 1000, 1),
             "prompt_response_logging": False,
