@@ -302,6 +302,10 @@ Two consequences follow and are recorded here rather than left implicit.
 
 ## Toolchain and image verdict
 
+> **Corrected 2026-09-14 — this verdict is empirically false for denvr. Read
+> the amendment below before relying on any row of the table that follows.**
+> The alternates are **unverified**, not approved.
+
 Sol's instruction was not to ship an alternate that will predictably fail once
 the money is gone, so the pinned requirements were read rather than assumed.
 **Both alternates are approved.** Nothing in this lane pins a CUDA minor
@@ -329,6 +333,158 @@ candidate — so it introduces no new toolchain surface at all. Denvr's
 pins this verdict so it fails if the floor is later raised above either image,
 if a driver comparison is introduced, or if the bootstrap stops installing a
 package the probe demands.
+
+## Amendment — 2026-09-14 — the alternate toolchain verdict is empirically false
+
+The verdict above cleared both alternates by reading the pinned requirements.
+The reasoning was sound and the conclusion is wrong. The first run in this
+program's history ever to select a non-primary entry selected denvr and died at
+the first probe.
+
+**Evidence.** Run `j1m-eval-20260914-b`, instance
+`a6abd624-5e0a-4024-ae30-0da929068162`, selected `approved_target_index` 1 —
+denvr / houston-usa-1 / `A100_sxm4_80G` / `ubuntu22.04_cuda12.4_shade_os` /
+USD 1.50 — because the recorded primary was absent from the catalogue at
+18:33Z (`selected_target.considered[0].status` is `not_in_catalogue`). It
+failed at `eval-stage:remote_toolchain_probe` about eight minutes in, with
+`remote toolchain refused: nvcc_unavailable`. Teardown was clean.
+
+**What the table got wrong.** The row asserting nvcc at
+`/usr/local/cuda/bin/nvcc` is `image-independent` for both alternates is the
+falsified cell. The floor was never the problem: `nvcc >= 12.0` is irrelevant
+when there is no `nvcc` on the image at all. The verdict reasoned about a
+*version* and the failure was an *absence*, which no amount of reading the
+pinned minima could have surfaced — only renting the machine could.
+
+**Scope of the correction.**
+
+- **denvr — REFUTED.** Not merely unverified: measured, and it fails. It must
+  not be selected again until an image carrying nvcc is identified for it.
+- **crusoe — UNTESTED.** It has never been selected by any run. Its clearance
+  rests on the same reasoning that proved false for denvr, so it carries no
+  more evidential weight than denvr's did at 18:32Z. Note the mitigating fact
+  that crusoe's `ubuntu22.04_cuda12.2_shade_os` is the same image name the
+  primary runs, which denvr's was not — that is a real difference, and it is
+  still an argument rather than a measurement.
+- **hyperstack (index 0) — the only empirically proven entry.** Every prior
+  run that recorded a `selected_target` used it: `20260911-d/e/f/g/h`,
+  `20260912-a/b/c`, `20260914-a` and `20260914-c`.
+
+**Cost of learning it, and why the figure is misleading.** The run booked
+USD 3.637207. The provider's own `cost_estimate` for that instance is
+**USD 0.0414** — an 87.9x overstatement, the worst row in the ledger, caused by
+the ceiling-settlement defect recorded separately. The true price of this
+finding was four cents. The intuitive reading that denvr "fails more expensively
+because it costs more per hour" is false: B cost an order of magnitude *less*
+than the 25-minute hyperstack run before it, because it died in eight minutes.
+Real cost tracks duration, not rate; only the phantom figure tracked rate.
+
+**No pre-launch guard would have prevented it.** A procedural check was
+published here and withdrawn the same day once it was found to query nothing;
+see §Pre-launch target check — WITHDRAWN below. Nothing available before the
+spend reports which target will be rented.
+
+**This amendment records a measurement; it does not re-decide the list.**
+Changing the recorded order, removing denvr, or promoting crusoe is Sol's
+decision and is not taken here. (The fail-closed guard below does not re-decide
+the list either: denvr stays in its recorded position, and is refused because it
+is unverified rather than because it is unapproved. Verifying its image, or
+crusoe's, is what would make either launchable again.)
+
+## Pre-launch target check — WITHDRAWN, see the correction at the end of this section
+
+> **This rule was published mandatory on 2026-09-14 and withdrawn the same day.
+> It does not work. Read §Corrected twice below before acting on any of it.**
+
+**Before every `--execute`, run the same command without `--execute` and read
+`selected_target.approved_target_index`.**
+
+```
+SOL_J1M_REVIEWED=1 <python> scripts/j1m_orchestrator.py --mode eval
+```
+
+The plan path performs the read-only catalogue query and prints the exact entry
+the launch will rent. It mutates nothing, mints no key, and costs USD 0.00 —
+`main()` returns before the `SOL_J1M_REVIEWED` gate is even reached when
+`--execute` is absent.
+
+**If the index is not 0, do not launch.** Index 0 is the only empirically proven
+entry; index 1 is refuted and index 2 is untested. A non-zero index means the
+primary is absent from the catalogue, which is a condition to report, not to
+spend through.
+
+### Corrected twice, 2026-09-14 — THE CHECK ABOVE IS VACUOUS. DO NOT RELY ON IT.
+
+**The rule stated above does not work and cannot work. It is retained only so
+that this correction has something to point at. There is currently no
+pre-launch signal about target availability at all.**
+
+The first correction to this section blamed a check-then-act race. That was
+wrong too, and the real cause is simpler and worse: **the plan path never
+queries the provider.** `build_plan` defaults `target_index` to the first
+approved entry and returns (`scripts/j1m_runner.py:2006-2008`):
+
+```
+    if target_index is None:
+        target_index = approved[0][0]
+```
+
+The orchestrator's only live catalogue query is
+`sf.list_candidates(...)` at `scripts/j1m_orchestrator.py:2446`, which is inside
+`execute()` (lines 2388-3188). Without `--execute`, `main()` prints the plan and
+returns before reaching it. The dry run therefore reports
+`approved_target_index: 0` **as a constant**, never as a measurement.
+
+The condition "if the index is not 0" can never be true, so the rule above
+refuses nothing, ever. It is not a weak guard; it is not a guard.
+
+**Evidence, code and observation agreeing.** A plan run taken while hyperstack
+was demonstrably absent from the catalogue — runs D, E and F had all just landed
+on denvr — still printed `approved_target_index: 0`, hyperstack,
+montreal-canada-2, and emitted **no `considered` key at all**. A real selection
+populates `considered` because it examines candidates; the plan path omits it
+because it examines none. Compare run D's lifecycle receipt, which recorded
+`considered: [{"approved_target_index": 0, "cloud": "hyperstack", "status":
+"not_in_catalogue"}]` and then selected index 1.
+
+**A separate defect the same evidence exposes.** The plan object reports
+`target_selection: "first approved entry that exactly matches a live catalogue
+candidate; refused if none does"`. The plan path performs no such match and
+issues no such refusal. A plan artifact that describes provider-dependent
+behaviour it never performs is how three operators in one day concluded they had
+checked something they had not. Either the plan path should perform the query it
+claims, or it should stop reporting a `selected_target` and a `target_selection`
+that imply one.
+
+**Consequence for the fail-closed refusal.** A refusal inside the orchestrator
+after selection and before the billable create is therefore not the *robust*
+option against a weak procedural one — **it is the only guard that can exist**,
+because selection happens exactly once, inside `execute()`, after the operator's
+last opportunity to intervene.
+
+**Decided and implemented (2026-09-14, later the same day).** The operator chose
+the fail-closed refusal, and it landed as `f3d30c4`. Each approved entry now
+carries `toolchain_verified`; `execute()` refuses an unverified entry after
+selection and before the ephemeral key or the billable create. Absent means
+unverified, and only a literal `True` counts. The recorded values are the
+observations above: hyperstack `true`, denvr `false`, crusoe `false` (never run).
+It was exercised on a real launch the same evening: run `j1m-eval-20260914-h`
+drew denvr and was refused at USD 0.00 with no instance, no key and no ledger
+row. The offline dry-run gate proves the same property with a dedicated
+scenario (25 checks, up from 24).
+
+**Consequence for retrying.** With provider-truth settlement live a wrong-target
+landing is cheap — run D booked **USD 0.031488** against a denvr ceiling of
+3.6372, a 115x reduction, matching the provider's own `cost_estimate` of
+0.0314884417. But cheap retrying is not a strategy here: because the plan path
+is blind, relaunching does not resample a signal, it just re-enters the same
+selection with the same catalogue. Runs B, D, E and F landing on denvr is that
+pattern, not bad luck.
+
+**What actually establishes which target was rented:** only the lifecycle
+receipt's own `selected_target`, after the money. Nothing before the spend
+reports it, and "pre-checked, index 0" must not be recorded as evidence that a
+run was on the primary.
 
 ## Validation
 
