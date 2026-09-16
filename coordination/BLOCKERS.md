@@ -1,5 +1,44 @@
 # Blockers
 
+## Close-out — 2026-09-16
+
+ADR-0007 is ratified, so the 2026-09-14 reclassification below is now the
+standing classification rather than a proposal. It still closes nothing:
+`B-006` remains open as gate L1 (measured 32/37, below the 90% bar), and every
+other blocker keeps its `State:` line. Two findings since then are recorded as
+claim rows rather than blockers because neither prevents work: the ledger's
+historical overstatement (`LEDGER-HISTORICAL-RESETTLEMENT-001`) and the
+misleading dry-run target report (`J1M-PLAN-TARGET-SELECTION-001`).
+
+## Scope change — 2026-09-14 — blockers reclassified under ADR-0007
+
+The program was rescoped from an enterprise Windows release to a personal local
+assistant (ADR-0007). `coordination/RELEASE_GATES.md` now carries a five-gate
+local-first set; Phase 0-8 is superseded history. **No blocker below is
+resolved by this. Reclassification is not closure** — each `State:` line stands
+exactly as written, and the work each describes is unchanged. What changed is
+only whether it sits on the critical path to the operator's stated goal.
+
+- **B-001** (exact Dell hardware/driver receipt) — OFF critical path,
+  informational. Hardware attestation is among the surrendered items; "works on
+  the Dell" now rests on operator observation.
+- **B-002** (corporate approval references) — OUT OF SCOPE. The local
+  assistant has no corporate deployment to approve.
+- **B-003** (external tool chain lacks durable authority and live proof) —
+  PARKED with the Graph/browser/Copilot tools. Reversible; restoring those
+  tools restores this blocker to the critical path.
+- **B-004** (A100 provider profile activation-unreliable) — OFF critical path.
+  It only ever affected rented evaluation runs, never the product.
+- **B-005** (Windows launch boundary not identity-pinned) — REDUCED, not
+  closed. Under this scope the operator approves each command, which is a
+  weaker control than identity-pinned launch and is accepted as such. The full
+  authority is parked. See L2/L3.
+- **B-006** (model/tool quality below gate) — **STILL OPEN AND NOW THE PRIMARY
+  GATE**, as L1. The rescope lowers assurance about provenance, not about
+  whether the model works. Run `j1m-eval-20260914-a` is producing the first
+  score on the shipping profile in the program's history.
+
+
 ## Update — 2026-09-14 — `EVAL-HTTP400-DIAGNOSTIC-001` closed
 
 - **The defect that guaranteed 0/37 is fixed, and it was a bound, not a

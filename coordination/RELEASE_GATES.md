@@ -1,5 +1,72 @@
 # Release Gates
 
+## CURRENT GATE SET — 2026-09-14 (v8, local-first rescope under ADR-0007, ratified 2026-09-16)
+
+**This section is current truth. The Phase 0-8 set below it is superseded
+history and gates nothing.** The operator rescoped the program on 2026-09-14
+from an enterprise Windows release to a personal local assistant: a local model
+on the Dell laptop, Ollama-like to run, with terminal access, secure. ADR-0007
+records the decision and, more importantly, what it surrenders.
+
+**Target:** the Dell laptop running Windows, 32 GiB RAM or more. The 8 GiB
+development Mac is explicitly NOT an acceptance machine — it is measured at
+~200 s per evaluation case and pages the 5.6 GB artifact from disk. Evidence
+produced on the Mac or on a rented A100 is evaluation evidence, never
+acceptance evidence.
+
+**The burden of proof is deliberately lower than it was, and that is a
+surrender rather than an achievement.** Five things are given up outright and
+must never be reported as satisfied: code signing and an approved trust anchor;
+a reproducible signed Windows release; hardware/driver attestation and the
+exact Dell target receipt; corporate approval references; and performance
+percentile evidence. Nothing will attest that the running binary is the
+reviewed one. That is acceptable for one operator on their own machine and
+would be disqualifying for redistribution — which is the revisit trigger.
+
+**Containment is NOT reduced.** The model gains terminal access under this
+scope, so its blast radius grows. Loopback-only binding, bearer auth, no
+engine-initiated egress, tool-envelope validation, fail-closed parsing, the
+action journal, and bounded output/context are all retained in full.
+
+| Gate | State | What closes it |
+|---|---|---|
+| L0 — Engine runs on the target | `NOT_STARTED` | `lae-engine` configured, built and serving on the Dell/Windows target with the accepted Q4 artifact. `/healthz`, `/readyz`, `/version` and a non-streaming `/v1/chat/completions` all answer; bind is loopback-only and the bearer token is required. Evidence: a receipt produced ON the target. No cross-compilation claim and no Mac or A100 result substitutes. Note the engine has never been built for Windows: this is real work, not a formality |
+| L1 — Model answers usefully | `MEASURED_BELOW_GATE` | **The program has a score for the first time in its history: 32/37 passed, 5 failed, 0 errors**, measured twice (`j1m-eval-20260914-a` and `-c`) against fixture sha `c75af520…c8ac6c` on A100, identical both times, canary passing at 5,711 prompt tokens with all 33 tools. Against `execution/ACCEPTANCE_CRITERIA.md`: valid-tool-call 35/37 = 94.6% and correct-tool-selection 17/18 = 94.4% both clear their ≥90% bars; **single-tool end-to-end 32/37 = 86.5% does not**. The ≥95% retention comparator is still unmeasured (comparators were off). So the gate is measured and NOT met, which is a different and much better state than the unknown it replaced. All five failures are quality, not transport, and are now attributable by case: `prod-browser-url-001` wrong_tool, `prod-fs-patch-001` and `prod-mail-send-001` malformed_call, `prod-mail-read-state-001` and `prod-mail-list-001` argument_type_mismatch — four of the five in `confirmation_sensitive` (11/15), which is the weakest category and the one that matters most now that L2 grants terminal access. **Fixture changed 2026-09-14 to sha `d3c4d457…25a452`** after three product defects were fixed (tool-use policy never stated how to encode non-string values in a protocol with no types; never stated the contract's `suffix: reject` rule; `browser.open_url` and `browser.session_start` were lexically indistinguishable). The scorer and parser are byte-unchanged — only the model's inputs improved. **Any score on the new fixture is therefore a comparison against 32/37, not a continuation of it** — and both 32/37 receipts are now rejected by `_verify_eval_receipt` as `eval receipt fixture identity mismatch`, so that evidence stands as recorded but is no longer re-verifiable against the current contract. **The caveat that matters most, stated before the next number exists rather than after: this is changing the benchmark after seeing which cases failed it.** It is defensible here because tool descriptions are product surface rather than test scaffolding, and a model choosing between two indistinguishable descriptions is a real defect the eval correctly surfaced — but if the score rises, the honest reading is **"the product's tool descriptions improved", NOT "the model got better"**. Those are different claims and only the second would be evidence about Qwen3.5-9B. Nothing measured after 2026-09-14 may be reported as the latter. `B-006` is this gate |
+| L2 — Terminal access works and is contained | `NOT_STARTED` | The any-command-with-confirmation tool, designed and reviewed under `LOCAL-TERMINAL-CONFIRM-001`. Closes when: the exact command text shown to the operator is byte-identical to what executes; confirmation cannot be bypassed, batched, defaulted to yes, or remembered across commands; a refused command executes nothing and is journalled; output is bounded and credential-screened. **The confirmation step is a security control, not a UX affordance** — under this scope it is the only thing between a prompt-injected tool call and code execution on the operator's machine, and it must be tested as such |
+| L3 — Security proportionate to local use | `PARTIAL` | Most of this already exists in source and needs target evidence rather than new work: loopback binding and token auth (built), no engine-initiated egress (built), tool-envelope validation and fail-closed parsing (built, heavily tested), action-journal audit record (built), bounded output/context (built). Outstanding: the L2 confirmation control, a prompt-injection case set exercised against the terminal tool specifically, and confirmation that secrets never reach logs or receipts on the target. Windows launch identity-pinning is reduced to "the operator approves each command" rather than the attestation-grade authority `B-005` describes |
+| L4 — Usable like Ollama | `NOT_STARTED` | Start, stop, model load and a chat interface the operator can actually live with on the target: a documented one-command start, model resident across turns rather than reloaded per request, and first-token latency the operator judges acceptable on 32 GiB. Deliberately judged by the operator, not by a percentile — performance evidence is among the surrendered items |
+
+**Parked, reversible, gating nothing.** Retained in the tree and in history
+because it is merged, tested source that costs nothing to keep and would be
+expensive to rebuild: the Microsoft Graph tools (mail, teams) and their
+live-account proof, browser automation, the Copilot tool, and the
+attestation-grade Windows launch authority in its full form. `B-003` is parked
+with them. Restoring any of it is a scope decision, not a repair.
+
+**Blocker reclassification under this scope.** `B-001` (exact Dell hardware
+receipt) and `B-002` (corporate approval references) leave the critical path
+and become informational. `B-004` (A100 provider profile) only ever affected
+paid evaluation runs, never the product, and is off the critical path. `B-003`
+is parked. `B-005` is reduced to its proportionate form inside L3. **`B-006`
+stays open and is now L1** — the rescope lowers assurance about provenance, not
+about whether the model works.
+
+**What this does not change.** No gate above is advanced by a source merge, a
+status update, or this document. `L1` is the only gate with evidence in flight.
+Four of five are `NOT_STARTED` or `PARTIAL`, and the honest summary of the
+program on 2026-09-14 is that it has a well-tested source tree, a first quality
+number arriving today, and no working build on its actual target.
+
+## HISTORICAL / SUPERSEDED — the enterprise Phase 0-8 gate set
+
+**Superseded by the v8 local-first set above, under ADR-0007 (2026-09-14). The
+snapshot and table below gate nothing and are retained as history.** They
+record an enterprise Windows release the program is no longer attempting. At
+the moment of supersession the set stood at 0 of 9 gates approved and 6 of 6
+blockers open, with the remaining work dominated by evidence no implementation
+lane could produce. A future report of "L-gates green" must never be presented
+as satisfying any phase below.
+
 ## Current governance snapshot — 2026-09-11 (refresh v7)
 
 - Exact integrated source head is `c469ed1`. Two source integrations this
