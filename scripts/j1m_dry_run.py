@@ -591,7 +591,8 @@ def _instance_info() -> dict[str, Any]:
 def drive(mode: str, *, inject_failure: bool, key_root: Path | None,
           recorder: Recorder, comparators: str = "",
           fail_eval_stage: str = "",
-          catalogue: list[Any] | None = None) -> dict[str, Any]:
+          catalogue: list[Any] | None = None,
+          assume_targets_verified: bool = False) -> dict[str, Any]:
     """Run one complete lifecycle offline and return everything it produced.
 
     ``comparators`` drives the default-OFF comparator phase exactly as
@@ -694,6 +695,20 @@ def drive(mode: str, *, inject_failure: bool, key_root: Path | None,
             stack.enter_context(mock.patch.object(
                 orchestrator, "teardown_exact",
                 side_effect=RuntimeError("dry-run injected teardown failure")))
+
+        if assume_targets_verified:
+            # Selection and verification are separate policies. These scenarios
+            # exercise "does the ordered list walk correctly", which must stay
+            # testable for entries whose images nobody has verified yet. The
+            # refusal itself is proved by `__target_unverified_is_refused__`,
+            # which deliberately does NOT use this override. `execute` loads the
+            # config from disk by path, so the override has to be patched here
+            # rather than passed in.
+            verified_config = {**config, "shadeform_targets": [
+                {**entry, "toolchain_verified": True}
+                for entry in config["shadeform_targets"]]}
+            stack.enter_context(mock.patch.object(
+                j1m_runner, "load_config", return_value=verified_config))
 
         lifecycle: dict[str, Any] | None = None
         error: str | None = None
@@ -1142,7 +1157,8 @@ def _selection_runs(config: dict[str, Any], key_root: Path | None) -> dict[str, 
     runs: dict[str, dict[str, Any]] = {}
     for name, expected in _SELECTION_SCENARIOS:
         runs[name] = drive("prove", inject_failure=False, key_root=key_root,
-                           recorder=Recorder(), catalogue=catalogues[name])
+                           recorder=Recorder(), catalogue=catalogues[name],
+                           assume_targets_verified=True)
         if expected is None:
             runs[name]["pre_spend_refusal"] = True
     # A full eval on the most expensive approved entry, with the comparator
@@ -1152,7 +1168,19 @@ def _selection_runs(config: dict[str, Any], key_root: Path | None) -> dict[str, 
     # reads as this run's own cost evidence.
     runs["__target_crusoe_eval_comparators__"] = drive(
         "eval", inject_failure=False, key_root=key_root, recorder=Recorder(),
-        comparators=DEFAULT_COMPARATORS, catalogue=[_candidate(config, 2)])
+        comparators=DEFAULT_COMPARATORS, catalogue=[_candidate(config, 2)],
+        assume_targets_verified=True)
+    # The guard itself, with the shipped flags rather than the override: an
+    # entry whose image has never passed the remote toolchain probe must be
+    # refused BEFORE anything billable. Four runs on 2026-09-14 fell through to
+    # the denvr entry and died at `remote_toolchain_probe` with
+    # `nvcc_unavailable`, each after the instance had been created.
+    runs["__target_unverified_is_refused__"] = drive(
+        "prove", inject_failure=False, key_root=key_root, recorder=Recorder(),
+        catalogue=[_candidate(config, 1)])
+    # It refuses before key generation, so it has no key to remove and no cost
+    # to record -- the same shape as the unapproved-catalogue scenarios.
+    runs["__target_unverified_is_refused__"]["pre_spend_refusal"] = True
     return runs
 
 
@@ -1191,6 +1219,17 @@ def _add_target_selection_checks(results: dict[str, dict[str, Any]], add) -> Non
         if not (refused and unspent):
             refusal_ok = False
         refusal_details.append(f"{name}->{'refused pre-spend' if refused and unspent else error[:60]}")
+    # An approved entry whose image has never passed the remote toolchain probe
+    # must be refused with nothing created. This is the ONLY guard that can
+    # exist: selection happens once inside execute(), after the operator's last
+    # chance to intervene, and the plan path reports the primary without ever
+    # consulting the catalogue.
+    guard = results.get("__target_unverified_is_refused__") or {}
+    guard_error = str(guard.get("error") or "")
+    guard_refused = "is not toolchain-verified" in guard_error
+    guard_unspent = not guard.get("cost_events") and not guard.get("teardown_calls")
+    add("unverified_target_is_refused_before_any_spend", guard_refused and guard_unspent,
+        f"denvr entry -> {'refused pre-spend, nothing created' if guard_refused and guard_unspent else guard_error[:80]}")
     add("unapproved_catalogue_is_refused_pre_spend", refusal_ok,
         "; ".join(refusal_details))
 

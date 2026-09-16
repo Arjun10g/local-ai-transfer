@@ -1089,6 +1089,41 @@ def select_approved_target(config: dict[str, Any], candidates: list[Any], *,
     raise error
 
 
+def _assert_selected_target_toolchain_verified(
+    target: dict[str, Any], *, index: int,
+) -> None:
+    """Refuse, pre-spend, an entry whose image has never passed the probe.
+
+    The ordered approved list says which machines MAY be rented; it never said
+    which ones actually work. On 2026-09-14 four runs (`-b`, `-d`, `-e`, `-f`)
+    fell through to the denvr entry when the primary was absent from the
+    catalogue and every one died at `eval-stage:remote_toolchain_probe` with
+    `nvcc_unavailable` -- that image ships no CUDA compiler. ADR-0006 had
+    cleared both alternates by reasoning that nothing pins a CUDA minor
+    version; the reasoning was sound and the conclusion wrong, because the
+    floor was never the problem and the binary's ABSENCE is.
+
+    There is no pre-launch signal to prevent this: the plan path reports the
+    first approved entry without consulting the catalogue
+    (`j1m_runner.py:2007-2008`), and the only `list_candidates` call happens
+    inside `execute` itself. So this -- after selection, before the ephemeral
+    key and before the billable create -- is the only place that both knows
+    what will be rented and can still refuse for free.
+
+    Absent means unverified. An entry nobody has ever run must not become
+    launchable by omitting a field.
+    """
+
+    if target.get("toolchain_verified") is True:
+        return
+    raise sf.ShadeformError(
+        "approved target at index {index} ({cloud}/{region}) is not toolchain-verified; "
+        "its image has never been observed to pass the remote toolchain probe, so a run "
+        "would fail after the money is spent. Verify it or record "
+        "toolchain_verified: true for that entry.".format(
+            index=index, cloud=target.get("cloud"), region=target.get("region")))
+
+
 def _assert_selected_target_within_per_run_cap(
     config: dict[str, Any], *, mode: str, hourly_usd: float, env: dict[str, str],
 ) -> dict[str, Any]:
@@ -2452,6 +2487,9 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
     candidate = chosen["candidate"]
     approved_target_index = chosen["index"]
     selected_target = chosen["selection"]
+    # Nothing billable has happened yet: refuse an entry whose image has never
+    # been seen to work before the ephemeral key or the create.
+    _assert_selected_target_toolchain_verified(target, index=approved_target_index)
     # Every dollar figure from here on is the selected entry's, not the
     # primary's, and the recorded per-run cap is enforced before key generation.
     selected_target["cost_projection"] = _assert_selected_target_within_per_run_cap(

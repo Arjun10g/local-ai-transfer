@@ -77,7 +77,12 @@ class ApprovedTargetConfigTests(unittest.TestCase):
 
         primary = j1m_runner.primary_shadeform_target(self.config)
         self.assertEqual(
-            {key: value for key, value in primary.items() if key != "approved"},
+            # `toolchain_verified` is a later addition and is excluded here for
+            # the same reason `approved` is: this test pins that the fields the
+            # single-target config carried are UNCHANGED, not that no field was
+            # ever added. Its values are pinned by ToolchainVerifiedRefusalTests.
+            {key: value for key, value in primary.items()
+             if key not in ("approved", "toolchain_verified")},
             {"cloud": "hyperstack", "region": "montreal-canada-2", "gpu": "A100_80G",
              "gpu_count": 1, "vram_gib": 80, "hourly_usd": 1.35,
              "proving_run_hours": 0.25, "active_run_cost_usd": 0.3375,
@@ -642,6 +647,17 @@ class AlternateImageToolchainTests(unittest.TestCase):
     is 12.0 and the driver version is recorded but never compared. Both
     alternate images clear it -- and crusoe's image is the same one the
     already-approved primary runs.
+
+    **Corrected 2026-09-14: clearing the floor did not predict the outcome.**
+    Run ``j1m-eval-20260914-b`` was the first ever to select a non-primary
+    entry, chose denvr, and died at ``remote_toolchain_probe`` with
+    ``nvcc_unavailable``. The floor was never the problem -- a minimum version
+    is irrelevant when the image ships no ``nvcc`` at all. Everything asserted
+    below remains true, because every assertion here is about what the
+    *configuration* pins; none of it is evidence about what an image
+    *provides*, and that gap is exactly what the money bought. denvr is
+    refuted, crusoe is still untested, and only index 0 is proven. See
+    ADR-0006 §Amendment -- 2026-09-14.
     """
 
     def setUp(self):
@@ -676,6 +692,15 @@ class AlternateImageToolchainTests(unittest.TestCase):
                          "ubuntu22.04_cuda12.2_shade_os")
 
     def test_the_nvcc_path_and_cuda_architecture_are_image_independent(self):
+        """The *pinned path* is image-independent; the *binary* is not.
+
+        Kept under its original name because what it asserts is unchanged and
+        still correct: the configuration names one compiler path and one
+        architecture for every entry. It was read as evidence that any approved
+        image would therefore have a compiler there, and denvr disproved that
+        for USD 0.04. Nothing here can catch an absent binary -- only the probe
+        on a rented machine can.
+        """
         self.assertEqual(self.config["modes"]["eval"]["cuda_compiler"],
                          "/usr/local/cuda/bin/nvcc")
         # sm_80 is the A100 itself, and every approved entry is an A100.
@@ -707,6 +732,75 @@ class AlternateImageToolchainTests(unittest.TestCase):
         self.assertIn('expected_memory_mib: int = 70000', source)
         self.assertIn('"a100" not in str(rows[0]["name"]).lower()', source)
         self.assertIn("expected_single_a100_80g_not_proven", source)
+
+
+class ToolchainVerifiedRefusalTests(unittest.TestCase):
+    """An entry whose image has never worked must be refused before the money.
+
+    On 2026-09-14 four runs (-b, -d, -e, -f) fell through to the denvr entry
+    when the primary was absent from the catalogue, and every one died at
+    `eval-stage:remote_toolchain_probe` with `nvcc_unavailable`. There is no
+    pre-launch signal that can prevent this: the plan path reports the first
+    approved entry without consulting the catalogue (j1m_runner.py:2007-2008)
+    and the only live `list_candidates` is inside `execute` itself. So the
+    refusal has to live where selection happens.
+    """
+
+    @staticmethod
+    def _target(**overrides):
+        target = {"cloud": "denvr", "region": "houston-usa-1", "gpu": "A100_80G"}
+        target.update(overrides)
+        return target
+
+    def test_a_verified_entry_is_allowed(self):
+        orchestrator._assert_selected_target_toolchain_verified(
+            self._target(cloud="hyperstack", toolchain_verified=True), index=0)
+
+    def test_an_unverified_entry_is_refused(self):
+        with self.assertRaises(sf.ShadeformError) as caught:
+            orchestrator._assert_selected_target_toolchain_verified(
+                self._target(toolchain_verified=False), index=1)
+        message = str(caught.exception)
+        self.assertIn("index 1", message)
+        self.assertIn("denvr", message)
+
+    def test_absent_means_unverified_not_verified(self):
+        # The whole point: an entry nobody has run must not become launchable
+        # by omitting the field. Fail closed, never open.
+        with self.assertRaises(sf.ShadeformError):
+            orchestrator._assert_selected_target_toolchain_verified(self._target(), index=2)
+
+    def test_only_a_true_boolean_counts_as_verified(self):
+        for value in ("true", 1, [], {}, None, "yes"):
+            with self.subTest(value=value):
+                with self.assertRaises(sf.ShadeformError):
+                    orchestrator._assert_selected_target_toolchain_verified(
+                        self._target(toolchain_verified=value), index=1)
+
+    def test_the_shipped_config_records_what_today_established(self):
+        config = j1m_runner.load_config()
+        verified = {entry["cloud"]: entry.get("toolchain_verified")
+                    for entry in config["shadeform_targets"]}
+        # hyperstack has produced completed evaluations; denvr is refuted by
+        # four observed nvcc_unavailable failures; crusoe has never been run.
+        self.assertIs(verified["hyperstack"], True)
+        self.assertIs(verified["denvr"], False)
+        self.assertIs(verified["crusoe"], False)
+
+    def test_a_non_boolean_flag_is_refused_by_config_validation(self):
+        entry = dict(j1m_runner.load_config()["shadeform_targets"][0])
+        entry["toolchain_verified"] = "true"
+        with self.assertRaises(ValueError):
+            j1m_runner._validate_shadeform_target(entry)
+
+    def test_the_refusal_precedes_every_billable_call(self):
+        # Pinned by source order: the assertion must sit after selection and
+        # before the ephemeral key and the provider create, or it refuses
+        # something that has already cost money.
+        source = Path(orchestrator.__file__).read_text(encoding="utf-8")
+        guard = source.index("_assert_selected_target_toolchain_verified(target, index=approved_target_index)")
+        self.assertLess(source.index('chosen = select_approved_target('), guard)
+        self.assertLess(guard, source.index("nonce = sf.new_ownership_nonce()"))
 
 
 if __name__ == "__main__":

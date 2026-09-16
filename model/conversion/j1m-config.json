@@ -26,6 +26,7 @@
   "shadeform_targets": [
     {
       "approved": true,
+      "toolchain_verified": true,
       "cloud": "hyperstack",
       "region": "montreal-canada-2",
       "gpu": "A100_80G",
@@ -40,6 +41,7 @@
     },
     {
       "approved": true,
+      "toolchain_verified": false,
       "cloud": "denvr",
       "region": "houston-usa-1",
       "gpu": "A100_80G",
@@ -57,6 +59,7 @@
     },
     {
       "approved": true,
+      "toolchain_verified": false,
       "cloud": "crusoe",
       "region": "culpeper-usa-1",
       "gpu": "A100_80G",

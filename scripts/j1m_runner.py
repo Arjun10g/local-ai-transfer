@@ -930,6 +930,10 @@ _TARGET_REQUIRED_FIELDS = frozenset({
 })
 _TARGET_OPTIONAL_FIELDS = frozenset({
     "instance_type", "os_image", "interruptible", "unapproved_reason",
+    # Whether this exact entry's image has been OBSERVED to pass the remote
+    # toolchain probe on a real host. Absent means unverified, never verified:
+    # an entry nobody has run must not become launchable by omission.
+    "toolchain_verified",
 })
 # The clocks every approved entry must share.  A target is a machine to rent,
 # not a schedule: an alternate that changed the backstop or the watchdog would
@@ -969,6 +973,8 @@ def _validate_shadeform_target(entry: object) -> dict[str, Any]:
                 not isinstance(entry[field], str)
                 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", entry[field])):
             raise ValueError("approved J1M target identity is not a bounded provider token")
+    if "toolchain_verified" in entry and not isinstance(entry["toolchain_verified"], bool):
+        raise ValueError("approved J1M target toolchain_verified must be a boolean")
     if entry["cloud"] != entry["cloud"].lower() or entry["region"] != entry["region"].lower():
         raise ValueError("approved J1M target cloud and region must be recorded lower-case")
     # B-004: the eval lane's own probes refuse anything but a single 80 GiB
