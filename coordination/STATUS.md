@@ -30,6 +30,13 @@
   nvcc; crusoe has never run. Both are refused before any spend. There is no
   pre-launch availability signal — the dry-run plan never queries the
   catalogue (`J1M-PLAN-TARGET-SELECTION-001`).
+- **The Dell testing kit exists** (`LOCAL-WINDOWS-TEST-KIT-001`):
+  `local/windows/README.md` is the operator guide, `Test-BMO.ps1` runs the
+  smoke test, the 37-case eval, or chosen cases with raw output on screen.
+  The engine also cross-compiles for Windows, so a prebuilt CPU executable
+  travels with the repository bundle and the Dell needs only Git and Python.
+  Nothing in it has run on Windows yet. It is also the fastest way to
+  diagnose the two boolean failures, since raw output is never logged.
 - **What remains, by gate.** L0 and L4 need the Dell laptop and cannot be
   advanced from the development Mac. L1 needs the tool-definition fixes
   measured. L2 is unbuilt; the confirmation infrastructure it needs already

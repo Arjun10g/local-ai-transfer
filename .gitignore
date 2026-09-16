@@ -30,3 +30,8 @@ build/
 out/build/
 *.user
 *.suo
+
+# local-first testing runs (ADR-0007): engine logs and receipts stay on the machine
+local/out/
+# a prebuilt engine copied in for testing, never committed
+local/bin/
