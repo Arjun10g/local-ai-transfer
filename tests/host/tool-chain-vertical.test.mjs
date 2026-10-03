@@ -71,8 +71,13 @@ test('production registries advertise only immutable configured capabilities', (
   });
   assert.deepEqual(Object.keys(windows), ['time.now', 'system.get_info']);
   for (const name of ['clipboard.read', 'clipboard.write', 'app.open', 'browser.open_url', 'process.run_allowlisted']) assert.equal(windows.capabilitySnapshot.tools[name].reason, 'unsafe_subprocess_boundary', name);
-  assert.equal(windows.capabilitySnapshot.tools['fs.read_text'].reason, 'platform_path_safety_unavailable');
-  assert.equal(windows.capabilitySnapshot.tools['fs.read_text'].status, 'NOT_READY');
+  // Windows reads now go through windows-filesystem.mjs, which accepts only
+  // local drive roots: this POSIX-style root is reported, not served.  Writes
+  // keep the fail-closed NOT_READY pin (tests/host/windows-filesystem-safety).
+  assert.equal(windows.capabilitySnapshot.tools['fs.read_text'].reason, 'workspace_path_invalid');
+  assert.equal(windows.capabilitySnapshot.tools['fs.read_text'].profile, 'windows_read_only');
+  assert.equal(windows.capabilitySnapshot.tools['fs.write_new'].reason, 'platform_path_safety_unavailable');
+  assert.equal(windows.capabilitySnapshot.tools['fs.write_new'].status, 'NOT_READY');
 
   const externalDefault = createExternalToolRegistry();
   assert.deepEqual(Object.keys(externalDefault), []);

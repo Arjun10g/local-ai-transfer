@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { makeToolResult, parseStrictJson, parseToolCall, validateToolCall, validateToolResult, ToolCallStreamDecoder, EnvelopeError } from '../../host/agent/tool-envelope.mjs';
+import { makeToolResult, parseStrictJson, parseToolCall, coerceBooleanArguments, validateToolCall, validateToolResult, ToolCallStreamDecoder, EnvelopeError } from '../../host/agent/tool-envelope.mjs';
 import { validateEvent } from '../../host/agent/assistant-events.mjs';
 import { ConversationController } from '../../host/agent/controller.mjs';
 import { FixtureEngineClient } from '../../host/engine/fixture-engine.mjs';
@@ -91,6 +91,45 @@ test('shared Qwen XML value vectors remain aligned with the host parser', async 
       assert.deepEqual({ name: parsed.name, arguments: parsed.arguments }, vector.expected, vector.id);
     }
   }
+});
+
+test('shared boolean-coercion vectors agree with the Python evaluator', async () => {
+  // Qwen3.5 can write `True`/`False`; coercion is by declared type, so a string
+  // parameter holding the word keeps it. Rejected values are never defaulted.
+  const { coercion } = JSON.parse(await readFile(new URL('../model/qwen_xml_vectors.json', import.meta.url), 'utf8'));
+  const schema = coercion.tool.function.parameters;
+  assert.ok(coercion.cases.length >= 12);
+  for (const vector of coercion.cases) {
+    const parsed = parseToolCall(vector.xml);
+    const args = coerceBooleanArguments(schema, parsed.arguments);
+    if (vector.reject) {
+      assert.deepEqual(args, vector.coerced, vector.id);
+      assert.notEqual(typeof args.flag, 'boolean', `${vector.id}: must not be defaulted to a boolean`);
+    } else {
+      assert.deepEqual({ name: parsed.name, arguments: args }, vector.expected, vector.id);
+    }
+  }
+});
+
+test('controller coerces a Python-style boolean before the tool runs, and refuses a non-boolean', async () => {
+  const ran = [];
+  const tool = { name: 'test.flags', description: 'Flag fixture.', risk_tier: 'T1', side_effect: 'read_sensitive',
+    parameters: { type: 'object', properties: { flag: { type: 'boolean' }, note: { type: 'string' } }, additionalProperties: false },
+    execute: async ({ id, name, arguments: args }) => { ran.push(args); return { id, name, status: 'ok', content: [{ type: 'text', text: 'ok' }], metadata: { truncated: false, duration_ms: 0 } }; } };
+  const run = async (xml, tag) => {
+    const engine = { async *generate({ messages }) {
+      if (!messages.some(m => m.role === 'tool')) { const decoder = new ToolCallStreamDecoder(); for (const e of decoder.push(xml)) yield e; for (const e of decoder.finish()) yield e; return; }
+      yield { kind: 'text_delta', text: 'done' }; yield { kind: 'done', finish_reason: 'stop' };
+    } };
+    return new ConversationController({ engine, toolRegistry: { 'test.flags': tool } }).runTurn({ sessionId: `ses_${tag}`, requestId: `req_${tag}`, message: 'go' });
+  };
+  const call = (flag, note) => `<tool_call><function=test.flags><parameter=flag>${flag}</parameter>${note === undefined ? '' : `<parameter=note>${note}</parameter>`}</function></tool_call>`;
+  assert.equal((await run(call('False', 'False'), 'bool01')).state, 'COMPLETED');
+  assert.deepEqual(ran.at(-1), { flag: false, note: 'False' }, 'the boolean is coerced; the string parameter keeps its text');
+  ran.length = 0;
+  const refused = await run(call('yes'), 'bool02');
+  assert.equal(refused.state === 'COMPLETED', false, 'a non-boolean must still be refused');
+  assert.equal(ran.length, 0, 'and the tool must not run');
 });
 
 test('controller propagates complete tool schema and ordered tool result correlation', async () => {
@@ -200,7 +239,7 @@ test('config rejects unknown/non-loopback settings and host enforces body bound'
 });
 
 test('authenticated operator grant API grants, projects, revokes, and rejects widening', async t => {
-  const config = mergeConfig({ providers: { microsoft_graph: { enabled: true, permission_profile: 'full_access', account_fingerprint: 'acct-test', scope: 'account' } }, applications: { outlook: { executable: 'outlook.exe', args: [] } } });
+  const config = mergeConfig({ providers: { microsoft_graph: { enabled: true, permission_profile: 'full_access', account_fingerprint: 'acct-test', scope: 'account' } }, applications: { outlook: { executable: 'C:\\Program Files\\Microsoft Office\\root\\Office16\\OUTLOOK.EXE', args: [] } } }); // absolute: bare names are refused by config
   const store = new OperatorGrantStore(); const grants = new OperatorGrantControl({ store, bindings: buildOperatorGrantBindings(config) });
   const engine = new FixtureEngineClient(); const controller = new ConversationController({ engine }); const host = new HostServer({ controller, engine, config, operatorGrants: grants }); const address = await host.listen(0); t.after(() => host.close());
   assert.equal((await fetch(`${address.url}/api/operator-grants`)).status, 401);

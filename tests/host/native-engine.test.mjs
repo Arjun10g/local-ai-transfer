@@ -54,10 +54,10 @@ test('NativeEngineClient requires explicit model/backend identity', () => {
   assert.throws(() => new NativeEngineClient({ endpoint: 'http://localhost:1234', token: 'native-client-test-token', model: 'fixture', backend: 'fixture-cpu' }), /numeric loopback/);
 });
 
-test('NativeEngineClient binds the 256-token ceiling and bearer header', () => {
-  const client = new NativeEngineClient({ endpoint: 'http://127.0.0.1:1234', token: 'native-client-boundary-token', model: 'fixture', backend: 'fixture-cpu', maxTokens: 256 });
-  assert.equal(client.maxTokens, 256);
-  assert.throws(() => new NativeEngineClient({ endpoint: 'http://127.0.0.1:1234', token: 'native-client-boundary-token', model: 'fixture', backend: 'fixture-cpu', maxTokens: 257 }), /1-256/);
+test('NativeEngineClient binds the 2048-token ceiling and bearer header', () => {
+  const client = new NativeEngineClient({ endpoint: 'http://127.0.0.1:1234', token: 'native-client-boundary-token', model: 'fixture', backend: 'fixture-cpu', maxTokens: 2048 });
+  assert.equal(client.maxTokens, 2048);
+  assert.throws(() => new NativeEngineClient({ endpoint: 'http://127.0.0.1:1234', token: 'native-client-boundary-token', model: 'fixture', backend: 'fixture-cpu', maxTokens: 2049 }), /1-2048/);
   const headers = client.headers({ authorization: 'Bearer attacker', Authorization: 'Bearer attacker-two', 'content-type': 'application/json' });
   assert.equal(headers.authorization, 'Bearer native-client-boundary-token');
   assert.equal(headers.Authorization, undefined);
@@ -74,7 +74,7 @@ test('NativeEngineClient readiness passes the caller deadline to each request', 
   assert.ok(observed[0] <= 25);
 });
 
-test('NativeEngineClient timeout covers a stalled SSE response body', async t => {
+test('NativeEngineClient first-token timeout covers a stalled SSE response body', async t => {
   const server = http.createServer((request, response) => {
     if (request.url === '/v1/sessions') { response.writeHead(201, { 'content-type': 'application/json' }); response.end('{"id":"sess-timeout"}'); return; }
     if (request.url === '/v1/chat/completions') { response.writeHead(200, { 'content-type': 'text/event-stream', 'x-request-id': 'req-native-timeout' }); response.flushHeaders(); response.write(': waiting\n\n'); return; }
@@ -83,9 +83,11 @@ test('NativeEngineClient timeout covers a stalled SSE response body', async t =>
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   t.after(() => new Promise(resolve => server.close(resolve)));
-  const client = new NativeEngineClient({ endpoint: `http://127.0.0.1:${server.address().port}`, token: 'native-stream-timeout-token', model: 'qwen35-9b-q4-k-m', backend: 'cpu', timeoutMs: 1000, maxTokens: 2 });
+  const client = new NativeEngineClient({ endpoint: `http://127.0.0.1:${server.address().port}`, token: 'native-stream-timeout-token', model: 'qwen35-9b-q4-k-m', backend: 'cpu', timeoutMs: 1000, firstTokenTimeoutMs: 1000, maxTokens: 2 });
   t.after(() => client.shutdown());
-  await assert.rejects(async () => { for await (const _frame of client.generate({ requestId: 'req_timeout01', sessionId: 'ses_timeout01', messages: [{ role: 'user', content: 'hello' }] })) {} }, error => error?.code === 'engine_timeout');
+  // An SSE comment is not model progress, so it does not satisfy the
+  // first-token deadline.
+  await assert.rejects(async () => { for await (const _frame of client.generate({ requestId: 'req_timeout01', sessionId: 'ses_timeout01', messages: [{ role: 'user', content: 'hello' }] })) {} }, error => error?.code === 'engine_timeout' && error.reason === 'first_token');
 });
 
 test('NativeEngineClient rejects oversized JSON and SSE frames with typed errors', async t => {

@@ -7,18 +7,22 @@ import { HostServer } from '../../host/server/host-server.mjs';
 
 const names = ['fs.list', 'fs.read_text', 'fs.search_text', 'fs.write_new', 'fs.apply_patch'];
 
-test('Windows filesystem capabilities are withheld with explicit NOT_READY status', () => {
+// Pin updated deliberately: Windows now serves the read-only trio through the
+// separate check-then-verify policy (host/tools/local/windows-filesystem.mjs);
+// write tools keep the explicit NOT_READY status this slice introduced.
+test('Windows filesystem writes are withheld with explicit NOT_READY status; reads are the read-only profile', () => {
   const registry = createLocalToolRegistry({
     platform: 'win32',
     workspaces: [{ id: 'project', path: 'C:\\approved\\workspace', read: true, write: true }]
   });
-  assert.deepEqual(Object.keys(registry), ['time.now', 'system.get_info']);
-  for (const name of names) {
+  assert.deepEqual(Object.keys(registry), ['time.now', 'system.get_info', 'fs.list', 'fs.read_text', 'fs.search_text']);
+  for (const name of ['fs.write_new', 'fs.apply_patch']) {
     const capability = registry.capabilitySnapshot.tools[name];
     assert.equal(capability.advertised, false, name);
     assert.equal(capability.status, 'NOT_READY', name);
     assert.equal(capability.reason, 'platform_path_safety_unavailable', name);
   }
+  for (const name of ['fs.list', 'fs.read_text', 'fs.search_text']) assert.equal(registry.capabilitySnapshot.tools[name].profile, 'windows_read_only', name);
 });
 
 test('direct Windows filesystem calls refuse before argument validation or policy access', async () => {
@@ -54,6 +58,7 @@ test('host status preserves local capability truth without making ready imply fi
   const status = await response.json();
   assert.equal(status.engine.ready, true);
   assert.equal(status.local_capabilities.platform, 'win32');
-  assert.equal(status.local_capabilities.tools['fs.read_text'].status, 'NOT_READY');
-  assert.equal(status.local_capabilities.tools['fs.read_text'].advertised, false);
+  assert.equal(status.local_capabilities.tools['fs.write_new'].status, 'NOT_READY');
+  assert.equal(status.local_capabilities.tools['fs.write_new'].advertised, false);
+  assert.equal(status.local_capabilities.tools['fs.read_text'].profile, 'windows_read_only');
 });

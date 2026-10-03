@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { chmod, mkdtemp, realpath, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 import { ProcessRunProvider, createProcessRunTools, terminateProcessTree } from '../../host/tools/local/process-run.mjs';
 import { WorkspacePolicy } from '../../host/tools/local/workspace-policy.mjs';
 import { OperatorGrantControl, OperatorGrantStore } from '../../host/providers/operator-grants.mjs';
@@ -58,7 +58,9 @@ test('process schema is exact per configured action and controller rejects undec
 test('process termination uses an injectable bounded Windows tree-kill path', async () => {
   const child = new FakeChild({ output: false }); child.pid = 42; child.exitCode = null; let launched;
   await terminateProcessTree(child, undefined, 'win32', (executable, args, options) => { launched = { executable, args, options }; const killer = new EventEmitter(); queueMicrotask(() => { child.exitCode = 1; child.emit('close', 1); killer.emit('close', 0); }); return killer; });
-  assert.deepEqual(launched.args, ['/PID', '42', '/T', '/F']); assert.equal(launched.executable, 'taskkill.exe'); assert.equal(launched.options.shell, false);
+  // Absolute System32 path, never the bare name: CreateProcess searches the
+  // current directory first, so `taskkill.exe` alone could run a planted binary.
+  assert.deepEqual(launched.args, ['/PID', '42', '/T', '/F']); assert.ok(win32.isAbsolute(launched.executable) && /^[A-Za-z]:\\/u.test(launched.executable), launched.executable); assert.equal(win32.basename(launched.executable).toLowerCase(), 'taskkill.exe'); assert.equal(win32.basename(win32.dirname(launched.executable)).toLowerCase(), 'system32'); assert.equal(launched.options.shell, false);
 });
 
 test('process action binds grant generation and is at-most-once across timeout/overflow/replay', async () => {

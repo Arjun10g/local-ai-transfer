@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { CONTEXT_DEFAULTS, utf8Bytes } from '../agent/context-budget.mjs';
 
 export const FIXTURE_ENGINE_VERSION = 'fixture-0.1.0';
 const sleep = (ms, signal) => new Promise((resolve, reject) => {
@@ -30,7 +31,11 @@ export class FixtureEngineClient {
       ? `The fixture clock reports: ${String(messages.findLast(m => m.role === 'tool' && m.name === 'time.now')?.content ?? 'time unavailable')}.`
       : mode === 'deep' ? 'Fixture deep mode completed a bounded local answer.' : 'Fixture answer: local inference is running with no network provider.';
     for (let i = 0; i < answer.length; i += this.chunkSize) { check(); await sleep(this.delayMs, signal); yield { kind: 'text_delta', text: answer.slice(i, i + this.chunkSize) }; }
-    yield { kind: 'done', finish_reason: 'stop', usage: { prompt_tokens: messages.length, completion_tokens: answer.length } };
+    // The fixture cannot tokenize. It used to report the message COUNT as
+    // `prompt_tokens`; the controller learns its bytes-per-token ratio from
+    // that field, so the fixture now omits it exactly as the native client
+    // does when the engine sends no usage, and estimates only the answer.
+    yield { kind: 'done', finish_reason: 'stop', usage: { completion_tokens: Math.ceil(utf8Bytes(answer) / CONTEXT_DEFAULTS.bytesPerToken) } };
   }
   async shutdown() { this.cancelled.clear(); }
 }

@@ -1,12 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
-import { open, readdir, rename, stat, unlink } from 'node:fs/promises';
+import { open, opendir, rename, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { makeToolResult } from '../../agent/tool-envelope.mjs';
 import { WorkspaceError } from './workspace-policy.mjs';
 import { validateToolArguments } from './argument-validation.mjs';
 import { applyOperatorGrantPolicy } from '../../providers/operator-tool-policy.mjs';
 import { assertFilesystemPlatformSafe, filesystemSafetyError } from './platform-safety.mjs';
+import { abortable, DIRECTORY_BATCH, isCancelled, readAt, recoverableReadTool, SEARCH_BUDGETS, throwIfAborted } from './read-tool-support.mjs';
+import { utf8Window } from './utf8-window.mjs';
 
 const MAX_READ = 65536; const MAX_SEARCH_FILES = 200; const MAX_SEARCH_MATCHES = 500;
 const NOFOLLOW = fsConstants.O_NOFOLLOW;
@@ -67,32 +69,78 @@ async function readRegular(file, platform, maxBytes) {
   try { return await readHandle(handle, maxBytes); } finally { await closeQuietly(handle); }
 }
 
+// Streams at most `limit` dirents (plus one look-ahead to report whether more
+// exist) instead of materialising the whole directory with readdir.
+async function readDirectoryEntries(directory, limit, signal) {
+  const dir = await abortable(opendir(directory, { bufferSize: DIRECTORY_BATCH }), signal, closeQuietly); const entries = []; let more = false;
+  try {
+    while (true) {
+      const entry = await abortable(dir.read(), signal); if (!entry) break;
+      if (entries.length >= limit) { more = true; break; }
+      entries.push(entry);
+    }
+  } finally { await closeQuietly(dir); }
+  return { entries, more };
+}
+// Line counts for the patch summary: lines outside the common prefix and
+// suffix.  Linear and bounded by the 2 MiB patch limit; an approximation of
+// a real diff that never needs to expose a line's text.
+function lineChangeCounts(oldText, newText) {
+  const before = oldText.split('\n'); const after = newText.split('\n'); let head = 0;
+  while (head < before.length && head < after.length && before[head] === after[head]) head++;
+  let tail = 0; while (tail < before.length - head && tail < after.length - head && before[before.length - 1 - tail] === after[after.length - 1 - tail]) tail++;
+  return { lines_removed: before.length - head - tail, lines_added: after.length - head - tail };
+}
+const { directories: MAX_SEARCH_DIRECTORIES, entries: MAX_SEARCH_ENTRIES, entriesPerDirectory: MAX_DIRECTORY_ENTRIES } = SEARCH_BUDGETS;
+
 export function createFilesystemTools(policy, { platform = process.platform, grantControl } = {}) {
   if (!policy) throw new TypeError('WorkspacePolicy is required');
   const list = async call => {
     assertPlatformSafe(platform);
-    const args = validateToolArguments('fs.list', argsObject(call)); const resolved = await policy.resolve(args.workspace_id, args.path ?? '', { allowEmpty: true, mustExist: true }); const info = await stat(resolved.canonical); if (!info.isDirectory()) throw new WorkspaceError('not_directory', 'path is not a directory');
-    const maxEntries = boundedInt(args.max_entries, 100, 1, 500); const entries = await readdir(resolved.canonical, { withFileTypes: true }); const output = []; let truncated = entries.length > maxEntries;
-    for (const entry of entries.slice(0, maxEntries)) { if (entry.name.includes(':') || entry.name === '.' || entry.name === '..') continue; let size = 0; try { if (entry.isFile()) size = (await stat(join(resolved.canonical, entry.name))).size; } catch {} output.push({ name: entry.name, type: entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : 'other', size_bytes: Math.min(size, 1048576) }); }
+    const signal = call.signal; const args = validateToolArguments('fs.list', argsObject(call)); const resolved = await abortable(policy.resolve(args.workspace_id, args.path ?? '', { allowEmpty: true, mustExist: true }), signal); const info = await abortable(stat(resolved.canonical), signal); if (!info.isDirectory()) throw new WorkspaceError('not_directory', 'path is not a directory');
+    const maxEntries = boundedInt(args.max_entries, 100, 1, 500); const { entries, more: truncated } = await readDirectoryEntries(resolved.canonical, maxEntries, signal); const output = [];
+    for (const entry of entries) { if (entry.name.includes(':') || entry.name === '.' || entry.name === '..') continue; let size = 0; try { if (entry.isFile()) size = (await abortable(stat(join(resolved.canonical, entry.name)), signal)).size; } catch (error) { if (isCancelled(error)) throw error; } output.push({ name: entry.name, type: entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : 'other', size_bytes: Math.min(size, 1048576) }); }
     return result(call, 'ok', JSON.stringify({ workspace_id: args.workspace_id, path: resolved.path, entries: output, entry_count: output.length }), truncated);
   };
   const readText = async call => {
     assertPlatformSafe(platform);
-    const args = validateToolArguments('fs.read_text', argsObject(call)); const maxBytes = boundedInt(args.max_bytes, MAX_READ, 1, MAX_READ); const offset = boundedInt(args.offset_bytes, 0, 0, 1048576); const file = await boundedFile(policy, call, { maxBytes: 8 * 1024 * 1024 }); const stable = await policy.regularFile(args.workspace_id, args.path); if (stable.canonical !== file.canonical || stable.stat.size !== file.stat.size || stable.stat.mtimeMs !== file.stat.mtimeMs) throw new WorkspaceError('path_changed', 'file changed during authorization');
-    const handle = await openNoFollow(stable.canonical, platform, fsConstants.O_RDONLY, stable.stat); let bytes; try { bytes = Buffer.alloc(maxBytes); const read = await handle.read(bytes, 0, maxBytes, offset); bytes = bytes.subarray(0, read.bytesRead); } finally { await closeQuietly(handle); }
-    const content = textContent(bytes); const truncated = offset + bytes.length < file.stat.size; return result(call, 'ok', JSON.stringify({ workspace_id: args.workspace_id, path: file.path, text: content, sha256: sha256(bytes), hash_scope: 'returned_bytes', offset_bytes: offset, bytes: bytes.length, truncated }), truncated);
+    const signal = call.signal; const args = validateToolArguments('fs.read_text', argsObject(call)); const maxBytes = boundedInt(args.max_bytes, MAX_READ, 1, MAX_READ); const offset = boundedInt(args.offset_bytes, 0, 0, 1048576); const file = await abortable(boundedFile(policy, call, { maxBytes: 8 * 1024 * 1024 }), signal); const stable = await abortable(policy.regularFile(args.workspace_id, args.path), signal); if (stable.canonical !== file.canonical || stable.stat.size !== file.stat.size || stable.stat.mtimeMs !== file.stat.mtimeMs) throw new WorkspaceError('path_changed', 'file changed during authorization');
+    const handle = await abortable(openNoFollow(stable.canonical, platform, fsConstants.O_RDONLY, stable.stat), signal, closeQuietly); let window;
+    try {
+      const raw = await readAt(handle, maxBytes, offset, signal);
+      // A byte window can cut a multi-byte character at either edge; see
+      // utf8-window.mjs.  offset_bytes then reports where the text really
+      // starts, so offset_bytes + bytes is always a valid place to continue.
+      window = utf8Window(raw, { atStart: offset === 0, atEnd: offset + raw.length >= file.stat.size });
+      if (!window.bytes.length && offset + window.start < file.stat.size) throw new WorkspaceError(raw.length < 4 && raw.length === maxBytes ? 'max_bytes_too_small' : 'not_text', 'no complete character in the requested window');
+    } finally { await closeQuietly(handle); }
+    const { bytes } = window; const start = offset + window.start; const content = textContent(bytes); const truncated = start + bytes.length < file.stat.size; return result(call, 'ok', JSON.stringify({ workspace_id: args.workspace_id, path: file.path, text: content, sha256: sha256(bytes), hash_scope: 'returned_bytes', offset_bytes: start, bytes: bytes.length, truncated }), truncated);
   };
   const searchText = async call => {
     assertPlatformSafe(platform);
-    const args = validateToolArguments('fs.search_text', argsObject(call));
-    const root = await policy.resolve(args.workspace_id, args.path ?? '', { allowEmpty: true, mustExist: true }); const maxFiles = boundedInt(args.max_files, MAX_SEARCH_FILES, 1, MAX_SEARCH_FILES); const maxMatches = boundedInt(args.max_matches, MAX_SEARCH_MATCHES, 1, MAX_SEARCH_MATCHES); const maxDepth = boundedInt(args.max_depth, 8, 0, 16); const matches = []; let filesSeen = 0; let truncated = false;
-    const walk = async (directory, depth, relativePath) => { if (depth > maxDepth || filesSeen >= maxFiles || matches.length >= maxMatches) { truncated = true; return; } let entries; try { entries = await readdir(directory, { withFileTypes: true }); } catch { return; }
-      for (const entry of entries) { if (filesSeen >= maxFiles || matches.length >= maxMatches) { truncated = true; return; } if (entry.name.includes(':') || entry.name.startsWith('.git')) continue; const child = join(directory, entry.name); const rel = relativePath ? `${relativePath}/${entry.name}` : entry.name; if (entry.isSymbolicLink()) continue; if (entry.isDirectory()) { await walk(child, depth + 1, rel); continue; } if (!entry.isFile()) continue; filesSeen++;
-        let bytes; try { const file = await policy.regularFile(args.workspace_id, rel); if (file.stat.size > MAX_READ) continue; bytes = await readRegular(file, platform, MAX_READ); } catch { continue; } let content; try { content = textContent(bytes); } catch { continue; }
+    const signal = call.signal; const args = validateToolArguments('fs.search_text', argsObject(call));
+    const root = await abortable(policy.resolve(args.workspace_id, args.path ?? '', { allowEmpty: true, mustExist: true }), signal); const maxFiles = boundedInt(args.max_files, MAX_SEARCH_FILES, 1, MAX_SEARCH_FILES); const maxMatches = boundedInt(args.max_matches, MAX_SEARCH_MATCHES, 1, MAX_SEARCH_MATCHES); const maxDepth = boundedInt(args.max_depth, 8, 0, 16);
+    const matches = []; const skipped = { too_large: 0, not_text: 0, unreadable: 0 }; let filesSeen = 0; let directoriesSeen = 0; let entriesSeen = 0; let truncated = false;
+    const exhausted = () => filesSeen >= maxFiles || matches.length >= maxMatches || directoriesSeen >= MAX_SEARCH_DIRECTORIES || entriesSeen >= MAX_SEARCH_ENTRIES;
+    const walk = async (directory, depth, relativePath) => {
+      throwIfAborted(signal);
+      if (depth > maxDepth || exhausted()) { truncated = true; return; }
+      directoriesSeen++;
+      let listing; try { listing = await readDirectoryEntries(directory, Math.min(MAX_DIRECTORY_ENTRIES, MAX_SEARCH_ENTRIES - entriesSeen), signal); } catch (error) { if (isCancelled(error)) throw error; skipped.unreadable++; return; }
+      if (listing.more) truncated = true;
+      for (const entry of listing.entries) {
+        throwIfAborted(signal);
+        if (exhausted()) { truncated = true; return; }
+        entriesSeen++;
+        if (entry.name.includes(':') || entry.name.startsWith('.git')) continue; const child = join(directory, entry.name); const rel = relativePath ? `${relativePath}/${entry.name}` : entry.name; if (entry.isSymbolicLink()) continue; if (entry.isDirectory()) { await walk(child, depth + 1, rel); continue; } if (!entry.isFile()) continue; filesSeen++;
+        // Skipped files make the answer incomplete; say so instead of
+        // letting "no match" read as "not present".
+        let bytes; try { const file = await abortable(policy.regularFile(args.workspace_id, rel), signal); if (file.stat.size > MAX_READ) { skipped.too_large++; truncated = true; continue; } bytes = await abortable(readRegular(file, platform, MAX_READ), signal); } catch (error) { if (isCancelled(error)) throw error; skipped.unreadable++; continue; }
+        let content; try { content = textContent(bytes); } catch { skipped.not_text++; continue; }
         let from = 0; while (matches.length < maxMatches) { const index = content.indexOf(args.query, from); if (index < 0) break; const before = content.slice(0, index); matches.push({ path: rel, line: before.split('\n').length, column: index - (before.lastIndexOf('\n') + 1) + 1, text: content.slice(Math.max(0, index - 80), Math.min(content.length, index + args.query.length + 80)) }); from = index + Math.max(1, args.query.length); } if (matches.length >= maxMatches) truncated = true;
       }
     };
-    await walk(root.canonical, 0, root.path); return result(call, 'ok', JSON.stringify({ query: args.query, matches, files_seen: filesSeen, truncated }), truncated);
+    await walk(root.canonical, 0, root.path); return result(call, 'ok', JSON.stringify({ query: args.query, matches, files_seen: filesSeen, directories_seen: directoriesSeen, skipped, truncated }), truncated);
   };
   const writeNew = async call => {
     assertPlatformSafe(platform);
@@ -102,7 +150,7 @@ export function createFilesystemTools(policy, { platform = process.platform, gra
   };
   const patchPreview = async call => {
     assertPlatformSafe(platform);
-    const args = validateToolArguments('fs.apply_patch', argsObject(call)); const baseHash = args.base_sha256 ?? args.base_hash; const file = await boundedFile(policy, call, { maxBytes: 2 * 1024 * 1024 }); const stable = await policy.regularFile(args.workspace_id, args.path); if (stable.canonical !== file.canonical || stable.stat.size !== file.stat.size || stable.stat.mtimeMs !== file.stat.mtimeMs) throw new WorkspaceError('path_changed', 'file changed during authorization'); const oldBytes = await readRegular(stable, platform, 2 * 1024 * 1024); const replacement = args.replacement ?? args.patch; const oldText = textContent(oldBytes); const newBytes = Buffer.from(replacement, 'utf8'); const diff = `--- ${file.path}\n+++ ${file.path}\n- ${oldText}\n+ ${replacement}`.slice(0, 8192); return { file: stable, oldBytes, replacement, baseHash, oldHash: sha256(oldBytes), newBytes, preview: { path: file.path, base_sha256: sha256(oldBytes), replacement_sha256: sha256(newBytes), old_bytes: oldBytes.length, new_bytes: newBytes.length, changed: oldText !== replacement, diff, diff_truncated: diff.length >= 8192 } };
+    const args = validateToolArguments('fs.apply_patch', argsObject(call)); const baseHash = args.base_sha256 ?? args.base_hash; const file = await boundedFile(policy, call, { maxBytes: 2 * 1024 * 1024 }); const stable = await policy.regularFile(args.workspace_id, args.path); if (stable.canonical !== file.canonical || stable.stat.size !== file.stat.size || stable.stat.mtimeMs !== file.stat.mtimeMs) throw new WorkspaceError('path_changed', 'file changed during authorization'); const oldBytes = await readRegular(stable, platform, 2 * 1024 * 1024); const replacement = args.replacement ?? args.patch; const oldText = textContent(oldBytes); const newBytes = Buffer.from(replacement, 'utf8'); const diff = `--- ${file.path}\n+++ ${file.path}\n- ${oldText}\n+ ${replacement}`.slice(0, 8192); return { file: stable, oldBytes, oldText, replacement, baseHash, oldHash: sha256(oldBytes), newBytes, preview: { path: file.path, base_sha256: sha256(oldBytes), replacement_sha256: sha256(newBytes), old_bytes: oldBytes.length, new_bytes: newBytes.length, changed: oldText !== replacement, diff, diff_truncated: diff.length >= 8192 } };
   };
   const applyPatch = async call => {
     const prepared = await patchPreview(call); if (prepared.oldHash.toLowerCase() !== prepared.baseHash.toLowerCase()) throw new WorkspaceError('base_hash_mismatch', 'file changed since patch proposal'); const finalCheck = await policy.regularFile(argsObject(call).workspace_id, argsObject(call).path); if (finalCheck.canonical !== prepared.file.canonical || finalCheck.stat.size !== prepared.file.stat.size || finalCheck.stat.mtimeMs !== prepared.file.stat.mtimeMs) throw new WorkspaceError('path_changed', 'file changed before atomic replace'); const temp = `${prepared.file.canonical}.lae-${randomUUID()}.tmp`; let tempHandle; try { tempHandle = await openNoFollow(temp, platform, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, undefined, 0o600); await tempHandle.write(prepared.newBytes); await tempHandle.sync(); } catch (error) { await unlink(temp).catch(() => {}); throw error; } finally { await closeQuietly(tempHandle); } const verify = sha256(await readRegular(prepared.file, platform, 2 * 1024 * 1024)); if (verify !== prepared.oldHash) { await unlink(temp).catch(() => {}); throw new WorkspaceError('base_hash_mismatch', 'file changed before atomic replace'); }
@@ -111,9 +159,17 @@ export function createFilesystemTools(policy, { platform = process.platform, gra
       if (!['EEXIST', 'EPERM', 'ENOTEMPTY'].includes(error.code)) { await unlink(temp).catch(() => {}); throw error; }
       const backup = `${renameCheck.canonical}.lae-${randomUUID()}.bak`; try { await rename(renameCheck.canonical, backup); await rename(temp, renameCheck.canonical); await unlink(backup); } catch (inner) { await rename(backup, renameCheck.canonical).catch(() => {}); await unlink(temp).catch(() => {}); throw inner; }
     }
-    const finalHandle = await openNoFollow(prepared.file.canonical, platform); let written; try { const finalStat = await finalHandle.stat(); if (finalStat.size > 2 * 1024 * 1024) throw new WorkspaceError('file_too_large', 'replacement exceeds the bounded operation size'); written = await readHandle(finalHandle, 2 * 1024 * 1024); } finally { await closeQuietly(finalHandle); } return result(call, 'ok', JSON.stringify({ applied: true, ...prepared.preview, final_sha256: sha256(written) }));
+    const finalHandle = await openNoFollow(prepared.file.canonical, platform); let written; try { const finalStat = await finalHandle.stat(); if (finalStat.size > 2 * 1024 * 1024) throw new WorkspaceError('file_too_large', 'replacement exceeds the bounded operation size'); written = await readHandle(finalHandle, 2 * 1024 * 1024); } finally { await closeQuietly(finalHandle); } const { path: patchedPath, base_sha256: baseSha256, replacement_sha256: replacementSha256, old_bytes: oldBytes, new_bytes: newBytes, changed } = prepared.preview;
+    // The result carries no file text.  The preview's diff is unmasked and
+    // the model wrote the replacement itself, so echoing it would only put
+    // file contents (and any credentials in them) back into the history and
+    // onto the event stream.  The operator saw the masked diff at confirmation.
+    return result(call, 'ok', JSON.stringify({ applied: true, path: patchedPath, base_sha256: baseSha256, replacement_sha256: replacementSha256, old_bytes: oldBytes, new_bytes: newBytes, changed, ...lineChangeCounts(prepared.oldText, prepared.replacement), final_sha256: sha256(written) }));
   };
-  const tools = { 'fs.list': { ...filesystemDefinitions['fs.list'], execute: list }, 'fs.read_text': { ...filesystemDefinitions['fs.read_text'], execute: readText }, 'fs.search_text': { ...filesystemDefinitions['fs.search_text'], execute: searchText }, 'fs.write_new': { ...filesystemDefinitions['fs.write_new'], execute: writeNew }, 'fs.apply_patch': { ...filesystemDefinitions['fs.apply_patch'], preview: async call => (await patchPreview(call)).preview, execute: applyPatch } };
+  // Read tools return recoverable WorkspaceErrors as failed results (see
+  // read-tool-support.mjs).  The write tools keep throwing: already_exists
+  // and base_hash_mismatch are a tested contract of the confirmation flow.
+  const tools = { 'fs.list': { ...filesystemDefinitions['fs.list'], execute: recoverableReadTool(list) }, 'fs.read_text': { ...filesystemDefinitions['fs.read_text'], execute: recoverableReadTool(readText) }, 'fs.search_text': { ...filesystemDefinitions['fs.search_text'], execute: recoverableReadTool(searchText) }, 'fs.write_new': { ...filesystemDefinitions['fs.write_new'], execute: writeNew }, 'fs.apply_patch': { ...filesystemDefinitions['fs.apply_patch'], preview: async call => (await patchPreview(call)).preview, execute: applyPatch } };
   for (const name of ['fs.write_new', 'fs.apply_patch']) {
     const guarded = applyOperatorGrantPolicy(tools[name], { grantControl, capabilityForCall: call => `local.filesystem:${call.arguments.workspace_id}` });
     tools[name] = refuseBeforePolicy(guarded, platform);

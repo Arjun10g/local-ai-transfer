@@ -119,6 +119,35 @@ export function validateToolCall(value) {
   return { id: value.id, name: value.name, arguments: structuredClone(value.arguments) };
 }
 
+// Qwen3.5 can write a boolean Python-style (`True`, `False`) where the call
+// format wants JSON (`true`, `false`); vLLM's and SGLang's Qwen tool parsers
+// both coerce by the declared type for this reason. The parser above cannot do
+// it: a value is opaque text until the tool's schema says what it should be,
+// and a `string` parameter whose text is literally "True" must stay text.
+//
+// So this runs after the tool is known and changes a value only when ALL hold:
+//   - the schema declares that top-level parameter exactly `type: "boolean"`
+//     (not a union that also admits a string),
+//   - the value is a string, and
+//   - its trimmed text is `true` or `false` in any case.
+// Anything else ("yes", "1", "maybe") is left alone, so schema validation still
+// refuses it. It is never defaulted to false: a guessed boolean on a
+// confirmation-gated tool would be a silent wrong action.
+export function coerceBooleanArguments(schema, args) {
+  const properties = schema && typeof schema === 'object' ? schema.properties : null;
+  if (!properties || typeof properties !== 'object' || !args || typeof args !== 'object') return args;
+  for (const key of Object.keys(args)) {
+    const declared = Object.hasOwn(properties, key) ? properties[key] : null;
+    if (!declared || declared.type !== 'boolean' || typeof args[key] !== 'string') continue;
+    // An explicit ASCII whitespace set, NOT String.prototype.trim(): trim() also
+    // strips U+FEFF and Unicode spaces, Python's strip() strips a different set
+    // (U+001C-001F, U+0085), and the scorer and the host must agree on every value.
+    const word = args[key].replace(/^[ \t\n\r\f\v]+|[ \t\n\r\f\v]+$/g, '').toLowerCase();
+    if (word === 'true' || word === 'false') args[key] = word === 'true';
+  }
+  return args;
+}
+
 export function parseToolCall(text, limits) {
   if (typeof text !== 'string') throw new EnvelopeError('invalid_tool_call', 'tool call must be text');
   const trimmed = text.trim();
@@ -169,12 +198,38 @@ function parseQwenToolCallXml(text, limits = {}) {
 // boundaries cannot turn a valid call into ordinary assistant text.
 const TOOL_OPEN = '<tool_call>';
 const TOOL_CLOSE = '</tool_call>';
+const THINK_CLOSE = '</think>';
+const commonPrefix = (text, tag) => { let n = 0; while (n < text.length && n < tag.length && text[n] === tag[n]) n++; return n; };
+const firstNonSpace = text => { const match = /\S/.exec(text); return match ? match.index : -1; };
+// Length of the longest suffix of `text` that is a proper prefix of one of
+// `tags`: those characters cannot be released until the next chunk decides.
+function heldTail(text, tags) {
+  let held = 0;
+  for (const tag of tags) for (let n = Math.min(tag.length - 1, text.length); n > held; n--) if (text.endsWith(tag.slice(0, n))) { held = n; break; }
+  return held;
+}
+
 export class ToolCallStreamDecoder {
-  constructor({ maxBytes = MAX_ENVELOPE_BYTES } = {}) {
+  // `stream: false` (the default) is the original whole-buffer decoder: all
+  // text is held until finish() and any prefix before a call is discarded.
+  // `stream: true` releases assistant text as soon as it can no longer be the
+  // start of a call, so the UI is not blank for the whole decode. The cost is
+  // that text written before a call has already been shown; it is still
+  // reported as text (never folded into the call), so the controller's
+  // mixed-output refusal sees it. That matches the accepted call contract:
+  // the tool-call eval only scores a call preceded by whitespace.
+  // `reasoning: true` (deep mode) treats everything before the first
+  // `</think>` as hidden reasoning, reported as `reasoning_delta` frames that a
+  // consumer may ignore, so a reasoned tool call is not mixed output.
+  constructor({ maxBytes = MAX_ENVELOPE_BYTES, stream = false, reasoning = false } = {}) {
     this.maxBytes = maxBytes; this.pending = ''; this.inCall = false; this.completedCall = false; this.finished = false;
+    this.stream = stream === true;
+    // Streaming states: reasoning -> lead -> text | call -> after.
+    this.state = reasoning === true ? 'reasoning' : 'lead'; this.reasoningSeen = false;
   }
   push(text) {
     if (this.finished || typeof text !== 'string') throw new EnvelopeError('invalid_tool_stream', 'invalid tool stream chunk');
+    if (this.stream) { this.pending += text; return this.#drain(false); }
     this.pending += text;
     if (Buffer.byteLength(this.pending, 'utf8') > this.maxBytes + TOOL_OPEN.length + TOOL_CLOSE.length) throw new EnvelopeError('tool_call_too_large', 'tool call exceeds limit');
     const output = [];
@@ -207,11 +262,91 @@ export class ToolCallStreamDecoder {
   }
   finish() {
     if (this.finished) return [];
+    if (this.stream) { const output = this.#drain(true); this.finished = true; return output; }
     this.finished = true;
     if (this.inCall) throw new EnvelopeError('malformed_tool_call', 'unterminated tool call');
     if (this.pending && (this.pending.includes('<tool_') || this.pending.includes('<tool_call') || TOOL_OPEN.startsWith(this.pending))) throw new EnvelopeError('malformed_tool_call', 'incomplete tool call tag');
     return this.pending ? [{ kind: 'text_delta', text: this.pending }] : [];
   }
+  // Every decision below depends only on the characters seen so far, never on
+  // where a chunk ended: text is released only once no continuation could make
+  // it part of a call, so splitting the same output differently yields the same
+  // text, reasoning, calls, and errors.
+  #drain(final) {
+    const output = [];
+    const emit = (kind, text) => { if (text) output.push({ kind, text }); };
+    const callLimit = this.maxBytes + TOOL_OPEN.length + TOOL_CLOSE.length;
+    while (true) {
+      if (this.state === 'reasoning') {
+        const call = this.pending.indexOf(TOOL_OPEN); const close = this.pending.indexOf(THINK_CLOSE);
+        // The buffered decoder accepted a call after any prefix; keep that for
+        // a call written before `</think>` so deep mode does not lose it.
+        if (call >= 0 && (close < 0 || call < close)) { this.#reason(emit, this.pending.slice(0, call)); this.pending = this.pending.slice(call); this.state = 'call'; continue; }
+        if (close >= 0) { this.#reason(emit, this.pending.slice(0, close)); this.pending = this.pending.slice(close + THINK_CLOSE.length); this.state = 'lead'; continue; }
+        if (!final) { const held = heldTail(this.pending, [TOOL_OPEN, THINK_CLOSE]); this.#reason(emit, this.pending.slice(0, this.pending.length - held)); this.pending = this.pending.slice(this.pending.length - held); break; }
+        this.#reason(emit, this.pending); this.pending = '';
+        // Reasoning that never closed (usually the length cap) is the only
+        // thing the model produced. Showing it beats an empty answer; the
+        // flag lets a reasoning-aware consumer avoid printing it twice.
+        if (this.reasoningSeen) output.push({ kind: 'text_delta', text: this.reasoningText, reasoning_fallback: true });
+        break;
+      }
+      if (this.state === 'lead') {
+        // Whitespace before the first visible character is held: the model
+        // often opens with newlines, and a call preceded only by whitespace is
+        // still a call, not text followed by a call.
+        const start = firstNonSpace(this.pending);
+        if (start < 0) { if (final) { emit('text_delta', this.pending); this.pending = ''; } break; }
+        const candidate = this.pending.slice(start, start + TOOL_OPEN.length);
+        if (candidate === TOOL_OPEN) { this.pending = this.pending.slice(start); this.state = 'call'; continue; }
+        if (TOOL_OPEN.startsWith(candidate)) {
+          // A reply that is nothing but a fragment of the call tag (say the
+          // length cap landed inside `<tool_ca`) is a truncated call with no
+          // prose around it, so it is refused rather than shown as text.
+          if (final) throw new EnvelopeError('malformed_tool_call', 'incomplete tool call tag');
+          break;
+        }
+        this.state = 'text'; continue;
+      }
+      if (this.state === 'text') {
+        // Release everything up to the first `<` that could still begin the
+        // call tag. A `<` that has diverged is prose however far it got:
+        // `a < b`, `<div>`, and equally `<tool_response>`, `<tool_calls>` or
+        // `</tool_call>`. Those are what a quoted file or tool output looks
+        // like, and refusing them would make every turn that quotes one fail.
+        // Only an opened `<tool_call>` is held to the call grammar.
+        let blocked = false;
+        for (let at = this.pending.indexOf('<'); at >= 0; at = this.pending.indexOf('<', at + 1)) {
+          const candidate = this.pending.slice(at, at + TOOL_OPEN.length); const shared = commonPrefix(candidate, TOOL_OPEN);
+          if (shared === TOOL_OPEN.length) { emit('text_delta', this.pending.slice(0, at)); this.pending = this.pending.slice(at); this.state = 'call'; blocked = true; break; }
+          if (shared === candidate.length) {
+            // An undecided fragment at the current end of the stream. At the
+            // real end it never became a call, so it is prose like the rest
+            // (a call cut off after text would be mixed output anyway).
+            if (final) break;
+            emit('text_delta', this.pending.slice(0, at)); this.pending = this.pending.slice(at); blocked = true; break;
+          }
+        }
+        if (this.state === 'call') continue;
+        if (!blocked) { emit('text_delta', this.pending); this.pending = ''; }
+        break;
+      }
+      if (this.state === 'call') {
+        const end = this.pending.indexOf(TOOL_CLOSE);
+        // Checked on the whole call as well as on a partial one, so an
+        // oversized call fails the same way however it was chunked.
+        if (Buffer.byteLength(end < 0 ? this.pending : this.pending.slice(0, end + TOOL_CLOSE.length), 'utf8') > callLimit) throw new EnvelopeError('tool_call_too_large', 'tool call exceeds limit');
+        if (end < 0) { if (final) throw new EnvelopeError('malformed_tool_call', 'unterminated tool call'); break; }
+        output.push({ kind: 'tool_call_chunk', text: this.pending.slice(0, end + TOOL_CLOSE.length) });
+        this.pending = this.pending.slice(end + TOOL_CLOSE.length); this.state = 'after'; this.completedCall = true; continue;
+      }
+      // after: only whitespace may follow the one call.
+      if (this.pending.trim()) throw new EnvelopeError('malformed_tool_call', 'tool call must not have a suffix or second call');
+      this.pending = ''; break;
+    }
+    return output;
+  }
+  #reason(emit, text) { if (!text) return; this.reasoningSeen = true; this.reasoningText = (this.reasoningText ?? '') + text; emit('reasoning_delta', text); }
 }
 
 export function validateToolResult(value) {

@@ -1,6 +1,13 @@
 // Platform boundaries that are deliberately fail-closed until a reviewed
 // handle-relative Windows implementation exists.  This module has no path,
 // process, or environment access so it is safe to use during composition.
+//
+// Scope on win32: the POSIX implementation in filesystem.mjs (built on
+// O_NOFOLLOW) always refuses here, for reads and writes alike.  The read-only
+// trio is served by the separate check-then-verify implementation in
+// windows-filesystem.mjs; fs.write_new and fs.apply_patch remain NOT_READY
+// because a create/replace through a swapped ancestor cannot be undone by a
+// post-hoc identity check.
 export const WINDOWS_FILESYSTEM_ERROR = 'platform_path_safety_unavailable';
 export const WINDOWS_FILESYSTEM_MESSAGE = 'filesystem tools require descriptor-safe path operations; Windows support is fail-closed until handle-relative reparse-safe primitives are available';
 

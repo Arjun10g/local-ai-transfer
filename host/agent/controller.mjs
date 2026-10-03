@@ -1,14 +1,43 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { types as utilTypes } from 'node:util';
 import { makeEvent } from './assistant-events.mjs';
-import { makeToolResult, parseToolCall, validateToolResult, EnvelopeError } from './tool-envelope.mjs';
+import { makeToolResult, parseToolCall, coerceBooleanArguments, validateToolResult, EnvelopeError } from './tool-envelope.mjs';
 import { ACTION_JOURNAL_HEALTH_ERRORS, createActionBinding } from './action-journal.mjs';
 import { readGraphAttestation, readGraphRestartAttestation, readGraphRestartControl, transferGraphAttestation } from '../providers/microsoft-graph.mjs';
 import { browserSafeCompletionDigest, projectBrowserResult, readBrowserAttestation, transferBrowserAttestation } from '../providers/browser-actions.mjs';
 import { isGraphReadTool, readGraphReadAttestation, transferGraphReadAttestation } from '../providers/microsoft-graph-reads.mjs';
 import { copilotSafeCompletionDigest, readCopilotAttestation, transferCopilotAttestation } from '../providers/copilot-cli.mjs';
 import { timeNowDefinition, timeNowTool } from '../tools/time-now.mjs';
+import { CONTEXT_DEFAULTS, ContextBudgetError, droppableHeadLength, fitHistory, historyBudget, messagesTokens, isContextOverflowError, learnBytesPerToken, observedBytesPerToken, penalizeBytesPerToken, utf8Bytes } from './context-budget.mjs';
+import { ENGINE_MAX_MESSAGE_BYTES, toolResultByteCap, truncateUtf8 } from './tool-result-cap.mjs';
+import { displayDiff, maskCredentialText, summarizeToolArguments } from './argument-summary.mjs';
 
+// The stored-history accounting the hard byte bound has always used.
+const storedBytes = message => Buffer.byteLength(JSON.stringify(message), 'utf8');
+// Long enough to read a confirmation card aloud during a narrated demo; the
+// host config can shorten or lengthen it (host.confirmation_timeout_ms).
+export const DEFAULT_CONFIRMATION_TIMEOUT_MS = 120000;
+// `auto` offers every available tool; `off` sends an empty tool list, which
+// drops the ~1,200+ token tool preamble from the prompt for plain chat.
+export const TOOL_MODES = Object.freeze(['auto', 'off']);
+const EXPIRED_CONFIRMATION = Symbol('expired-confirmation');
+// `length` means the answer hit the max_tokens cap, which the UI turns into a
+// "Continue" offer; anything unknown is reported as a normal stop.
+const FINISH_REASONS = new Set(['stop', 'length']);
+// Only counts the engine actually reported.  A missing field stays missing:
+// an invented `prompt_tokens: 0` or a character count would read as a
+// tokenizer measurement to anything downstream.
+function reportedUsage(usage) {
+  const out = {};
+  for (const key of ['prompt_tokens', 'completion_tokens']) if (Number.isSafeInteger(usage?.[key]) && usage[key] >= 0) out[key] = usage[key];
+  return out;
+}
+// Late clicks on an expired card are answered from this bounded memory, so
+// the UI can say "expired" instead of "unknown confirmation".
+const MAX_EXPIRED_CONFIRMATIONS = 16;
+// Appended to a partial answer kept in history, so the model knows the text
+// it sees was cut off rather than finished.
+const INTERRUPTED_ANSWER_MARKER = '\n\n[This answer was interrupted before it finished.]';
 export const STATES = Object.freeze(['IDLE', 'BUILDING_PROMPT', 'INFERENCING', 'TOOL_PROPOSED', 'WAITING_CONFIRMATION', 'TOOL_RUNNING', 'CONTINUING_MODEL', 'COMPLETED', 'CANCELLED', 'FAILED']);
 const opaque = prefix => `${prefix}_${randomUUID().replaceAll('-', '')}`;
 const CANCELLED_CONFIRMATION = Symbol('cancelled-confirmation');
@@ -158,6 +187,61 @@ function validateToolArgumentShape(tool, call) {
   if (!schemaMatches(call.arguments, schema)) throw Object.assign(new Error('tool arguments do not match schema'), { code: 'invalid_tool_arguments' });
 }
 function publicToolCall(call) { return { id: call.id, name: call.name }; }
+// The display copy rides beside `call`, not inside it: `call` stays the bare
+// {id, name} the UI and tests key on, and nothing here can reach execution.
+function argumentsSummaryField(call, preview) {
+  let summary = null;
+  try { summary = summarizeToolArguments(call.name, call.arguments, preview); } catch { summary = null; }
+  return summary ? { arguments_summary: summary } : {};
+}
+// An oversized raw result would fail envelope validation (65,536 chars) and
+// end the turn. Unattested results are cut here instead; private journal keys
+// are stripped from the WHOLE value first, because a truncated JSON text can
+// no longer be parsed to strip them later.
+// Every text part of a result, in order, joined by one newline: what the
+// model sees and what history stores.  Deterministic, so a stored result is
+// byte-stable and later prompts stay strict extensions of earlier ones.
+function toolResultText(result) {
+  return (Array.isArray(result?.content) ? result.content : []).filter(item => item?.type === 'text' && typeof item.text === 'string').map(item => item.text).join('\n');
+}
+// The bound is on the joined text (what the model will see), so a result
+// split into several parts is cut once, with a marker that counts every
+// part, instead of each part separately.  A malformed item is left for
+// envelope validation to reject.
+function boundRawToolResult(result, maxBytes) {
+  if (!result || typeof result !== 'object' || !Array.isArray(result.content) || result.content.length > 16) return result;
+  if (!result.content.every(item => item?.type === 'text' && typeof item.text === 'string')) return result;
+  if (utf8Bytes(toolResultText(result)) <= maxBytes) return result;
+  const parts = result.content.map(item => { try { return JSON.stringify(stripPrivateJournalMetadata(JSON.parse(item.text))); } catch { return item.text; } });
+  return { ...result, content: [{ type: 'text', text: truncateUtf8(parts.join('\n'), maxBytes).text }], metadata: result.metadata && typeof result.metadata === 'object' ? { ...result.metadata, truncated: true } : result.metadata };
+}
+// The model-visible result is what enters history, so it is the one held to
+// the per-result cap; the flag the envelope already carries says it was cut.
+// The cap applies to the joined text, not only the first part, so a result
+// split into several parts can neither slip past the cap nor lose its later
+// parts.  A single-part result is cut exactly as before.
+function capModelResult(result, maxBytes) {
+  const text = toolResultText(result);
+  if (utf8Bytes(text) <= maxBytes) return result;
+  return validateToolResult({ ...result, content: [{ type: 'text', text: truncateUtf8(text, maxBytes).text }], metadata: { ...result.metadata, truncated: true } });
+}
+// The preview as the UI receives it.  The fs.apply_patch diff carries up to
+// 8 KB of the old and new file text, and a process preview carries the real
+// argv; either may hold a credential the operator would not want on a shared
+// screen.  Credential-shaped values are masked in this display copy only:
+// the action binding, confirmationRequired, authorize and execute all keep
+// the real preview and arguments.  The diff is also re-classified by
+// structure (see displayDiff) and sanitized.
+function displayPreview(preview, call) {
+  if (!preview || typeof preview !== 'object' || Array.isArray(preview)) return preview;
+  let view = preview;
+  if (typeof preview.diff === 'string') {
+    const args = call?.arguments ?? {};
+    view = { ...view, ...displayDiff(preview.diff, { path: preview.path, oldBytes: preview.old_bytes, replacement: args.replacement ?? args.patch }) };
+  }
+  if (Array.isArray(preview.argv)) view = { ...view, argv: preview.argv.map(value => (typeof value === 'string' ? maskCredentialText(value).text : value)) };
+  return view;
+}
 
 export function requiresDurableAction(tool) {
   const tier = tool?.risk_tier; const effect = tool?.side_effect;
@@ -310,13 +394,21 @@ export class ConversationController {
   #journalMethods;
   #graphRestartControls;
   #restartReconciliationPromise;
-  constructor({ engine, maxToolCalls = 8, confirmationTimeoutMs = 30000, maxSessions = 4, maxHistoryMessages = 64, maxHistoryBytes = 262144, toolRegistry, actionJournal } = {}) {
+  // `contextTokens` must match the engine's `--context`; `maxOutputTokens`
+  // defaults to the engine client's per-request `max_tokens`, which the engine
+  // reserves out of the same window.
+  constructor({ engine, maxToolCalls = 8, confirmationTimeoutMs = DEFAULT_CONFIRMATION_TIMEOUT_MS, maxSessions = 4, maxHistoryMessages = 64, maxHistoryBytes = 262144, contextTokens = CONTEXT_DEFAULTS.contextTokens, maxOutputTokens = engine?.maxTokens ?? CONTEXT_DEFAULTS.maxOutputTokens, toolRegistry, actionJournal } = {}) {
     if (!engine?.generate) throw new TypeError('engine.generate is required');
     if (!Number.isInteger(maxSessions) || maxSessions < 1) throw new TypeError('maxSessions must be positive');
     if (!Number.isInteger(maxHistoryMessages) || maxHistoryMessages < 1 || !Number.isInteger(maxHistoryBytes) || maxHistoryBytes < 1024) throw new TypeError('history limits are invalid');
+    // 512 is the smallest window the host launcher accepts; such a window
+    // only fits plain chat (tools: 'off'), which the budget then enforces.
+    if (!Number.isInteger(contextTokens) || contextTokens < 512 || contextTokens > 16384 || !Number.isInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens * 4 > contextTokens) throw new TypeError('context limits are invalid');
+    if (!Number.isInteger(confirmationTimeoutMs) || confirmationTimeoutMs < 1 || confirmationTimeoutMs > 3600000) throw new TypeError('confirmationTimeoutMs is invalid');
+    this.contextTokens = contextTokens; this.maxOutputTokens = maxOutputTokens;
     this.#journalMethods = actionJournal === undefined ? null : snapshotJournalMethods(actionJournal);
     this.engine = engine; this.maxToolCalls = maxToolCalls; this.confirmationTimeoutMs = confirmationTimeoutMs; this.maxSessions = maxSessions; this.maxHistoryMessages = maxHistoryMessages; this.maxHistoryBytes = maxHistoryBytes; this.actionJournal = actionJournal; this.clock = 0;
-    this.sessions = new Map(); this.active = null; this.pending = new Map();
+    this.sessions = new Map(); this.active = null; this.pending = new Map(); this.expiredConfirmations = new Map();
     const registry = executionRegistrySnapshot(toolRegistry); this.#graphRestartControls = registry.graphRestartControls; this.#restartReconciliationPromise = null;
     this.#tools = new Map([[timeNowDefinition.name, { ...timeNowDefinition, execute: ({ id, arguments: args }) => timeNowTool({ id, arguments: args }) }], ...registry.entries]);
   }
@@ -358,69 +450,175 @@ export class ConversationController {
       candidates.sort((a, b) => a.last_used - b.last_used || a.id.localeCompare(b.id));
       this.sessions.delete(candidates[0].id);
     }
-    const session = { id: sessionId, state: 'IDLE', history: [], history_bytes: 0, created_at: new Date().toISOString(), last_request_id: null, last_used: ++this.clock };
+    const session = { id: sessionId, state: 'IDLE', history: [], history_bytes: 0, bytes_per_token: null, context_compactions: 0, created_at: new Date().toISOString(), last_request_id: null, last_used: ++this.clock };
     this.sessions.set(sessionId, session); return session;
   }
   _touch(session) { session.last_used = ++this.clock; return session; }
   getSession(sessionId) { return this._touch(this.sessions.get(sessionId) ?? this.createSession(sessionId)); }
+  // Hard storage bounds, enforced a whole oldest turn at a time: shifting off a
+  // single message could strand a tool result without its call or leave no
+  // user message, both of which the engine rejects.  The latest turn is never
+  // split, so it may alone exceed a bound; the token budget then decides.
   _appendHistory(session, message) {
-    session.history.push(message); session.history_bytes += Buffer.byteLength(JSON.stringify(message), 'utf8');
-    while (session.history.length > this.maxHistoryMessages || session.history_bytes > this.maxHistoryBytes) { const removed = session.history.shift(); session.history_bytes -= Buffer.byteLength(JSON.stringify(removed), 'utf8'); }
+    session.history.push(message); session.history_bytes += storedBytes(message);
+    while (session.history.length > this.maxHistoryMessages || session.history_bytes > this.maxHistoryBytes) {
+      const length = droppableHeadLength(session.history); if (!length) break;
+      for (const removed of session.history.splice(0, length)) session.history_bytes -= storedBytes(removed);
+    }
   }
-  resetSession(sessionId) { const session = this.sessions.get(sessionId); if (!session) return false; if (session.state !== 'IDLE' && session.state !== 'COMPLETED' && session.state !== 'FAILED' && session.state !== 'CANCELLED') throw new Error('session_busy'); session.history = []; session.history_bytes = 0; session.state = 'IDLE'; return true; }
+  // Fit the history into the engine window before a model call and persist the
+  // result: what was elided or dropped stays that way, so later prompts extend
+  // this one byte-for-byte and engine prefix reuse resumes.  Compaction goes
+  // down to a low-water mark, so it is rare rather than every turn, and at
+  // turn start (where the engine re-prefills anyway) it triggers early to
+  // spare the tool loop.  `shrink` is for after an engine overflow: the
+  // estimate was just proven wrong, so the cut is relative to what the engine
+  // rejected, not to the budget the estimate claimed was met.
+  _fitContext(session, tools, emit, { reason = 'budget', turnStart = false, shrink } = {}) {
+    const budget = historyBudget({ tools, bytesPerToken: session.bytes_per_token ?? undefined, contextTokens: this.contextTokens, maxOutputTokens: this.maxOutputTokens });
+    const limits = shrink !== undefined
+      ? { triggerTokens: 0, targetTokens: Math.floor(Math.min(budget.budgetTokens, messagesTokens(session.history, budget.bytesPerToken)) * shrink) }
+      : turnStart ? { triggerTokens: Math.floor(budget.budgetTokens * CONTEXT_DEFAULTS.turnStartTriggerRatio), targetTokens: Math.floor(budget.budgetTokens * CONTEXT_DEFAULTS.turnStartTargetRatio) } : {};
+    const fitted = fitHistory({ messages: session.history, budgetTokens: budget.budgetTokens, ...limits, bytesPerToken: budget.bytesPerToken });
+    const estimatedTokens = fitted.tokens + budget.toolTokens + budget.overheadTokens;
+    if (fitted.changed) {
+      session.history = fitted.messages; session.history_bytes = fitted.messages.reduce((sum, message) => sum + storedBytes(message), 0); session.context_compactions += 1;
+      // Counts only: the UI can say "earlier context was condensed" without
+      // the host logging any prompt or tool content.
+      emit('metrics.snapshot', { context_compaction: { reason, masked_tool_results: fitted.masked, elided_bytes: fitted.maskedBytes, dropped_turns: fitted.droppedTurns, dropped_messages: fitted.droppedMessages, estimated_prompt_tokens: estimatedTokens, context_tokens: this.contextTokens, history_messages: session.history.length, compactions: session.context_compactions } });
+    }
+    return { estimatedTokens, changed: fitted.changed };
+  }
+  // Only a real tokenizer count can move the ratio; see observedBytesPerToken.
+  _learnTokenRatio(session, messages, tools, usage) {
+    const promptTokens = usage?.prompt_tokens;
+    const learned = learnBytesPerToken({ observed: observedBytesPerToken({ messages, tools, promptTokens }), current: session.bytes_per_token ?? undefined, promptTokens, contextTokens: this.contextTokens });
+    if (learned !== null) session.bytes_per_token = learned;
+  }
+  resetSession(sessionId) { const session = this.sessions.get(sessionId); if (!session) return false; if (session.state !== 'IDLE' && session.state !== 'COMPLETED' && session.state !== 'FAILED' && session.state !== 'CANCELLED') throw Object.assign(new Error('session_busy'), { code: 'session_busy' }); session.history = []; session.history_bytes = 0; session.state = 'IDLE'; return true; }
   state(sessionId) { return this.getSession(sessionId).state; }
   _cancelPending(requestId) { const active = this.active; if (!active || active.requestId !== requestId || !active.confirmationId) return false; const item = this.pending.get(active.confirmationId); if (!item) return false; this.pending.delete(active.confirmationId); active.confirmationId = null; item.resolve(CANCELLED_CONFIRMATION); return true; }
   cancel(requestId) { if (this.active?.requestId !== requestId) return false; this.active.controller.abort(); this._cancelPending(requestId); this.engine.cancel?.(requestId); return true; }
   cancelActive() { return this.active ? this.cancel(this.active.requestId) : false; }
   confirm(confirmationId, approved, { requestId, callId } = {}) { const item = this.pending.get(confirmationId); if (!item || typeof approved !== 'boolean') return false; if (typeof requestId !== 'string' || typeof callId !== 'string' || requestId !== item.requestId || callId !== item.callId) return false; this.pending.delete(confirmationId); item.resolve(approved); return true; }
+  // True only for a confirmation that this controller let expire, matched to
+  // the same request and call: a late click then gets an honest "expired"
+  // answer while a guessed or foreign id still looks unknown.
+  confirmationExpired(confirmationId, { requestId, callId } = {}) {
+    const item = this.expiredConfirmations.get(confirmationId);
+    return Boolean(item && typeof requestId === 'string' && typeof callId === 'string' && item.requestId === requestId && item.callId === callId);
+  }
+  // Resolves to true/false (the user's answer), CANCELLED_CONFIRMATION, or
+  // EXPIRED_CONFIRMATION. Expiry is never an implicit approval or denial.
+  #awaitConfirmation(confirmationId, requestId, sessionId, callId) {
+    return new Promise(resolve => {
+      const timer = setTimeout(() => {
+        if (!this.pending.delete(confirmationId)) return;
+        this.expiredConfirmations.set(confirmationId, { requestId, callId });
+        while (this.expiredConfirmations.size > MAX_EXPIRED_CONFIRMATIONS) this.expiredConfirmations.delete(this.expiredConfirmations.keys().next().value);
+        resolve(EXPIRED_CONFIRMATION);
+      }, this.confirmationTimeoutMs);
+      this.pending.set(confirmationId, { resolve: answer => { clearTimeout(timer); resolve(answer); }, requestId, sessionId, callId });
+    });
+  }
+  // Rolls a failed or cancelled turn back to what the user actually saw. If
+  // the turn produced nothing (no streamed text, no tool step), its user
+  // message is removed: the model never answered it, and leaving it would
+  // make the next turn answer two questions. If the user saw a partial
+  // answer, the message stays and the partial answer is recorded with a
+  // marker, so history matches the transcript. Completed tool steps are
+  // always kept, since their side effects happened. Removing only the
+  // newest message leaves the earlier history byte-identical, so the
+  // engine's prefix reuse for the next prompt is unaffected.
+  _settleFailedTurn(session, userMessage, partialText) {
+    if (partialText) { this._appendHistory(session, { role: 'assistant', content: partialText + INTERRUPTED_ANSWER_MARKER }); return true; }
+    if (session.history.at(-1) !== userMessage) return true;
+    session.history.pop(); session.history_bytes -= storedBytes(userMessage);
+    return false;
+  }
   emitFactory(requestId, sessionId, onEvent) { let sequence = 0; return (event, data) => { const output = makeEvent({ event, requestId, sessionId, sequence: sequence++, data }); onEvent?.(output); return output; }; }
-  async runTurn({ sessionId, message, mode = 'normal', requestId = opaque('req'), signal, onEvent } = {}) {
-    if (typeof message !== 'string' || !message.trim() || message.length > 32768) throw new Error('invalid_message');
+  // `tools: 'off'` sends this turn with no tool definitions (plain chat).
+  async runTurn({ sessionId, message, mode = 'normal', tools: toolMode = 'auto', requestId = opaque('req'), signal, onEvent } = {}) {
+    if (typeof message !== 'string' || !message.trim()) throw Object.assign(new Error('invalid_message'), { code: 'invalid_message' });
+    // The engine bounds each message in UTF-8 BYTES, not UTF-16 characters:
+    // 20,000 CJK characters are 60,000 bytes and would pass a length check
+    // only to be refused by the engine after the turn had started.
+    const messageBytes = utf8Bytes(message);
+    if (messageBytes > ENGINE_MAX_MESSAGE_BYTES) throw Object.assign(new Error(`Message is too long: ${messageBytes} bytes of UTF-8 text; the limit is ${ENGINE_MAX_MESSAGE_BYTES} bytes. Shorten it or split it into several messages.`), { code: 'invalid_message_too_large', bytes: messageBytes, limit_bytes: ENGINE_MAX_MESSAGE_BYTES });
     if (!/^[A-Za-z0-9_-]{8,96}$/.test(requestId)) throw Object.assign(new Error('invalid_request_id'), { code: 'invalid_request_id' });
+    if (!TOOL_MODES.includes(toolMode)) throw Object.assign(new Error('invalid_tools_mode'), { code: 'invalid_tools_mode' });
     const session = this.getSession(sessionId); if (this.active) throw Object.assign(new Error('another_generation_active'), { code: 'busy' });
-    if (!['normal', 'deep'].includes(mode)) throw new Error('invalid_mode');
+    if (!['normal', 'deep'].includes(mode)) throw Object.assign(new Error('invalid_mode'), { code: 'invalid_mode' });
     const controller = new AbortController();
     const relayAbort = () => { controller.abort(); this._cancelPending(requestId); }; signal?.addEventListener('abort', relayAbort, { once: true });
     this.active = { requestId, sessionId: session.id, controller, confirmationId: null };
     const emit = this.emitFactory(requestId, session.id, onEvent);
-    session.last_request_id = requestId; this._appendHistory(session, { role: 'user', content: message }); session.state = 'BUILDING_PROMPT';
+    const userMessage = { role: 'user', content: message };
+    session.last_request_id = requestId; this._appendHistory(session, userMessage); session.state = 'BUILDING_PROMPT';
     let text = ''; let calls = 0; let activeJournalOperation = null;
     try {
-      emit('message.started', { mode, state: session.state });
+      emit('message.started', { mode, state: session.state, tools: toolMode });
       while (true) {
         if (controller.signal.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' });
         session.state = calls ? 'CONTINUING_MODEL' : 'INFERENCING'; emit('message.started', { mode, state: session.state, continuation: calls > 0 });
         const journal = journalStatus(this.#journalMethods); const ready = journal.ready;
-        const tools = modelToolDefinitions(new Map([...this.#tools].filter(([name, tool]) => {
+        // With tools off the request carries an empty list, so the engine's
+        // template renders no tool preamble at all and the budget reserves
+        // only the small no-tools overhead.
+        const tools = toolMode === 'off' ? [] : modelToolDefinitions(new Map([...this.#tools].filter(([name, tool]) => {
           const nativeOwned = nativeSupervisorOwnerFor(name, tool, process.platform) !== null;
           return nativeOwned ? ready : !requiresDurableAction(tool) || ready;
         })));
-        let callText = ''; let gotCall = false; let usage;
-        for await (const frame of this.engine.generate({ requestId, sessionId: session.id, messages: session.history, tools, mode, signal: controller.signal })) {
-          if (frame.kind === 'text_delta') { text += frame.text; emit('message.delta', { text: frame.text }); }
-          else if (frame.kind === 'tool_call_chunk') { gotCall = true; callText += frame.text; if (Buffer.byteLength(callText) > 32768) throw new EnvelopeError('tool_call_too_large', 'tool call exceeds limit'); }
-          else if (frame.kind === 'done') usage = frame.usage;
+        let callText = ''; let gotCall = false; let usage; let finishReason;
+        let fit = this._fitContext(session, tools, emit, { turnStart: calls === 0 }); let sent;
+        for (let attempt = 0; ; attempt++) {
+          let framed = false; sent = session.history;
+          try {
+            for await (const frame of this.engine.generate({ requestId, sessionId: session.id, messages: session.history, tools, mode, signal: controller.signal })) {
+              framed = true;
+              if (frame.kind === 'text_delta') { text += frame.text; emit('message.delta', { text: frame.text }); }
+              else if (frame.kind === 'tool_call_chunk') { gotCall = true; callText += frame.text; if (Buffer.byteLength(callText) > 32768) throw new EnvelopeError('tool_call_too_large', 'tool call exceeds limit'); }
+              else if (frame.kind === 'done') { usage = frame.usage; finishReason = frame.finish_reason; }
+            }
+            break;
+          } catch (error) {
+            // The engine refuses an oversized prompt before its first token, so
+            // nothing has reached the UI and one retry cannot duplicate output.
+            if (framed || controller.signal.aborted || !isContextOverflowError(error, { estimatedTokens: fit.estimatedTokens, contextTokens: this.contextTokens })) throw error;
+            if (attempt > 0) throw new ContextBudgetError({ estimated_tokens: fit.estimatedTokens, reason: 'engine_overflow' });
+            // The estimate was wrong in the unsafe direction: distrust the
+            // ratio for the rest of the session and trim well below budget.
+            session.bytes_per_token = penalizeBytesPerToken(session.bytes_per_token ?? undefined);
+            fit = this._fitContext(session, tools, emit, { reason: 'engine_overflow', shrink: 0.5 });
+            if (!fit.changed) throw new ContextBudgetError({ estimated_tokens: fit.estimatedTokens, reason: 'engine_overflow' });
+          }
         }
-        if (!gotCall) { this._appendHistory(session, { role: 'assistant', content: text }); session.state = 'COMPLETED'; emit('message.completed', { text, finish_reason: 'stop', usage: usage ?? { prompt_tokens: 0, completion_tokens: text.length }, state: session.state }); emit('metrics.snapshot', { tool_calls: calls, history_messages: session.history.length, history_bytes: session.history_bytes }); return { requestId, sessionId: session.id, state: session.state, text }; }
+        this._learnTokenRatio(session, sent, tools, usage);
+        if (!gotCall) { this._appendHistory(session, { role: 'assistant', content: text }); session.state = 'COMPLETED'; emit('message.completed', { text, finish_reason: FINISH_REASONS.has(finishReason) ? finishReason : 'stop', usage: reportedUsage(usage), state: session.state }); emit('metrics.snapshot', { tool_calls: calls, history_messages: session.history.length, history_bytes: session.history_bytes }); return { requestId, sessionId: session.id, state: session.state, text }; }
         if (text.trim()) throw new EnvelopeError('mixed_tool_call_output', 'tool call output cannot contain assistant text');
+        // A model can still emit call syntax it was never offered; running a
+        // tool the user switched off would make the switch meaningless.
+        if (toolMode === 'off') throw Object.assign(new Error('tool_call_not_offered'), { code: 'tool_call_not_offered' });
         calls++; if (calls > this.maxToolCalls) throw Object.assign(new Error('tool_call_limit_exceeded'), { code: 'tool_call_limit_exceeded' });
         const call = parseToolCall(callText); session.state = 'TOOL_PROPOSED';
         const tool = this.#tools.get(call.name); if (!tool) throw Object.assign(new Error('unknown_tool'), { code: 'unknown_tool' });
+        coerceBooleanArguments(tool.parameters ?? parameterSchema(call.name), call.arguments);
         validateToolArgumentShape(tool, call);
         const nativeDispatchOwner = nativeSupervisorOwnerFor(tool.name, tool, process.platform);
         if ((nativeDispatchOwner !== null || requiresDurableAction(tool)) && !journal.ready) throw Object.assign(new Error('durable action journal is unavailable'), { code: journal.code });
         let preview;
         if (tool.preview) preview = await invokeWithTimeout(tool, tool.preview, call, controller.signal);
-        emit('tool.proposed', { call: publicToolCall(call), ...(preview === undefined ? {} : { preview }) });
-        let approved = true; let previewAccessDenied = false; let authorization = { kind: 'policy' };
+        emit('tool.proposed', { call: publicToolCall(call), ...argumentsSummaryField(call, preview), ...(preview === undefined ? {} : { preview: displayPreview(preview, call) }) });
+        let approved = true; let previewAccessDenied = false; let authorization = { kind: 'policy' }; let expiredConfirmationId = null;
         if (preview?.preview_authorization_required === true) {
           session.state = 'WAITING_CONFIRMATION'; const confirmationId = opaque('cnf'); this.active.confirmationId = confirmationId;
-          emit('tool.confirmation_required', { confirmation_id: confirmationId, call: publicToolCall(call), preview, phase: 'preview_access', risk_tier: 'T1', expires_in_ms: this.confirmationTimeoutMs });
-          approved = await new Promise(resolve => { const timer = setTimeout(() => { this.pending.delete(confirmationId); resolve(false); }, this.confirmationTimeoutMs); this.pending.set(confirmationId, { resolve: answer => { clearTimeout(timer); resolve(answer); }, requestId, sessionId: session.id, callId: call.id }); });
+          emit('tool.confirmation_required', { confirmation_id: confirmationId, call: publicToolCall(call), ...argumentsSummaryField(call, preview), preview: displayPreview(preview, call), phase: 'preview_access', risk_tier: 'T1', expires_in_ms: this.confirmationTimeoutMs });
+          approved = await this.#awaitConfirmation(confirmationId, requestId, session.id, call.id);
           this.active.confirmationId = null;
           if (approved === CANCELLED_CONFIRMATION) { if (activeJournalOperation) { await this.#journalMethods.cancel(activeJournalOperation.id, 'request_cancelled'); activeJournalOperation = null; } throw Object.assign(new Error('cancelled'), { code: 'cancelled' }); }
+          if (approved === EXPIRED_CONFIRMATION) { approved = false; expiredConfirmationId = confirmationId; }
           if (!approved) { authorization = { kind: 'policy' }; previewAccessDenied = true; }
-          else { preview = await invokeWithTimeout(tool, tool.preview, { ...call, authorization: { kind: 'user_confirmation' }, preview_authorized: true }, controller.signal); emit('tool.proposed', { call: publicToolCall(call), preview }); }
+          else { preview = await invokeWithTimeout(tool, tool.preview, { ...call, authorization: { kind: 'user_confirmation' }, preview_authorized: true }, controller.signal); emit('tool.proposed', { call: publicToolCall(call), ...argumentsSummaryField(call, preview), preview: displayPreview(preview, call) }); }
         }
         if (nativeDispatchOwner !== null || requiresDurableAction(tool)) {
           if (!journal.ready) throw Object.assign(new Error('durable action journal is unavailable'), { code: journal.code });
@@ -461,12 +659,13 @@ export class ConversationController {
         const requiresConfirmation = !previewAccessDenied && (typeof tool.confirmationRequired === 'function' ? await tool.confirmationRequired(call, { preview }) : Boolean(tool.requires_confirmation));
         if (requiresConfirmation) {
           session.state = 'WAITING_CONFIRMATION'; const confirmationId = opaque('cnf');
-          this.active.confirmationId = confirmationId; emit('tool.confirmation_required', { confirmation_id: confirmationId, call: publicToolCall(call), preview, risk_tier: tool.risk_tier, expires_in_ms: this.confirmationTimeoutMs });
-          approved = await new Promise(resolve => { const timer = setTimeout(() => { this.pending.delete(confirmationId); resolve(false); }, this.confirmationTimeoutMs); this.pending.set(confirmationId, { resolve: answer => { clearTimeout(timer); resolve(answer); }, requestId, sessionId: session.id, callId: call.id }); });
+          this.active.confirmationId = confirmationId; emit('tool.confirmation_required', { confirmation_id: confirmationId, call: publicToolCall(call), ...argumentsSummaryField(call, preview), preview: displayPreview(preview, call), risk_tier: tool.risk_tier, expires_in_ms: this.confirmationTimeoutMs });
+          approved = await this.#awaitConfirmation(confirmationId, requestId, session.id, call.id);
           this.active.confirmationId = null;
           if (approved === CANCELLED_CONFIRMATION) { if (activeJournalOperation) { await this.#journalMethods.cancel(activeJournalOperation.id, 'request_cancelled'); activeJournalOperation = null; } throw Object.assign(new Error('cancelled'), { code: 'cancelled' }); }
+          if (approved === EXPIRED_CONFIRMATION) { approved = false; expiredConfirmationId = confirmationId; }
           if (approved) authorization = { kind: 'user_confirmation' };
-        } else { const autoAuthorization = tool.authorize ? await invokeWithTimeout(tool, tool.authorize, { ...call, preview }, controller.signal) : null; if (autoAuthorization && typeof autoAuthorization === 'object') authorization = autoAuthorization; }
+        } else if (approved) { const autoAuthorization = tool.authorize ? await invokeWithTimeout(tool, tool.authorize, { ...call, preview }, controller.signal) : null; if (autoAuthorization && typeof autoAuthorization === 'object') authorization = autoAuthorization; }
         if (activeJournalOperation && !approved) { await this.#journalMethods.cancel(activeJournalOperation.id); activeJournalOperation = null; }
         else if (activeJournalOperation) {
           if (controller.signal.aborted) { await this.#journalMethods.cancel(activeJournalOperation.id, 'request_cancelled'); activeJournalOperation = null; throw Object.assign(new Error('cancelled'), { code: 'cancelled' }); }
@@ -494,10 +693,20 @@ export class ConversationController {
           }
           await this.#journalMethods.dispatch(activeJournalOperation.id); activeJournalOperation.dispatched = true;
         }
-        session.state = 'TOOL_RUNNING'; emit('tool.started', { call: publicToolCall(call), approved, authorization: authorization.kind });
         let result;
-        if (!approved) result = makeToolResult({ id: call.id, name: call.name, status: 'denied', text: 'User denied this action.' });
-        else {
+        if (expiredConfirmationId !== null) {
+          // Nobody answered: not an approval, and not the user saying no.
+          // The model is told exactly that, so it can ask again rather than
+          // report a refusal the user never gave.
+          const seconds = Math.round(this.confirmationTimeoutMs / 1000);
+          emit('tool.failed', { call: publicToolCall(call), code: 'confirmation_expired', confirmation_id: expiredConfirmationId, message: `The confirmation expired after ${seconds} seconds without an answer, so the action was not run.` });
+          session.state = 'TOOL_RUNNING';
+          result = makeToolResult({ id: call.id, name: call.name, status: 'cancelled', text: `Not run: the user did not answer the confirmation within ${seconds} seconds, so it expired. The user neither approved nor denied it. Ask whether they still want this done.` });
+        } else {
+          session.state = 'TOOL_RUNNING'; emit('tool.started', { call: publicToolCall(call), approved, authorization: authorization.kind });
+          if (!approved) result = makeToolResult({ id: call.id, name: call.name, status: 'denied', text: 'User denied this action.' });
+        }
+        if (!result) {
           if (controller.signal.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' });
           // `policy` is host-internal bookkeeping, not a model/provider
           // authorization object. Only pass concrete user/grant proof across
@@ -510,7 +719,14 @@ export class ConversationController {
           result = await invokeWithTimeout(tool, tool.execute, { ...call, ...(authorization.kind === 'policy' ? {} : { authorization }), ...(internal ? { internal } : {}) }, controller.signal);
         }
         const hostResult = result;
-        try { result = validateToolResult(result); } catch { throw Object.assign(new Error('invalid_tool_result'), { code: 'invalid_tool_result' }); }
+        // Measured before this call's two messages are appended, so the cap
+        // already accounts for the assistant call message that precedes it.
+        const resultCapBytes = toolResultByteCap({ history: session.history, pending: [{ role: 'assistant', content: callText }], tools, bytesPerToken: session.bytes_per_token ?? undefined, contextTokens: this.contextTokens, maxOutputTokens: this.maxOutputTokens });
+        // Provider results are bound to digests of their exact text, so only
+        // an unattested result may be cut before validation; the projected,
+        // model-visible copy of every result is capped below.
+        const attestedResult = BROWSER_TOOL_NAMES.has(call.name) || COPILOT_TOOL_NAMES.has(call.name) || isGraphReadTool(call.name) || activeJournalOperation?.reconcile === true;
+        try { result = validateToolResult(attestedResult ? result : boundRawToolResult(result, resultCapBytes)); } catch { throw Object.assign(new Error('invalid_tool_result'), { code: 'invalid_tool_result' }); }
         if (result.id !== call.id || result.name !== call.name) throw Object.assign(new Error('tool_result_mismatch'), { code: 'tool_result_mismatch' });
         transferGraphAttestation(hostResult, result); if (BROWSER_TOOL_NAMES.has(call.name)) transferBrowserAttestation(hostResult, result);
         transferGraphReadAttestation(hostResult, result);
@@ -540,10 +756,11 @@ export class ConversationController {
           else await this.#journalMethods.markUnknown(activeJournalOperation.id);
           activeJournalOperation = null;
         }
-        const modelResult = BROWSER_TOOL_NAMES.has(call.name) ? projectBrowserResult(result, { controllerVerified, reconciliationRequired: strictModelResult }) : strictModelResult && COPILOT_TOOL_NAMES.has(call.name) ? modelVisibleCopilotResult(result, controllerVerified) : strictModelResult ? modelVisibleReconciliationResult(result, controllerVerified, modelBinding) : isGraphReadTool(call.name) ? modelVisibleGraphReadResult(result, call) : modelVisibleToolResult(result);
+        let modelResult = BROWSER_TOOL_NAMES.has(call.name) ? projectBrowserResult(result, { controllerVerified, reconciliationRequired: strictModelResult }) : strictModelResult && COPILOT_TOOL_NAMES.has(call.name) ? modelVisibleCopilotResult(result, controllerVerified) : strictModelResult ? modelVisibleReconciliationResult(result, controllerVerified, modelBinding) : isGraphReadTool(call.name) ? modelVisibleGraphReadResult(result, call) : modelVisibleToolResult(result);
+        modelResult = capModelResult(modelResult, resultCapBytes);
         emit('tool.completed', { result: modelResult });
         this._appendHistory(session, { role: 'assistant', content: callText });
-        this._appendHistory(session, { role: 'tool', name: call.name, tool_call_id: call.id, content: modelResult.content[0]?.text ?? '' });
+        this._appendHistory(session, { role: 'tool', name: call.name, tool_call_id: call.id, content: toolResultText(modelResult) });
         session.state = 'CONTINUING_MODEL'; text = '';
       }
     } catch (caught) {
@@ -554,8 +771,11 @@ export class ConversationController {
         activeJournalOperation = null;
       }
       const cancelled = error?.code === 'cancelled' || controller.signal.aborted;
+      // `user_message_kept` tells the UI whether the model will see this
+      // message next turn, so it can mark the bubble as not sent.
+      const userMessageKept = this._settleFailedTurn(session, userMessage, text.trim() ? text : '');
       session.state = cancelled ? 'CANCELLED' : 'FAILED';
-      emit(cancelled ? 'request.cancelled' : 'request.failed', { code: cancelled ? 'cancelled' : (error.code ?? 'request_failed'), message: cancelled ? 'Request cancelled.' : 'Request failed.' });
+      emit(cancelled ? 'request.cancelled' : 'request.failed', { code: cancelled ? 'cancelled' : (error.code ?? 'request_failed'), message: cancelled ? 'Request cancelled.' : error instanceof ContextBudgetError ? error.message : 'Request failed.', user_message_kept: userMessageKept });
       return { requestId, sessionId: session.id, state: session.state, error: cancelled ? 'cancelled' : (error.code ?? 'request_failed') };
     } finally { signal?.removeEventListener('abort', relayAbort); if (this.active?.requestId === requestId) this.active = null; }
   }

@@ -26,7 +26,9 @@ test('workspace policy rejects traversal, ADS, reserved names, absolute paths, a
 test('workspace config supports explicit read/write policy', () => {
   const config = mergeConfig({ workspace_roots: [{ id: 'project', path: '/tmp/project', read: true, write: false }] }); assert.equal(config.workspace_roots[0].write, false);
   assert.throws(() => mergeConfig({ workspace_roots: [{ id: 'project', path: '/tmp/project', extra: true }] }), /workspace_roots invalid/);
-  assert.deepEqual(mergeConfig({ applications: { teams: { executable_id: 'teams', executable: 'ms-teams.exe', args: [] } } }).applications.teams.args, []);
+  // Absolute path: a bare `ms-teams.exe` is now refused (CreateProcess would search the current directory first).
+  assert.deepEqual(mergeConfig({ applications: { teams: { executable_id: 'teams', executable: 'C:\\Program Files\\Teams\\ms-teams.exe', args: [] } } }).applications.teams.args, []);
+  assert.throws(() => mergeConfig({ applications: { teams: { executable_id: 'teams', executable: 'ms-teams.exe', args: [] } } }), /absolute local path/);
   for (const applications of [{ bad: { executable: 'x', args: 'no' } }, { bad: { executable: 'x\nattack', args: [] } }, { bad: { executable: 'x', args: ['ok\nattack'] } }, { '../bad': { executable: 'x', args: [] } }]) assert.throws(() => mergeConfig({ applications }), /applications/);
 });
 

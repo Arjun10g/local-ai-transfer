@@ -5,7 +5,7 @@
   "post_content_type": "application/json[;charset=utf-8]",
   "exact_bodies": {
     "sessions": {"allowed": ["session_id", "reset"], "required": []},
-    "chat": {"allowed": ["session_id", "request_id", "message", "mode"], "required": ["session_id", "request_id", "message"]},
+    "chat": {"allowed": ["session_id", "request_id", "message", "mode", "tools"], "required": ["session_id", "request_id", "message"]},
     "cancel": {"allowed": ["request_id"], "required": ["request_id"]},
     "tool_confirmation": {"allowed": ["approved", "request_id", "call_id"], "required": ["approved", "request_id", "call_id"]},
     "operator_grant": {"allowed": ["granted", "duration_ms"], "required": ["granted"], "minimum_duration_ms": 60000, "maximum_duration_ms": 28800000},

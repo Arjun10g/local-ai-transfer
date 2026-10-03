@@ -1,15 +1,37 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Local Assistant</title><link rel="stylesheet" href="/styles.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BMO — Local Assistant</title><link rel="stylesheet" href="/styles.css"></head>
 <body>
   <main class="shell" aria-labelledby="title">
-    <header><div><p class="eyebrow">LOCAL ASSISTANT ENGINE</p><h1 id="title">BMO</h1><p id="status" role="status">Connecting to local host…</p></div><div class="controls"><button id="normal" aria-pressed="true">Normal</button><button id="deep" aria-pressed="false">Deep</button><button id="reset">Reset</button><button id="stop">Stop</button></div></header>
-    <section class="status-grid" aria-label="Runtime status"><div><span>Engine</span><strong id="engine">fixture</strong></div><div><span>Backend</span><strong id="backend">CPU/fixture</strong></div><div><span>Network</span><strong id="network">disabled</strong></div></section>
-    <section class="access-panel" aria-labelledby="access-title"><div><h2 id="access-title">Delegated access</h2><p>Grant one-hour access only to the capability you select. Stop remains immediate; external sends and other high-impact actions still ask every time.</p><button id="graph-auth" type="button">Connect Outlook / Teams</button> <button id="graph-auth-cancel" type="button">Cancel</button> <button id="graph-auth-clear" type="button">Disconnect / clear</button><p id="graph-auth-status" role="status">Not connected</p></div><button id="revoke-all" class="danger" type="button">Stop &amp; revoke all</button><div id="grant-list" class="grant-list"><p>No grantable capabilities are configured.</p></div></section>
-    <section id="transcript" class="transcript" aria-live="polite"></section>
-    <form id="chat"><label for="message">Message</label><textarea id="message" maxlength="32768" rows="3" placeholder="Ask the local assistant…" required></textarea><button type="submit">Send</button></form>
-    <p class="notice">Core inference is local. Configured Outlook, Teams, browser, and Copilot tools may use their named external services and disclose destination before sensitive actions.</p>
+    <header>
+      <div>
+        <p class="eyebrow">LOCAL ASSISTANT ENGINE</p>
+        <h1 id="title">BMO <span id="health" class="badge" data-state="connecting">Connecting…</span></h1>
+        <p id="status" role="status">Connecting to local host…</p>
+      </div>
+      <div class="controls">
+        <!-- Deep mode is parked: it enables thinking inside a 256-token budget. Shown only when localStorage "bmo.ui.show_deep" is "1". -->
+        <button id="normal" type="button" aria-pressed="true" hidden>Normal</button><button id="deep" type="button" aria-pressed="false" hidden>Deep</button>
+        <button id="tools" type="button" aria-pressed="true" title="When off, BMO answers from the model alone and cannot use tools (faster, and nothing can run)">Tools on</button>
+        <button id="export" type="button" title="Download this conversation as a Markdown file">Export</button>
+        <button id="reset" type="button" title="Start a new conversation">Reset</button>
+      </div>
+    </header>
+    <section class="status-grid" aria-label="Runtime status"><div><span>Engine</span><strong id="engine">…</strong></div><div><span>Backend</span><strong id="backend">…</strong></div><div><span>Network</span><strong id="network">…</strong></div><div><span>Actions</span><strong id="actions">…</strong></div></section>
+    <!-- Parked integrations: hidden unless /api/status reports a configured provider or grantable capability. -->
+    <section id="access-panel" class="access-panel" aria-labelledby="access-title" hidden><div><h2 id="access-title">Delegated access</h2><p>Grant one-hour access only to the capability you select. Stop remains immediate; external sends and other high-impact actions still ask every time.</p><div id="graph-controls" hidden><button id="graph-auth" type="button">Connect Outlook / Teams</button> <button id="graph-auth-cancel" type="button">Cancel</button> <button id="graph-auth-clear" type="button">Disconnect / clear</button><p id="graph-auth-status" role="status">Not connected</p></div></div><button id="revoke-all" class="danger" type="button">Stop &amp; revoke all</button><div id="grant-list" class="grant-list"><p>No grantable capabilities are configured.</p></div></section>
+    <section id="transcript" class="transcript" aria-live="polite" aria-label="Conversation"></section>
+    <div id="activity" class="activity" hidden>
+      <span class="spinner" aria-hidden="true"></span>
+      <span id="activity-text" role="status">Working…</span>
+      <span id="activity-elapsed" class="elapsed" aria-hidden="true"></span>
+      <button id="stop" type="button">Stop</button>
+      <p id="activity-hint" class="hint" hidden>Still working. This laptop is slow on long prompts, so the first words can take a few minutes. You can press Stop at any time.</p>
+    </div>
+    <form id="chat"><label for="message">Message</label><textarea id="message" maxlength="32768" rows="3" placeholder="Ask BMO… (Enter to send, Shift+Enter for a new line)" required></textarea><button id="send" type="submit">Send</button></form>
+    <p id="notice" class="notice">Answers are generated on this laptop. The conversation is kept only in this tab: it survives a reload but not closing the tab, and nothing is saved to this computer unless you use Export.</p>
+    <p id="external-notice" class="notice" hidden>Configured Outlook, Teams, browser, and Copilot tools may use their named external services and disclose destination before sensitive actions.</p>
   </main>
-  <script src="/app.js" defer></script>
+  <script type="module" src="/app.js"></script>
 </body>
 </html>

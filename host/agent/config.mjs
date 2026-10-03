@@ -2,7 +2,20 @@ export const CONFIG_VERSION = '0.1.0';
 const PROVIDERS = ['disabled', 'approved_http_search', 'approved_http_fetch', 'browser_open'];
 const MODES = ['fixture', 'native'];
 const own = (o, key) => Object.prototype.hasOwnProperty.call(o, key);
+// [config key, min, max, environment override] for NativeEngineClient's
+// generation options; the ranges are the client's own validation ranges.
+export const ENGINE_GENERATION_LIMITS = Object.freeze([
+  ['first_token_timeout_ms', 1000, 3600000, 'LAE_ENGINE_FIRST_TOKEN_TIMEOUT_MS'],
+  ['idle_timeout_ms', 1000, 1800000, 'LAE_ENGINE_IDLE_TIMEOUT_MS'],
+  ['total_timeout_ms', 1000, 7200000, 'LAE_ENGINE_TOTAL_TIMEOUT_MS'],
+  ['max_tokens', 1, 2048, 'LAE_ENGINE_MAX_TOKENS'],
+]);
 function object(value, name) { if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${name} must be an object`); return value; }
+// An application is launched by absolute local path only.  A bare name such
+// as `ms-teams.exe` would be resolved by CreateProcess, which searches the
+// current directory before PATH, so a binary planted there would run instead.
+// UNC and `//` paths are refused because they reach the network.
+const absoluteLocalExecutable = value => typeof value === 'string' && value.length >= 2 && value.length <= 1024 && !/[\u0000-\u001f\u007f]/u.test(value) && (/^\/(?!\/)/u.test(value) || /^[A-Za-z]:[\\/]/u.test(value));
 function keys(value, allowed, name) { for (const key of Object.keys(value)) if (!allowed.includes(key)) throw new Error(`${name} has unknown key: ${key}`); }
 
 export function validateConfig(input = {}) {
@@ -10,21 +23,28 @@ export function validateConfig(input = {}) {
   keys(input, ['version', 'host', 'engine', 'workspace_roots', 'applications', 'process_actions', 'network', 'providers'], 'config');
   if (own(input, 'version') && input.version !== CONFIG_VERSION) throw new Error('unsupported config version');
   if (own(input, 'host')) {
-    const h = object(input.host, 'host'); keys(h, ['bind', 'max_body_bytes', 'request_timeout_ms', 'max_connections', 'max_header_bytes', 'max_header_count'], 'host');
+    const h = object(input.host, 'host'); keys(h, ['bind', 'max_body_bytes', 'request_timeout_ms', 'max_connections', 'max_header_bytes', 'max_header_count', 'confirmation_timeout_ms'], 'host');
     if (own(h, 'bind') && h.bind !== '127.0.0.1') throw new Error('host.bind must be 127.0.0.1');
     if (own(h, 'max_body_bytes') && (!Number.isInteger(h.max_body_bytes) || h.max_body_bytes < 1024 || h.max_body_bytes > 1048576)) throw new Error('host.max_body_bytes out of range');
     if (own(h, 'request_timeout_ms') && (!Number.isInteger(h.request_timeout_ms) || h.request_timeout_ms < 100 || h.request_timeout_ms > 120000)) throw new Error('host.request_timeout_ms out of range');
     if (own(h, 'max_connections') && (!Number.isInteger(h.max_connections) || h.max_connections < 1 || h.max_connections > 256)) throw new Error('host.max_connections out of range');
     if (own(h, 'max_header_bytes') && (!Number.isInteger(h.max_header_bytes) || h.max_header_bytes < 1024 || h.max_header_bytes > 65536)) throw new Error('host.max_header_bytes out of range');
     if (own(h, 'max_header_count') && (!Number.isInteger(h.max_header_count) || h.max_header_count < 8 || h.max_header_count > 256)) throw new Error('host.max_header_count out of range');
+    // How long a tool confirmation card waits for the user. Long enough to
+    // narrate a demo; bounded so an abandoned card cannot hold the single
+    // generation slot indefinitely.
+    if (own(h, 'confirmation_timeout_ms') && (!Number.isInteger(h.confirmation_timeout_ms) || h.confirmation_timeout_ms < 5000 || h.confirmation_timeout_ms > 600000)) throw new Error('host.confirmation_timeout_ms out of range');
   }
   if (own(input, 'engine')) {
-    const e = object(input.engine, 'engine'); keys(e, ['mode', 'endpoint', 'model', 'backend', 'request_timeout_ms'], 'engine');
+    const e = object(input.engine, 'engine'); keys(e, ['mode', 'endpoint', 'model', 'backend', 'request_timeout_ms', 'first_token_timeout_ms', 'idle_timeout_ms', 'total_timeout_ms', 'max_tokens'], 'engine');
     if (own(e, 'mode') && !MODES.includes(e.mode)) throw new Error('engine.mode unsupported');
     if (own(e, 'endpoint') && (typeof e.endpoint !== 'string' || e.endpoint.length > 512)) throw new Error('engine.endpoint invalid');
     if (own(e, 'model') && (typeof e.model !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(e.model))) throw new Error('engine.model invalid');
     if (own(e, 'backend') && (typeof e.backend !== 'string' || !/^[A-Za-z0-9._/-]{1,128}$/.test(e.backend))) throw new Error('engine.backend invalid');
     if (own(e, 'request_timeout_ms') && (!Number.isInteger(e.request_timeout_ms) || e.request_timeout_ms < 1000 || e.request_timeout_ms > 120000)) throw new Error('engine.request_timeout_ms out of range');
+    // Generation deadlines and the answer cap, with the native engine client's
+    // own bounds (a CPU prefill can take many minutes before the first token).
+    for (const [key, min, max] of ENGINE_GENERATION_LIMITS) if (own(e, key) && (!Number.isInteger(e[key]) || e[key] < min || e[key] > max)) throw new Error(`engine.${key} out of range`);
   }
   if (own(input, 'workspace_roots')) {
     if (!Array.isArray(input.workspace_roots) || input.workspace_roots.length > 16 || input.workspace_roots.some(x => (typeof x === 'string' && (x.length < 1 || x.length > 1024)) || (x && typeof x === 'object' && !Array.isArray(x) && (Object.keys(x).some(key => !['id', 'path', 'read', 'write'].includes(key)) || typeof x.id !== 'string' || x.id.length < 1 || x.id.length > 64 || typeof x.path !== 'string' || x.path.length < 1 || x.path.length > 1024 || (x.read !== undefined && typeof x.read !== 'boolean') || (x.write !== undefined && typeof x.write !== 'boolean'))) || (typeof x !== 'string' && (!x || typeof x !== 'object' || Array.isArray(x))))) throw new Error('workspace_roots invalid');
@@ -36,6 +56,7 @@ export function validateConfig(input = {}) {
       const app = object(value, `applications.${id}`); keys(app, ['executable_id', 'executable', 'args'], `applications.${id}`);
       if (own(app, 'executable_id') && (typeof app.executable_id !== 'string' || !/^[A-Za-z0-9_.-]{1,64}$/.test(app.executable_id))) throw new Error(`applications.${id}.executable_id invalid`);
       if (typeof app.executable !== 'string' || app.executable.length < 1 || app.executable.length > 1024 || /[\u0000-\u001f\u007f]/u.test(app.executable)) throw new Error(`applications.${id}.executable invalid`);
+      if (!absoluteLocalExecutable(app.executable)) throw new Error(`applications.${id}.executable must be an absolute local path (C:\\...\\app.exe or /path/to/app); bare names and UNC paths are refused`);
       if (!Array.isArray(app.args) || app.args.length > 16 || app.args.some(arg => typeof arg !== 'string' || arg.length > 1024 || /[\u0000\r\n\u007f]/u.test(arg))) throw new Error(`applications.${id}.args invalid`);
     }
   }
@@ -61,6 +82,6 @@ export function validateConfig(input = {}) {
   return structuredClone(input);
 }
 
-export const DEFAULT_CONFIG = Object.freeze({ version: CONFIG_VERSION, host: { bind: '127.0.0.1', max_body_bytes: 65536, request_timeout_ms: 30000, max_connections: 32, max_header_bytes: 16384, max_header_count: 64 }, engine: { mode: 'fixture' }, workspace_roots: [], applications: {}, process_actions: { enabled: false, actions: {} }, network: { provider: 'disabled' }, providers: {} });
+export const DEFAULT_CONFIG = Object.freeze({ version: CONFIG_VERSION, host: { bind: '127.0.0.1', max_body_bytes: 65536, request_timeout_ms: 30000, max_connections: 32, max_header_bytes: 16384, max_header_count: 64, confirmation_timeout_ms: 120000 }, engine: { mode: 'fixture' }, workspace_roots: [], applications: {}, process_actions: { enabled: false, actions: {} }, network: { provider: 'disabled' }, providers: {} });
 
 export function mergeConfig(input = {}) { const checked = validateConfig(input); return validateConfig({ ...DEFAULT_CONFIG, ...checked, host: { ...DEFAULT_CONFIG.host, ...(checked.host ?? {}) }, engine: { ...DEFAULT_CONFIG.engine, ...(checked.engine ?? {}) }, applications: { ...DEFAULT_CONFIG.applications, ...(checked.applications ?? {}) }, process_actions: { ...DEFAULT_CONFIG.process_actions, ...(checked.process_actions ?? {}), actions: { ...DEFAULT_CONFIG.process_actions.actions, ...(checked.process_actions?.actions ?? {}) } }, network: { ...DEFAULT_CONFIG.network, ...(checked.network ?? {}) }, providers: { ...DEFAULT_CONFIG.providers, ...(checked.providers ?? {}) } }); }
