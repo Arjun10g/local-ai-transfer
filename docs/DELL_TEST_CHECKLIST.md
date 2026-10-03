@@ -58,6 +58,8 @@ Recall memory is **on by default** (`memory.mode: "recall"`: no extra engine cal
 | D5 | Time cost of recall | turn latency with and without a recall block (it adds ≤ ~300 prompt tokens, no extra call) | |
 | D6 | `memory.mode: "summary"`: how long does ONE note take on this CPU | A100: ~4 s. Estimate here: **minutes**. If > 5 min the note is not worth turning on by default | |
 | D7 | Prefix reuse still works after a recall block | `/stats` on the turn after one | |
+| D8 | Ask about a fact using words that share only the project name ("what did that billing file come to?") | the block still contains it (offline: yes at 200-800 turns; real model with this wording is NOT yet measured, arm `recall_gap`) | |
+| D9 | Ask a list question over many facts ("every on-call engineer I told you about") | up to 12 lines come back; with more than 12 facts of that kind some are missing: a stated limit | |
 
 ## E. Web UI and safety on Windows
 
