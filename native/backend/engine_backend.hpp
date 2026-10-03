@@ -20,6 +20,15 @@ struct BackendConfig {
   unsigned gpu_layers = 20;
   // CPU threads for prefill and generation; 0 means every logical thread.
   unsigned threads = 0;
+  // CPU threads for prompt processing only; 0 means "same as `threads`".
+  // Prompt processing is compute-bound and can use more cores than generation,
+  // which is memory-bandwidth-bound and is often fastest on fewer.
+  unsigned threads_batch = 0;
+  // Draft-free (n-gram) speculative decoding: how many tokens may be drafted
+  // and verified per forward pass. 0 disables it, which is the default and
+  // leaves the generation path unchanged. It also sizes the recurrent-state
+  // rollback (`n_rs_seq`) the hybrid model needs to discard a rejected draft.
+  unsigned speculate_tokens = 0;
   std::string vulkan_device_name;
   std::string cuda_device_name;
   std::shared_ptr<ModelValidationLease> model_lease;
@@ -45,12 +54,19 @@ struct GenerationRequest {
   std::vector<ToolDefinition> tools;
   unsigned max_tokens = 8;
   bool enable_thinking = false;
+  // Scopes reuse of an already-computed prompt prefix to one conversation.
+  // Reuse is sound regardless of this value -- it only ever skips work for an
+  // exact token-prefix match -- but keying it makes the behaviour auditable
+  // and keeps unrelated conversations from extending each other's state.
+  std::string cache_key;
 };
 
 struct GenerationResult {
   std::string finish_reason;
   unsigned generated_tokens = 0;
   unsigned prompt_tokens = 0;
+  // Prompt tokens served from the retained context instead of recomputed.
+  unsigned reused_prefix_tokens = 0;
 };
 
 using Cancellation = std::shared_ptr<std::atomic<bool>>;
@@ -69,6 +85,9 @@ class EngineBackend {
                                     const Cancellation& cancellation,
                                     const TokenSink& sink) = 0;
   virtual void reset() = 0;
+  // Drop any context retained for `key` (a deleted session's conversation).
+  // Backends that retain nothing keep the default.
+  virtual void forget(const std::string& /*key*/) {}
   virtual void shutdown() = 0;
 };
 

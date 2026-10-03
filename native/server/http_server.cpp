@@ -406,7 +406,7 @@ void HttpServer::handle(Socket client) {
     respond(client, 200, "application/json", engine_.metrics_json(), request_id);
   } else if (method == "POST" && path == "/v1/sessions") {
     try { const auto session = engine_.create_session(); respond(client, 201, "application/json", "{\"id\":\"" + session.id + "\",\"object\":\"session\",\"state_version\":1}", request_id); }
-    catch (...) { fail(503, "not_ready"); }
+    catch (...) { if (engine_.state() == LifecycleState::BUSY) fail(409, "busy"); else fail(503, "not_ready"); }
   } else if (method == "DELETE" && path.rfind("/v1/sessions/", 0) == 0) {
     const std::string id = path.substr(std::string("/v1/sessions/").size());
     if (!valid_path_id(id)) fail(400, "invalid_session_id");
@@ -430,6 +430,9 @@ void HttpServer::handle(Socket client) {
     std::string combined;
     if (stream) {
       std::ostringstream head; head << "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache, no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\nX-Request-Id: " << request_id << "\r\n\r\n";
+      // The head below carries the request id a client cancels by; make that id
+      // cancellable before it is visible, not only once generation starts.
+      engine_.announce(request_id, cancellation);
       if (!send_all(client, head.str())) { cancellation->store(true); close_socket(client); return; }
       size_t sse_bytes = head.str().size(); size_t sse_events = 0;
       bool stream_bound_exceeded = false;
@@ -449,7 +452,10 @@ void HttpServer::handle(Socket client) {
         if (stream_bound_exceeded) {
           send_all(client, "data: {\"error\":{\"code\":\"response_too_large\"}}\n\ndata: [DONE]\n\n");
         } else {
-          const std::string tail = "data: {\"id\":\"" + json_escape(request_id) + "\",\"choices\":[{\"delta\":{},\"finish_reason\":\"" + json_escape(result.finish_reason) + "\"}]}\n\ndata: [DONE]\n\n";
+          // The streamed answer carries usage on its final frame, as the non-streaming one
+          // does, so a client can learn the real tokens-per-character ratio of its
+          // prompts (the host's context budgeting estimates, and tightens on evidence).
+          const std::string tail = "data: {\"id\":\"" + json_escape(request_id) + "\",\"choices\":[{\"delta\":{},\"finish_reason\":\"" + json_escape(result.finish_reason) + "\"}],\"usage\":{\"prompt_tokens\":" + std::to_string(result.prompt_tokens) + ",\"completion_tokens\":" + std::to_string(result.generated_tokens) + "}}\n\ndata: [DONE]\n\n";
           if (tail.size() > kMaxSseLine || sse_events + 2 > kMaxSseEvents || sse_bytes > kMaxSseBytes - tail.size())
             send_all(client, "data: {\"error\":{\"code\":\"response_too_large\"}}\n\ndata: [DONE]\n\n");
           else send_all(client, tail);

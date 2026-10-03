@@ -21,6 +21,7 @@ constexpr size_t kMaxMessageFields = 8;
 // generic 64-element array limit, so an oversized tool list is refused by the
 // tool-specific rule rather than the generic one.
 constexpr size_t kMaxTools = 48;
+constexpr double kMaxOutputTokens = 2048;
 
 struct JsonValue {
   enum class Type { Null, Bool, Number, String, Array, Object } type = Type::Null;
@@ -271,7 +272,11 @@ bool parse_chat_request(const std::string& body, ChatRequest& request, std::stri
       request.stream = stream->boolean;
     } else request.stream = false;
     if (const JsonValue* max_tokens = field(root, "max_tokens")) {
-      if (!is_type(max_tokens, JsonValue::Type::Number) || max_tokens->number < 1 || max_tokens->number > 256) throw ParseFailure("max_tokens out of range", false);
+      // A chat answer needs room beyond a few paragraphs. This is only the
+      // per-request ceiling: generation still refuses a prompt whose tokens
+      // plus max_tokens exceed the context (context_budget_fits), and 2,048
+      // frames stays under the stream's kMaxSseEvents bound.
+      if (!is_type(max_tokens, JsonValue::Type::Number) || max_tokens->number < 1 || max_tokens->number > kMaxOutputTokens) throw ParseFailure("max_tokens out of range", false);
       request.generation.max_tokens = static_cast<unsigned>(max_tokens->number);
     } else request.generation.max_tokens = 8;
     if (const JsonValue* mode = field(root, "mode")) {
