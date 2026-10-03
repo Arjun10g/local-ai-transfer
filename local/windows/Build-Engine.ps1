@@ -29,6 +29,12 @@ $ErrorActionPreference = 'Stop'
 
 $Repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 if (-not $BuildDir) { $BuildDir = Join-Path $Repo "build-windows-$Backend" }
+# MSBuild still hits Windows' 260-character path limit deep inside the vendored
+# llama.cpp tree (the Vulkan shader generator nests several folders down), and
+# the error it gives names a missing file, not the real cause.
+if ($BuildDir.Length -gt 80) {
+    Write-Warning "The build folder path is $($BuildDir.Length) characters long. If the build fails with a missing file or 'path too long', clone the repository to a short folder such as C:\bmo and build there."
+}
 
 function Require-Command([string] $Name, [string] $Hint) {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {

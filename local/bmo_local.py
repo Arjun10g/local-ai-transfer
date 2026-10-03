@@ -18,8 +18,22 @@ Commands
           `--cases id,id` scores only those cases; `--show-output` also prints
           the model's raw output to this console. Raw output is never written
           to the receipt, so `prompt_response_logging` stays false.
+  bench   measure this machine: how fast the engine reads a prompt, how fast
+          it writes tokens, and how much a second turn saves by reusing the
+          prompt prefix the context already holds.
+  longctx measure whether long conversations hold up: at growing prompt
+          sizes, does the model still recall planted facts, use an old tool
+          result, emit a correct tool call, and how does latency grow.
+          Exact-match graded; see scripts/test/long_context_eval.py.
   serve   start the engine and keep it running until Ctrl+C, printing the
-          endpoint and token so another program on this machine can use it.
+          endpoint. The bearer token is printed only with `--print-token`:
+          a console is often recorded or shared, and nothing else here
+          ever shows the token.
+  preflight  before a demo: check Python, Node, the engine, the model, disk,
+          memory and power, then start the engine and the web UI host once
+          and check every endpoint they rely on. One PASS/WARN/FAIL line
+          per check, a fix for each problem; exits 1 on any FAIL. See
+          `local/bmo_preflight.py`.
 """
 
 from __future__ import annotations
@@ -40,6 +54,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from scripts.test import evaluate_tool_calls as ev  # noqa: E402
+from scripts.test import long_context_eval as lce  # noqa: E402
 
 DEFAULT_FIXTURE = ROOT / "tests" / "model" / "production_tool_call_eval.json"
 MODEL_SHA256 = "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b"
@@ -54,10 +69,16 @@ def _utc() -> str:
 
 
 class Engine:
-    """A running `lae-engine serve`, token on stdin, logs to a file."""
+    """A running `lae-engine serve`, token on stdin, logs to a file.
 
-    def __init__(self, args: argparse.Namespace):
+    `popen_kwargs` are extra `subprocess.Popen` options for the engine process,
+    e.g. `bmo_chat` starts it outside the terminal's Ctrl+C group. The pipes
+    and the log are this class's to set, so those keys cannot be overridden.
+    """
+
+    def __init__(self, args: argparse.Namespace, popen_kwargs: dict | None = None):
         self.args = args
+        self.popen_kwargs = dict(popen_kwargs or {})
         self.token = secrets.token_urlsafe(32)
         self.log_path = Path(args.log).resolve()
         self.proc: subprocess.Popen | None = None
@@ -85,18 +106,50 @@ class Engine:
             cmd += ["--gpu-layers", str(self.args.gpu_layers)]
         if self.args.threads is not None:
             cmd += ["--threads", str(self.args.threads)]
+        if self.args.threads_batch is not None:
+            cmd += ["--threads-batch", str(self.args.threads_batch)]
+        if self.args.speculate:
+            cmd += ["--speculate", str(self.args.speculate)]
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         t0 = time.monotonic()
         # stderr goes to a file so a chatty backend can never fill a pipe and
         # deadlock the engine. The engine keeps its own inherited handle.
         with open(self.log_path, "wb") as log:
-            self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log)
-        self.proc.stdin.write(self.token.encode())
-        self.proc.stdin.close()  # the engine reads the token to EOF
+            try:
+                self.proc = subprocess.Popen(cmd, **{**self.popen_kwargs, "stdin": subprocess.PIPE,
+                                                      "stdout": subprocess.PIPE, "stderr": log})
+            except OSError as exc:
+                # On Windows this is typically antivirus: Defender quarantined
+                # the freshly copied exe (it vanished between the check above
+                # and here) or holds it open while it scans it.
+                sys.exit(f"could not start the engine {engine}: {exc}\n"
+                         "If Windows Security quarantined or is scanning lae-engine.exe, restore or allow it "
+                         "(Windows Security > Protection history), wait a minute and retry.")
+        try:
+            self._await_ready(t0)
+        except BaseException:
+            # Loading the model takes a minute or more, and this runs before
+            # `with Engine(...)` has entered its block, so __exit__ would never
+            # stop the engine: a Ctrl+C here (or any failure) must, or the
+            # engine stays behind holding ~6 GB with nobody to talk to it.
+            self.stop()
+            raise
+        return self
+
+    def _await_ready(self, t0: float) -> None:
+        try:
+            self.proc.stdin.write(self.token.encode())
+            self.proc.stdin.close()  # the engine reads the token to EOF
+        except OSError:
+            pass  # it exited already; the missing ready line below reports how
         line: list[bytes] = []
         reader = threading.Thread(target=lambda: line.append(self.proc.stdout.readline()), daemon=True)
         reader.start()
-        reader.join(self.args.ready_timeout)
+        # Short joins, not one long one: on Windows a long blocking wait is not
+        # interrupted by Ctrl+C, so the operator could not abort a slow load.
+        deadline = time.monotonic() + self.args.ready_timeout
+        while reader.is_alive() and time.monotonic() < deadline:
+            reader.join(min(0.25, max(0.0, deadline - time.monotonic())))
         if not line or not line[0]:
             code = self.proc.poll()
             self.stop()
@@ -109,7 +162,6 @@ class Engine:
             self.stop()
             sys.exit(f"unexpected engine ready line: {line[0][:200]!r}")
         self.ready_seconds = round(time.monotonic() - t0, 1)
-        return self
 
     @property
     def base(self) -> str:
@@ -132,6 +184,10 @@ class Engine:
                 self.proc.wait(timeout=20)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+            except KeyboardInterrupt:
+                # An impatient second Ctrl+C must not leave the engine behind.
+                self.proc.kill()
+                raise
 
     def __enter__(self):
         return self.start()
@@ -230,10 +286,131 @@ def cmd_eval(args: argparse.Namespace) -> int:
     return 0
 
 
+FILLER = "The quick brown fox jumps over the lazy dog. "
+
+
+def _chat(eng: "Engine", session: str, messages: list[dict], max_tokens: int,
+          timeout: float) -> tuple[str, int, int, float]:
+    """One non-streaming completion. Returns reply, prompt/completion tokens, seconds."""
+    body = json.dumps({"model": "qwen35-9b-q4-k-m", "stream": False, "max_tokens": max_tokens,
+                       "mode": "normal", "session_id": session, "messages": messages}).encode()
+    req = urllib.request.Request(f"{eng.base}/v1/chat/completions", data=body, method="POST")
+    req.add_header("Authorization", f"Bearer {eng.token}")
+    req.add_header("Content-Type", "application/json")
+    t0 = time.monotonic()
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        payload = json.loads(resp.read())
+    seconds = time.monotonic() - t0
+    usage = payload.get("usage", {})
+    return (payload["choices"][0]["message"]["content"], int(usage.get("prompt_tokens", 0)),
+            int(usage.get("completion_tokens", 0)), seconds)
+
+
+def _new_session(eng: "Engine") -> str:
+    req = urllib.request.Request(f"{eng.base}/v1/sessions", data=b"{}", method="POST")
+    req.add_header("Authorization", f"Bearer {eng.token}")
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read())["id"]
+
+
+def cmd_bench(args: argparse.Namespace) -> int:
+    receipt = {"schema": "local_bmo.local-bench.v1", "started_at_utc": _utc(), "host": _host(),
+               "backend": args.backend, "context": args.context, "threads": args.threads,
+               "prompt_response_logging": False}
+    with Engine(args) as eng:
+        receipt["model_load_seconds"] = eng.ready_seconds
+        _, build = eng.get("/build-info")
+        receipt["build_info"] = {k: build.get(k) for k in ("backend", "engine_version", "llama_cpp_revision")}
+
+        # Writing speed: a short prompt, so the time is almost all generation.
+        short = [{"role": "user", "content": "Count from one to twenty in words."}]
+        session = _new_session(eng)
+        _, p_tok, c_tok, secs = _chat(eng, session, short, args.generate_tokens, args.timeout)
+        receipt["decode"] = {"prompt_tokens": p_tok, "generated_tokens": c_tok,
+                             "seconds": round(secs, 1),
+                             "tokens_per_second": round(c_tok / secs, 2) if secs > 0 else None}
+
+        # Reading speed: a long prompt, one token out, so the time is almost
+        # all prompt processing.
+        filler = FILLER * max(1, args.prefill_tokens // 10)
+        long_turn = [{"role": "user", "content": filler + "Reply with the single word: ok"}]
+        cold_session = _new_session(eng)
+        # Keep the model's REAL reply: the follow-ups below must contain exactly
+        # what it generated, or the retained prompt is not a prefix of them and
+        # reuse silently reads as "not working".
+        reply_long, p_long, c_long, secs_long = _chat(eng, cold_session, long_turn, 1, args.timeout)
+        receipt["prefill"] = {"prompt_tokens": p_long, "seconds": round(secs_long, 1),
+                              "tokens_per_second": round(p_long / secs_long, 2) if secs_long > 0 else None}
+
+        # Reuse, measured in the two situations a conversation produces.
+        #
+        # 1. A tool-call continuation extends the prompt the context already holds,
+        #    so the live context serves it.
+        # 2. A NEW user turn does not: the chat template re-renders the earlier
+        #    assistant message without its <think> scaffold, so the live context
+        #    no longer agrees with the prompt. The engine instead restores a
+        #    snapshot it took at the end of the previous user message.
+        # The new-turn request must come straight after the continuation on the
+        # SAME session; any request on another session in between would take the
+        # engine's one live context and the snapshot's key would no longer match.
+        tool_continuation = long_turn + [
+            {"role": "assistant", "content": reply_long},
+            {"role": "tool", "name": "time.now", "tool_call_id": "call-1",
+             "content": '{"utc":"2026-10-02T00:00:00Z"}'}]
+        _, _, _, secs_warm = _chat(eng, cold_session, tool_continuation, 1, args.timeout)
+        warm = eng.get("/metrics")[1].get("runtime", {})
+
+        new_turn = long_turn + [{"role": "assistant", "content": reply_long},
+                                {"role": "user", "content": "Reply with the single word: again"}]
+        _, p_turn, _, secs_turn = _chat(eng, cold_session, new_turn, 1, args.timeout)
+        turn_metrics = eng.get("/metrics")[1].get("runtime", {})
+
+        # The same two prompts with nothing to reuse, for the comparison.
+        _, _, _, secs_fresh = _chat(eng, _new_session(eng), tool_continuation, 1, args.timeout)
+        _, _, _, secs_turn_cold = _chat(eng, _new_session(eng), new_turn, 1, args.timeout)
+
+        receipt["prefix_reuse"] = {
+            "tool_continuation_seconds": round(secs_warm, 1),
+            "same_prompt_without_reuse_seconds": round(secs_fresh, 1),
+            "speedup": round(secs_fresh / secs_warm, 2) if secs_warm > 0 else None,
+            "reused_prefix_tokens": warm.get("last_reused_prefix_tokens"),
+        }
+        receipt["new_user_turn"] = {
+            "prompt_tokens": p_turn,
+            "seconds": round(secs_turn, 1),
+            "same_prompt_without_snapshot_seconds": round(secs_turn_cold, 1),
+            "speedup": round(secs_turn_cold / secs_turn, 2) if secs_turn > 0 else None,
+            "reused_prefix_tokens": turn_metrics.get("last_reused_prefix_tokens"),
+            "restored_snapshot_tokens": turn_metrics.get("last_restored_snapshot_tokens"),
+            "note": "restored_snapshot_tokens of 0 means the engine re-read the whole history for a new user turn",
+        }
+        receipt["runtime"] = eng.get("/metrics")[1].get("runtime", {})
+    _write(receipt, args.out)
+    return 0
+
+
+def cmd_longctx(args: argparse.Namespace) -> int:
+    receipt = {"started_at_utc": _utc(), "host": _host(), "backend": args.backend, "context": args.context,
+               "threads": args.threads, "engine_launched_by_tool": True}
+    with Engine(args) as eng:
+        receipt["model_load_seconds"] = eng.ready_seconds
+        # The evaluator saves the receipt after every cell, so a run cut short
+        # on a slow laptop keeps what it measured and `--resume` continues it.
+        lce.run_eval(lce.EngineClient(eng.base, eng.token, args.timeout), args, receipt)
+    _write(receipt, args.out)
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     with Engine(args) as eng:
-        print(json.dumps({"endpoint": f"{eng.base}/v1/chat/completions", "token": eng.token,
-                          "model_load_seconds": eng.ready_seconds}, indent=2))
+        info = {"endpoint": f"{eng.base}/v1/chat/completions", "model_load_seconds": eng.ready_seconds}
+        if args.print_token:
+            info["token"] = eng.token
+        else:
+            info["note"] = ("the bearer token is not printed; rerun with --print-token if another "
+                            "program on this machine needs it")
+        print(json.dumps(info, indent=2))
         print("engine running; Ctrl+C to stop", file=sys.stderr)
         try:
             while eng.proc.poll() is None:
@@ -243,10 +420,32 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_preflight(args: argparse.Namespace) -> int:
+    # Imported here: bmo_preflight builds on this module.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import bmo_preflight
+    return bmo_preflight.run(args)
+
+
+def console_safe_output() -> None:
+    """A replacement character instead of a crash on an unencodable character.
+
+    A Windows console redirected to a file or a pipe (`| Tee-Object`) encodes
+    with the ANSI code page, which cannot hold most of what a model writes
+    (`--show-output` prints it) or a non-ASCII path in an error message.
+    """
+    for stream in (sys.stdout, sys.stderr, sys.stdin):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="command", required=True)
-    for name, handler in (("smoke", cmd_smoke), ("eval", cmd_eval), ("serve", cmd_serve)):
+    for name, handler in (("smoke", cmd_smoke), ("eval", cmd_eval), ("bench", cmd_bench),
+                          ("longctx", cmd_longctx), ("serve", cmd_serve), ("preflight", cmd_preflight)):
         s = sub.add_parser(name)
         s.set_defaults(handler=handler)
         s.add_argument("--engine", required=True, help="path to lae-engine (lae-engine.exe on Windows)")
@@ -255,24 +454,47 @@ def build_parser() -> argparse.ArgumentParser:
         s.add_argument("--vulkan-device-name")
         s.add_argument("--gpu-layers", type=int, help="intel-vulkan defaults to 99 (the whole model)")
         s.add_argument("--threads", type=int, help="CPU threads (default: every logical thread)")
+        s.add_argument("--threads-batch", type=int, dest="threads_batch",
+                       help="CPU threads for prompt processing only (default: same as --threads)")
+        s.add_argument("--speculate", type=int, default=0,
+                       help="draft-free n-gram speculation: tokens verified per pass, 0-8 (default 0 = off)")
         s.add_argument("--context", type=int, default=8192)
         s.add_argument("--ready-timeout", type=float, default=600)
         s.add_argument("--log", default=str(ROOT / "local" / "out" / f"engine-{name}.log"))
-        if name in ("smoke", "eval"):
+        if name in ("smoke", "eval", "bench", "longctx"):
             s.add_argument("--out", help="write the JSON receipt here")
+        if name == "serve":
+            s.add_argument("--print-token", action="store_true",
+                           help="also print the engine's bearer token (off by default: consoles get shared)")
+        if name == "preflight":
+            s.add_argument("--verify-hash", action="store_true",
+                           help="also check the model's SHA-256 (reads all 5.6 GB, about a minute)")
+            s.add_argument("--node", help="node to check and start the web UI host with (default: node on PATH)")
+            s.add_argument("--chat-budget", type=float, default=300,
+                           help="seconds the one tiny chat reply may take (default 300)")
+        if name == "longctx":
+            # --context above already sets the engine's context; the evaluator
+            # reads the real value back from /metrics.
+            lce.add_eval_arguments(s, include_context=False)
+        if name == "bench":
+            s.add_argument("--prefill-tokens", type=int, default=2000,
+                           help="approximate prompt size for the reading-speed measurement")
+            s.add_argument("--generate-tokens", type=int, default=64)
+            s.add_argument("--timeout", type=float, default=1800)
         if name == "eval":
             s.add_argument("--fixture", default=str(DEFAULT_FIXTURE))
             s.add_argument("--cases", help="comma-separated case ids to score only those")
             s.add_argument("--show-output", action="store_true", help="print raw model output (console only)")
             # Every case sends a ~5,800-token prompt and the engine re-reads all of
             # it each time. A laptop CPU can need several minutes, and a client
-            # that gives up leaves the engine busy (503s until it finishes), so
-            # the wait is generous.
+            # that gives up leaves the engine busy (HTTP 409 `busy` until it
+            # finishes), so the wait is generous.
             s.add_argument("--timeout", type=float, default=1800)
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
+    console_safe_output()
     args = build_parser().parse_args(argv)
     return args.handler(args)
 
