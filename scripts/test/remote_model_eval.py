@@ -39,10 +39,12 @@ TOOL_NAME = re.compile(r"^[a-z][a-z0-9_.-]{1,95}$")
 VARIANT_MEMBERS = ("variants-chunk-1", "variants-chunk-2", "variants-chunk-3")
 ABLATION_MEMBER = "ablation-no-boolean-coercion"
 LONG_CONTEXT_MEMBER = "long-context"
+MEMORY_MEMBER = "memory"
 SUITE_MEMBER_SCHEMAS = {
     **{member: "local_bmo.j1m.variants-eval-receipt.v1" for member in VARIANT_MEMBERS},
     ABLATION_MEMBER: "local_bmo.j1m.scorer-ablation-eval-receipt.v1",
     LONG_CONTEXT_MEMBER: "local_bmo.j1m.long-context-receipt.v1",
+    MEMORY_MEMBER: "local_bmo.j1m.memory-eval-receipt.v1",
 }
 # Recorded in the ablation receipt so a no-coercion score can never be read as
 # the shipping one.
@@ -52,6 +54,8 @@ SUITE_ERROR_CODES = frozenset({
     "long_context_harness_missing", "long_context_harness_failed",
     "long_context_timeout", "long_context_receipt_missing",
     "long_context_receipt_invalid",
+    "memory_harness_missing", "memory_harness_failed", "memory_timeout",
+    "memory_receipt_missing", "memory_receipt_invalid", "memory_prompts_identity_mismatch",
 })
 # The long-context member's whole budget: engine start plus the harness. It is
 # deliberately separate from (and larger than) EVAL_TOTAL_TIMEOUT, which stays
@@ -72,6 +76,36 @@ LONG_CONTEXT_PROFILE = {
     "request_timeout_seconds": 60,
     "stop_after_failures": 40,
 }
+# The memory member (``scripts/test/memory_eval.py`` with the host's shared
+# ``host/agent/memory-prompts.json``). One fixed profile, like long context:
+# six synthetic conversations, all three arms, two summarisation chunks per
+# note, the host's own note/excerpt bounds. 6 x (2 + 8 x 3) = 156 requests, and
+# ``max_requests`` is exactly that, so the harness refuses a larger plan
+# before its first request.
+MEMORY_TOTAL_TIMEOUT = 600.0
+MEMORY_RAW_MAX_BYTES = 4 * 1024 * 1024
+MEMORY_PROMPTS_MAX_BYTES = 64 * 1024
+MEMORY_PROFILE = {
+    "conversations": 6,
+    "arms": ["note", "drop", "full"],
+    "chunks": 2,
+    "dropped_tokens": 2500,
+    "retained_tokens": 1500,
+    "note_tokens": 256,
+    "note_bytes": 1024,
+    "max_input_bytes": 6144,
+    "per_message_bytes": 1536,
+    "max_output": 64,
+    "request_timeout_seconds": 60,
+    "max_requests": 156,
+}
+# Mirrors of scripts/test/memory_eval.py's closed vocabularies; the extended
+# suite tests pin that the two agree.
+MEMORY_FACT_TYPES = ("name", "number", "preference", "decision", "tool_result", "updated")
+MEMORY_PROBES = MEMORY_FACT_TYPES + ("retained_control", "hallucination")
+MEMORY_OUTCOMES = ("context_overflow", "engine_busy", "error", "fail", "pass", "request_too_large", "skipped", "timeout")
+MEMORY_AGE_BUCKETS = ((1, 5), (6, 10), (11, 20), (21, 40), (41, 1000))
+MEMORY_CONVERSATION_ID = re.compile(r"^conv[0-9]{1,2}$")
 LONG_CONTEXT_OUTCOMES = ("context_overflow", "engine_busy", "error", "fail", "pass", "request_too_large", "timeout")
 LONG_CONTEXT_CELL_ID = re.compile(r"^[a-z_]{1,16}/[a-z_]{1,16}/s[0-9]{3,5}/d[0-9.]{1,6}/t[0-9]{1,2}$")
 LONG_CONTEXT_REASON = re.compile(r"^[a-z0-9_]{1,64}$")
@@ -1469,14 +1503,285 @@ def _long_context_session(*, args: argparse.Namespace, artifact: dict[str, Any],
         shutil.rmtree(workspace, ignore_errors=True)
 
 
+def _memory_planned_requests(profile: dict[str, Any]) -> int:
+    questions = len(MEMORY_FACT_TYPES) + 2
+    return profile["conversations"] * (profile["chunks"] * ("note" in profile["arms"]) + questions * len(profile["arms"]))
+
+
+def _memory_age_bucket(age: int) -> str:
+    for low, high in MEMORY_AGE_BUCKETS:
+        if low <= age <= high:
+            return f"{low}-{high}" if high < 1000 else f"{low}+"
+    return "0"
+
+
+def _distill_memory(raw: Any, *, prompts_sha256: str) -> dict[str, Any]:
+    """Rebuild bounded aggregates from the memory harness receipt, field by field.
+
+    As for long context, nothing is copied by reference: the harness receipt
+    carries a key (``credential_masking``) the persisted-receipt screen would
+    refuse, and its notes metadata is checked rather than trusted. Every value
+    below is recomputed from typed cell fields; identifiers are matched by
+    regex, outcomes and probes come from closed sets, numbers are
+    range-checked. No note, prompt or model text can reach the result.
+    """
+
+    profile = MEMORY_PROFILE
+    if (not isinstance(raw, dict) or raw.get("schema") != "local_bmo.memory-eval.v1" or
+            raw.get("prompt_response_logging") is not False):
+        raise ValueError("memory_receipt_invalid")
+    prompts = raw.get("memory_prompts")
+    if not isinstance(prompts, dict) or prompts.get("sha256") != prompts_sha256:
+        raise ValueError("memory_prompts_identity_mismatch")
+    plan = raw.get("plan")
+    expected_plan = {
+        "conversations": profile["conversations"], "arms": profile["arms"], "chunks": profile["chunks"],
+        "dropped_tokens": profile["dropped_tokens"], "retained_tokens": profile["retained_tokens"],
+        "note_tokens": profile["note_tokens"], "note_bytes": profile["note_bytes"],
+        "max_input_bytes": profile["max_input_bytes"], "per_message_bytes": profile["per_message_bytes"],
+        "max_tokens": profile["max_output"], "planned_requests": _memory_planned_requests(profile),
+    }
+    if not isinstance(plan, dict) or any(plan.get(key) != value for key, value in expected_plan.items()):
+        raise ValueError("memory_receipt_invalid")
+    conversations = raw.get("conversations", [])
+    if not isinstance(conversations, list) or len(conversations) > profile["conversations"]:
+        raise ValueError("memory_receipt_invalid")
+    arms = set(profile["arms"])
+    cells: list[dict[str, Any]] = []
+    notes: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    per_conversation = (len(MEMORY_FACT_TYPES) + 2) * len(profile["arms"])
+    complete_conversations = 0
+    for conversation in conversations:
+        if not isinstance(conversation, dict):
+            raise ValueError("memory_receipt_invalid")
+        cid = conversation.get("id")
+        rows = conversation.get("cells")
+        if (not isinstance(cid, str) or not MEMORY_CONVERSATION_ID.fullmatch(cid) or cid in seen or
+                not isinstance(rows, list) or len(rows) > per_conversation):
+            raise ValueError("memory_receipt_invalid")
+        seen.add(cid)
+        complete_conversations += conversation.get("complete") is True and len(rows) == per_conversation
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("memory_receipt_invalid")
+            arm, probe, outcome, reason = row.get("arm"), row.get("probe"), row.get("outcome"), row.get("reason")
+            age = row.get("age_turns")
+            in_dropped = row.get("in_dropped")
+            if (arm not in arms or probe not in MEMORY_PROBES or outcome not in MEMORY_OUTCOMES or
+                    not isinstance(reason, str) or not LONG_CONTEXT_REASON.fullmatch(reason) or
+                    (age is not None and _bounded_int_value(age, 0, 100_000) is None) or
+                    (in_dropped is not None and not isinstance(in_dropped, bool))):
+                raise ValueError("memory_receipt_invalid")
+            cells.append({
+                "conversation": cid, "arm": arm, "probe": probe, "outcome": outcome, "reason": reason,
+                "age": age, "in_dropped": in_dropped is True,
+                "coherent": row.get("coherent") if isinstance(row.get("coherent"), bool) else None,
+                "prompt_tokens": _bounded_int_value(row.get("prompt_tokens"), 0, 1_000_000),
+                "seconds": _bounded_float_value(row.get("seconds"), 0.0, 86_400.0),
+            })
+        note = conversation.get("note")
+        if note is not None:
+            if not isinstance(note, dict):
+                raise ValueError("memory_receipt_invalid")
+            facts = note.get("facts_in_note") if isinstance(note.get("facts_in_note"), dict) else {}
+            notes.append({
+                "ok": note.get("outcome") == "ok",
+                "facts": {fact: facts.get(fact) is True for fact in MEMORY_FACT_TYPES},
+                "stale": note.get("stale_value_in_note") is True,
+                "markup_removed": note.get("markup_removed") is True,
+                "truncated": note.get("truncated") is True,
+                "bytes": _bounded_int_value(note.get("note_bytes"), 0, 1_000_000),
+                "seconds": _bounded_float_value(note.get("seconds"), 0.0, 86_400.0),
+            })
+
+    def bucket(key: Any) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        for item in cells:
+            name = key(item)
+            if name is None:
+                continue
+            entry = out.setdefault(name, {"pass": 0, "fail": 0, "not_graded": 0})
+            entry["pass" if item["outcome"] == "pass" else "fail" if item["outcome"] == "fail" else "not_graded"] += 1
+        for entry in out.values():
+            graded = entry["pass"] + entry["fail"]
+            entry["accuracy"] = round(entry["pass"] / graded, 3) if graded else None
+        return dict(sorted(out.items()))
+
+    by_arm_probe = bucket(lambda item: f"{item['arm']}/{item['probe']}")
+    by_arm = bucket(lambda item: item["arm"] if item["probe"] in MEMORY_FACT_TYPES else None)
+    benefit = {}
+    for probe in MEMORY_PROBES:
+        note_accuracy = by_arm_probe.get(f"note/{probe}", {}).get("accuracy")
+        drop_accuracy = by_arm_probe.get(f"drop/{probe}", {}).get("accuracy")
+        benefit[probe] = (round(note_accuracy - drop_accuracy, 3)
+                          if note_accuracy is not None and drop_accuracy is not None else None)
+    ok_notes = [note for note in notes if note["ok"]]
+    answered = [item for item in cells if item["prompt_tokens"] is not None]
+    run = len(conversations)
+    return {
+        "conversations_planned": profile["conversations"],
+        "conversations_run": run,
+        "requests_planned": _memory_planned_requests(profile),
+        "cells_run": len(cells),
+        "complete": raw.get("complete") is True and run == profile["conversations"] and complete_conversations == run,
+        "outcomes": {outcome: sum(1 for item in cells if item["outcome"] == outcome) for outcome in MEMORY_OUTCOMES},
+        "by_arm": by_arm,
+        "by_arm_probe": by_arm_probe,
+        "by_arm_age": bucket(lambda item: f"{item['arm']}/{_memory_age_bucket(item['age'])}"
+                             if item["in_dropped"] and item["age"] is not None else None),
+        "note_minus_drop": benefit,
+        "notes": {
+            "generated": len(ok_notes), "failed": len(notes) - len(ok_notes),
+            "facts_kept_by_type": {fact: sum(1 for note in ok_notes if note["facts"][fact]) for fact in MEMORY_FACT_TYPES},
+            "stale_value_kept": sum(1 for note in ok_notes if note["stale"]),
+            "markup_removed": sum(1 for note in ok_notes if note["markup_removed"]),
+            "truncated": sum(1 for note in ok_notes if note["truncated"]),
+            "median_note_bytes": _median([float(note["bytes"]) for note in ok_notes if note["bytes"] is not None]),
+            "median_note_seconds": _median([note["seconds"] for note in ok_notes if note["seconds"] is not None]),
+        },
+        "latency": {
+            "answered": len(answered),
+            "median_prompt_tokens": _median([float(item["prompt_tokens"]) for item in answered]),
+            "max_prompt_tokens": max((item["prompt_tokens"] for item in answered), default=None),
+            "median_seconds": _median([item["seconds"] for item in answered if item["seconds"] is not None]),
+            "incoherent": sum(1 for item in answered if item["coherent"] is False),
+        },
+        "not_passed": [{"conversation": item["conversation"], "arm": item["arm"], "probe": item["probe"],
+                        "outcome": item["outcome"], "reason": item["reason"]}
+                       for item in cells if item["outcome"] != "pass"],
+    }
+
+
+def _memory_session(*, args: argparse.Namespace, artifact: dict[str, Any], port: int, token_file: Path,
+                    process: Any, deadline: float, started: float, fixture_identity: dict[str, Any],
+                    context_tokens: int, build_info: dict[str, Any],
+                    model_preflight: dict[str, Any]) -> dict[str, Any]:
+    """Drive ``memory_eval.py`` against the engine ``_launch_and_evaluate`` started.
+
+    ``memory_eval`` imports ``scripts.test.long_context_eval`` and
+    ``scripts.test.evaluate_tool_calls`` and reads ``host/agent/memory-prompts.json``
+    relative to its own tree, so the uploaded files are laid out that way in an
+    owner-private directory of this process. The prompt file's digest was
+    proved against the orchestrator's before the model was hashed, and is
+    proved again here against the copy the harness actually reads.
+    """
+
+    harness = Path(getattr(args, "memory_harness", "") or "")
+    long_context = Path(getattr(args, "long_context_harness", "") or "")
+    prompts = Path(getattr(args, "memory_prompts", "") or "")
+    if (harness.name != "memory_eval.py" or not harness.is_file() or long_context.name != "long_context_eval.py" or
+            not long_context.is_file() or prompts.name != "memory-prompts.json" or not prompts.is_file()):
+        raise ValueError("memory_harness_missing")
+    harness_bytes = _read_bounded(harness, LONG_CONTEXT_HARNESS_MAX_BYTES, deadline=deadline, error_code="memory_harness_missing")
+    long_context_bytes = _read_bounded(long_context, LONG_CONTEXT_HARNESS_MAX_BYTES, deadline=deadline, error_code="memory_harness_missing")
+    evaluator_bytes = _read_bounded(Path(args.evaluator), LONG_CONTEXT_HARNESS_MAX_BYTES, deadline=deadline, error_code="memory_harness_missing")
+    prompts_bytes = _read_bounded(prompts, MEMORY_PROMPTS_MAX_BYTES, deadline=deadline, error_code="memory_harness_missing")
+    fixture_bytes = _read_bounded(Path(args.fixture), FIXTURE_MAX_BYTES, deadline=deadline, error_code="evaluator_fixture_unreadable")
+    prompts_sha256 = hashlib.sha256(prompts_bytes).hexdigest()
+    if prompts_sha256 != getattr(args, "memory_prompts_sha256", ""):
+        raise ValueError("memory_prompts_identity_mismatch")
+    try:
+        prompts_version = _strict_json_object(prompts_bytes).get("version")
+    except (ValueError, UnicodeError, AttributeError, json.JSONDecodeError) as exc:
+        raise ValueError("memory_prompts_identity_mismatch") from exc
+    if not isinstance(prompts_version, str) or not LONG_CONTEXT_REASON.fullmatch(prompts_version.replace(".", "_").replace("-", "_")):
+        raise ValueError("memory_prompts_identity_mismatch")
+    workspace = Path(tempfile.mkdtemp(prefix="lae-memory-eval-"))
+    try:
+        os.chmod(workspace, 0o700)
+        tree = workspace / "tree"
+        for directory in (tree / "scripts" / "test", tree / "tests" / "model", tree / "host" / "agent"):
+            directory.mkdir(parents=True, mode=0o700)
+        (workspace / "out").mkdir(mode=0o700)
+        entry = tree / "scripts" / "test" / "memory_eval.py"
+        entry.write_bytes(harness_bytes)
+        (tree / "scripts" / "test" / "long_context_eval.py").write_bytes(long_context_bytes)
+        (tree / "scripts" / "test" / "evaluate_tool_calls.py").write_bytes(evaluator_bytes)
+        (tree / "tests" / "model" / "production_tool_call_eval.json").write_bytes(fixture_bytes)
+        (tree / "host" / "agent" / "memory-prompts.json").write_bytes(prompts_bytes)
+        raw_path = workspace / "out" / "memory-raw.json"
+        profile = MEMORY_PROFILE
+        command = [
+            sys.executable, os.fspath(entry),
+            "--endpoint", f"http://127.0.0.1:{port}/v1/chat/completions",
+            "--token-stdin", "--out", os.fspath(raw_path),
+            "--conversations", str(profile["conversations"]),
+            "--arms", ",".join(profile["arms"]),
+            "--chunks", str(profile["chunks"]),
+            "--dropped-tokens", str(profile["dropped_tokens"]),
+            "--retained-tokens", str(profile["retained_tokens"]),
+            "--note-tokens", str(profile["note_tokens"]),
+            "--note-bytes", str(profile["note_bytes"]),
+            "--max-input-bytes", str(profile["max_input_bytes"]),
+            "--per-message-bytes", str(profile["per_message_bytes"]),
+            "--max-tokens", str(profile["max_output"]),
+            "--max-requests", str(profile["max_requests"]),
+            "--timeout", str(profile["request_timeout_seconds"]),
+        ]
+        bearer = token_file.read_bytes()
+        harness_timeout = _stage_timeout(deadline, MEMORY_TOTAL_TIMEOUT, "memory_timeout")
+        result = _run_with_stdin(command, bearer, timeout=harness_timeout)
+        raw: Any = None
+        if raw_path.is_file():
+            try:
+                raw = _strict_json_object(_read_bounded(raw_path, MEMORY_RAW_MAX_BYTES, error_code="memory_receipt_invalid"))
+            except (ValueError, UnicodeError, json.JSONDecodeError) as exc:
+                raise ValueError("memory_receipt_invalid") from exc
+        if raw is None:
+            raise ValueError("memory_timeout" if result.get("status") == "timeout" else
+                             "memory_harness_failed" if result.get("status") == "failed" else
+                             "memory_receipt_missing")
+        results = _distill_memory(raw, prompts_sha256=prompts_sha256)
+        sent = raw.get("requests_sent_this_run")
+        if sent is not None and _bounded_int_value(sent, 0, profile["max_requests"]) is None:
+            raise ValueError("memory_receipt_invalid")
+        results["requests_sent"] = sent
+        child_status = _bounded_child_status(process)
+        if child_status is not None:
+            raise EngineStartupFailure("engine_exited_during_evaluation", child_status)
+        complete = results["complete"] and result.get("status") == "completed"
+        return {
+            "schema": SUITE_MEMBER_SCHEMAS[MEMORY_MEMBER],
+            "status": "completed" if complete else "partial",
+            "artifact": artifact,
+            "fixture": fixture_identity,
+            "engine": build_info,
+            "model_preflight": model_preflight,
+            "harness": {"schema": raw["schema"], "sha256": hashlib.sha256(harness_bytes).hexdigest(),
+                        "long_context_sha256": hashlib.sha256(long_context_bytes).hexdigest(),
+                        "process": {"status": result.get("status"), "exit_code": result.get("exit_code")}},
+            "memory_prompts": {"sha256": prompts_sha256, "version": prompts_version},
+            "plan": dict(profile, arms=list(profile["arms"])),
+            "results": results,
+            "duration_ms": round((time.monotonic() - started) * 1000, 1),
+            "prompt_response_logging": False,
+            "tokens_logged": False,
+        }
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
 def _validate_suite_member(args: argparse.Namespace) -> str:
     """Return the opt-in member, or ``""``; refuse an incoherent request."""
 
     member = getattr(args, "suite_member", "") or ""
+    memory_options = (getattr(args, "memory_harness", ""), getattr(args, "memory_prompts", ""),
+                      getattr(args, "memory_prompts_sha256", ""))
     if not member:
-        if getattr(args, "expected_fixture_sha256", "") or getattr(args, "long_context_harness", ""):
+        if getattr(args, "expected_fixture_sha256", "") or getattr(args, "long_context_harness", "") or any(memory_options):
             raise ValueError("suite_member_invalid")
         return ""
+    if member == MEMORY_MEMBER:
+        digest = memory_options[2]
+        # The memory harness imports the long-context module, so it needs that
+        # file too; every one of its options is required and none may appear
+        # on any other member.
+        if (not all(memory_options) or not getattr(args, "long_context_harness", "") or
+                not isinstance(digest, str) or len(digest) != 64 or set(digest) - PIN_RE):
+            raise ValueError("suite_member_invalid")
+    elif any(memory_options):
+        raise ValueError("suite_member_invalid")
     expected = getattr(args, "expected_fixture_sha256", "")
     preflight = Path(getattr(args, "preflight_receipt", "") or "")
     if (member not in SUITE_MEMBER_SCHEMAS or not isinstance(expected, str) or len(expected) != 64 or set(expected) - PIN_RE or
@@ -1484,7 +1789,7 @@ def _validate_suite_member(args: argparse.Namespace) -> str:
             # or receipt evidence on the host.
             not getattr(args, "preflight_receipt", "") or preflight.name == "startup-preflight-receipt.json" or
             Path(args.receipt).name in {"eval-receipt.json", "startup-preflight-receipt.json"} or
-            (member == LONG_CONTEXT_MEMBER) != bool(getattr(args, "long_context_harness", ""))):
+            (member in {LONG_CONTEXT_MEMBER, MEMORY_MEMBER}) != bool(getattr(args, "long_context_harness", ""))):
         raise ValueError("suite_member_invalid")
     return member
 
@@ -1527,6 +1832,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--suite-member", default="", choices=("", *SUITE_MEMBER_SCHEMAS))
     parser.add_argument("--expected-fixture-sha256", default="")
     parser.add_argument("--long-context-harness", default="")
+    parser.add_argument("--memory-harness", default="")
+    parser.add_argument("--memory-prompts", default="")
+    parser.add_argument("--memory-prompts-sha256", default="")
     args = parser.parse_args(argv)
     receipt: dict[str, Any]
     process_started = time.monotonic()
@@ -1534,7 +1842,8 @@ def main(argv: list[str] | None = None) -> int:
     member = ""
     try:
         member = _validate_suite_member(args)
-        if not 1 <= args.timeout <= (LONG_CONTEXT_TOTAL_TIMEOUT if member == LONG_CONTEXT_MEMBER else EVAL_TOTAL_TIMEOUT):
+        if not 1 <= args.timeout <= (LONG_CONTEXT_TOTAL_TIMEOUT if member == LONG_CONTEXT_MEMBER else
+                                     MEMORY_TOTAL_TIMEOUT if member == MEMORY_MEMBER else EVAL_TOTAL_TIMEOUT):
             raise ValueError("eval_timeout_invalid")
         deadline = process_started + args.timeout
         try:
@@ -1545,6 +1854,16 @@ def main(argv: list[str] | None = None) -> int:
             # Refused before the model is hashed or the engine started: a
             # wrong chunk file must not cost GPU time or score as the right one.
             raise ValueError("evaluator_fixture_identity_mismatch")
+        if member == MEMORY_MEMBER:
+            # Same rule for the memory prompt file: a different prompt version
+            # is refused before the model is hashed or the engine started.
+            try:
+                prompts_bytes = _read_bounded(Path(args.memory_prompts), MEMORY_PROMPTS_MAX_BYTES, deadline=deadline,
+                                              error_code="memory_harness_missing")
+            except ValueError:
+                raise ValueError("memory_harness_missing") from None
+            if hashlib.sha256(prompts_bytes).hexdigest() != args.memory_prompts_sha256:
+                raise ValueError("memory_prompts_identity_mismatch")
         preflight_path = Path(args.preflight_receipt or Path(args.receipt).with_name("startup-preflight-receipt.json"))
         try:
             _write_preflight_receipt(preflight_path, status="not_started", error_code="engine_model_preflight_not_started")
@@ -1560,6 +1879,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             if member == LONG_CONTEXT_MEMBER:
                 receipt = _launch_and_evaluate(args, artifact, deadline=deadline, session=_long_context_session)
+            elif member == MEMORY_MEMBER:
+                receipt = _launch_and_evaluate(args, artifact, deadline=deadline, session=_memory_session)
             elif member == ABLATION_MEMBER:
                 receipt = _launch_and_evaluate(args, artifact, deadline=deadline, extra_evaluator_args=("--no-boolean-coercion",))
             else:

@@ -211,12 +211,14 @@ _SALVAGE_REQUIRED_KEYS: dict[str, frozenset[str]] = {
 _ABLATION_MEMBER = "ablation-no-boolean-coercion"
 _VARIANT_MEMBERS = ("variants-chunk-1", "variants-chunk-2", "variants-chunk-3")
 _LONG_CONTEXT_MEMBER = "long-context"
+_MEMORY_MEMBER = "memory"
 _SALVAGE_EXTRA_RECEIPT_ALLOWLIST: dict[str, str] = {
     "ablation-no-boolean-coercion-receipt.json": "local_bmo.j1m.scorer-ablation-eval-receipt.v1",
     "variants-chunk-1-receipt.json": "local_bmo.j1m.variants-eval-receipt.v1",
     "variants-chunk-2-receipt.json": "local_bmo.j1m.variants-eval-receipt.v1",
     "variants-chunk-3-receipt.json": "local_bmo.j1m.variants-eval-receipt.v1",
     "long-context-receipt.json": "local_bmo.j1m.long-context-receipt.v1",
+    "memory-receipt.json": "local_bmo.j1m.memory-eval-receipt.v1",
 }
 _EVAL_MEMBER_REQUIRED_KEYS = frozenset({
     "schema", "status", "suite_member", "artifact", "fixture", "engine",
@@ -231,6 +233,11 @@ _SALVAGE_EXTRA_REQUIRED_KEYS: dict[str, frozenset[str]] = {
         "schema", "status", "suite_member", "artifact", "fixture", "engine",
         "model_preflight", "harness", "plan", "results", "prompt_response_logging",
         "tokens_logged",
+    }),
+    "memory-receipt.json": frozenset({
+        "schema", "status", "suite_member", "artifact", "fixture", "engine",
+        "model_preflight", "harness", "memory_prompts", "plan", "results",
+        "prompt_response_logging", "tokens_logged",
     }),
 }
 # The locally written salvage evidence file.  It is deliberately not fetchable:
@@ -2190,6 +2197,15 @@ def _salvage_extra_binding(name: str, payload: dict[str, Any], identity: dict[st
         harness = payload.get("harness")
         if not isinstance(harness, dict) or harness.get("sha256") != binding.get("harness_sha256"):
             raise _SalvageRefusal("salvage_identity_mismatch")
+    if member == _MEMORY_MEMBER and not failure:
+        # The prompt version is part of the identity: a receipt made with a
+        # different memory-prompts.json (or harness) is a different experiment.
+        harness = payload.get("harness")
+        prompts = payload.get("memory_prompts")
+        if (not isinstance(harness, dict) or harness.get("sha256") != binding.get("harness_sha256") or
+                harness.get("long_context_sha256") != binding.get("long_context_sha256") or
+                not isinstance(prompts, dict) or prompts.get("sha256") != binding.get("memory_prompts_sha256")):
+            raise _SalvageRefusal("salvage_identity_mismatch")
 
 
 def _salvage_validated_payload(
@@ -2579,7 +2595,7 @@ def _salvage(
 # artifact and engine identity again, and writes its own schema-bound receipt;
 # a member failure is recorded as that member's typed outcome and can never
 # change ``lifecycle["job"]``, ``lifecycle["status"]`` or the shipping receipt.
-_EVAL_SUITES = ("shipping", "extended")
+_EVAL_SUITES = ("shipping", "extended", "memory")
 _SCORER_ABLATIONS = ("", "no-boolean-coercion")
 # The extracted variants chunks are hash-pinned exactly as the shipping
 # fixture's identity is pinned in every receipt: a regenerated or stale
@@ -2598,6 +2614,19 @@ _LONG_CONTEXT_HARNESS = ROOT / "scripts" / "test" / "long_context_eval.py"
 _EVAL_MEMBER_REMOTE_TIMEOUT = 420
 _LONG_CONTEXT_REMOTE_TIMEOUT = 840
 _LONG_CONTEXT_STAGE_BUDGET_SECONDS = 900.0
+# ``--suite memory``: the shipping eval, then ONLY the memory member
+# (``scripts/test/memory_eval.py`` with the shipped ``host/agent/memory-prompts.json``).
+# 156 requests (6 conversations x (2 note chunks + 8 questions x 3 arms)). Run
+# j1m-eval-20261003-d measured 0.34-1.02 s per long-context request on the A100
+# for 1.4k-5.8k prompt tokens; the 144 recall answers here are <= 64 tokens on
+# ~1.5k-4.5k-token prompts and the 12 note requests are ~2k tokens in, <= 256
+# out (~3 s). Expected ~180 s with the ~45 s per-stage fixed cost. The budget
+# is an explicit 600 s on the host inside a 660 s stage: >3x the estimate, and
+# every request is also capped at 60 s by the harness.
+_MEMORY_HARNESS = ROOT / "scripts" / "test" / "memory_eval.py"
+_MEMORY_PROMPTS = ROOT / "host" / "agent" / "memory-prompts.json"
+_MEMORY_REMOTE_TIMEOUT = 600
+_MEMORY_STAGE_BUDGET_SECONDS = 660.0
 # Realistic wall-time estimates, for the plan's expected-cost line only (never
 # a gate). Derived from run j1m-eval-20261003-b on the A100: the 37-case
 # shipping stage took 128.2 s end to end, about 45 s of which is the per-stage
@@ -2609,6 +2638,7 @@ _EXTRA_MEMBER_EXPECTED_SECONDS = {
     _ABLATION_MEMBER: 130.0,
     **{member: 180.0 for member in _VARIANT_MEMBERS},
     _LONG_CONTEXT_MEMBER: 420.0,
+    _MEMORY_MEMBER: 180.0,
 }
 _EXTRA_UPLOAD_EXPECTED_SECONDS = 3.0
 _EXTENDED_SKIP_REASONS = frozenset({
@@ -2637,7 +2667,21 @@ def _extra_members(suite: str | None, scorer_ablation: str | None) -> tuple[str,
         members.append(_ABLATION_MEMBER)
     if suite == "extended":
         members.extend((*_VARIANT_MEMBERS, _LONG_CONTEXT_MEMBER))
+    if suite == "memory":
+        # Deliberately ONLY the memory member: no variants or long context.
+        members.append(_MEMORY_MEMBER)
     return tuple(members)
+
+
+_ALL_EXTRA_MEMBERS = (_ABLATION_MEMBER, *_VARIANT_MEMBERS, _LONG_CONTEXT_MEMBER, _MEMORY_MEMBER)
+
+
+def _memory_profile() -> dict[str, Any]:
+    """The one memory profile, read from the host-side source of truth."""
+
+    from scripts.test import remote_model_eval
+
+    return copy.deepcopy(remote_model_eval.MEMORY_PROFILE)
 
 
 def _extra_member_receipt(member: str) -> str:
@@ -2712,11 +2756,52 @@ def _extended_suite_preflight(config: dict[str, Any], members: tuple[str, ...]) 
                 max(profile["sizes"]) > shipping["context_tokens"] - profile["max_output"] - long_context_eval.OUTPUT_RESERVE or
                 not 1 <= profile["max_output"] <= 256 or profile["trials"] != 1):
             raise ValueError("long-context profile does not fit the shipping engine context")
-    return {"members": list(members), "fixtures": fixtures, "chunks": chunks,
-            "harness_sha256": harness_sha256}
+    preflight = {"members": list(members), "fixtures": fixtures, "chunks": chunks,
+                 "harness_sha256": harness_sha256}
+    if _MEMORY_MEMBER in members:
+        preflight["memory"] = _memory_preflight(shipping)
+    return preflight
 
 
-def _extra_member_command(config: dict[str, Any], remote_root: str, member: str, fixture_sha256: str) -> list[str]:
+def _memory_preflight(shipping: dict[str, Any]) -> dict[str, Any]:
+    """Pin the memory harness, its long-context dependency and the prompt file, at USD 0.00."""
+
+    from scripts.test import memory_eval, remote_model_eval
+
+    harness = _bounded_bytes(_MEMORY_HARNESS, 512 * 1024)
+    long_context = _bounded_bytes(_LONG_CONTEXT_HARNESS, 512 * 1024)
+    prompts_raw = _bounded_bytes(_MEMORY_PROMPTS, 64 * 1024)
+    prompts = _decode_bounded_json(prompts_raw)
+    profile = _memory_profile()
+    options = argparse.Namespace(
+        conversations=profile["conversations"], arms=tuple(profile["arms"]), chunks=profile["chunks"],
+        max_tokens=profile["max_output"], note_tokens=profile["note_tokens"], note_bytes=profile["note_bytes"],
+        max_input_bytes=profile["max_input_bytes"], per_message_bytes=profile["per_message_bytes"],
+        timeout=profile["request_timeout_seconds"], dropped_tokens=profile["dropped_tokens"],
+        retained_tokens=profile["retained_tokens"], max_requests=profile["max_requests"])
+    planned = memory_eval.planned_requests(options)
+    if (not isinstance(prompts, dict) or not isinstance(prompts.get("version"), str) or
+            tuple(memory_eval.FACT_TYPES) != remote_model_eval.MEMORY_FACT_TYPES or
+            tuple(memory_eval.PROBES) != remote_model_eval.MEMORY_PROBES or
+            tuple(sorted(memory_eval.OUTCOMES)) != remote_model_eval.MEMORY_OUTCOMES or
+            tuple(memory_eval.AGE_BUCKETS) != remote_model_eval.MEMORY_AGE_BUCKETS or
+            not set(profile["arms"]) <= set(memory_eval.ARMS) or
+            planned != profile["max_requests"] or planned != remote_model_eval._memory_planned_requests(profile) or
+            # The full arm carries the whole conversation; it must fit the
+            # shipping engine context with the answer budget.
+            profile["dropped_tokens"] + profile["retained_tokens"] + profile["max_output"] + 1024 > shipping["context_tokens"]):
+        raise ValueError("memory profile does not match the harness or the shipping engine context")
+    return {
+        "harness_sha256": hashlib.sha256(harness).hexdigest(),
+        "long_context_sha256": hashlib.sha256(long_context).hexdigest(),
+        "memory_prompts_sha256": hashlib.sha256(prompts_raw).hexdigest(),
+        "memory_prompts_version": prompts["version"],
+        "planned_requests": planned,
+    }
+
+
+def _extra_member_command(config: dict[str, Any], remote_root: str, member: str, fixture_sha256: str,
+                          *, memory_prompts_sha256: str | None = None) -> list[str]:
     """One member's argv: the shipping eval argv, re-pointed and member-stamped.
 
     Every identity operand (model, manifest, lock, revisions, engine, CUDA and
@@ -2726,8 +2811,11 @@ def _extra_member_command(config: dict[str, Any], remote_root: str, member: str,
     digest the host must see before it spends any GPU time.
     """
 
-    if member not in _extra_members("extended", "no-boolean-coercion"):
+    if member not in _ALL_EXTRA_MEMBERS:
         raise ValueError("extra member is not approved")
+    if (member == _MEMORY_MEMBER) != (memory_prompts_sha256 is not None) or (
+            memory_prompts_sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", memory_prompts_sha256)):
+        raise ValueError("memory prompt digest is required for, and only for, the memory member")
     if not isinstance(fixture_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", fixture_sha256):
         raise ValueError("extra member fixture digest is invalid")
     llama = config["llama_cpp"]
@@ -2735,7 +2823,8 @@ def _extra_member_command(config: dict[str, Any], remote_root: str, member: str,
     build_root = f"{remote_root}/engine-build"
     fixture = (f"{remote_root}/{member}.json" if member in _VARIANT_MEMBERS
                else f"{remote_root}/production_tool_call_eval.json")
-    timeout = _LONG_CONTEXT_REMOTE_TIMEOUT if member == _LONG_CONTEXT_MEMBER else _EVAL_MEMBER_REMOTE_TIMEOUT
+    timeout = (_LONG_CONTEXT_REMOTE_TIMEOUT if member == _LONG_CONTEXT_MEMBER else
+               _MEMORY_REMOTE_TIMEOUT if member == _MEMORY_MEMBER else _EVAL_MEMBER_REMOTE_TIMEOUT)
     command = [
         "python3", f"{remote_root}/remote_model_eval.py",
         "--model", f"{remote_root}/artifacts/Qwen3.5-9B-Q4_K_M.gguf",
@@ -2757,18 +2846,28 @@ def _extra_member_command(config: dict[str, Any], remote_root: str, member: str,
     ]
     if member == _LONG_CONTEXT_MEMBER:
         command.extend(["--long-context-harness", f"{remote_root}/long_context_eval.py"])
+    if member == _MEMORY_MEMBER:
+        command.extend([
+            "--long-context-harness", f"{remote_root}/long_context_eval.py",
+            "--memory-harness", f"{remote_root}/memory_eval.py",
+            "--memory-prompts", f"{remote_root}/memory-prompts.json",
+            "--memory-prompts-sha256", memory_prompts_sha256,
+        ])
     return command
 
 
 def _extra_member_commands(config: dict[str, Any], remote_root: str, preflight: dict[str, Any]) -> list[list[str]]:
-    return [_extra_member_command(config, remote_root, member, preflight["fixtures"][member])
+    return [_extra_member_command(
+                config, remote_root, member, preflight["fixtures"][member],
+                **({"memory_prompts_sha256": preflight["memory"]["memory_prompts_sha256"]}
+                   if member == _MEMORY_MEMBER else {}))
             for member in preflight["members"]]
 
 
 def _extra_salvage_bindings(preflight: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """What each requested member receipt must prove at the salvage boundary."""
 
-    return {
+    bindings = {
         _extra_member_receipt(member): {
             "member": member,
             "fixture_sha256": preflight["fixtures"][member],
@@ -2776,6 +2875,14 @@ def _extra_salvage_bindings(preflight: dict[str, Any]) -> dict[str, dict[str, An
         }
         for member in preflight["members"]
     }
+    if _MEMORY_MEMBER in preflight["members"]:
+        memory = preflight["memory"]
+        bindings[_extra_member_receipt(_MEMORY_MEMBER)].update({
+            "harness_sha256": memory["harness_sha256"],
+            "long_context_sha256": memory["long_context_sha256"],
+            "memory_prompts_sha256": memory["memory_prompts_sha256"],
+        })
+    return bindings
 
 
 def _extra_uploads(remote_root: str, staging: Path, members: tuple[str, ...]) -> list[tuple[Path, str, bool]]:
@@ -2789,14 +2896,22 @@ def _extra_uploads(remote_root: str, staging: Path, members: tuple[str, ...]) ->
         (staging / f"{member}.json", f"{remote_root}/{member}.json", False)
         for member in members if member in _VARIANT_MEMBERS
     ]
-    if _LONG_CONTEXT_MEMBER in members:
+    if _LONG_CONTEXT_MEMBER in members or _MEMORY_MEMBER in members:
+        # Once, even if both members are ever selected together.
         uploads.append((_LONG_CONTEXT_HARNESS, f"{remote_root}/long_context_eval.py", False))
+    if _MEMORY_MEMBER in members:
+        uploads.extend([
+            (_MEMORY_HARNESS, f"{remote_root}/memory_eval.py", False),
+            (_MEMORY_PROMPTS, f"{remote_root}/memory-prompts.json", False),
+        ])
     return uploads
 
 
 def _extra_member_budget_seconds(config: dict[str, Any], member: str) -> float:
     if member == _LONG_CONTEXT_MEMBER:
         return _LONG_CONTEXT_STAGE_BUDGET_SECONDS
+    if member == _MEMORY_MEMBER:
+        return _MEMORY_STAGE_BUDGET_SECONDS
     return float(config["modes"]["eval"]["stage_budgets_seconds"]["evaluation"])
 
 
@@ -3026,9 +3141,103 @@ def _verify_long_context_receipt(path: Path, artifact: dict[str, Any], *, harnes
     }
 
 
+def _verify_memory_receipt(path: Path, artifact: dict[str, Any], *, binding: dict[str, Any] | None) -> dict[str, Any]:
+    """Verify the distilled memory receipt against the harness and prompt version this run uploaded."""
+
+    from scripts.test import remote_model_eval
+
+    payload = _bounded_json(path, j1m_runner._RECEIPT_MAX_BYTES)
+    if (not isinstance(payload, dict) or payload.get("schema") != _SALVAGE_EXTRA_RECEIPT_ALLOWLIST["memory-receipt.json"] or
+            payload.get("suite_member") != _MEMORY_MEMBER or "scorer_ablation" in payload):
+        raise ValueError("memory receipt schema mismatch")
+    shipping = _tool_eval_contract()["fixture_identity"]
+    if payload.get("status") == "failed":
+        code = payload.get("error_code")
+        if not isinstance(code, str) or not re.fullmatch(r"[a-z0-9_]{1,64}", code):
+            raise ValueError("memory failure receipt invalid")
+        if "fixture" in payload and payload["fixture"] != shipping:
+            raise ValueError("memory receipt fixture identity mismatch")
+        return {"status": "failed", "error_code": code}
+    expected_keys = {*_SALVAGE_EXTRA_REQUIRED_KEYS["memory-receipt.json"], "duration_ms", *j1m_runner.RUN_IDENTITY_FIELDS}
+    if (not _SALVAGE_EXTRA_REQUIRED_KEYS["memory-receipt.json"] <= set(payload) or set(payload) - expected_keys or
+            payload.get("status") not in {"completed", "partial"}):
+        raise ValueError("memory receipt schema mismatch")
+    if payload.get("prompt_response_logging") is not False or payload.get("tokens_logged") is not False:
+        raise ValueError("memory receipt logging policy missing")
+    recorded = payload.get("artifact")
+    if not isinstance(recorded, dict) or any(recorded.get(key) != artifact.get(key) for key in ("name", "size_bytes", "sha256")):
+        raise ValueError("memory receipt artifact mismatch")
+    if payload.get("fixture") != shipping:
+        raise ValueError("memory receipt fixture identity mismatch")
+    engine = payload.get("engine")
+    if (not isinstance(engine, dict) or engine.get("llama_cpp_revision") != artifact.get("llama_cpp_revision") or
+            engine.get("model") != "qwen35-9b-q4-k-m"):
+        raise ValueError("memory receipt engine identity mismatch")
+    preflight = payload.get("model_preflight")
+    if (not isinstance(preflight, dict) or preflight.get("status") != "verified" or
+            preflight.get("sha256") != artifact.get("sha256") or preflight.get("size_bytes") != artifact.get("size_bytes")):
+        raise ValueError("memory receipt model preflight invalid")
+    harness, prompts = payload.get("harness"), payload.get("memory_prompts")
+    binding = binding or {}
+    if (not isinstance(harness, dict) or harness.get("schema") != "local_bmo.memory-eval.v1" or
+            not binding.get("harness_sha256") or harness.get("sha256") != binding["harness_sha256"] or
+            harness.get("long_context_sha256") != binding.get("long_context_sha256")):
+        raise ValueError("memory receipt harness identity mismatch")
+    if (not isinstance(prompts, dict) or not binding.get("memory_prompts_sha256") or
+            prompts.get("sha256") != binding["memory_prompts_sha256"] or
+            prompts.get("version") != binding.get("memory_prompts_version")):
+        raise ValueError("memory receipt prompt identity mismatch")
+    if payload.get("plan") != _memory_profile():
+        raise ValueError("memory receipt plan is not the approved profile")
+    results = payload.get("results")
+    if not isinstance(results, dict):
+        raise ValueError("memory receipt results invalid")
+    outcomes, not_passed = results.get("outcomes"), results.get("not_passed")
+    cells = results.get("cells_run")
+    profile = _memory_profile()
+    per_conversation = (len(remote_model_eval.MEMORY_FACT_TYPES) + 2) * len(profile["arms"])
+    vocabulary = set(remote_model_eval.MEMORY_OUTCOMES)
+    if (results.get("conversations_planned") != profile["conversations"] or
+            results.get("requests_planned") != profile["max_requests"] or
+            isinstance(cells, bool) or not isinstance(cells, int) or
+            not 0 <= cells <= profile["conversations"] * per_conversation or
+            not isinstance(outcomes, dict) or set(outcomes) != vocabulary or
+            any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in outcomes.values()) or
+            sum(outcomes.values()) != cells or not isinstance(not_passed, list) or
+            len(not_passed) != cells - outcomes["pass"] or
+            any(not isinstance(item, dict) or set(item) != {"conversation", "arm", "probe", "outcome", "reason"} or
+                not isinstance(item["conversation"], str) or
+                not remote_model_eval.MEMORY_CONVERSATION_ID.fullmatch(item["conversation"]) or
+                item["arm"] not in profile["arms"] or item["probe"] not in remote_model_eval.MEMORY_PROBES or
+                item["outcome"] not in vocabulary - {"pass"} or not isinstance(item["reason"], str) or
+                not remote_model_eval.LONG_CONTEXT_REASON.fullmatch(item["reason"])
+                for item in not_passed) or
+            not isinstance(results.get("complete"), bool) or
+            (payload["status"] == "completed") != results["complete"]):
+        raise ValueError("memory receipt results invalid")
+    sent = results.get("requests_sent")
+    if sent is not None and (isinstance(sent, bool) or not isinstance(sent, int) or not 0 <= sent <= profile["max_requests"]):
+        raise ValueError("memory receipt results invalid")
+    return {
+        "status": payload["status"],
+        "complete": results["complete"],
+        "conversations_run": results.get("conversations_run"),
+        "cells_run": cells,
+        "requests_sent": sent,
+        "outcomes": dict(outcomes),
+        "by_arm": results.get("by_arm"),
+        "note_minus_drop": results.get("note_minus_drop"),
+        "notes": results.get("notes"),
+        "latency": results.get("latency"),
+        "harness_sha256": harness["sha256"],
+        "memory_prompts": {"sha256": prompts["sha256"], "version": prompts["version"]},
+    }
+
+
 def _verify_extra_members(
     phase: dict[str, Any], salvage: list[dict[str, Any]], destination: Path,
     artifact: dict[str, Any], *, harness_sha256: str | None,
+    memory: dict[str, Any] | None = None,
 ) -> None:
     """Record each member's verified result in ``phase``. Never touches the shipping verdict."""
 
@@ -3047,6 +3256,8 @@ def _verify_extra_members(
         try:
             if member == _LONG_CONTEXT_MEMBER:
                 receipts[member] = _verify_long_context_receipt(destination / name, artifact, harness_sha256=harness_sha256)
+            elif member == _MEMORY_MEMBER:
+                receipts[member] = _verify_memory_receipt(destination / name, artifact, binding=memory)
             else:
                 receipts[member] = _verify_member_eval_receipt(destination / name, artifact, member)
         except Exception as exc:
@@ -3852,7 +4063,8 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     try:
                         _verify_extra_members(
                             extended_phase, lifecycle["salvage"], artifact_destination, eval_artifact,
-                            harness_sha256=extended_preflight["harness_sha256"])
+                            harness_sha256=extended_preflight["harness_sha256"],
+                            **({"memory": extended_preflight["memory"]} if "memory" in extended_preflight else {}))
                     except Exception as exc:
                         extended_phase["verification_error_type"] = type(exc).__name__
             # The shared teardown performs exact deletion before cost/key
@@ -3998,7 +4210,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model-artifact", type=Path, help="refused for eval; the Q4 artifact is always built remotely")
     parser.add_argument("--model-manifest", type=Path, help="approved manifest; defaults to the checked-in Q4 acceptance manifest")
     parser.add_argument("--evaluate-comparators", default="", choices=sorted(_COMPARATOR_SELECTIONS), help="default OFF; 'q4-oracle' scores the Q4 artifact on the pinned upstream server, 'q8' or 'q8,bf16' also evaluate the rebuilt higher-precision comparators")
-    parser.add_argument("--suite", default="shipping", choices=_EVAL_SUITES, help="default 'shipping' (the 37-case eval only); 'extended' also scores the three 60-case variants chunks and runs the conservative long-context harness, after the shipping eval, in the same lifecycle")
+    parser.add_argument("--suite", default="shipping", choices=_EVAL_SUITES, help="default 'shipping' (the 37-case eval only); 'extended' also scores the three 60-case variants chunks and runs the conservative long-context harness, after the shipping eval, in the same lifecycle; 'memory' runs ONLY the memory-note eval (156 requests) after the shipping eval")
     parser.add_argument("--scorer-ablation", default="", choices=_SCORER_ABLATIONS, help="default OFF; 'no-boolean-coercion' also re-scores the shipping fixture with True/False coercion disabled, into its own ablation receipt")
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args(argv)
@@ -4041,6 +4253,8 @@ def main(argv: list[str] | None = None) -> int:
                 "fixtures_sha256": dict(preflight["fixtures"]),
                 "long_context_harness_sha256": preflight["harness_sha256"],
                 "long_context_profile": _long_context_profile() if _LONG_CONTEXT_MEMBER in extra_members else None,
+                **({"memory_profile": _memory_profile(), "memory_identity": dict(preflight["memory"])}
+                   if _MEMORY_MEMBER in extra_members else {}),
                 "budget": _extended_budget(config, extra_members),
                 "failure_policy": ("a failed, refused or clock-skipped member is recorded on lifecycle.extended_suite "
                                    "and never changes the shipping job, status or eval receipt"),
