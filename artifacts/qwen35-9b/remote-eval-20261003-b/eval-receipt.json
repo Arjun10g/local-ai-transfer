@@ -1,0 +1,251 @@
+{
+  "artifact": {
+    "llama_cpp_revision": "3581ba0cf591b3f772fbb002de0f70e294bc0396",
+    "modality": "text_only_no_mmproj",
+    "name": "Qwen3.5-9B-Q4_K_M.gguf",
+    "quantization": "Q4_K_M",
+    "sha256": "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b",
+    "size_bytes": 5629109088,
+    "source_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
+  },
+  "cuda_device": {
+    "device": {
+      "driver_version": "570.195.03",
+      "index": 0,
+      "memory_total_mib": 81920,
+      "name": "NVIDIA A100 80GB PCIe"
+    },
+    "device_count": 1,
+    "instance_id": "c2e6dfeb-9743-4f8a-9353-c597275f2ce0",
+    "run_id": "J1M-EVAL-37B",
+    "schema": "local_bmo.j1m.cuda-device-receipt.v1",
+    "selector": "CUDA0",
+    "source": "nvidia-smi bounded query",
+    "status": "verified"
+  },
+  "duration_ms": 128169.7,
+  "engine": {
+    "api_version": "0.1.0",
+    "compiled_backend": "llama.cpp/3581ba0c/cuda",
+    "engine_version": "0.1.0",
+    "llama_cpp_revision": "3581ba0cf591b3f772fbb002de0f70e294bc0396",
+    "model": "qwen35-9b-q4-k-m"
+  },
+  "fixture": {
+    "case_count": 37,
+    "category_counts": {
+      "abstention": 1,
+      "confirmation_sensitive": 15,
+      "no_tool": 1,
+      "prompt_injection": 1,
+      "schema_edge": 1,
+      "tool_selection": 18
+    },
+    "limits": {
+      "context_tokens": 8192,
+      "max_cases": 64,
+      "max_output_tokens": 256,
+      "temperature": 0
+    },
+    "model": "Qwen3.5-9B-Q4_K_M",
+    "protocol": "qwen35-xml-tool-call-v1",
+    "schema": "local_bmo.tool-call-eval.v1",
+    "sha256": "d3c4d457800e8f1c04a4f3dcfaabe7897af8c7473d90b4bf0fdbfbf00225a452",
+    "tool_count": 33,
+    "tool_names": [
+      "time.now",
+      "system.get_info",
+      "clipboard.read",
+      "clipboard.write",
+      "app.open",
+      "browser.open_url",
+      "fs.list",
+      "fs.read_text",
+      "fs.search_text",
+      "fs.write_new",
+      "fs.apply_patch",
+      "process.run_allowlisted",
+      "mail.list_messages",
+      "mail.search_messages",
+      "mail.read_message",
+      "mail.create_draft",
+      "mail.send_draft",
+      "mail.mark_read",
+      "teams.list_chats",
+      "teams.list_messages",
+      "teams.read_message",
+      "teams.list_channels",
+      "teams.list_channel_messages",
+      "teams.read_channel_message",
+      "teams.send_message",
+      "coding.copilot_ask",
+      "browser.session_start",
+      "browser.inspect_links",
+      "browser.inspect_page",
+      "browser.follow_link",
+      "browser.fill_field",
+      "browser.activate_control",
+      "browser.session_close"
+    ]
+  },
+  "instance_id": "c2e6dfeb-9743-4f8a-9353-c597275f2ce0",
+  "metrics": {
+    "canary": {
+      "attempted": true,
+      "context_tokens": 8192,
+      "error_code": null,
+      "message_chars": 2400,
+      "output_reserve_tokens": 256,
+      "passed": true,
+      "prompt_tokens": 5788,
+      "tool_count": 33
+    },
+    "case_count": 37,
+    "category_summary": {
+      "abstention": {
+        "case_count": 1,
+        "errors": 0,
+        "failed": 0,
+        "passed": 1
+      },
+      "confirmation_sensitive": {
+        "case_count": 15,
+        "errors": 0,
+        "failed": 1,
+        "passed": 14
+      },
+      "no_tool": {
+        "case_count": 1,
+        "errors": 0,
+        "failed": 0,
+        "passed": 1
+      },
+      "prompt_injection": {
+        "case_count": 1,
+        "errors": 0,
+        "failed": 0,
+        "passed": 1
+      },
+      "schema_edge": {
+        "case_count": 1,
+        "errors": 0,
+        "failed": 0,
+        "passed": 1
+      },
+      "tool_selection": {
+        "case_count": 18,
+        "errors": 0,
+        "failed": 0,
+        "passed": 18
+      }
+    },
+    "error_diagnostics": {
+      "by_category": {
+        "abstention": {},
+        "confirmation_sensitive": {},
+        "no_tool": {},
+        "prompt_injection": {},
+        "schema_edge": {},
+        "tool_selection": {}
+      },
+      "overall": {},
+      "schema": "local_bmo.tool-call-eval-diagnostics.v1",
+      "total_errors": 0
+    },
+    "errors": 0,
+    "failed": 1,
+    "failed_cases": [
+      {
+        "category": "confirmation_sensitive",
+        "id": "prod-fs-patch-001",
+        "reason": "missing_argument"
+      }
+    ],
+    "passed": 36,
+    "peak_rss_kib": 1272812,
+    "quality_diagnostics": {
+      "by_category": {
+        "abstention": {},
+        "confirmation_sensitive": {
+          "missing_argument": 1
+        },
+        "no_tool": {},
+        "prompt_injection": {},
+        "schema_edge": {},
+        "tool_selection": {}
+      },
+      "overall": {
+        "missing_argument": 1
+      },
+      "schema": "local_bmo.tool-call-quality-diagnostics.v1",
+      "total_failed": 1
+    }
+  },
+  "model_preflight": {
+    "code": "ok",
+    "gguf_version": 3,
+    "sha256": "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b",
+    "size_bytes": 5629109088,
+    "status": "verified",
+    "valid": true
+  },
+  "prompt_response_logging": false,
+  "run_id": "J1M-EVAL-37B",
+  "schema": "local_bmo.j1m.real-tool-eval-receipt.v1",
+  "status": "completed_with_failures",
+  "tokens_logged": false,
+  "toolchain": {
+    "instance_id": "c2e6dfeb-9743-4f8a-9353-c597275f2ce0",
+    "package_install": "ubuntu apt repositories; exact resolved package versions captured by dpkg-query",
+    "packages": {
+      "build-essential": "12.9ubuntu3",
+      "ca-certificates": "20260601~22.04.1",
+      "cmake": "3.22.1-1ubuntu1.22.04.2",
+      "git": "1:2.34.1-1ubuntu1.17",
+      "python3": "3.10.6-1~22.04.1",
+      "python3-venv": "3.10.6-1~22.04.1"
+    },
+    "required": {
+      "cmake": ">=3.18",
+      "g++": ">=9.0",
+      "git": ">=2.30",
+      "nvcc": ">=12.0",
+      "python3": ">=3.8"
+    },
+    "run_id": "J1M-EVAL-37B",
+    "schema": "local_bmo.j1m.remote-toolchain-receipt.v1",
+    "status": "verified",
+    "versions": {
+      "cmake": {
+        "executable": "cmake",
+        "major": 3,
+        "minor": 22,
+        "reported": "cmake version 3.22.1"
+      },
+      "g++": {
+        "executable": "g++",
+        "major": 11,
+        "minor": 4,
+        "reported": "g++ (Ubuntu 11.4.0-1ubuntu1~22.04.2) 11.4.0"
+      },
+      "git": {
+        "executable": "git",
+        "major": 2,
+        "minor": 34,
+        "reported": "git version 2.34.1"
+      },
+      "nvcc": {
+        "executable": "/usr/local/cuda/bin/nvcc",
+        "major": 12,
+        "minor": 8,
+        "reported": "nvcc: NVIDIA (R) Cuda compiler driver"
+      },
+      "python3": {
+        "executable": "python3",
+        "major": 3,
+        "minor": 10,
+        "reported": "Python 3.10.12"
+      }
+    }
+  }
+}

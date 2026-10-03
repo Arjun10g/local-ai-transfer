@@ -1,0 +1,15 @@
+{
+  "device": {
+    "driver_version": "570.195.03",
+    "index": 0,
+    "memory_total_mib": 81920,
+    "name": "NVIDIA A100 80GB PCIe"
+  },
+  "device_count": 1,
+  "instance_id": "c2e6dfeb-9743-4f8a-9353-c597275f2ce0",
+  "run_id": "J1M-EVAL-37B",
+  "schema": "local_bmo.j1m.cuda-device-receipt.v1",
+  "selector": "CUDA0",
+  "source": "nvidia-smi bounded query",
+  "status": "verified"
+}
