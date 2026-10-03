@@ -444,6 +444,28 @@ class ToolCallEvaluatorTests(unittest.TestCase):
                 else:
                     self.assertEqual(parse_tool_call(vector["xml"]), vector["expected"])
 
+    def test_shared_boolean_coercion_vectors(self):
+        # Qwen3.5 can write `True`/`False`; coercion is by declared type, so a
+        # string parameter holding the word keeps it, and a value that is not a
+        # boolean is refused rather than defaulted. The Node parser runs the
+        # same vectors (tests/host/fixture-host.test.mjs).
+        coercion = json.loads((Path(__file__).with_name("qwen_xml_vectors.json")).read_text(encoding="utf-8"))["coercion"]
+        tools = [coercion["tool"]]
+        self.assertGreaterEqual(len(coercion["cases"]), 12)
+        for vector in coercion["cases"]:
+            with self.subTest(vector=vector["id"]):
+                if vector.get("reject"):
+                    with self.assertRaises(ValueError):
+                        parse_tool_call(vector["xml"], tools)
+                else:
+                    self.assertEqual(parse_tool_call(vector["xml"], tools), vector["expected"])
+
+    def test_boolean_coercion_is_off_without_a_schema(self):
+        # With no tool list the parser cannot know a parameter's type, so a bare
+        # `True` stays text: coercion must never guess.
+        parsed = parse_tool_call("<tool_call><function=test.flags><parameter=flag>True</parameter></function></tool_call>")
+        self.assertEqual(parsed["arguments"], {"flag": "True"})
+
     def test_proxy_environment_is_ignored_and_redirects_fail_for_both_requests(self):
         with patch.dict(os.environ, {"http_proxy": "http://attacker.invalid:8080", "HTTPS_PROXY": "http://attacker.invalid:8080"}):
             with patch("scripts.test.evaluate_tool_calls.urllib.request.getproxies", side_effect=AssertionError("proxy lookup")):

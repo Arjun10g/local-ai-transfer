@@ -14,5 +14,178 @@
     {"id": "indentation", "xml": "<tool_call><function=test.echo><parameter=value>\n  first line  \n  second line  \n</parameter></function></tool_call>", "expected": {"name": "test.echo", "arguments": {"value": "  first line  \n  second line  "}}},
     {"id": "duplicate-json-key", "xml": "<tool_call><function=test.echo><parameter=value>{\"x\":1,\"x\":2}</parameter></function></tool_call>", "reject": true},
     {"id": "json-depth-overflow", "xml": "<tool_call><function=test.echo><parameter=value>{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":0}}}}}}}}}</parameter></function></tool_call>", "reject": true}
-  ]
+  ],
+  "coercion": {
+    "note": "Schema-directed boolean coercion. A value is changed only when its parameter is declared exactly boolean, it is a string, and its trimmed text is true/false in any case. Both parsers must agree on every case. `reject` cases list the arguments AFTER coercion, which validation must then refuse; nothing is defaulted.",
+    "tool": {
+      "type": "function",
+      "function": {
+        "name": "test.flags",
+        "description": "coercion fixture",
+        "parameters": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "flag": {
+              "type": "boolean"
+            },
+            "limit": {
+              "type": "integer"
+            },
+            "note": {
+              "type": "string"
+            },
+            "either": {"anyOf": [{"type": "boolean"}, {"type": "string"}]}
+          }
+        }
+      }
+    },
+    "cases": [
+      {
+        "id": "python-true",
+        "xml": "<tool_call><function=test.flags><parameter=flag>True</parameter></function></tool_call>",
+        "expected": {
+          "name": "test.flags",
+          "arguments": {
+            "flag": true
+          }
+        }
+      },
+      {
+        "id": "python-false",
+        "xml": "<tool_call><function=test.flags><parameter=flag>False</parameter></function></tool_call>",
+        "expected": {
+          "name": "test.flags",
+          "arguments": {
+            "flag": false
+          }
+        }
+      },
+      {
+        "id": "padded-and-mixed-case",
+        "xml": "<tool_call><function=test.flags><parameter=flag> tRuE </parameter></function></tool_call>",
+        "expected": {
+          "name": "test.flags",
+          "arguments": {
+            "flag": true
+          }
+        }
+      },
+      {
+        "id": "json-true-unchanged",
+        "xml": "<tool_call><function=test.flags><parameter=flag>true</parameter></function></tool_call>",
+        "expected": {
+          "name": "test.flags",
+          "arguments": {
+            "flag": true
+          }
+        }
+      },
+      {
+        "id": "string-parameter-keeps-its-text",
+        "xml": "<tool_call><function=test.flags><parameter=note>True</parameter></function></tool_call>",
+        "expected": {
+          "name": "test.flags",
+          "arguments": {
+            "note": "True"
+          }
+        }
+      },
+      {
+        "id": "string-parameter-keeps-false-too",
+        "xml": "<tool_call><function=test.flags><parameter=note>False</parameter></function></tool_call>",
+        "expected": {
+          "name": "test.flags",
+          "arguments": {
+            "note": "False"
+          }
+        }
+      },
+      {
+        "id": "union-with-string-is-not-coerced",
+        "xml": "<tool_call><function=test.flags><parameter=either>True</parameter></function></tool_call>",
+        "expected": {
+          "name": "test.flags",
+          "arguments": {
+            "either": "True"
+          }
+        }
+      },
+      {
+        "id": "boolean-and-string-together",
+        "xml": "<tool_call><function=test.flags><parameter=flag>False</parameter><parameter=note>False</parameter></function></tool_call>",
+        "expected": {
+          "name": "test.flags",
+          "arguments": {
+            "flag": false,
+            "note": "False"
+          }
+        }
+      },
+      {
+        "id": "bom-padding-is-not-whitespace",
+        "xml": "<tool_call><function=test.flags><parameter=flag>\ufeffTrue</parameter></function></tool_call>",
+        "reject": true,
+        "coerced": {
+          "flag": "\ufeffTrue"
+        }
+      },
+      {
+        "id": "next-line-padding-is-not-whitespace",
+        "xml": "<tool_call><function=test.flags><parameter=flag>\u0085False</parameter></function></tool_call>",
+        "reject": true,
+        "coerced": {
+          "flag": "\u0085False"
+        }
+      },
+      {
+        "id": "no-break-space-padding-is-not-whitespace",
+        "xml": "<tool_call><function=test.flags><parameter=flag>\u00a0True</parameter></function></tool_call>",
+        "reject": true,
+        "coerced": {
+          "flag": "\u00a0True"
+        }
+      },
+      {
+        "id": "file-separator-padding-is-not-whitespace",
+        "xml": "<tool_call><function=test.flags><parameter=flag>\u001cTrue </parameter></function></tool_call>",
+        "reject": true,
+        "coerced": {
+          "flag": "\u001cTrue "
+        }
+      },
+      {
+        "id": "yes-is-not-a-boolean",
+        "xml": "<tool_call><function=test.flags><parameter=flag>yes</parameter></function></tool_call>",
+        "reject": true,
+        "coerced": {
+          "flag": "yes"
+        }
+      },
+      {
+        "id": "one-is-not-a-boolean",
+        "xml": "<tool_call><function=test.flags><parameter=flag>1</parameter></function></tool_call>",
+        "reject": true,
+        "coerced": {
+          "flag": 1
+        }
+      },
+      {
+        "id": "quoted-true-is-not-a-boolean",
+        "xml": "<tool_call><function=test.flags><parameter=flag>\"true\"</parameter></function></tool_call>",
+        "reject": true,
+        "coerced": {
+          "flag": "\"true\""
+        }
+      },
+      {
+        "id": "integer-parameter-is-never-coerced",
+        "xml": "<tool_call><function=test.flags><parameter=limit>True</parameter></function></tool_call>",
+        "reject": true,
+        "coerced": {
+          "limit": "True"
+        }
+      }
+    ]
+  }
 }

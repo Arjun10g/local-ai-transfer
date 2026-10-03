@@ -586,6 +586,36 @@ def _argument_failure_code(
     return "argument_value_mismatch"
 
 
+def coerce_boolean_arguments(parameters: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Schema-directed `True`/`False` -> boolean, mirroring `coerceBooleanArguments`.
+
+    Qwen3.5 can write a boolean Python-style where the call format wants JSON;
+    vLLM's and SGLang's Qwen parsers coerce by declared type for this reason.
+    A value is opaque text until the schema says what it should be, so this
+    changes one only when the parameter is declared exactly ``boolean``, the
+    value is a string, and its trimmed text is ``true``/``false`` in any case.
+    Anything else is left for validation to refuse, and is never defaulted.
+    Must stay identical to ``host/agent/tool-envelope.mjs``; the shared
+    ``coercion`` vectors in ``qwen_xml_vectors.json`` bind the two. Only the
+    Qwen XML path calls it: the OpenAI-style path carries real JSON booleans.
+    """
+
+    properties = parameters.get("properties") if isinstance(parameters, dict) else None
+    if not isinstance(properties, dict):
+        return arguments
+    for key, value in list(arguments.items()):
+        declared = properties.get(key)
+        if not isinstance(declared, dict) or declared.get("type") != "boolean" or not isinstance(value, str):
+            continue
+        # The same explicit ASCII whitespace set as the host's regex, NOT bare
+        # str.strip(): it strips U+001C-001F and U+0085 that JS trim() does not,
+        # and JS trim() strips U+FEFF that it does not.
+        word = value.strip(" \t\n\r\f\v").lower()
+        if word in ("true", "false"):
+            arguments[key] = word == "true"
+    return arguments
+
+
 def parse_tool_call(text: str, tools: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
     """Parse one complete pinned Qwen XML call; malformed output never scores."""
     if not isinstance(text, str):
@@ -632,6 +662,7 @@ def parse_tool_call(text: str, tools: list[dict[str, Any]] | None = None) -> dic
         arguments[key] = value
         position = parameter.end()
     if known_tools is not None:
+        coerce_boolean_arguments(known_tools[name].get("parameters"), arguments)
         _validate_arguments(known_tools[name], arguments)
     return {"name": name, "arguments": arguments}
 
