@@ -22,6 +22,7 @@ import sys
 import time
 import re
 import selectors
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,50 @@ from typing import Any
 MODEL_NAME = "Qwen3.5-9B-Q4_K_M.gguf"
 PIN_RE = set("0123456789abcdef")
 TOOL_NAME = re.compile(r"^[a-z][a-z0-9_.-]{1,95}$")
+# Opt-in suite members (``j1m_orchestrator.py --suite extended`` and
+# ``--scorer-ablation no-boolean-coercion``). With ``--suite-member`` absent
+# nothing below is reachable and the shipping receipt is byte-for-byte what it
+# was. Each member writes its OWN schema, so a member receipt can never be
+# published or verified as the shipping ``eval-receipt.json``.
+VARIANT_MEMBERS = ("variants-chunk-1", "variants-chunk-2", "variants-chunk-3")
+ABLATION_MEMBER = "ablation-no-boolean-coercion"
+LONG_CONTEXT_MEMBER = "long-context"
+SUITE_MEMBER_SCHEMAS = {
+    **{member: "local_bmo.j1m.variants-eval-receipt.v1" for member in VARIANT_MEMBERS},
+    ABLATION_MEMBER: "local_bmo.j1m.scorer-ablation-eval-receipt.v1",
+    LONG_CONTEXT_MEMBER: "local_bmo.j1m.long-context-receipt.v1",
+}
+# Recorded in the ablation receipt so a no-coercion score can never be read as
+# the shipping one.
+SCORER_ABLATION_RECORD = {"name": ABLATION_MEMBER, "boolean_coercion": False}
+SUITE_ERROR_CODES = frozenset({
+    "suite_member_invalid", "evaluator_fixture_identity_mismatch",
+    "long_context_harness_missing", "long_context_harness_failed",
+    "long_context_timeout", "long_context_receipt_missing",
+    "long_context_receipt_invalid",
+})
+# The long-context member's whole budget: engine start plus the harness. It is
+# deliberately separate from (and larger than) EVAL_TOTAL_TIMEOUT, which stays
+# the shipping eval's cap; the orchestrator budgets the stage explicitly.
+LONG_CONTEXT_TOTAL_TIMEOUT = 840.0
+LONG_CONTEXT_RAW_MAX_BYTES = 4 * 1024 * 1024
+LONG_CONTEXT_HARNESS_MAX_BYTES = 512 * 1024
+# The one conservative profile this lane runs. Fixed in source, not argv, so a
+# paid stage cannot be widened by configuration; the orchestrator mirrors it
+# for the plan and its verifier requires the receipt to repeat it exactly.
+LONG_CONTEXT_PROFILE = {
+    "sizes": [1000, 2000, 4000, 6000],
+    "styles": ["turns", "tool_loop"],
+    "depths": [0.1, 0.5, 0.9],
+    "trials": 1,
+    "probes": ["needle", "multi_needle", "latest_value", "tool_result", "tool_call"],
+    "max_output": 96,
+    "request_timeout_seconds": 60,
+    "stop_after_failures": 40,
+}
+LONG_CONTEXT_OUTCOMES = ("context_overflow", "engine_busy", "error", "fail", "pass", "request_too_large", "timeout")
+LONG_CONTEXT_CELL_ID = re.compile(r"^[a-z_]{1,16}/[a-z_]{1,16}/s[0-9]{3,5}/d[0-9.]{1,6}/t[0-9]{1,2}$")
+LONG_CONTEXT_REASON = re.compile(r"^[a-z0-9_]{1,64}$")
 SAFE_ERROR_CODES = frozenset({
     "artifact_manifest_invalid", "cuda_device_receipt_invalid", "engine_binary_missing",
     "engine_build_info_failed", "engine_build_info_invalid", "engine_llama_identity_mismatch",
@@ -61,7 +106,7 @@ SAFE_ERROR_CODES = frozenset({
     "model_manifest_lock_invalid", "model_manifest_lock_mismatch", "q4_artifact_hash_mismatch",
     "q4_artifact_missing_or_wrong_name", "source_pin_invalid", "source_revision_mismatch",
     "toolchain_receipt_invalid",
-})
+}) | SUITE_ERROR_CODES
 EVAL_HTTP_DIAGNOSTIC_STATUSES = (400, 401, 404, 408, 409, 413, 415, 429, 500, 503)
 # Mirrors ENGINE_ERROR_CODES in scripts/test/evaluate_tool_calls.py; the two
 # move together, and tests/model/test_tool_call_eval.py pins that they agree.
@@ -1018,7 +1063,17 @@ def _parse_evaluator_result(result: dict[str, Any], *, expected_case_count: int,
     return metrics, all_passed, has_failure
 
 
-def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any], deadline: float | None = None) -> dict[str, Any]:
+def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any], deadline: float | None = None, *,
+                         extra_evaluator_args: tuple[str, ...] = (), session: Any = None) -> dict[str, Any]:
+    """Start the engine once, score the fixture, and always stop the engine.
+
+    ``extra_evaluator_args`` and ``session`` exist only for the opt-in suite
+    members; both default to doing nothing, which is the shipping path. A
+    ``session`` replaces the evaluator call with a different client of the SAME
+    running engine (the long-context harness) and returns its own receipt; the
+    engine and its bearer are torn down by the ``finally`` below either way.
+    """
+
     started = time.monotonic()
     deadline = deadline if deadline is not None else started + float(getattr(args, "timeout", EVAL_TOTAL_TIMEOUT))
     engine = Path(args.engine)
@@ -1115,12 +1170,22 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any], dea
                 ready.get("event") != "ready" or ready.get("token_required") is not True or
                 isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535 or ready.get("bind") != "127.0.0.1"):
             raise EngineStartupFailure("engine_ready_identity_invalid", _reap_child_status(process, deadline))
+        if session is not None:
+            return session(
+                args=args, artifact=artifact, port=port, token_file=token_file,
+                process=process, deadline=deadline, started=started,
+                fixture_identity=fixture_contract["fixture_identity"],
+                context_tokens=expected_context_tokens, build_info=build_info,
+                model_preflight={**model_preflight, **preflight_summary},
+            )
         evaluate = [
             sys.executable, args.evaluator, "--fixture", args.fixture,
             "--endpoint", f"http://127.0.0.1:{port}/v1/chat/completions",
             "--token-file", os.fspath(token_file), "--timeout", "120",
             "--max-cases", str(expected_case_count), "--engine-pid", str(process.pid),
         ]
+        if extra_evaluator_args:
+            evaluate.extend(extra_evaluator_args)
         evaluator_timeout = _stage_timeout(deadline, float(args.timeout), "evaluator_timeout_invalid")
         evaluate[evaluate.index("--timeout") + 1] = str(max(1, math.floor(evaluator_timeout)))
         result = _run_bounded(evaluate, timeout=evaluator_timeout, output_limit=MAX_EVAL_OUTPUT)
@@ -1188,6 +1253,253 @@ def _launch_and_evaluate(args: argparse.Namespace, artifact: dict[str, Any], dea
                 pass
 
 
+def _run_with_stdin(command: list[str], stdin_bytes: bytes, *, timeout: float) -> dict[str, Any]:
+    """Run one child with a secret on stdin only; never argv, never env."""
+
+    environment = {key: value for key, value in os.environ.items() if key != "LAE_EVAL_TOKEN"}
+    with tempfile.TemporaryFile() as stdout_log, tempfile.TemporaryFile() as stderr_log:
+        try:
+            result = subprocess.run(command, input=stdin_bytes, stdout=stdout_log, stderr=stderr_log,
+                                    timeout=timeout, check=False, env=environment)
+        except subprocess.TimeoutExpired:
+            return {"status": "timeout", "exit_code": None}
+        return {"status": "completed" if result.returncode == 0 else "failed", "exit_code": result.returncode}
+
+
+def _bounded_int_value(value: Any, low: int, high: int) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+        return None
+    return value
+
+
+def _bounded_float_value(value: Any, low: float, high: float) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not low <= value <= high:
+        return None
+    return round(float(value), 3)
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    return round(ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2, 3)
+
+
+def _distill_long_context(raw: Any) -> dict[str, Any]:
+    """Rebuild bounded aggregates from the harness receipt, field by field.
+
+    The harness receipt already excludes prompts and replies; this goes
+    further and copies NOTHING by reference. Every value below is recomputed
+    from typed cell fields (identifiers matched by regex, outcomes from a
+    closed set, numbers range-checked), so even a changed harness cannot route
+    text into the salvageable receipt, and no key carries a credential-shaped
+    name the persisted-receipt screen would refuse.
+    """
+
+    if not isinstance(raw, dict) or raw.get("schema") != "local_bmo.long-context-eval.v1" or raw.get("prompt_response_logging") is not False:
+        raise ValueError("long_context_receipt_invalid")
+    cells = raw.get("cells", [])
+    planned = (len(LONG_CONTEXT_PROFILE["sizes"]) * len(LONG_CONTEXT_PROFILE["styles"]) *
+               len(LONG_CONTEXT_PROFILE["depths"]) * len(LONG_CONTEXT_PROFILE["probes"]) * LONG_CONTEXT_PROFILE["trials"])
+    if not isinstance(cells, list) or len(cells) > planned:
+        raise ValueError("long_context_receipt_invalid")
+    sizes = set(LONG_CONTEXT_PROFILE["sizes"])
+    clean: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for cell in cells:
+        if not isinstance(cell, dict):
+            raise ValueError("long_context_receipt_invalid")
+        cell_id, outcome, reason = cell.get("id"), cell.get("outcome"), cell.get("reason")
+        size, depth = cell.get("target_tokens"), cell.get("depth")
+        probe, style = cell.get("probe"), cell.get("style")
+        if (not isinstance(cell_id, str) or not LONG_CONTEXT_CELL_ID.fullmatch(cell_id) or cell_id in seen or
+                outcome not in LONG_CONTEXT_OUTCOMES or not isinstance(reason, str) or not LONG_CONTEXT_REASON.fullmatch(reason) or
+                probe not in LONG_CONTEXT_PROFILE["probes"] or style not in LONG_CONTEXT_PROFILE["styles"] or
+                size not in sizes or isinstance(size, bool) or depth not in LONG_CONTEXT_PROFILE["depths"]):
+            raise ValueError("long_context_receipt_invalid")
+        seen.add(cell_id)
+        clean.append({
+            "id": cell_id, "probe": probe, "style": style, "size": size, "depth": depth,
+            "outcome": outcome, "reason": reason,
+            "coherent": cell.get("coherent") if isinstance(cell.get("coherent"), bool) else None,
+            "prompt_tokens": _bounded_int_value(cell.get("prompt_tokens"), 0, 1_000_000),
+            "seconds": _bounded_float_value(cell.get("seconds"), 0.0, 86_400.0),
+            "prefill": _bounded_float_value(cell.get("prefill_seconds_est"), 0.0, 86_400.0),
+            "reused": _bounded_int_value(cell.get("reused_prefix_tokens"), 0, 1_000_000) or 0,
+        })
+
+    def bucket(key: Any) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        for item in clean:
+            entry = out.setdefault(key(item), {outcome: 0 for outcome in LONG_CONTEXT_OUTCOMES})
+            entry[item["outcome"]] += 1
+        for entry in out.values():
+            graded = entry["pass"] + entry["fail"]
+            entry["accuracy"] = round(entry["pass"] / graded, 3) if graded else None
+        return dict(sorted(out.items()))
+
+    latency: dict[str, dict[str, Any]] = {}
+    for size in sorted(sizes):
+        answered = [item for item in clean if item["size"] == size and item["prompt_tokens"] is not None]
+        if not answered:
+            continue
+        latency[str(size)] = {
+            "cells": len(answered),
+            "median_prompt_tokens": _median([float(item["prompt_tokens"]) for item in answered]),
+            "median_seconds": _median([item["seconds"] for item in answered if item["seconds"] is not None]),
+            "median_prefill_seconds_est": _median([item["prefill"] for item in answered if item["prefill"] is not None]),
+            "max_reused_prefix": max(item["reused"] for item in answered),
+            "incoherent": sum(1 for item in answered if item["coherent"] is False),
+        }
+    stopped = raw.get("stopped_early")
+    stopped_early = None
+    if isinstance(stopped, dict):
+        stopped_early = {
+            "reason": "failure_limit" if stopped.get("reason") == "failure_limit" else "other",
+            "failures": _bounded_int_value(stopped.get("failures"), 0, planned),
+            "cells_not_run": _bounded_int_value(stopped.get("cells_not_run"), 0, planned),
+        }
+    outcomes = {outcome: sum(1 for item in clean if item["outcome"] == outcome) for outcome in LONG_CONTEXT_OUTCOMES}
+    return {
+        "cells_planned": planned,
+        "cells_run": len(clean),
+        "complete": raw.get("complete") is True and len(clean) == planned and stopped_early is None,
+        "stopped_early": stopped_early,
+        "engine_context": _bounded_int_value(raw.get("engine_context_tokens"), 1, 16384),
+        "outcomes": outcomes,
+        "by_size": bucket(lambda item: str(item["size"])),
+        "by_style_size": bucket(lambda item: f"{item['style']}@{item['size']}"),
+        "by_depth_size": bucket(lambda item: f"d{item['depth']:g}@{item['size']}"),
+        "by_probe_size": bucket(lambda item: f"{item['probe']}@{item['size']}"),
+        "latency_by_size": latency,
+        "tool_loop_reuse": {
+            "cells": sum(1 for item in clean if item["style"] == "tool_loop" and item["prompt_tokens"] is not None),
+            "reused": sum(1 for item in clean if item["style"] == "tool_loop" and item["reused"] > 0),
+        },
+        "not_passed": [{"id": item["id"], "outcome": item["outcome"], "reason": item["reason"]}
+                       for item in clean if item["outcome"] != "pass"],
+    }
+
+
+def _long_context_session(*, args: argparse.Namespace, artifact: dict[str, Any], port: int, token_file: Path,
+                          process: Any, deadline: float, started: float, fixture_identity: dict[str, Any],
+                          context_tokens: int, build_info: dict[str, Any],
+                          model_preflight: dict[str, Any]) -> dict[str, Any]:
+    """Drive ``long_context_eval.py`` against the engine ``_launch_and_evaluate`` started.
+
+    The harness imports ``scripts.test.evaluate_tool_calls`` and reads the
+    shipping fixture from ``tests/model``, so the already-uploaded evaluator and
+    fixture are copied into that layout inside an owner-private directory of
+    this process. The bearer goes to the child on stdin, never argv or env. Its
+    raw receipt never leaves the private directory: only the distilled,
+    recomputed aggregate below is returned for publication.
+    """
+
+    harness = Path(getattr(args, "long_context_harness", "") or "")
+    if harness.name != "long_context_eval.py" or not harness.is_file():
+        raise ValueError("long_context_harness_missing")
+    harness_bytes = _read_bounded(harness, LONG_CONTEXT_HARNESS_MAX_BYTES, deadline=deadline, error_code="long_context_harness_missing")
+    evaluator_bytes = _read_bounded(Path(args.evaluator), LONG_CONTEXT_HARNESS_MAX_BYTES, deadline=deadline, error_code="long_context_harness_missing")
+    fixture_bytes = _read_bounded(Path(args.fixture), FIXTURE_MAX_BYTES, deadline=deadline, error_code="evaluator_fixture_unreadable")
+    if hashlib.sha256(fixture_bytes).hexdigest() != fixture_identity.get("sha256"):
+        raise ValueError("evaluator_fixture_identity_mismatch")
+    workspace = Path(tempfile.mkdtemp(prefix="lae-long-context-"))
+    try:
+        os.chmod(workspace, 0o700)
+        tree = workspace / "tree"
+        (tree / "scripts" / "test").mkdir(parents=True, mode=0o700)
+        (tree / "tests" / "model").mkdir(parents=True, mode=0o700)
+        (workspace / "out").mkdir(mode=0o700)
+        entry = tree / "scripts" / "test" / "long_context_eval.py"
+        entry.write_bytes(harness_bytes)
+        (tree / "scripts" / "test" / "evaluate_tool_calls.py").write_bytes(evaluator_bytes)
+        (tree / "tests" / "model" / "production_tool_call_eval.json").write_bytes(fixture_bytes)
+        raw_path = workspace / "out" / "long-context-raw.json"
+        profile = LONG_CONTEXT_PROFILE
+        command = [
+            sys.executable, os.fspath(entry),
+            "--endpoint", f"http://127.0.0.1:{port}/v1/chat/completions",
+            "--token-stdin", "--out", os.fspath(raw_path),
+            "--sizes", ",".join(str(value) for value in profile["sizes"]),
+            "--styles", ",".join(profile["styles"]),
+            "--depths", ",".join(f"{value:g}" for value in profile["depths"]),
+            "--trials", str(profile["trials"]),
+            "--probes", ",".join(profile["probes"]),
+            "--max-tokens", str(profile["max_output"]),
+            "--timeout", str(profile["request_timeout_seconds"]),
+            "--stop-after-failures", str(profile["stop_after_failures"]),
+            "--context", str(context_tokens),
+        ]
+        bearer = token_file.read_bytes()
+        harness_timeout = _stage_timeout(deadline, LONG_CONTEXT_TOTAL_TIMEOUT, "long_context_timeout")
+        result = _run_with_stdin(command, bearer, timeout=harness_timeout)
+        raw: Any = None
+        if raw_path.is_file():
+            try:
+                raw = _strict_json_object(_read_bounded(raw_path, LONG_CONTEXT_RAW_MAX_BYTES, error_code="long_context_receipt_invalid"))
+            except (ValueError, UnicodeError, json.JSONDecodeError) as exc:
+                raise ValueError("long_context_receipt_invalid") from exc
+        if raw is None:
+            raise ValueError("long_context_timeout" if result.get("status") == "timeout" else
+                             "long_context_harness_failed" if result.get("status") == "failed" else
+                             "long_context_receipt_missing")
+        results = _distill_long_context(raw)
+        child_status = _bounded_child_status(process)
+        if child_status is not None:
+            raise EngineStartupFailure("engine_exited_during_evaluation", child_status)
+        complete = results["complete"] and result.get("status") == "completed"
+        harness_outcome = {"status": result.get("status"), "exit_code": result.get("exit_code")}
+        return {
+            "schema": SUITE_MEMBER_SCHEMAS[LONG_CONTEXT_MEMBER],
+            "status": "completed" if complete else "partial",
+            "artifact": artifact,
+            "fixture": fixture_identity,
+            "engine": build_info,
+            "model_preflight": model_preflight,
+            "harness": {"schema": raw["schema"], "sha256": hashlib.sha256(harness_bytes).hexdigest(),
+                        "process": harness_outcome},
+            "plan": {key: (list(value) if isinstance(value, (list, tuple)) else value) for key, value in profile.items()},
+            "results": results,
+            "duration_ms": round((time.monotonic() - started) * 1000, 1),
+            "prompt_response_logging": False,
+            "tokens_logged": False,
+        }
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def _validate_suite_member(args: argparse.Namespace) -> str:
+    """Return the opt-in member, or ``""``; refuse an incoherent request."""
+
+    member = getattr(args, "suite_member", "") or ""
+    if not member:
+        if getattr(args, "expected_fixture_sha256", "") or getattr(args, "long_context_harness", ""):
+            raise ValueError("suite_member_invalid")
+        return ""
+    expected = getattr(args, "expected_fixture_sha256", "")
+    preflight = Path(getattr(args, "preflight_receipt", "") or "")
+    if (member not in SUITE_MEMBER_SCHEMAS or not isinstance(expected, str) or len(expected) != 64 or set(expected) - PIN_RE or
+            # A member must never overwrite the shipping eval's own preflight
+            # or receipt evidence on the host.
+            not getattr(args, "preflight_receipt", "") or preflight.name == "startup-preflight-receipt.json" or
+            Path(args.receipt).name in {"eval-receipt.json", "startup-preflight-receipt.json"} or
+            (member == LONG_CONTEXT_MEMBER) != bool(getattr(args, "long_context_harness", ""))):
+        raise ValueError("suite_member_invalid")
+    return member
+
+
+def _stamp_suite_member(receipt: dict[str, Any], member: str) -> dict[str, Any]:
+    """Give a member receipt its own schema and say which member it is."""
+
+    if not member:
+        return receipt
+    stamped = {**receipt, "schema": SUITE_MEMBER_SCHEMAS[member], "suite_member": member}
+    if member == ABLATION_MEMBER:
+        stamped["scorer_ablation"] = dict(SCORER_ABLATION_RECORD)
+    return stamped
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True)
@@ -1210,18 +1522,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--receipt", required=True)
     parser.add_argument("--preflight-receipt", default="")
     parser.add_argument("--timeout", type=float, default=EVAL_TOTAL_TIMEOUT)
+    # Opt-in suite members. All three default to empty, which is the shipping
+    # path exactly; see SUITE_MEMBER_SCHEMAS.
+    parser.add_argument("--suite-member", default="", choices=("", *SUITE_MEMBER_SCHEMAS))
+    parser.add_argument("--expected-fixture-sha256", default="")
+    parser.add_argument("--long-context-harness", default="")
     args = parser.parse_args(argv)
     receipt: dict[str, Any]
     process_started = time.monotonic()
     fixture_identity: dict[str, Any] | None = None
+    member = ""
     try:
-        if not 1 <= args.timeout <= EVAL_TOTAL_TIMEOUT:
+        member = _validate_suite_member(args)
+        if not 1 <= args.timeout <= (LONG_CONTEXT_TOTAL_TIMEOUT if member == LONG_CONTEXT_MEMBER else EVAL_TOTAL_TIMEOUT):
             raise ValueError("eval_timeout_invalid")
         deadline = process_started + args.timeout
         try:
             fixture_identity = _fixture_contract(Path(args.fixture), deadline=deadline)["fixture_identity"]
         except ValueError:
             fixture_identity = None
+        if member and (fixture_identity is None or fixture_identity.get("sha256") != args.expected_fixture_sha256):
+            # Refused before the model is hashed or the engine started: a
+            # wrong chunk file must not cost GPU time or score as the right one.
+            raise ValueError("evaluator_fixture_identity_mismatch")
         preflight_path = Path(args.preflight_receipt or Path(args.receipt).with_name("startup-preflight-receipt.json"))
         try:
             _write_preflight_receipt(preflight_path, status="not_started", error_code="engine_model_preflight_not_started")
@@ -1231,8 +1554,17 @@ def main(argv: list[str] | None = None) -> int:
             # preflight destination itself is unavailable.
             pass
         artifact = verify_artifact(Path(args.model), Path(args.model_manifest), source_revision=args.source_revision, llama_revision=args.llama_revision, manifest_lock_path=Path(args.model_manifest_lock), deadline=deadline)
-        receipt = _launch_and_evaluate(args, artifact, deadline=deadline)
-        status = 0 if receipt["status"] in {"verified", "completed_with_failures"} else 1
+        if not member:
+            receipt = _launch_and_evaluate(args, artifact, deadline=deadline)
+            status = 0 if receipt["status"] in {"verified", "completed_with_failures"} else 1
+        else:
+            if member == LONG_CONTEXT_MEMBER:
+                receipt = _launch_and_evaluate(args, artifact, deadline=deadline, session=_long_context_session)
+            elif member == ABLATION_MEMBER:
+                receipt = _launch_and_evaluate(args, artifact, deadline=deadline, extra_evaluator_args=("--no-boolean-coercion",))
+            else:
+                receipt = _launch_and_evaluate(args, artifact, deadline=deadline)
+            status = 0 if receipt["status"] in {"verified", "completed_with_failures", "completed", "partial"} else 1
     except (OSError, ValueError, TypeError, KeyError, IndexError, RecursionError, OverflowError, subprocess.SubprocessError) as exc:
         receipt = {"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "failed", "error_type": type(exc).__name__, "error_code": _safe_error_code(exc), "prompt_response_logging": False, "tokens_logged": False}
         if fixture_identity is not None:
@@ -1245,10 +1577,14 @@ def main(argv: list[str] | None = None) -> int:
             receipt["child"] = child_status
         status = 1
     output = Path(args.receipt)
-    receipt = {**receipt, **_run_identity()}
+    # A member whose own arguments were refused still publishes under its
+    # member schema, so the refusal can never be salvaged as a shipping receipt.
+    member = member or (args.suite_member if args.suite_member in SUITE_MEMBER_SCHEMAS else "")
+    receipt = {**_stamp_suite_member(receipt, member), **_run_identity()}
     encoded = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
     if len(encoded) > MAX_RECEIPT_BYTES:
         receipt = {"schema": "local_bmo.j1m.real-tool-eval-receipt.v1", "status": "failed", "error_code": "evaluator_receipt_invalid", "prompt_response_logging": False, "tokens_logged": False, **_run_identity()}
+        receipt = {**_stamp_suite_member(receipt, member), **_run_identity()}
         encoded = (json.dumps(receipt, sort_keys=True) + "\n").encode("ascii")
     _publish_private_receipt(output, encoded)
     # The orchestrator records this line as the failed stage's stdout tail, and

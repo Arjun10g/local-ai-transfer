@@ -267,8 +267,64 @@ class FakeWatchdog:
 # ------------------------------------------------------------- fake receipts
 
 
+def _fake_member_receipts(config: dict[str, Any], eval_receipt: dict[str, Any],
+                          eval_artifact: dict[str, Any]) -> dict[str, Any]:
+    """The extra-member receipts a correct host writes for ``--suite extended``.
+
+    Each one is built from the shipping receipt's own shape and then given the
+    member's schema, stamp and pinned fixture identity, exactly as
+    ``remote_model_eval.py --suite-member`` does on the host.
+    """
+
+    from scripts.test import remote_model_eval
+
+    receipts: dict[str, Any] = {}
+    for member in orchestrator._extra_members("extended", "no-boolean-coercion"):
+        name = orchestrator._extra_member_receipt(member)
+        schema = orchestrator._SALVAGE_EXTRA_RECEIPT_ALLOWLIST[name]
+        contract = orchestrator._extra_member_contract(member)
+        if member == orchestrator._LONG_CONTEXT_MEMBER:
+            profile = orchestrator._long_context_profile()
+            planned = (len(profile["sizes"]) * len(profile["styles"]) * len(profile["depths"]) *
+                       len(profile["probes"]) * profile["trials"])
+            outcomes = {outcome: 0 for outcome in remote_model_eval.LONG_CONTEXT_OUTCOMES}
+            outcomes["pass"] = planned
+            receipts[name] = {
+                "schema": schema, "status": "completed", "suite_member": member,
+                "artifact": eval_receipt["artifact"], "fixture": contract["fixture_identity"],
+                "engine": eval_receipt["engine"], "model_preflight": eval_receipt["model_preflight"],
+                "harness": {"schema": "local_bmo.long-context-eval.v1",
+                            "sha256": hashlib.sha256(orchestrator._LONG_CONTEXT_HARNESS.read_bytes()).hexdigest(),
+                            "process": {"status": "completed", "exit_code": 0}},
+                "plan": profile,
+                "results": {"cells_planned": planned, "cells_run": planned, "complete": True,
+                            "stopped_early": None, "engine_context": 8192, "outcomes": outcomes,
+                            "by_size": {}, "latency_by_size": {}, "tool_loop_reuse": {"cells": 0, "reused": 0},
+                            "not_passed": []},
+                "prompt_response_logging": False, "tokens_logged": False,
+            }
+            continue
+        counts = contract["category_counts"]
+        summary = {category: {"case_count": count, "passed": count, "failed": 0, "errors": 0}
+                   for category, count in counts.items()}
+        metrics = dict(eval_receipt["metrics"])
+        metrics.update({
+            "case_count": contract["case_count"], "passed": contract["case_count"],
+            "category_summary": summary,
+            "error_diagnostics": {"schema": "local_bmo.tool-call-eval-diagnostics.v1", "total_errors": 0,
+                                  "overall": {}, "by_category": {category: {} for category in summary}},
+            "quality_diagnostics": {"schema": "local_bmo.tool-call-quality-diagnostics.v1", "total_failed": 0,
+                                    "overall": {}, "by_category": {category: {} for category in summary}},
+        })
+        receipts[name] = {**eval_receipt, "schema": schema, "suite_member": member,
+                          "fixture": contract["fixture_identity"], "metrics": metrics}
+        if member == orchestrator._ABLATION_MEMBER:
+            receipts[name]["scorer_ablation"] = {"name": member, "boolean_coercion": False}
+    return receipts
+
+
 def fake_receipts(config: dict[str, Any], eval_artifact: dict[str, Any] | None,
-                  *, run_id: str, instance_id: str) -> dict[str, bytes]:
+                  *, run_id: str, instance_id: str, extended: bool = False) -> dict[str, bytes]:
     """Build the receipts a correct host would write, bound to this run.
 
     These are what the *real* host-side writers now produce: every one carries
@@ -470,6 +526,8 @@ def fake_receipts(config: dict[str, Any], eval_artifact: dict[str, Any] | None,
             "tensor_metadata": {"status": "verified"},
         },
     }
+    if extended:
+        receipts.update(_fake_member_receipts(config, receipts["eval-receipt.json"], artifact))
     return {
         name: (json.dumps({**payload, **bound}, sort_keys=True) + "\n").encode("utf-8")
         for name, payload in receipts.items()
@@ -592,7 +650,8 @@ def drive(mode: str, *, inject_failure: bool, key_root: Path | None,
           recorder: Recorder, comparators: str = "",
           fail_eval_stage: str = "",
           catalogue: list[Any] | None = None,
-          assume_targets_verified: bool = False) -> dict[str, Any]:
+          assume_targets_verified: bool = False,
+          suite: str = "shipping", scorer_ablation: str = "") -> dict[str, Any]:
     """Run one complete lifecycle offline and return everything it produced.
 
     ``comparators`` drives the default-OFF comparator phase exactly as
@@ -610,7 +669,10 @@ def drive(mode: str, *, inject_failure: bool, key_root: Path | None,
     if mode == "eval":
         eval_artifact = orchestrator._verify_eval_artifact(
             None, ROOT / "artifacts" / "qwen35-9b" / "model-manifest.json", config)
-    receipts = fake_receipts(config, eval_artifact, run_id=run_id, instance_id=FAKE_INSTANCE_ID)
+    extra_options = {key: value for key, value in (("suite", suite), ("scorer_ablation", scorer_ablation))
+                     if value not in {"shipping", ""}}
+    receipts = fake_receipts(config, eval_artifact, run_id=run_id, instance_id=FAKE_INSTANCE_ID,
+                             **({"extended": True} if extra_options else {}))
     shim = SubprocessShim(recorder, mode=mode, receipts=receipts,
                           fail_eval_stage=fail_eval_stage)
     progress: list[str] = []
@@ -719,6 +781,7 @@ def drive(mode: str, *, inject_failure: bool, key_root: Path | None,
                 phase_id=phase_id, run_id=run_id,
                 artifact_destination=destination, mode=mode,
                 evaluate_comparators=comparators,
+                **extra_options,
             )
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
@@ -754,6 +817,10 @@ def drive(mode: str, *, inject_failure: bool, key_root: Path | None,
             # namespace does not outlive this block.
             "published_identity": _published_identity(destination),
         })
+        if final.get("extended_suite") is not None:
+            outcome["extended_suite"] = copy.deepcopy(final["extended_suite"])
+            outcome["eval_receipt_status"] = (final.get("eval_receipt") or {}).get("status")
+            outcome["job_status"] = (final.get("job") or {}).get("status")
         key_directory = (sf.ephemeral_key_directory(f"{run_id}-{nonces[-1]}", root=key_root)
                          if nonces else None)
         present = bool(key_directory and key_directory.exists())
@@ -807,7 +874,8 @@ def _published_identity(destination: Path) -> dict[str, Any]:
         # Only *salvaged* receipts carry a run binding: `salvage-receipt.json`
         # and `comparison-receipt.json` are written locally by this run and are
         # not fetched from the host, so they are not in scope for this check.
-        if item.name not in orchestrator._SALVAGE_RECEIPT_ALLOWLIST:
+        if (item.name not in orchestrator._SALVAGE_RECEIPT_ALLOWLIST and
+                item.name not in orchestrator._SALVAGE_EXTRA_RECEIPT_ALLOWLIST):
             continue
         try:
             payload = json.loads(item.read_text(encoding="utf-8"))
@@ -894,7 +962,10 @@ def evaluate(results: dict[str, dict[str, Any]], recorder: Recorder,
     ]
     fetches = [item.rsplit("/", 1)[-1] for item in remote_operands
                if item.split(":", 1)[1].startswith(orchestrator._SALVAGE_REMOTE_DIRECTORY)]
-    stray = sorted(set(fetches) - set(orchestrator._SALVAGE_RECEIPT_ALLOWLIST))
+    extended_requested = any(name.startswith("__extended") for name in results)
+    fetchable = set(orchestrator._SALVAGE_RECEIPT_ALLOWLIST) | (
+        set(orchestrator._SALVAGE_EXTRA_RECEIPT_ALLOWLIST) if extended_requested else set())
+    stray = sorted(set(fetches) - fetchable)
     add("remote_operands_allowlisted", not stray,
         f"{len(fetches)} salvage fetches, all from {orchestrator._SALVAGE_REMOTE_DIRECTORY}; "
         f"outside the source allowlist: {stray or 'none'}")
@@ -1071,6 +1142,9 @@ def evaluate(results: dict[str, dict[str, Any]], recorder: Recorder,
             f"{stripped} with its run binding stripped is refused as "
             f"{unbound_codes.get(stripped)!r} and never published")
 
+    if extended_requested:
+        _add_extended_checks(results, recorder, add)
+
     _add_target_selection_checks(results, add)
 
     probe = Recorder()
@@ -1114,6 +1188,114 @@ def evaluate(results: dict[str, dict[str, Any]], recorder: Recorder,
         f"booked on 2026-09-11 for USD 3.273486")
 
     return checks
+
+
+def _add_extended_checks(results: dict[str, dict[str, Any]], recorder: Recorder, add) -> None:
+    """Checks that exist only when ``--suite extended`` / ``--scorer-ablation`` is gated."""
+
+    run = results.get("__extended__", {})
+    phase = run.get("extended_suite") or {}
+    members = phase.get("members") or []
+    member_argv = [entry for entry in recorder.entries
+                   if any(item == "--suite-member" for item in entry["argv"])]
+    order = [entry["argv"][entry["argv"].index("--suite-member") + 1] for entry in member_argv]
+    shipping_index = max((index for index, entry in enumerate(recorder.entries)
+                          if any("remote_model_eval.py" in item for item in entry["argv"])
+                          and "--suite-member" not in entry["argv"]), default=-1)
+    first_member = min((recorder.entries.index(entry) for entry in member_argv), default=-1)
+    add("extended_members_run_in_order_after_the_shipping_eval",
+        bool(members) and order[-len(members):] == members and first_member > shipping_index >= 0
+        and all(entry["validator"] == "accepted" for entry in member_argv),
+        f"{len(member_argv)} member stage(s) {order} recorded after the shipping eval stage, "
+        f"all accepted by validate_persisted_argv")
+
+    receipts = phase.get("receipts") or {}
+    codes = run.get("salvage_codes") or {}
+    names = [orchestrator._extra_member_receipt(member) for member in members]
+    bound = all(
+        isinstance(run.get("published_identity", {}).get(name), dict)
+        and run["published_identity"][name].get("run_id") == run["run_identity"]["run_id"]
+        and run["published_identity"][name].get("instance_id") == run["run_identity"]["instance_id"]
+        for name in names)
+    verified = all((receipts.get(member) or {}).get("status") in {"verified", "completed"} for member in members)
+    add("extended_receipts_salvaged_verified_and_bound",
+        bool(names) and all(codes.get(name) == "completed" for name in names) and bound and verified
+        and run.get("status") == results.get("eval", {}).get("status"),
+        f"{sum(codes.get(name) == 'completed' for name in names)}/{len(names)} member receipts fetched "
+        f"from the extra source allowlist, bound to this run and verified: "
+        f"{ {member: (receipts.get(member) or {}).get('status') for member in members} }; "
+        f"run status {run.get('status')!r} equals the shipping-only run's")
+
+    failure = results.get("__extended_member_failure__", {})
+    failed_phase = failure.get("extended_suite") or {}
+    skipped = {item.get("member"): item.get("reason") for item in failed_phase.get("skipped") or []}
+    add("extended_member_failure_keeps_the_shipping_result",
+        failed_phase.get("status") == "failed" and failed_phase.get("failed_member") == "variants-chunk-2"
+        and failure.get("status") == results.get("eval", {}).get("status")
+        and failure.get("eval_receipt_status") == "verified" and failure.get("job_status") == "completed"
+        and set(skipped) == {"variants-chunk-3", "long-context"}
+        and set(skipped.values()) == {"extended_skipped_after_member_failure"}
+        and bool(failure.get("teardown_calls")),
+        f"chunk-2 stage injected to fail: phase={failed_phase.get('status')!r} "
+        f"failed_member={failed_phase.get('failed_member')!r}, later members skipped {skipped}, shipping "
+        f"eval receipt {failure.get('eval_receipt_status')!r}, job {failure.get('job_status')!r}, "
+        f"run status {failure.get('status')!r}, teardown reached")
+
+    tampered = results.get("__extended_tampered__", {})
+    tampered_codes = tampered.get("salvage_codes") or {}
+    expected = tampered.get("tampered") or {}
+    add("a_mismatched_extended_receipt_is_refused",
+        bool(expected) and all(tampered_codes.get(name) in {"salvage_identity_missing", "salvage_identity_mismatch"}
+                               for name in expected)
+        and all(name not in tampered.get("published", []) for name in expected),
+        f"{ {name: tampered_codes.get(name) for name in expected} } -- an unbound receipt and one "
+        f"claiming another chunk are refused and never published")
+
+    budget = phase.get("budget") or {}
+    plain = results.get("eval", {})
+    plain_cost = [event.get("estimated_cost_usd") for event in plain.get("cost_events", []) if event.get("status") == "pending"]
+    extended_cost = [event.get("estimated_cost_usd") for event in run.get("cost_events", []) if event.get("status") == "pending"]
+    add("extended_cost_projection_is_explicit_and_unchanged_ceiling",
+        budget.get("raises_authorized_cost") is False
+        and budget.get("authorized_active_cost_usd") == j1m_runner.mode_active_cost_usd(
+            j1m_runner.load_config(), "eval", budget.get("hourly_usd", 0.0))
+        and isinstance(budget.get("expected_marginal_cost_usd"), float)
+        and isinstance(budget.get("worst_marginal_cost_usd"), float)
+        and budget.get("uploads_fit_static_slack") is True
+        and plain_cost == extended_cost and bool(extended_cost),
+        f"expected +{budget.get('expected_extra_seconds')} s (~${budget.get('expected_marginal_cost_usd')}), "
+        f"worst +{budget.get('worst_extra_seconds')} s (<= ${budget.get('worst_marginal_cost_usd')}) inside the "
+        f"unchanged ${budget.get('authorized_active_cost_usd')} active ceiling; pending ledger row "
+        f"{extended_cost} equals the shipping-only run's {plain_cost}")
+
+
+def _extended_runs(key_root: Path | None, recorder: Recorder, suite: str, scorer_ablation: str) -> dict[str, dict[str, Any]]:
+    """Drive the opt-in members: success, an injected member failure, tampered receipts."""
+
+    runs = {"__extended__": drive("eval", inject_failure=False, key_root=key_root, recorder=recorder,
+                                  suite=suite, scorer_ablation=scorer_ablation)}
+    runs["__extended_member_failure__"] = drive(
+        "eval", inject_failure=False, key_root=key_root, recorder=Recorder(),
+        suite=suite, scorer_ablation=scorer_ablation, fail_eval_stage="variants-chunk-2.json")
+    real_fake_receipts = fake_receipts
+    tampered = {"variants-chunk-1-receipt.json": "salvage_identity_missing",
+                "variants-chunk-2-receipt.json": "salvage_identity_mismatch"}
+
+    def tamper(*args, **kwargs):
+        receipts = real_fake_receipts(*args, **kwargs)
+        unbound = json.loads(receipts["variants-chunk-1-receipt.json"])
+        unbound.pop("run_id", None)
+        receipts["variants-chunk-1-receipt.json"] = (json.dumps(unbound, sort_keys=True) + "\n").encode("utf-8")
+        # Chunk 3's genuine, correctly bound receipt served under chunk 2's name.
+        receipts["variants-chunk-2-receipt.json"] = receipts["variants-chunk-3-receipt.json"]
+        return receipts
+
+    with mock.patch.object(sys.modules[__name__], "fake_receipts", side_effect=tamper):
+        outcome = drive("eval", inject_failure=False, key_root=key_root, recorder=Recorder(),
+                        suite=suite, scorer_ablation=scorer_ablation)
+    outcome["tampered"] = tampered
+    runs["__extended_tampered__"] = outcome
+    return runs
 
 
 # Every approved-target scenario this gate drives, and what each one must
@@ -1522,7 +1704,8 @@ def dry_run_key_root(key_root: Path | None):
 
 def run_dry_run(modes: tuple[str, ...] = ("eval",), *, key_root: Path | None = None,
                 receipt_path: Path | None = None,
-                comparators: str = DEFAULT_COMPARATORS) -> dict[str, Any]:
+                comparators: str = DEFAULT_COMPARATORS,
+                suite: str = "shipping", scorer_ablation: str = "") -> dict[str, Any]:
     """Drive every requested mode offline and return the complete receipt."""
 
     # Snapshot residue *before* this invocation creates its own subtree, so the
@@ -1532,11 +1715,14 @@ def run_dry_run(modes: tuple[str, ...] = ("eval",), *, key_root: Path | None = N
         return _run_dry_run(modes, key_root=owned_root, receipt_path=receipt_path,
                             comparators=comparators,
                             residue=[path for path in residue
-                                     if path != str(owned_root)])
+                                     if path != str(owned_root)],
+                            **({"suite": suite, "scorer_ablation": scorer_ablation}
+                               if (suite, scorer_ablation) != ("shipping", "") else {}))
 
 
 def _run_dry_run(modes: tuple[str, ...], *, key_root: Path, receipt_path: Path | None,
-                 comparators: str, residue: list[str]) -> dict[str, Any]:
+                 comparators: str, residue: list[str],
+                 suite: str = "shipping", scorer_ablation: str = "") -> dict[str, Any]:
     recorder = Recorder()
     started = time.monotonic()
     results: dict[str, dict[str, Any]] = {}
@@ -1556,6 +1742,10 @@ def _run_dry_run(modes: tuple[str, ...], *, key_root: Path, receipt_path: Path |
         # And an arm receipt with its binding stripped must be refused rather
         # than becoming a number this run is about to pay for.
         results["__comparator_unbound__"] = _unbound_comparator_run(comparators, key_root)
+    if (suite, scorer_ablation) != ("shipping", "") and "eval" in modes:
+        # Default OFF, so -- like the comparator phase -- only gated when asked.
+        orchestrator._extra_members(suite, scorer_ablation)
+        results.update(_extended_runs(key_root, recorder, suite, scorer_ablation))
     # The ordered approved-target list is exercised on its own catalogues: the
     # primary is the only entry the default fake catalogue offers, so without
     # these the alternate path would never be executed by this gate at all.
@@ -1595,7 +1785,8 @@ def _run_dry_run(modes: tuple[str, ...], *, key_root: Path, receipt_path: Path |
                               "comparator_cleanup_stages", "comparison_receipt",
                               "fail_eval_stage", "stripped_receipt",
                               "published_identity", "run_identity",
-                              "selected_target", "pre_spend_refusal"}}
+                              "selected_target", "pre_spend_refusal",
+                              "extended_suite", "eval_receipt_status", "job_status", "tampered"}}
             for name, run in results.items()
         },
         "duration_ms": int((time.monotonic() - started) * 1000),
@@ -1691,13 +1882,19 @@ def main(argv: list[str] | None = None) -> int:
                         help="lifecycle mode to drive; repeatable, defaults to every mode")
     parser.add_argument("--evaluate-comparators", default=DEFAULT_COMPARATORS,
                         help="comparator selection to gate as well; '' skips the phase")
+    parser.add_argument("--suite", default="shipping", choices=orchestrator._EVAL_SUITES,
+                        help="also gate the opt-in extended suite (default 'shipping': not gated)")
+    parser.add_argument("--scorer-ablation", default="", choices=orchestrator._SCORER_ABLATIONS,
+                        help="also gate the opt-in scorer ablation (default '': not gated)")
     parser.add_argument("--receipt", type=Path,
                         default=ROOT / "experiments" / "runtime" / "dry-run-receipt.json")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
     modes = tuple(dict.fromkeys(args.mode or MODES))
     receipt = run_dry_run(modes, receipt_path=args.receipt,
-                          comparators=args.evaluate_comparators)
+                          comparators=args.evaluate_comparators,
+                          **({"suite": args.suite, "scorer_ablation": args.scorer_ablation}
+                             if (args.suite, args.scorer_ablation) != ("shipping", "") else {}))
     if not args.quiet:
         print(render(receipt))
         print(f"\n  receipt: {args.receipt}")

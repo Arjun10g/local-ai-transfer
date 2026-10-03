@@ -112,6 +112,7 @@ TEST_INVENTORY = {
     "tests/performance/test_shadeform_env_security.py": "lifecycle",
     "tests/performance/test_comparator_eval.py": "lifecycle",
     "tests/performance/test_j1m_approved_targets.py": "lifecycle",
+    "tests/performance/test_j1m_extended_suite.py": "lifecycle",
     "tests/performance/test_j1m_dry_run.py": "lifecycle",
     "tests/performance/test_j1m_host_privacy.py": "lifecycle",
     "tests/performance/test_j1m_receipt_rehearsal.py": "lifecycle",

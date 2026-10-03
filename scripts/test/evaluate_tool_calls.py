@@ -105,6 +105,15 @@ MAX_TOOL_SCHEMA_BYTES = 16384
 TRANSPORT_PRODUCT_ENGINE = "product-engine"
 TRANSPORT_UPSTREAM_OPENAI = "upstream-openai"
 TRANSPORTS = (TRANSPORT_PRODUCT_ENGINE, TRANSPORT_UPSTREAM_OPENAI)
+# Scorer ablation switch (TOOL-CALL-REMAINING-FAILURES-001 /
+# ENGINE-SPECIAL-TOKENS-001). ``True`` is the shipping scorer and the only value
+# any default path uses. ``--no-boolean-coercion`` (or ``boolean_coercion=False``
+# on ``parse_tool_call``/``evaluate_case``/``run_local``) disables exactly one
+# thing: ``coerce_boolean_arguments``. The raw spelling the model wrote is then
+# what the schema check sees, so a ``True`` written for a JSON boolean scores as
+# a failure. This separates the effect of the special-token fix from the
+# scorer's own True/False coercion. It is an ablation, never a release score.
+BOOLEAN_COERCION_DEFAULT = True
 # Exact port of ``kSchemaAbstentionPolicy`` in
 # ``native/backend/llama_chat_template.cpp``.  The product engine prepends
 # this app-owned system message whenever the request carries tools, before
@@ -616,8 +625,14 @@ def coerce_boolean_arguments(parameters: Any, arguments: dict[str, Any]) -> dict
     return arguments
 
 
-def parse_tool_call(text: str, tools: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
-    """Parse one complete pinned Qwen XML call; malformed output never scores."""
+def parse_tool_call(text: str, tools: list[dict[str, Any]] | None = None, *,
+                    boolean_coercion: bool | None = None) -> dict[str, Any] | None:
+    """Parse one complete pinned Qwen XML call; malformed output never scores.
+
+    ``boolean_coercion`` defaults to :data:`BOOLEAN_COERCION_DEFAULT` (on).
+    ``False`` is the opt-in scorer ablation and skips only
+    :func:`coerce_boolean_arguments`; every other check is unchanged.
+    """
     if not isinstance(text, str):
         raise ValueError("malformed_call")
     match = TOOL_CALL.fullmatch(text)
@@ -662,7 +677,8 @@ def parse_tool_call(text: str, tools: list[dict[str, Any]] | None = None) -> dic
         arguments[key] = value
         position = parameter.end()
     if known_tools is not None:
-        coerce_boolean_arguments(known_tools[name].get("parameters"), arguments)
+        if BOOLEAN_COERCION_DEFAULT if boolean_coercion is None else boolean_coercion:
+            coerce_boolean_arguments(known_tools[name].get("parameters"), arguments)
         _validate_arguments(known_tools[name], arguments)
     return {"name": name, "arguments": arguments}
 
@@ -797,11 +813,12 @@ def evaluate_call(case: dict[str, Any], call: dict[str, Any] | None) -> tuple[bo
     return True, "exact_call"
 
 
-def evaluate_case(case: dict[str, Any], output: str, tools: list[dict[str, Any]] | None = None) -> tuple[bool, str]:
+def evaluate_case(case: dict[str, Any], output: str, tools: list[dict[str, Any]] | None = None, *,
+                  boolean_coercion: bool | None = None) -> tuple[bool, str]:
     # Judge attempted actions structurally. A safe refusal may name the
     # unavailable function from the user's request without attempting a call.
     try:
-        call = parse_tool_call(output, tools)
+        call = parse_tool_call(output, tools, boolean_coercion=boolean_coercion)
     except (ValueError, re.error) as exc:
         return False, "invalid_tool_schema" if isinstance(exc, re.error) else str(exc)
     return evaluate_call(case, call)
@@ -1154,6 +1171,7 @@ def run_local(
     max_cases: int, engine_pid: int | None = None,
     transport: str = TRANSPORT_PRODUCT_ENGINE,
     timeout_ceiling: float = 600,
+    boolean_coercion: bool = True,
 ) -> dict[str, Any]:
     # `timeout_ceiling` stays 600 for every remote caller, whose stage budgets
     # are derived from it. Only the local testing kit (local/bmo_local.py)
@@ -1164,6 +1182,8 @@ def run_local(
             raise ValueError("timeout_ceiling_invalid")
         if transport not in TRANSPORTS:
             raise ValueError("transport_unknown")
+        if not isinstance(boolean_coercion, bool):
+            raise ValueError("boolean_coercion_invalid")
         post = _transport(transport)
         validate_endpoint(endpoint)
         validate_fixture(fixture)
@@ -1210,7 +1230,8 @@ def run_local(
                 # into a structured call; score the canonical form.
                 passed, reason = evaluate_structured_case(case, outcome["tool_calls"], fixture["tools"])
             else:
-                passed, reason = evaluate_case(case, outcome["content"], fixture["tools"])
+                passed, reason = evaluate_case(case, outcome["content"], fixture["tools"],
+                                               **({} if boolean_coercion else {"boolean_coercion": False}))
             status = "pass" if passed else "fail"
             if status == "fail":
                 reason = _quality_code(reason)
@@ -1335,6 +1356,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-cases", type=int, default=MAX_EVAL_CASES)
     parser.add_argument("--engine-pid", type=int, help="optional local engine PID for bounded RSS sampling")
     parser.add_argument("--dry-run", action="store_true", help="validate fixture and print case IDs only")
+    parser.add_argument("--no-boolean-coercion", action="store_true",
+                        help="scorer ablation, default OFF: score the boolean spelling the model wrote "
+                             "instead of coercing True/False; never a release score")
     args = parser.parse_args(argv)
     if not 1 <= args.max_cases <= MAX_EVAL_CASES:
         parser.error(f"--max-cases must be between 1 and {MAX_EVAL_CASES}")
@@ -1356,7 +1380,8 @@ def main(argv: list[str] | None = None) -> int:
         token = load_bearer_token(args.token_file, args.token_env)
     except ValueError as exc:
         parser.error(str(exc))
-    result = run_local(fixture, endpoint, token, timeout=args.timeout, max_cases=min(args.max_cases, int(fixture["limits"]["max_cases"])), engine_pid=args.engine_pid, transport=args.transport)
+    result = run_local(fixture, endpoint, token, timeout=args.timeout, max_cases=min(args.max_cases, int(fixture["limits"]["max_cases"])), engine_pid=args.engine_pid, transport=args.transport,
+                       **({"boolean_coercion": False} if args.no_boolean_coercion else {}))
     aggregate = aggregate_result(result)
     if args.emit_case_indicators:
         aggregate["case_indicators"] = case_indicators(result)

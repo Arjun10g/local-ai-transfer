@@ -9,6 +9,7 @@ account, and tears down the exact resource in ``finally`` after salvage.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import ipaddress
 import json
@@ -198,6 +199,39 @@ _SALVAGE_REQUIRED_KEYS: dict[str, frozenset[str]] = {
         })
         for name in _SALVAGE_COMPARATOR_RECEIPTS
     },
+}
+# ----- Opt-in extra members: ``--suite extended`` / ``--scorer-ablation`` -----
+# Receipts the extra members write, kept OUT of ``_SALVAGE_RECEIPT_ALLOWLIST``
+# on purpose: that mapping, its caps and the salvage receipt that lists it are
+# what every default run publishes, and they stay byte-identical. A run that
+# opts in passes exactly the names it requested to ``_salvage`` as
+# ``extra_receipts``; a name outside this source-fixed mapping is refused there
+# as it is everywhere else. Each receipt declares its OWN schema, so a member
+# receipt can never be published or verified as ``eval-receipt.json``.
+_ABLATION_MEMBER = "ablation-no-boolean-coercion"
+_VARIANT_MEMBERS = ("variants-chunk-1", "variants-chunk-2", "variants-chunk-3")
+_LONG_CONTEXT_MEMBER = "long-context"
+_SALVAGE_EXTRA_RECEIPT_ALLOWLIST: dict[str, str] = {
+    "ablation-no-boolean-coercion-receipt.json": "local_bmo.j1m.scorer-ablation-eval-receipt.v1",
+    "variants-chunk-1-receipt.json": "local_bmo.j1m.variants-eval-receipt.v1",
+    "variants-chunk-2-receipt.json": "local_bmo.j1m.variants-eval-receipt.v1",
+    "variants-chunk-3-receipt.json": "local_bmo.j1m.variants-eval-receipt.v1",
+    "long-context-receipt.json": "local_bmo.j1m.long-context-receipt.v1",
+}
+_EVAL_MEMBER_REQUIRED_KEYS = frozenset({
+    "schema", "status", "suite_member", "artifact", "fixture", "engine",
+    "model_preflight", "toolchain", "metrics",
+})
+_SALVAGE_EXTRA_REQUIRED_KEYS: dict[str, frozenset[str]] = {
+    "ablation-no-boolean-coercion-receipt.json": _EVAL_MEMBER_REQUIRED_KEYS | {"scorer_ablation"},
+    "variants-chunk-1-receipt.json": _EVAL_MEMBER_REQUIRED_KEYS,
+    "variants-chunk-2-receipt.json": _EVAL_MEMBER_REQUIRED_KEYS,
+    "variants-chunk-3-receipt.json": _EVAL_MEMBER_REQUIRED_KEYS,
+    "long-context-receipt.json": frozenset({
+        "schema", "status", "suite_member", "artifact", "fixture", "engine",
+        "model_preflight", "harness", "plan", "results", "prompt_response_logging",
+        "tokens_logged",
+    }),
 }
 # The locally written salvage evidence file.  It is deliberately not fetchable:
 # it describes the transfer and must never be supplied by the remote host.
@@ -500,6 +534,19 @@ def _tool_eval_contract() -> dict[str, Any]:
 
     fixture_path = ROOT / "tests" / "model" / "production_tool_call_eval.json"
     fixture_raw = _bounded_bytes(fixture_path, _EVAL_FIXTURE_MAX_BYTES)
+    return _fixture_contract_from_raw(fixture_raw)
+
+
+def _fixture_contract_from_raw(fixture_raw: bytes) -> dict[str, Any]:
+    """The contract of one bounded fixture's exact bytes.
+
+    Shared by the shipping fixture and, for ``--suite extended``, by each
+    extracted variants chunk, so a chunk is held to exactly the shape and
+    identity rules the shipping fixture is.
+    """
+
+    if len(fixture_raw) > _EVAL_FIXTURE_MAX_BYTES:
+        raise ValueError("eval fixture count invalid")
     fixture = _decode_bounded_json(fixture_raw)
     limits = fixture.get("limits") if isinstance(fixture, dict) else None
     cases = fixture.get("cases") if isinstance(fixture, dict) else None
@@ -1377,7 +1424,7 @@ _SALVAGE_FAILURE_STATUSES: frozenset[str] = frozenset({
 def _salvage_required_keys(name: str, payload: dict[str, Any]) -> frozenset[str]:
     """Required keys for one receipt, given the outcome it records."""
 
-    required = _SALVAGE_REQUIRED_KEYS[name]
+    required = _SALVAGE_REQUIRED_KEYS[name] if name in _SALVAGE_REQUIRED_KEYS else _SALVAGE_EXTRA_REQUIRED_KEYS[name]
     status = payload.get("status")
     if (isinstance(status, str) and status in _SALVAGE_FAILURE_STATUSES
             and isinstance(payload.get("error_code"), str) and payload["error_code"]):
@@ -1486,7 +1533,7 @@ def _write_comparison_receipt(
     return receipt
 
 
-def _verify_eval_diagnostics(value: Any, *, errors: int, categories: set[str], category_errors: dict[str, int]) -> dict[str, Any]:
+def _verify_eval_diagnostics(value: Any, *, errors: int, categories: set[str], category_errors: dict[str, int], histogram_bound: int = 40) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {"schema", "total_errors", "overall", "by_category"} or value.get("schema") != "local_bmo.tool-call-eval-diagnostics.v1":
         raise ValueError("eval receipt diagnostics invalid")
     if isinstance(value.get("total_errors"), bool) or not isinstance(value.get("total_errors"), int) or value["total_errors"] != errors:
@@ -1500,7 +1547,7 @@ def _verify_eval_diagnostics(value: Any, *, errors: int, categories: set[str], c
             raise ValueError("eval receipt diagnostics invalid")
         total = 0
         for code, amount in item.items():
-            if code not in _EVAL_DIAGNOSTIC_CODES or isinstance(amount, bool) or not isinstance(amount, int) or amount < 1 or amount > 40:
+            if code not in _EVAL_DIAGNOSTIC_CODES or isinstance(amount, bool) or not isinstance(amount, int) or amount < 1 or amount > histogram_bound:
                 raise ValueError("eval receipt diagnostics code invalid")
             total += amount
         return total
@@ -1521,7 +1568,7 @@ def _verify_eval_diagnostics(value: Any, *, errors: int, categories: set[str], c
     return {"schema": value["schema"], "total_errors": value["total_errors"], "overall": dict(overall), "by_category": {category: dict(by_category[category]) for category in sorted(categories)}}
 
 
-def _verify_eval_quality_diagnostics(value: Any, *, failed: int, categories: set[str], category_failed: dict[str, int]) -> dict[str, Any]:
+def _verify_eval_quality_diagnostics(value: Any, *, failed: int, categories: set[str], category_failed: dict[str, int], histogram_bound: int = 40) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {"schema", "total_failed", "overall", "by_category"} or value.get("schema") != "local_bmo.tool-call-quality-diagnostics.v1":
         raise ValueError("eval receipt quality diagnostics invalid")
     total = value.get("total_failed")
@@ -1536,7 +1583,7 @@ def _verify_eval_quality_diagnostics(value: Any, *, failed: int, categories: set
             raise ValueError("eval receipt quality diagnostics invalid")
         count = 0
         for code, amount in item.items():
-            if code not in _EVAL_QUALITY_CODES or isinstance(amount, bool) or not isinstance(amount, int) or amount < 1 or amount > 40:
+            if code not in _EVAL_QUALITY_CODES or isinstance(amount, bool) or not isinstance(amount, int) or amount < 1 or amount > histogram_bound:
                 raise ValueError("eval receipt quality diagnostics code invalid")
             count += amount
         return count
@@ -1630,6 +1677,24 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     """Accept only the bounded aggregate receipt produced by remote eval."""
 
     payload = _bounded_json(path, _EVAL_RECEIPT_MAX_BYTES)
+    return _verify_eval_receipt_payload(payload, artifact)
+
+
+def _verify_eval_receipt_payload(
+    payload: Any, artifact: dict[str, Any], *,
+    schema: str = "local_bmo.j1m.real-tool-eval-receipt.v1",
+    contract: dict[str, Any] | None = None,
+    histogram_bound: int = 40,
+) -> dict[str, Any]:
+    """The eval receipt rules over an already bounded, decoded payload.
+
+    With the defaults this is exactly the shipping verifier. ``--suite
+    extended`` reuses it for each variants chunk and the scorer ablation, with
+    the member's own schema and the chunk's own contract, so a member receipt
+    passes every check the shipping receipt does -- against its own pinned
+    identity, never the shipping one.
+    """
+
     allowed_top_level = {"schema", "status", "artifact", "fixture", "engine", "model_preflight", "cuda_device", "toolchain", "metrics", "duration_ms", "prompt_response_logging", "tokens_logged", "child", *j1m_runner.RUN_IDENTITY_FIELDS}
     # The run-identity binding is *required* where it is load-bearing: at the
     # salvage fetch boundary, before an untrusted receipt is ever published
@@ -1638,7 +1703,7 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     # without re-demanding it and no receipt fixture has to grow a field that
     # is not part of what is being verified here.
     required_top_level = {"schema", "status", "artifact", "fixture", "engine", "model_preflight", "toolchain", "metrics", "prompt_response_logging", "tokens_logged"}
-    if not isinstance(payload, dict) or payload.get("schema") != "local_bmo.j1m.real-tool-eval-receipt.v1":
+    if not isinstance(payload, dict) or payload.get("schema") != schema:
         raise ValueError("eval receipt schema mismatch")
     # Keep the diagnostic specific for a missing mandatory evidence section;
     # other missing/unknown top-level fields remain a schema failure.
@@ -1656,7 +1721,7 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
     for key in ("source_revision", "llama_cpp_revision", "modality", "quantization"):
         if key in artifact and recorded.get(key) != artifact[key]:
             raise ValueError("eval receipt artifact identity mismatch")
-    expected_fixture = _tool_eval_contract()["fixture_identity"]
+    expected_fixture = (contract if contract is not None else _tool_eval_contract())["fixture_identity"]
     recorded_fixture = payload.get("fixture")
     if recorded_fixture != expected_fixture:
         raise ValueError("eval receipt fixture identity mismatch")
@@ -1674,7 +1739,7 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
             any(isinstance(metrics.get(key), bool) or not isinstance(metrics.get(key), int) or metrics[key] < 0 for key in ("case_count", "passed", "failed", "errors"))):
         raise ValueError("eval receipt metrics invalid")
     summary = metrics.get("category_summary")
-    eval_contract = _tool_eval_contract()
+    eval_contract = contract if contract is not None else _tool_eval_contract()
     expected_count = eval_contract["case_count"]
     expected_categories = eval_contract["categories"]
     expected_category_counts = eval_contract["category_counts"]
@@ -1723,10 +1788,10 @@ def _verify_eval_receipt(path: Path, artifact: dict[str, Any]) -> dict[str, Any]
         raise ValueError("eval receipt metric totals invalid")
     if "error_diagnostics" not in metrics or "canary" not in metrics or "quality_diagnostics" not in metrics:
         raise ValueError("eval receipt diagnostics missing")
-    diagnostics = _verify_eval_diagnostics(metrics["error_diagnostics"], errors=metrics["errors"], categories=expected_categories, category_errors={category: summary[category]["errors"] for category in expected_categories})
+    diagnostics = _verify_eval_diagnostics(metrics["error_diagnostics"], errors=metrics["errors"], categories=expected_categories, category_errors={category: summary[category]["errors"] for category in expected_categories}, **({} if histogram_bound == 40 else {"histogram_bound": histogram_bound}))
     canary = _verify_eval_canary(metrics["canary"], expected_tool_count=eval_contract["tool_count"], expected_context_tokens=eval_contract["context_tokens"], expected_output_reserve_tokens=eval_contract["output_reserve_tokens"])
     _verify_eval_canary_coherence(canary, metrics=metrics, summary=summary, diagnostics=diagnostics, expected_count=expected_count, categories=expected_categories)
-    quality_diagnostics = _verify_eval_quality_diagnostics(metrics["quality_diagnostics"], failed=metrics["failed"], categories=expected_categories, category_failed={category: summary[category]["failed"] for category in expected_categories})
+    quality_diagnostics = _verify_eval_quality_diagnostics(metrics["quality_diagnostics"], failed=metrics["failed"], categories=expected_categories, category_failed={category: summary[category]["failed"] for category in expected_categories}, **({} if histogram_bound == 40 else {"histogram_bound": histogram_bound}))
     child = _verify_eval_child(payload.get("child")) if payload.get("status") == "failed" else None
     if payload.get("status") != "failed" and "child" in payload:
         raise ValueError("eval receipt child status invalid")
@@ -1945,15 +2010,17 @@ class _SalvageRefusal(Exception):
 
 def _salvage_transport_argv(
     info: dict[str, Any], identity: Path, known_hosts: Path, name: str, staged: Path,
+    *, allowlist: dict[str, str] | None = None,
 ) -> list[str]:
     """Build the exact non-shell argv for one allowlisted receipt fetch.
 
     ``name`` is a source-fixed allowlist key, so the remote operand is a
     constant directory joined with a constant basename.  No caller value, no
-    glob, and no remote directory listing can influence it.
+    glob, and no remote directory listing can influence it.  ``allowlist`` is
+    only ever ``_salvage_effective_allowlist``'s source-derived mapping.
     """
 
-    if name not in _SALVAGE_RECEIPT_ALLOWLIST:
+    if name not in (_SALVAGE_RECEIPT_ALLOWLIST if allowlist is None else allowlist):
         raise _SalvageRefusal("salvage_name_not_allowlisted")
     # The endpoint is read from the same creation/activation record the run
     # itself used; salvage never re-resolves a host or accepts a new address.
@@ -2074,6 +2141,17 @@ def _salvage_identity_claims(name: str, payload: dict[str, Any]) -> dict[str, An
         claims = {"sha256": payload.get("artifact_sha256")}
     elif name == "startup-preflight-receipt.json" and payload.get("status") == "verified":
         claims = {key: payload.get(key) for key in ("size_bytes", "sha256")}
+    elif name in _SALVAGE_EXTRA_RECEIPT_ALLOWLIST:
+        # A member receipt that succeeded must name the artifact it scored; a
+        # typed failure receipt may not have one, but if it names one it must
+        # be this run's.
+        recorded = payload.get("artifact")
+        failure = payload.get("status") in _SALVAGE_FAILURE_STATUSES
+        if recorded is None and failure:
+            return {}
+        if not isinstance(recorded, dict) or any(recorded.get(key) is None for key in ("name", "size_bytes", "sha256")):
+            raise _SalvageRefusal("salvage_identity_missing")
+        return {key: recorded.get(key) for key in ("name", "size_bytes", "sha256")}
     else:
         return {}
     required = _SALVAGE_REQUIRED_ARTIFACT_CLAIMS.get(name, ())
@@ -2082,8 +2160,41 @@ def _salvage_identity_claims(name: str, payload: dict[str, Any]) -> dict[str, An
     return claims
 
 
+def _salvage_extra_binding(name: str, payload: dict[str, Any], identity: dict[str, Any]) -> None:
+    """Bind one extra-member receipt to the member, fixture and harness asked for.
+
+    The run-identity binding proves the run and instance; this proves the
+    receipt is the member its NAME says it is. A chunk-1 receipt copied over
+    the chunk-2 name, a chunk scored against a different fixture, or a
+    long-context receipt from another harness is refused here rather than
+    published.
+    """
+
+    bindings = identity.get("extra_bindings")
+    binding = bindings.get(name) if isinstance(bindings, dict) else None
+    if not isinstance(binding, dict):
+        raise _SalvageRefusal("salvage_run_identity_unavailable")
+    member = name[:-len("-receipt.json")]
+    if payload.get("suite_member") != member or binding.get("member") != member:
+        raise _SalvageRefusal("salvage_identity_mismatch")
+    failure = payload.get("status") in _SALVAGE_FAILURE_STATUSES
+    fixture = payload.get("fixture")
+    if fixture is not None or not failure:
+        if not isinstance(fixture, dict) or fixture.get("sha256") != binding.get("fixture_sha256"):
+            raise _SalvageRefusal("salvage_identity_mismatch")
+    if member == _ABLATION_MEMBER and payload.get("scorer_ablation") != {"name": _ABLATION_MEMBER, "boolean_coercion": False}:
+        raise _SalvageRefusal("salvage_identity_mismatch")
+    if member != _ABLATION_MEMBER and "scorer_ablation" in payload:
+        raise _SalvageRefusal("salvage_identity_mismatch")
+    if member == _LONG_CONTEXT_MEMBER and not failure:
+        harness = payload.get("harness")
+        if not isinstance(harness, dict) or harness.get("sha256") != binding.get("harness_sha256"):
+            raise _SalvageRefusal("salvage_identity_mismatch")
+
+
 def _salvage_validated_payload(
     name: str, raw: bytes, run_identity: dict[str, Any] | None,
+    *, allowlist: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Prove untrusted remote bytes are the expected receipt for this run."""
 
@@ -2100,7 +2211,7 @@ def _salvage_validated_payload(
         raise _SalvageRefusal("salvage_invalid_json") from None
     if not isinstance(payload, dict):
         raise _SalvageRefusal("salvage_not_an_object")
-    if payload.get("schema") != _SALVAGE_RECEIPT_ALLOWLIST[name]:
+    if payload.get("schema") != (_SALVAGE_RECEIPT_ALLOWLIST if allowlist is None else allowlist)[name]:
         raise _SalvageRefusal("salvage_schema_mismatch")
     if not _salvage_required_keys(name, payload) <= set(payload):
         raise _SalvageRefusal("salvage_required_key_missing")
@@ -2147,6 +2258,8 @@ def _salvage_validated_payload(
             raise _SalvageRefusal("salvage_identity_mismatch")
         if payload.get("arm") != name[len("comparator-receipt-"):-len(".json")]:
             raise _SalvageRefusal("salvage_identity_mismatch")
+    if name in _SALVAGE_EXTRA_RECEIPT_ALLOWLIST:
+        _salvage_extra_binding(name, payload, identity)
     artifact = identity.get("artifact")
     claims = _salvage_identity_claims(name, payload)
     if claims and isinstance(artifact, dict):
@@ -2154,6 +2267,23 @@ def _salvage_validated_payload(
             if field in artifact and value != artifact[field]:
                 raise _SalvageRefusal("salvage_identity_mismatch")
     return payload
+
+
+def _salvage_effective_allowlist(extra_receipts: tuple[str, ...] = ()) -> dict[str, str]:
+    """The base allowlist, or the base plus exactly the requested extra names.
+
+    The default returns the base mapping itself, so a default run's fetchable
+    set, caps and salvage receipt are unchanged. An extra name must be a key of
+    the source-fixed ``_SALVAGE_EXTRA_RECEIPT_ALLOWLIST``; anything else refuses
+    the whole call before any transfer.
+    """
+
+    if not extra_receipts:
+        return _SALVAGE_RECEIPT_ALLOWLIST
+    if (not isinstance(extra_receipts, tuple) or len(set(extra_receipts)) != len(extra_receipts) or
+            any(not isinstance(name, str) or name not in _SALVAGE_EXTRA_RECEIPT_ALLOWLIST for name in extra_receipts)):
+        raise ValueError("salvage extra receipts are not source-allowlisted")
+    return {**_SALVAGE_RECEIPT_ALLOWLIST, **{name: _SALVAGE_EXTRA_RECEIPT_ALLOWLIST[name] for name in extra_receipts}}
 
 
 def _salvage_host_key_pin(known_hosts: Path, host_key: dict[str, Any] | None) -> str:
@@ -2221,6 +2351,7 @@ def _salvage(
     q4_expected_gib: float = 6.0,
     run_identity: dict[str, Any] | None = None,
     host_key: dict[str, Any] | None = None,
+    extra_receipts: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
     """Fetch only source-allowlisted receipts, bounded and fail-closed.
 
@@ -2237,6 +2368,18 @@ def _salvage(
 
     if not _EXTERNAL_SALVAGE_TRANSPORT_AVAILABLE:
         raise ValueError("external salvage transport is unavailable in this source slice")
+    # Default: exactly the base allowlist and its caps. An opted-in run widens
+    # the fetchable set by the extra names it requested -- each one a key of
+    # the source-fixed ``_SALVAGE_EXTRA_RECEIPT_ALLOWLIST`` -- and the caps
+    # widen with it by the same per-file arithmetic.
+    allowlist = _salvage_effective_allowlist(extra_receipts)
+    if extra_receipts:
+        max_files = _SALVAGE_MAX_FILES + len(extra_receipts)
+        max_total_bytes = _SALVAGE_MAX_TOTAL_BYTES + len(extra_receipts) * _SALVAGE_MAX_FILE_BYTES
+        min_free_bytes = max_total_bytes * 2
+    else:
+        max_files, max_total_bytes, min_free_bytes = (
+            _SALVAGE_MAX_FILES, _SALVAGE_MAX_TOTAL_BYTES, _SALVAGE_MIN_FREE_BYTES)
     try:
         salvage_ancestors = j1m_runner._private_ancestor_snapshot(
             destination, j1m_runner.PRIVATE_OUTPUT_ROOT,
@@ -2294,7 +2437,7 @@ def _salvage(
             free_bytes = shutil.disk_usage(staging_root).free
         except OSError:
             free_bytes = 0
-        if free_bytes < _SALVAGE_MIN_FREE_BYTES:
+        if free_bytes < min_free_bytes:
             raise ValueError("salvage staging has insufficient free space")
         for name in names:
             record: dict[str, Any] = {"name": name}
@@ -2311,7 +2454,7 @@ def _salvage(
                 })
                 results.append(record)
                 continue
-            if not isinstance(name, str) or name not in _SALVAGE_RECEIPT_ALLOWLIST:
+            if not isinstance(name, str) or name not in allowlist:
                 # A configuration or caller may name anything; only source can
                 # make a name fetchable.  Everything else is recorded, never
                 # transferred, and never turned into a remote path.
@@ -2327,11 +2470,11 @@ def _salvage(
             # Cheap source-fixed bounds first, then the cleanup-safety clock,
             # then the key handle.  Exhausted budget must dominate every other
             # reason: teardown is more important than any receipt.
-            if fetched >= _SALVAGE_MAX_FILES:
+            if fetched >= max_files:
                 record.update({"status": "salvage_failed", "error_code": "salvage_file_count_cap"})
                 results.append(record)
                 continue
-            if total_bytes >= _SALVAGE_MAX_TOTAL_BYTES:
+            if total_bytes >= max_total_bytes:
                 record.update({"status": "salvage_failed", "error_code": "salvage_total_size_cap"})
                 results.append(record)
                 continue
@@ -2348,7 +2491,9 @@ def _salvage(
             staged = staging_root / name
             try:
                 sf._preflight(info["phase_id"])
-                command = _salvage_transport_argv(info, identity, known_hosts, name, staged)
+                command = _salvage_transport_argv(
+                    info, identity, known_hosts, name, staged,
+                    **({"allowlist": allowlist} if extra_receipts else {}))
                 fetched += 1
                 transfer = _remote(command, timeout=min(_SALVAGE_FILE_TIMEOUT_SECONDS, budget))
                 if transfer.get("status") != "completed":
@@ -2360,9 +2505,11 @@ def _salvage(
                     results.append(record)
                     continue
                 raw = _salvage_staged_bytes(staged, _SALVAGE_MAX_FILE_BYTES)
-                if total_bytes + len(raw) > _SALVAGE_MAX_TOTAL_BYTES:
+                if total_bytes + len(raw) > max_total_bytes:
                     raise _SalvageRefusal("salvage_total_size_cap")
-                payload = _salvage_validated_payload(name, raw, run_identity)
+                payload = _salvage_validated_payload(
+                    name, raw, run_identity,
+                    **({"allowlist": allowlist} if extra_receipts else {}))
                 digest = hashlib.sha256(raw).hexdigest()
                 # Only now does a path into the validated destination exist, and
                 # it is the descriptor-safe publisher rather than a pathname
@@ -2398,13 +2545,13 @@ def _salvage(
         "known_hosts_sha256": known_hosts_sha256,
         "caps": {
             "per_file_bytes": _SALVAGE_MAX_FILE_BYTES,
-            "total_bytes": _SALVAGE_MAX_TOTAL_BYTES,
-            "min_free_bytes": _SALVAGE_MIN_FREE_BYTES,
-            "max_files": _SALVAGE_MAX_FILES,
+            "total_bytes": max_total_bytes,
+            "min_free_bytes": min_free_bytes,
+            "max_files": max_files,
             "wall_clock_seconds": _SALVAGE_WALL_CLOCK_SECONDS,
             "per_file_timeout_seconds": _SALVAGE_FILE_TIMEOUT_SECONDS,
         },
-        "allowlist": sorted(_SALVAGE_RECEIPT_ALLOWLIST),
+        "allowlist": sorted(allowlist),
         "requested": len(results),
         "completed": len(completed),
         "failed": len(results) - len(completed),
@@ -2420,7 +2567,521 @@ def _salvage(
     return results
 
 
-def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, artifact_destination: Path, mode: str = "prove", model_artifact: Path | None = None, model_manifest: Path | None = None, evaluate_comparators: str = "") -> dict[str, Any]:
+# ---------------------------------------------------------------------------
+# Opt-in extra members: ``--suite extended`` and ``--scorer-ablation``
+# ---------------------------------------------------------------------------
+# Default OFF. With both options absent none of this is reached and the plan,
+# argv, uploads, salvage request, caps and receipts are byte-identical to the
+# shipping eval. When requested, every member runs AFTER the shipping eval
+# stage has completed, on the same host, against the same freshly built
+# ``lae-engine`` binary and the same verified Q4 artifact. Each member is its
+# own ``remote_model_eval.py`` stage that starts that engine, verifies the
+# artifact and engine identity again, and writes its own schema-bound receipt;
+# a member failure is recorded as that member's typed outcome and can never
+# change ``lifecycle["job"]``, ``lifecycle["status"]`` or the shipping receipt.
+_EVAL_SUITES = ("shipping", "extended")
+_SCORER_ABLATIONS = ("", "no-boolean-coercion")
+# The extracted variants chunks are hash-pinned exactly as the shipping
+# fixture's identity is pinned in every receipt: a regenerated or stale
+# ``tests/model/tool_call_eval_variants.json`` is refused before any spend.
+_VARIANT_CHUNK_SHA256 = {
+    "variants-chunk-1": "5f6defa55d4773a08b286d4b0c376bb9f24186b9be8b91559caaad3329f5464c",
+    "variants-chunk-2": "b67bc6a4deedcd7ec8fdf4aa367d1f8d04b2204ab758614d812c83d38695ae75",
+    "variants-chunk-3": "e447fd51f8240e3fde79a9a53e1b13efb25b2566571bc6961da5d873d62469e5",
+}
+_VARIANT_CHUNK_CASES = 60
+_LONG_CONTEXT_HARNESS = ROOT / "scripts" / "test" / "long_context_eval.py"
+# Remote ``--timeout`` per member. The variants and ablation members use the
+# shipping eval's exact 420 s inside the config's 480 s ``evaluation`` stage
+# budget. Long context gets its own explicit, bounded budget: 840 s on the host
+# (``remote_model_eval.LONG_CONTEXT_TOTAL_TIMEOUT``) inside a 900 s stage.
+_EVAL_MEMBER_REMOTE_TIMEOUT = 420
+_LONG_CONTEXT_REMOTE_TIMEOUT = 840
+_LONG_CONTEXT_STAGE_BUDGET_SECONDS = 900.0
+# Realistic wall-time estimates, for the plan's expected-cost line only (never
+# a gate). Derived from run j1m-eval-20261003-b on the A100: the 37-case
+# shipping stage took 128.2 s end to end, about 45 s of which is the per-stage
+# fixed cost (artifact re-hash, ``verify-model``, engine start and model load)
+# and about 2.2 s per scored case. A 60-case chunk is therefore ~180 s, the
+# ablation re-score ~130 s, and the long-context member (120 cells, 180
+# requests of <= 6,000 prompt tokens at ~2 s each, plus calibration) ~420 s.
+_EXTRA_MEMBER_EXPECTED_SECONDS = {
+    _ABLATION_MEMBER: 130.0,
+    **{member: 180.0 for member in _VARIANT_MEMBERS},
+    _LONG_CONTEXT_MEMBER: 420.0,
+}
+_EXTRA_UPLOAD_EXPECTED_SECONDS = 3.0
+_EXTENDED_SKIP_REASONS = frozenset({
+    "extended_clock_insufficient", "extended_upload_failed",
+    "extended_skipped_after_member_failure", "extended_phase_error",
+})
+
+
+def _extra_members(suite: str | None, scorer_ablation: str | None) -> tuple[str, ...]:
+    """Parse the two opt-in options into the ordered member list; refuse anything else.
+
+    Order is fixed: the ablation re-scores the shipping fixture first (it is
+    the cheapest and the closest to the shipping number), then the three
+    variants chunks, then the long-context harness, whose budget is the
+    largest and whose failure is therefore the least costly to absorb last.
+    """
+
+    suite = "shipping" if suite is None else suite
+    scorer_ablation = "" if scorer_ablation is None else scorer_ablation
+    if not isinstance(suite, str) or suite not in _EVAL_SUITES:
+        raise ValueError("eval suite is not an approved request")
+    if not isinstance(scorer_ablation, str) or scorer_ablation not in _SCORER_ABLATIONS:
+        raise ValueError("scorer ablation is not an approved request")
+    members: list[str] = []
+    if scorer_ablation:
+        members.append(_ABLATION_MEMBER)
+    if suite == "extended":
+        members.extend((*_VARIANT_MEMBERS, _LONG_CONTEXT_MEMBER))
+    return tuple(members)
+
+
+def _extra_member_receipt(member: str) -> str:
+    return f"{member}-receipt.json"
+
+
+def _long_context_profile() -> dict[str, Any]:
+    """The one long-context profile, read from the host-side source of truth."""
+
+    from scripts.test import remote_model_eval
+
+    return copy.deepcopy(remote_model_eval.LONG_CONTEXT_PROFILE)
+
+
+def _variant_chunk_bytes(member: str) -> bytes:
+    """Extract one chunk with the generator's own extractor and pin its digest."""
+
+    from scripts.test import build_eval_variants
+
+    if member not in _VARIANT_MEMBERS:
+        raise ValueError("variants chunk is not an approved member")
+    index = _VARIANT_MEMBERS.index(member) + 1
+    raw = build_eval_variants.extract_chunk_text(index).encode("utf-8")
+    if hashlib.sha256(raw).hexdigest() != _VARIANT_CHUNK_SHA256[member]:
+        raise ValueError("variants chunk does not match its pinned sha256; rerun build_eval_variants.py --check")
+    return raw
+
+
+def _extra_member_contract(member: str) -> dict[str, Any]:
+    """The contract a member receipt must match: the chunk's own, or the shipping one."""
+
+    if member in _VARIANT_MEMBERS:
+        contract = _fixture_contract_from_raw(_variant_chunk_bytes(member))
+        if contract["case_count"] != _VARIANT_CHUNK_CASES:
+            raise ValueError("variants chunk case count is not the pinned count")
+        return contract
+    return _tool_eval_contract()
+
+
+def _extended_suite_preflight(config: dict[str, Any], members: tuple[str, ...]) -> dict[str, Any]:
+    """Prove, at USD 0.00, that every requested member can actually run.
+
+    Stale chunks, a missing harness, a probe tool absent from the shipping
+    catalogue, or a long-context size that cannot fit the engine context are
+    all refused here, before key generation or any provider call.
+    """
+
+    shipping = _tool_eval_contract()
+    fixtures: dict[str, str] = {}
+    chunks: dict[str, bytes] = {}
+    for member in members:
+        if member in _VARIANT_MEMBERS:
+            chunks[member] = _variant_chunk_bytes(member)
+            contract = _fixture_contract_from_raw(chunks[member])
+            if (contract["case_count"] != _VARIANT_CHUNK_CASES or
+                    contract["fixture_identity"]["tool_names"] != shipping["fixture_identity"]["tool_names"] or
+                    contract["fixture_identity"]["limits"] != shipping["fixture_identity"]["limits"]):
+                raise ValueError("variants chunk does not share the shipping catalogue and limits")
+            fixtures[member] = contract["fixture_identity"]["sha256"]
+        else:
+            fixtures[member] = shipping["fixture_identity"]["sha256"]
+    harness_sha256 = None
+    if _LONG_CONTEXT_MEMBER in members:
+        from scripts.test import long_context_eval
+
+        raw = _bounded_bytes(_LONG_CONTEXT_HARNESS, 512 * 1024)
+        harness_sha256 = hashlib.sha256(raw).hexdigest()
+        profile = _long_context_profile()
+        if (not set(long_context_eval.PROBE_TOOL_NAMES) <= set(shipping["fixture_identity"]["tool_names"]) or
+                not set(profile["probes"]) <= set(long_context_eval.PROBES) or
+                not set(profile["styles"]) <= set(long_context_eval.STYLES) or
+                max(profile["sizes"]) > shipping["context_tokens"] - profile["max_output"] - long_context_eval.OUTPUT_RESERVE or
+                not 1 <= profile["max_output"] <= 256 or profile["trials"] != 1):
+            raise ValueError("long-context profile does not fit the shipping engine context")
+    return {"members": list(members), "fixtures": fixtures, "chunks": chunks,
+            "harness_sha256": harness_sha256}
+
+
+def _extra_member_command(config: dict[str, Any], remote_root: str, member: str, fixture_sha256: str) -> list[str]:
+    """One member's argv: the shipping eval argv, re-pointed and member-stamped.
+
+    Every identity operand (model, manifest, lock, revisions, engine, CUDA and
+    toolchain receipts) is the shipping stage's own. What differs is the
+    fixture, a receipt name the member owns, a private preflight path that can
+    never overwrite the shipping one, and the member stamp plus the fixture
+    digest the host must see before it spends any GPU time.
+    """
+
+    if member not in _extra_members("extended", "no-boolean-coercion"):
+        raise ValueError("extra member is not approved")
+    if not isinstance(fixture_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", fixture_sha256):
+        raise ValueError("extra member fixture digest is invalid")
+    llama = config["llama_cpp"]
+    eval_mode = config["modes"]["eval"]
+    build_root = f"{remote_root}/engine-build"
+    fixture = (f"{remote_root}/{member}.json" if member in _VARIANT_MEMBERS
+               else f"{remote_root}/production_tool_call_eval.json")
+    timeout = _LONG_CONTEXT_REMOTE_TIMEOUT if member == _LONG_CONTEXT_MEMBER else _EVAL_MEMBER_REMOTE_TIMEOUT
+    command = [
+        "python3", f"{remote_root}/remote_model_eval.py",
+        "--model", f"{remote_root}/artifacts/Qwen3.5-9B-Q4_K_M.gguf",
+        "--model-manifest", f"{remote_root}/model-manifest.json",
+        "--model-manifest-lock", f"{remote_root}/model-manifest.sha256",
+        "--source-revision", config["source"]["revision"],
+        "--llama-revision", llama["revision"], "--llama-checkout", llama["checkout"],
+        "--engine", f"{build_root}/native/lae-engine",
+        "--evaluator", f"{remote_root}/evaluate_tool_calls.py",
+        "--fixture", fixture,
+        "--backend", eval_mode["backend"], "--cuda-device-name", eval_mode["cuda_device_name"],
+        "--cuda-device-receipt", f"{remote_root}/artifacts/cuda-device-receipt.json",
+        "--toolchain-receipt", f"{remote_root}/artifacts/toolchain-receipt.json",
+        "--receipt", f"{remote_root}/artifacts/{_extra_member_receipt(member)}",
+        "--preflight-receipt", f"{remote_root}/extended/{member}-preflight-receipt.json",
+        "--timeout", str(timeout),
+        "--suite-member", member,
+        "--expected-fixture-sha256", fixture_sha256,
+    ]
+    if member == _LONG_CONTEXT_MEMBER:
+        command.extend(["--long-context-harness", f"{remote_root}/long_context_eval.py"])
+    return command
+
+
+def _extra_member_commands(config: dict[str, Any], remote_root: str, preflight: dict[str, Any]) -> list[list[str]]:
+    return [_extra_member_command(config, remote_root, member, preflight["fixtures"][member])
+            for member in preflight["members"]]
+
+
+def _extra_salvage_bindings(preflight: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """What each requested member receipt must prove at the salvage boundary."""
+
+    return {
+        _extra_member_receipt(member): {
+            "member": member,
+            "fixture_sha256": preflight["fixtures"][member],
+            "harness_sha256": preflight["harness_sha256"],
+        }
+        for member in preflight["members"]
+    }
+
+
+def _extra_uploads(remote_root: str, staging: Path, members: tuple[str, ...]) -> list[tuple[Path, str, bool]]:
+    """The small files only an opted-in run uploads, after the shipping uploads.
+
+    The ablation needs nothing new: it re-scores the already uploaded shipping
+    fixture with the already uploaded evaluator.
+    """
+
+    uploads: list[tuple[Path, str, bool]] = [
+        (staging / f"{member}.json", f"{remote_root}/{member}.json", False)
+        for member in members if member in _VARIANT_MEMBERS
+    ]
+    if _LONG_CONTEXT_MEMBER in members:
+        uploads.append((_LONG_CONTEXT_HARNESS, f"{remote_root}/long_context_eval.py", False))
+    return uploads
+
+
+def _extra_member_budget_seconds(config: dict[str, Any], member: str) -> float:
+    if member == _LONG_CONTEXT_MEMBER:
+        return _LONG_CONTEXT_STAGE_BUDGET_SECONDS
+    return float(config["modes"]["eval"]["stage_budgets_seconds"]["evaluation"])
+
+
+def _extended_budget(config: dict[str, Any], members: tuple[str, ...], *,
+                     hourly_usd: float | None = None) -> dict[str, Any]:
+    """The extra wall time and cost, stated explicitly. Never a new cap.
+
+    Members run strictly inside the run's existing ``execution_deadline``
+    (``modes.eval.runtime_hours``), so the authorised active cost, the provider
+    backstop and the per-run cap gate are all unchanged: ``raises_authorized_cost``
+    is ``False`` by construction, and a member that does not fit the remaining
+    clock is skipped with a typed reason instead of extending the run.
+    """
+
+    envelope = _eval_deadline_ceiling(config)
+    static_slack = envelope["run_seconds"] - envelope["ceiling_seconds"]
+    base_uploads = _eval_uploads(config, "/scratch/j1m", None, ROOT / _APPROVED_EVAL_MANIFEST_RELATIVE)
+    per_upload = float(config["modes"]["eval"]["stage_budgets_seconds"]["small_uploads"]) / max(1, len(base_uploads))
+    upload_count = len(_extra_uploads("/scratch/j1m", Path("/nonexistent"), members))
+    stage_budgets = {member: _extra_member_budget_seconds(config, member) for member in members}
+    expected = {member: _EXTRA_MEMBER_EXPECTED_SECONDS[member] for member in members}
+    upload_worst = round(per_upload * upload_count, 3)
+    upload_expected = _EXTRA_UPLOAD_EXPECTED_SECONDS * upload_count
+    required = sum(stage_budgets.values())
+    expected_total = sum(expected.values()) + upload_expected
+    worst_total = required + upload_worst
+    hourly = float(j1m_runner.primary_shadeform_target(config)["hourly_usd"]) if hourly_usd is None else float(hourly_usd)
+    mode = config["modes"]["eval"]
+    return {
+        "members": list(members),
+        "stage_budget_seconds": stage_budgets,
+        "expected_stage_seconds": expected,
+        "extra_upload_count": upload_count,
+        "extra_upload_worst_seconds": upload_worst,
+        "required_seconds": round(required, 3),
+        "expected_extra_seconds": round(expected_total, 3),
+        "worst_extra_seconds": round(worst_total, 3),
+        "static_slack_seconds": round(static_slack, 3),
+        # The extra uploads happen BEFORE the shipping stages, so their worst
+        # case must fit the static slack or they could starve the shipping eval.
+        "uploads_fit_static_slack": upload_worst <= static_slack,
+        "fits_static_worst_case": worst_total <= static_slack,
+        "hourly_usd": hourly,
+        "expected_marginal_cost_usd": round(hourly * expected_total / 3600.0, 4),
+        "worst_marginal_cost_usd": round(hourly * worst_total / 3600.0, 4),
+        "authorized_active_cost_usd": j1m_runner.mode_active_cost_usd(config, "eval", hourly),
+        "provider_backstop_cost_usd": round(hourly * float(mode["provider_backstop_hours"]), 4),
+        "per_run_cap_usd": j1m_runner.per_run_cap_usd(config),
+        "runtime_hours": float(mode["runtime_hours"]),
+        "raises_authorized_cost": False,
+        "clock_gate": ("each member starts only if the remaining execution clock, after the "
+                       "cleanup and deletion reserves, covers its full stage budget; otherwise it "
+                       "and every later member are skipped as extended_clock_insufficient"),
+    }
+
+
+def _extended_clock_available(config: dict[str, Any], execution_deadline: float) -> float:
+    """Remaining clock a member may use, with salvage cleanup and deletion reserved."""
+
+    cleanup = float(config["modes"]["eval"]["stage_budgets_seconds"]["cleanup_reserve"])
+    return execution_deadline - time.monotonic() - cleanup - _DELETION_RESERVE_SECONDS
+
+
+def _run_extra_members(
+    config: dict[str, Any], commands: list[list[str]], members: tuple[str, ...], *,
+    ssh_prefix: list[str], execution_deadline: float, progress_path: Path,
+    phase_id: str, phase: dict[str, Any], lifecycle: dict[str, Any],
+) -> None:
+    """Run the members in order, after the shipping eval. Never raises a member failure.
+
+    A member that does not fit the remaining clock, or follows a failed member,
+    is skipped with a typed reason: a failed stage here is almost always
+    systemic (engine, host or clock), and repeating it would only spend money.
+    """
+
+    stages = phase.setdefault("stages", [])
+    skipped = phase.setdefault("skipped", [])
+    for index, (member, command) in enumerate(zip(members, commands)):
+        if phase.get("status") == "failed":
+            skipped.extend({"member": later, "reason": "extended_skipped_after_member_failure"}
+                           for later in members[index:])
+            return
+        budget = _extra_member_budget_seconds(config, member)
+        available = _extended_clock_available(config, execution_deadline)
+        if available < budget:
+            phase["status"] = "partial" if stages else "refused"
+            skipped.extend({"member": later, "reason": "extended_clock_insufficient"}
+                           for later in members[index:])
+            phase["available_seconds"] = round(available, 3)
+            return
+        lifecycle["stage"] = f"extended-stage:{member}"
+        _progress(progress_path, "extended-stage-starting", phase_id=phase_id, operation_stage=lifecycle["stage"])
+        timeout = _eval_timeout(
+            execution_deadline, budget,
+            reserve=_DELETION_RESERVE_SECONDS + float(config["modes"]["eval"]["stage_budgets_seconds"]["cleanup_reserve"]))
+        stage = _remote(ssh_prefix + command, timeout=timeout)
+        stages.append({"member": member, **stage})
+        _progress(progress_path, "extended-stage-result", phase_id=phase_id, operation_stage=lifecycle["stage"],
+                  status=stage["status"], exit_code=stage.get("exit_code"))
+        if stage["status"] != "completed":
+            phase["status"] = "failed"
+            phase["failed_member"] = member
+    if phase.get("status") not in {"failed", "partial", "refused"}:
+        phase["status"] = "completed"
+
+
+def _verify_member_eval_receipt(path: Path, artifact: dict[str, Any], member: str) -> dict[str, Any]:
+    """Verify a variants-chunk or ablation receipt against its OWN pinned identity."""
+
+    payload = _bounded_json(path, _EVAL_RECEIPT_MAX_BYTES)
+    if not isinstance(payload, dict) or payload.get("schema") != _SALVAGE_EXTRA_RECEIPT_ALLOWLIST[_extra_member_receipt(member)]:
+        raise ValueError("member receipt schema mismatch")
+    if payload.get("suite_member") != member:
+        raise ValueError("member receipt claims another member")
+    ablation = {"name": _ABLATION_MEMBER, "boolean_coercion": False}
+    if (member == _ABLATION_MEMBER) != ("scorer_ablation" in payload) or (
+            member == _ABLATION_MEMBER and payload.get("scorer_ablation") != ablation):
+        raise ValueError("member receipt ablation record invalid")
+    contract = _extra_member_contract(member)
+    if payload.get("status") == "failed" and "metrics" not in payload:
+        allowed = {"schema", "status", "error_type", "error_code", "fixture", "preflight", "child",
+                   "prompt_response_logging", "tokens_logged", "suite_member", "scorer_ablation",
+                   *j1m_runner.RUN_IDENTITY_FIELDS}
+        code = payload.get("error_code")
+        if (set(payload) - allowed or not isinstance(code, str) or not re.fullmatch(r"[a-z0-9_]{1,64}", code) or
+                ("fixture" in payload and payload["fixture"] != contract["fixture_identity"])):
+            raise ValueError("member failure receipt invalid")
+        return {"status": "failed", "error_code": code,
+                "fixture_sha256": contract["fixture_identity"]["sha256"]}
+    stripped = {key: value for key, value in payload.items() if key not in {"suite_member", "scorer_ablation"}}
+    verified = _verify_eval_receipt_payload(
+        stripped, artifact, schema=payload["schema"], contract=contract, histogram_bound=64)
+    metrics = verified["metrics"]
+    projection = {
+        "status": verified["status"],
+        "fixture_sha256": verified["fixture"]["sha256"],
+        "case_count": metrics["case_count"], "passed": metrics["passed"],
+        "failed": metrics["failed"], "errors": metrics["errors"],
+        "quality_diagnostics": metrics["quality_diagnostics"]["overall"],
+        "error_diagnostics": metrics["error_diagnostics"]["overall"],
+        "failed_cases": metrics.get("failed_cases", []),
+    }
+    if member == _ABLATION_MEMBER:
+        projection["scorer_ablation"] = dict(ablation)
+    return projection
+
+
+def _verify_long_context_receipt(path: Path, artifact: dict[str, Any], *, harness_sha256: str | None) -> dict[str, Any]:
+    """Verify the distilled long-context receipt; nothing in it is prompt or output text."""
+
+    payload = _bounded_json(path, j1m_runner._RECEIPT_MAX_BYTES)
+    if (not isinstance(payload, dict) or payload.get("schema") != _SALVAGE_EXTRA_RECEIPT_ALLOWLIST["long-context-receipt.json"] or
+            payload.get("suite_member") != _LONG_CONTEXT_MEMBER or "scorer_ablation" in payload):
+        raise ValueError("long-context receipt schema mismatch")
+    shipping = _tool_eval_contract()["fixture_identity"]
+    if payload.get("status") == "failed":
+        code = payload.get("error_code")
+        if not isinstance(code, str) or not re.fullmatch(r"[a-z0-9_]{1,64}", code):
+            raise ValueError("long-context failure receipt invalid")
+        if "fixture" in payload and payload["fixture"] != shipping:
+            raise ValueError("long-context receipt fixture identity mismatch")
+        return {"status": "failed", "error_code": code}
+    expected_keys = {"schema", "status", "suite_member", "artifact", "fixture", "engine", "model_preflight",
+                     "harness", "plan", "results", "duration_ms", "prompt_response_logging", "tokens_logged",
+                     *j1m_runner.RUN_IDENTITY_FIELDS}
+    required = _SALVAGE_EXTRA_REQUIRED_KEYS["long-context-receipt.json"]
+    if not required <= set(payload) or set(payload) - expected_keys or payload.get("status") not in {"completed", "partial"}:
+        raise ValueError("long-context receipt schema mismatch")
+    if payload.get("prompt_response_logging") is not False or payload.get("tokens_logged") is not False:
+        raise ValueError("long-context receipt logging policy missing")
+    recorded = payload.get("artifact")
+    if not isinstance(recorded, dict) or any(recorded.get(key) != artifact.get(key) for key in ("name", "size_bytes", "sha256")):
+        raise ValueError("long-context receipt artifact mismatch")
+    if payload.get("fixture") != shipping:
+        raise ValueError("long-context receipt fixture identity mismatch")
+    engine = payload.get("engine")
+    if (not isinstance(engine, dict) or engine.get("llama_cpp_revision") != artifact.get("llama_cpp_revision") or
+            engine.get("model") != "qwen35-9b-q4-k-m"):
+        raise ValueError("long-context receipt engine identity mismatch")
+    preflight = payload.get("model_preflight")
+    if (not isinstance(preflight, dict) or preflight.get("status") != "verified" or
+            preflight.get("sha256") != artifact.get("sha256") or preflight.get("size_bytes") != artifact.get("size_bytes")):
+        raise ValueError("long-context receipt model preflight invalid")
+    harness = payload.get("harness")
+    if (not isinstance(harness, dict) or harness.get("schema") != "local_bmo.long-context-eval.v1" or
+            harness_sha256 is None or harness.get("sha256") != harness_sha256):
+        raise ValueError("long-context receipt harness identity mismatch")
+    if payload.get("plan") != _long_context_profile():
+        raise ValueError("long-context receipt plan is not the approved profile")
+    results = payload.get("results")
+    from scripts.test import remote_model_eval
+
+    outcomes_vocabulary = set(remote_model_eval.LONG_CONTEXT_OUTCOMES)
+    if not isinstance(results, dict):
+        raise ValueError("long-context receipt results invalid")
+    planned, run = results.get("cells_planned"), results.get("cells_run")
+    outcomes = results.get("outcomes")
+    not_passed = results.get("not_passed")
+    profile = _long_context_profile()
+    expected_planned = (len(profile["sizes"]) * len(profile["styles"]) * len(profile["depths"]) *
+                        len(profile["probes"]) * profile["trials"])
+    if (planned != expected_planned or isinstance(run, bool) or not isinstance(run, int) or not 0 <= run <= planned or
+            not isinstance(outcomes, dict) or set(outcomes) != outcomes_vocabulary or
+            any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in outcomes.values()) or
+            sum(outcomes.values()) != run or not isinstance(not_passed, list) or
+            len(not_passed) != run - outcomes["pass"] or
+            any(not isinstance(item, dict) or set(item) != {"id", "outcome", "reason"} or
+                not isinstance(item["id"], str) or not remote_model_eval.LONG_CONTEXT_CELL_ID.fullmatch(item["id"]) or
+                item["outcome"] not in outcomes_vocabulary - {"pass"} or not isinstance(item["reason"], str) or
+                not remote_model_eval.LONG_CONTEXT_REASON.fullmatch(item["reason"])
+                for item in not_passed) or
+            not isinstance(results.get("complete"), bool) or
+            (payload["status"] == "completed") != (results["complete"] and run == planned)):
+        raise ValueError("long-context receipt results invalid")
+    graded = outcomes["pass"] + outcomes["fail"]
+    return {
+        "status": payload["status"],
+        "complete": results["complete"],
+        "cells_planned": planned, "cells_run": run,
+        "outcomes": dict(outcomes),
+        "accuracy": round(outcomes["pass"] / graded, 3) if graded else None,
+        "by_size": results.get("by_size"),
+        "latency_by_size": results.get("latency_by_size"),
+        "tool_loop_reuse": results.get("tool_loop_reuse"),
+        "stopped_early": results.get("stopped_early"),
+        "harness_sha256": harness["sha256"],
+    }
+
+
+def _verify_extra_members(
+    phase: dict[str, Any], salvage: list[dict[str, Any]], destination: Path,
+    artifact: dict[str, Any], *, harness_sha256: str | None,
+) -> None:
+    """Record each member's verified result in ``phase``. Never touches the shipping verdict."""
+
+    attempted = {item.get("member") for item in phase.get("stages", [])}
+    receipts: dict[str, Any] = {}
+    for member in phase.get("members", []):
+        name = _extra_member_receipt(member)
+        saved = next((item for item in salvage if item.get("name") == name and item.get("status") == "completed"), None)
+        if member not in attempted:
+            receipts[member] = {"status": "not_attempted"}
+            continue
+        if saved is None:
+            failed = next((item for item in salvage if item.get("name") == name), {})
+            receipts[member] = {"status": "not_salvaged", "error_code": str(failed.get("error_code") or "salvage_not_requested")[:64]}
+            continue
+        try:
+            if member == _LONG_CONTEXT_MEMBER:
+                receipts[member] = _verify_long_context_receipt(destination / name, artifact, harness_sha256=harness_sha256)
+            else:
+                receipts[member] = _verify_member_eval_receipt(destination / name, artifact, member)
+        except Exception as exc:
+            receipts[member] = {"status": "invalid", "error_type": type(exc).__name__}
+            try:
+                message = str(exc)[:200]
+                j1m_runner.validate_persisted_output(message)
+                receipts[member]["reason"] = message
+            except (ValueError, UnicodeError):
+                pass
+    phase["receipts"] = receipts
+    chunks = [receipts.get(member) for member in _VARIANT_MEMBERS if member in phase.get("members", [])]
+    verified = [item for item in chunks if isinstance(item, dict) and "case_count" in item]
+    if chunks:
+        summary: dict[str, Any] = {
+            "chunks_verified": len(verified), "chunks_requested": len(chunks),
+            "case_count": sum(item["case_count"] for item in verified),
+            "passed": sum(item["passed"] for item in verified),
+            "failed": sum(item["failed"] for item in verified),
+            "errors": sum(item["errors"] for item in verified),
+        }
+        try:
+            from scripts.test import build_eval_variants
+
+            attribution = build_eval_variants.summarize_by_origin(
+                {"failed_cases": [entry for item in verified for entry in item["failed_cases"]]})
+            candidate = {"by_kind": attribution["by_kind"], "by_origin": attribution["by_origin"]}
+            j1m_runner.validate_persisted_receipt(candidate)
+            summary.update(candidate)
+        except Exception:
+            summary["attribution_error"] = "variants_attribution_refused"
+        phase["variants_summary"] = summary
+
+
+def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, artifact_destination: Path, mode: str = "prove", model_artifact: Path | None = None, model_manifest: Path | None = None, evaluate_comparators: str = "", suite: str = "shipping", scorer_ablation: str = "") -> dict[str, Any]:
     # Parse the comparator vocabulary first: an unapproved request is refused
     # before the legacy deletion preflight, config/env loading, candidate
     # access, key generation or any provider POST. The engine/clock refusal
@@ -2431,6 +3092,18 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
     if comparator_selection and mode != "eval":
         raise ValueError("comparator evaluation is only available in eval mode")
     comparator_phase: dict[str, Any] = {}
+    # The opt-in extra members are parsed and refused here too, before any
+    # local state or provider call. Combining them with the comparator phase
+    # is refused rather than budgeted: both would compete for the same
+    # post-eval clock and the comparator's deferred cleanup must not wait on
+    # them.
+    extra_members = _extra_members(suite, scorer_ablation)
+    if extra_members and mode != "eval":
+        raise ValueError("the extended suite and scorer ablation are only available in eval mode")
+    if extra_members and comparator_selection:
+        raise ValueError("the extended suite and scorer ablation are not combined with comparators in one run")
+    extended_preflight: dict[str, Any] | None = None
+    extended_phase: dict[str, Any] = {}
     if mode == "canary":
         # The canary is intentionally plan-only in this source slice.  Its
         # two read-only probes may become executable only after the existing
@@ -2457,6 +3130,13 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             # Typed, pre-spend refusal. The reason is retained in the plan the
             # operator already printed; nothing has been created at this point.
             raise ValueError("comparator evaluation is refused before any provider call")
+        if extra_members:
+            # Stale chunks, a missing harness or an unfit long-context profile
+            # are refused here, at USD 0.00, as is any extra upload whose worst
+            # case could starve the shipping stages of their static budget.
+            extended_preflight = _extended_suite_preflight(config, extra_members)
+            if not _extended_budget(config, extra_members)["uploads_fit_static_slack"]:
+                raise ValueError("extended suite uploads do not fit the shipping eval's static slack")
         # Eval is explicitly CUDA-only on the approved A100. A CPU binary or
         # missing CUDA placement receipt is rejected by the remote verifier.
     else:
@@ -2500,6 +3180,12 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
         # does not enter; this only makes the recorded numbers the true ones.
         comparator_phase = _comparator_phase(
             config, comparator_selection, hourly_usd=float(target["hourly_usd"]))
+    if extra_members:
+        extended_phase = {
+            "suite": suite, "scorer_ablation": scorer_ablation or None,
+            "members": list(extra_members), "status": "planned",
+            "budget": _extended_budget(config, extra_members, hourly_usd=float(target["hourly_usd"])),
+        }
     nonce = sf.new_ownership_nonce()
     with tempfile.TemporaryDirectory(prefix=f"j1m-{phase_id}-") as temp:
         temp_root = Path(temp)
@@ -2540,6 +3226,8 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
             lifecycle["artifact"] = eval_artifact
         if comparator_selection:
             lifecycle["comparator_phase"] = comparator_phase
+        if extra_members:
+            lifecycle["extended_suite"] = extended_phase
         def cancel(_signum: int, _frame: Any) -> None:
             raise OperatorCancelled("operator cancellation signal")
         previous_handlers = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)}
@@ -2883,6 +3571,17 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 eval_uploads = _eval_uploads(config, remote_root, model_artifact, model_manifest, comparator_selection)
                 small_upload_divisor = len(eval_uploads) - 1 if model_artifact is not None else len(eval_uploads)
                 small_upload_timeout = float(config["modes"]["eval"]["stage_budgets_seconds"]["small_uploads"]) / max(1, small_upload_divisor)
+                extra_uploads: list[tuple[Path, str, bool]] = []
+                if extra_members and extended_preflight is not None:
+                    # Stage the pinned chunk bytes in this run's private
+                    # temporary directory; the per-file timeout above was
+                    # derived from the shipping list alone, so no shipping
+                    # upload gets a smaller budget because of these.
+                    for member, raw in extended_preflight["chunks"].items():
+                        staged_chunk = temp_root / f"{member}.json"
+                        staged_chunk.write_bytes(raw)
+                        staged_chunk.chmod(0o600)
+                    extra_uploads = _extra_uploads(remote_root, temp_root, extra_members)
                 for local, remote, recursive in eval_uploads:
                     lifecycle["stage"] = f"eval-upload:{local.name}"
                     _progress(progress_path, "eval-upload-starting", phase_id=phase_id, operation_stage=lifecycle["stage"])
@@ -2897,6 +3596,17 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                     _progress(progress_path, "eval-upload-result", phase_id=phase_id, operation_stage=lifecycle["stage"], status=upload_receipt["status"], exit_code=upload_receipt.get("exit_code"))
                     if upload_receipt["status"] != "completed":
                         raise sf.ShadeformError("required eval upload failed")
+                for local, remote, recursive in extra_uploads:
+                    # Best effort, never fatal: a failed extra upload refuses
+                    # the extended phase and leaves the shipping eval alone.
+                    lifecycle["stage"] = f"extended-upload:{local.name}"
+                    upload_receipt = _remote(
+                        sf.scp_base(info, identity, known_hosts) + [str(local), f"{ssh_user}@{info['ip']}:{remote}"],
+                        timeout=_eval_timeout(execution_deadline, small_upload_timeout))
+                    extended_phase.setdefault("uploads", []).append({"name": local.name, **upload_receipt})
+                    if upload_receipt["status"] != "completed":
+                        extended_phase["status"] = "refused"
+                        extended_phase["reason"] = "extended_upload_failed"
                 for command in eval_commands[_EVAL_BOOTSTRAP_STAGE_COUNT:]:
                     lifecycle["stage"] = _eval_stage_label(command)
                     if any("remote_model_eval.py" in part for part in command):
@@ -2949,6 +3659,30 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                         # including a refusal and a stage failure, and an
                         # unproven deletion is a fail-closed condition.
                         run_comparator_cleanup()
+                if extra_members and extended_preflight is not None:
+                    # Strictly after the shipping stage completed, and after
+                    # ``lifecycle["job"]`` was fixed to it: nothing below can
+                    # change the shipping result. Any member failure, refusal
+                    # or even an unexpected error is recorded on the phase.
+                    if extended_phase.get("status") == "refused":
+                        extended_phase["skipped"] = [
+                            {"member": member, "reason": extended_phase.get("reason", "extended_upload_failed")}
+                            for member in extra_members]
+                    else:
+                        extended_phase["status"] = "approved"
+                        try:
+                            _run_extra_members(
+                                config, _extra_member_commands(config, remote_root, extended_preflight),
+                                extra_members, ssh_prefix=sf.ssh_base(info, identity, known_hosts),
+                                execution_deadline=execution_deadline, progress_path=progress_path,
+                                phase_id=phase_id, phase=extended_phase, lifecycle=lifecycle)
+                        except (KeyboardInterrupt, OperatorCancelled):
+                            raise
+                        except Exception as exc:
+                            extended_phase["status"] = "failed"
+                            extended_phase["reason"] = "extended_phase_error"
+                            extended_phase["error_type"] = type(exc).__name__
+                    lifecycle["stage"] = _eval_stage_label(eval_commands[-1])
             if lifecycle["job"]["status"] != "completed":
                 lifecycle["status"] = lifecycle["job"]["status"]
                 raise sf.ShadeformError("J1M remote job did not complete")
@@ -2986,6 +3720,11 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                 else _eval_fetch_allowlist(config, comparator_selection) if mode == "eval"
                 else config["artifacts"]["prove_fetch_allowlist"]
             )
+            extra_receipt_names = tuple(_extra_member_receipt(member) for member in extra_members)
+            salvage_extra: dict[str, Any] = {}
+            if extra_receipt_names and extended_preflight is not None:
+                fetch_allowlist = [*fetch_allowlist, *extra_receipt_names]
+                salvage_extra = {"extra_receipts": extra_receipt_names}
             try:
                 lifecycle["salvage"] = _salvage(
                     {"phase_id": phase_id, "instance_info": lifecycle.get("instance_info", {})},
@@ -3005,10 +3744,13 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                         # The fixture every comparator arm must have scored.
                         "fixture_sha256": (_tool_eval_contract()["fixture_identity"]["sha256"]
                                            if mode == "eval" else None),
+                        **({"extra_bindings": _extra_salvage_bindings(extended_preflight)}
+                           if salvage_extra else {}),
                     },
                     # The host key pinned before the first remote command; a
                     # host swapped before teardown fails the transfer.
                     host_key=lifecycle.get("host_key"),
+                    **salvage_extra,
                 ) if lifecycle.get("instance_info") else []
             except Exception as exc:
                 # Even an unexpected salvage/setup failure must leave the
@@ -3103,6 +3845,16 @@ def execute(env_file: Path, *, config_path: Path, phase_id: str, run_id: str, ar
                             "status": "refused", "error_type": "comparison_failed",
                             "error_code": str(exc)[:64],
                         }
+                if extra_members and extended_preflight is not None:
+                    # Reported on the phase only. ``status`` and
+                    # ``receipt_error`` above are the shipping verdict and are
+                    # never read or written here.
+                    try:
+                        _verify_extra_members(
+                            extended_phase, lifecycle["salvage"], artifact_destination, eval_artifact,
+                            harness_sha256=extended_preflight["harness_sha256"])
+                    except Exception as exc:
+                        extended_phase["verification_error_type"] = type(exc).__name__
             # The shared teardown performs exact deletion before cost/key
             # bookkeeping and emits a receipt, while remote salvage above is
             # best-effort and independent for each allowlisted artifact.
@@ -3246,11 +3998,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model-artifact", type=Path, help="refused for eval; the Q4 artifact is always built remotely")
     parser.add_argument("--model-manifest", type=Path, help="approved manifest; defaults to the checked-in Q4 acceptance manifest")
     parser.add_argument("--evaluate-comparators", default="", choices=sorted(_COMPARATOR_SELECTIONS), help="default OFF; 'q4-oracle' scores the Q4 artifact on the pinned upstream server, 'q8' or 'q8,bf16' also evaluate the rebuilt higher-precision comparators")
+    parser.add_argument("--suite", default="shipping", choices=_EVAL_SUITES, help="default 'shipping' (the 37-case eval only); 'extended' also scores the three 60-case variants chunks and runs the conservative long-context harness, after the shipping eval, in the same lifecycle")
+    parser.add_argument("--scorer-ablation", default="", choices=_SCORER_ABLATIONS, help="default OFF; 'no-boolean-coercion' also re-scores the shipping fixture with True/False coercion disabled, into its own ablation receipt")
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args(argv)
     comparator_selection = _comparator_selection(args.evaluate_comparators)
     if comparator_selection and args.mode != "eval":
         raise ValueError("comparator evaluation is only available in eval mode")
+    extra_members = _extra_members(args.suite, args.scorer_ablation)
+    if extra_members and args.mode != "eval":
+        raise ValueError("the extended suite and scorer ablation are only available in eval mode")
+    if extra_members and comparator_selection:
+        raise ValueError("the extended suite and scorer ablation are not combined with comparators in one run")
     config = j1m_runner.load_config(args.config)
     plan = j1m_runner.build_plan(config, args.mode)
     plan["mode"] = args.mode
@@ -3270,6 +4029,25 @@ def main(argv: list[str] | None = None) -> int:
             plan["comparator_fetch_allowlist"] = _eval_fetch_allowlist(config, comparator_selection)
             plan["comparator_commands"] = _comparator_remote_commands(config, "/scratch/j1m", comparator_selection)
             plan["comparator_cleanup_commands"] = _comparator_cleanup_commands(config, "/scratch/j1m")
+        if extra_members:
+            # Additive only, exactly like the comparator keys: with neither
+            # option given none of these keys exist.
+            preflight = _extended_suite_preflight(config, extra_members)
+            plan["extended_suite"] = {
+                "suite": args.suite,
+                "scorer_ablation": args.scorer_ablation or None,
+                "members": list(extra_members),
+                "order": "after the shipping eval stage completes, on the same host and engine build",
+                "fixtures_sha256": dict(preflight["fixtures"]),
+                "long_context_harness_sha256": preflight["harness_sha256"],
+                "long_context_profile": _long_context_profile() if _LONG_CONTEXT_MEMBER in extra_members else None,
+                "budget": _extended_budget(config, extra_members),
+                "failure_policy": ("a failed, refused or clock-skipped member is recorded on lifecycle.extended_suite "
+                                   "and never changes the shipping job, status or eval receipt"),
+            }
+            plan["extended_commands"] = _extra_member_commands(config, "/scratch/j1m", preflight)
+            plan["extended_uploads"] = [remote for _local, remote, _recursive in _extra_uploads("/scratch/j1m", Path("/nonexistent"), extra_members)]
+            plan["extended_fetch_allowlist"] = [_extra_member_receipt(member) for member in extra_members]
     elif args.mode == "canary":
         plan["commands"] = _canary_remote_commands(config, "/scratch/j1m-canary")
         plan["artifact"] = "no model; bounded toolchain and CUDA prerequisite probes only"
@@ -3284,7 +4062,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if os.environ.get("SOL_J1M_REVIEWED") != "1":
         raise SystemExit("refusing mutation: Sol must set SOL_J1M_REVIEWED=1 after reviewing the plan")
-    print(json.dumps(execute(args.env_file, config_path=args.config, phase_id=args.phase_id, run_id=args.run_id, artifact_destination=args.artifact_destination, mode=args.mode, model_artifact=args.model_artifact, model_manifest=args.model_manifest, evaluate_comparators=args.evaluate_comparators), sort_keys=True))
+    extra_options = {key: value for key, value in (("suite", args.suite), ("scorer_ablation", args.scorer_ablation))
+                     if value not in {"shipping", ""}}
+    print(json.dumps(execute(args.env_file, config_path=args.config, phase_id=args.phase_id, run_id=args.run_id, artifact_destination=args.artifact_destination, mode=args.mode, model_artifact=args.model_artifact, model_manifest=args.model_manifest, evaluate_comparators=args.evaluate_comparators, **extra_options), sort_keys=True))
     return 0
 
 
