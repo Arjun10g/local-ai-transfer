@@ -1,0 +1,54 @@
+{
+  "instance_id": "030b4915-a690-450d-afd3-471092a6e6c3",
+  "package_install": "ubuntu apt repositories; exact resolved package versions captured by dpkg-query",
+  "packages": {
+    "build-essential": "12.9ubuntu3",
+    "ca-certificates": "20260601~22.04.1",
+    "cmake": "3.22.1-1ubuntu1.22.04.2",
+    "git": "1:2.34.1-1ubuntu1.17",
+    "python3": "3.10.6-1~22.04.1",
+    "python3-venv": "3.10.6-1~22.04.1"
+  },
+  "required": {
+    "cmake": ">=3.18",
+    "g++": ">=9.0",
+    "git": ">=2.30",
+    "nvcc": ">=12.0",
+    "python3": ">=3.8"
+  },
+  "run_id": "J1M-EVAL-37E",
+  "schema": "local_bmo.j1m.remote-toolchain-receipt.v1",
+  "status": "verified",
+  "versions": {
+    "cmake": {
+      "executable": "cmake",
+      "major": 3,
+      "minor": 22,
+      "reported": "cmake version 3.22.1"
+    },
+    "g++": {
+      "executable": "g++",
+      "major": 11,
+      "minor": 4,
+      "reported": "g++ (Ubuntu 11.4.0-1ubuntu1~22.04.2) 11.4.0"
+    },
+    "git": {
+      "executable": "git",
+      "major": 2,
+      "minor": 34,
+      "reported": "git version 2.34.1"
+    },
+    "nvcc": {
+      "executable": "/usr/local/cuda/bin/nvcc",
+      "major": 12,
+      "minor": 8,
+      "reported": "nvcc: NVIDIA (R) Cuda compiler driver"
+    },
+    "python3": {
+      "executable": "python3",
+      "major": 3,
+      "minor": 10,
+      "reported": "Python 3.10.12"
+    }
+  }
+}

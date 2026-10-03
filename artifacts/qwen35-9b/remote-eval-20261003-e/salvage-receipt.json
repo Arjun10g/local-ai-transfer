@@ -1,0 +1,98 @@
+{
+  "allowlist": [
+    "comparator-receipt-bf16.json",
+    "comparator-receipt-q4_k_m.json",
+    "comparator-receipt-q8_0.json",
+    "conversion-receipt.json",
+    "cuda-device-receipt.json",
+    "eval-artifact-receipt.json",
+    "eval-receipt.json",
+    "manifest.json",
+    "memory-receipt.json",
+    "model-receipt.json",
+    "post-cleanup-receipt.json",
+    "proving-receipt.json",
+    "scan-receipt.json",
+    "source-model-receipt.json",
+    "startup-preflight-receipt.json",
+    "tensor-metadata.json",
+    "toolchain-receipt.json",
+    "toolchain.json"
+  ],
+  "caps": {
+    "max_files": 18,
+    "min_free_bytes": 75497472,
+    "per_file_bytes": 2097152,
+    "per_file_timeout_seconds": 60.0,
+    "total_bytes": 37748736,
+    "wall_clock_seconds": 300.0
+  },
+  "completed": 6,
+  "duration_ms": 2653,
+  "failed": 1,
+  "files": [
+    {
+      "exit_code": 0,
+      "name": "eval-receipt.json",
+      "schema": "local_bmo.j1m.real-tool-eval-receipt.v1",
+      "sha256": "8d59cf405dd3eff11290fd844209089c6b88f7b0a24726dba4324a5c04815143",
+      "size_bytes": 6596,
+      "status": "completed"
+    },
+    {
+      "exit_code": 0,
+      "name": "startup-preflight-receipt.json",
+      "schema": "local_bmo.j1m.startup-preflight-receipt.v1",
+      "sha256": "38cc4bdf579c86c07d1d026fe4a30dca50b37b1aebd363d37c8cd7dc67917ebe",
+      "size_bytes": 270,
+      "status": "completed"
+    },
+    {
+      "exit_code": 0,
+      "name": "eval-artifact-receipt.json",
+      "schema": "local_bmo.j1m.remote-eval-artifact-receipt.v1",
+      "sha256": "b898bda177ea74be856a37d10157ced085f3e7a8c87afb8cf5995da65b693c2b",
+      "size_bytes": 500,
+      "status": "completed"
+    },
+    {
+      "exit_code": 0,
+      "name": "toolchain-receipt.json",
+      "schema": "local_bmo.j1m.remote-toolchain-receipt.v1",
+      "sha256": "7ad2417ec08ceabdedb56897c47c77376cab9ce6d7b767cc41e809285af22580",
+      "size_bytes": 1365,
+      "status": "completed"
+    },
+    {
+      "exit_code": 0,
+      "name": "cuda-device-receipt.json",
+      "schema": "local_bmo.j1m.cuda-device-receipt.v1",
+      "sha256": "ed53affa71ae506e71550070e8389715ccd20a818fb9b079c0239194890d8adc",
+      "size_bytes": 386,
+      "status": "completed"
+    },
+    {
+      "error_code": "salvage_refused_non_receipt",
+      "name": "command-receipt.json",
+      "refusal_class": "not_schema_bound",
+      "status": "salvage_failed"
+    },
+    {
+      "exit_code": 0,
+      "name": "memory-receipt.json",
+      "schema": "local_bmo.j1m.memory-eval-receipt.v1",
+      "sha256": "62229b393b81f0ecd51593c376330e7eb218c0e048a29ee8e7c172f7d3a9e713",
+      "size_bytes": 16345,
+      "status": "completed"
+    }
+  ],
+  "host_key_proof": "two-stable-bounded-scans-residual-tofu",
+  "host_key_reproof": "acquisition-digest",
+  "known_hosts_sha256": "f12c0e0e8a21e459b832f645ae1675a55852939d7a2e2c7767dc0f65545fe0cd",
+  "remote_directory": "/scratch/j1m/artifacts",
+  "requested": 7,
+  "schema": "local_bmo.j1m.salvage-receipt.v1",
+  "status": "salvage_failed",
+  "total_bytes": 25462,
+  "transport": "scp-argv-bounded-source-allowlist-v1"
+}

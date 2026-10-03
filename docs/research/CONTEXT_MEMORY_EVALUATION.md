@@ -334,3 +334,8 @@ Command, against a serving `lae-engine` with the pinned Q4_K_M and an
   `lae-host.mjs`.
 - A UI that wants to show "condensing earlier conversation..." reads
   `metrics.snapshot` `memory_note.state`.
+
+
+## Real-model result (2026-10-03, `j1m-eval-20261003-e`)
+
+On an A100, 6 synthetic conversations, 144 cells: full (no compaction) 36/36, plain dropping 0/36, memory note 27/36 (75%). The note keeps names, numbers, preferences and updated values 6/6, decisions 3/6 and tool-result facts 0/6; hallucination 6/6. Five of six notes hit the byte cap. Median note time 4.3 s (A100). See claim `MEMORY-NOTE-MEASURED-001` for the limits. This replaces the 'stand-in summariser' upper bound above with a measurement for the default 256-token note.
