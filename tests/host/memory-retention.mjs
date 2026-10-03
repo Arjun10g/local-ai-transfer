@@ -117,7 +117,7 @@ export function buildConversation({ turns, seed = 0, profile = 'mixed' }) {
     const factTurn = t < turns && t % 2 === 1;
     if (pendingUpdate && pendingUpdate.turn === t && t < turns) {
       user = `${FACT_SPECS.updated.sayNew(pendingUpdate.subject, pendingUpdate.value)} ${sentences(rng, rng.int(60, 200))}`;
-      facts.push({ type: 'updated', turn: t, value: pendingUpdate.value, stale: pendingUpdate.old }); pendingUpdate = null;
+      facts.push({ type: 'updated', turn: t, value: pendingUpdate.value, stale: pendingUpdate.old, subject: pendingUpdate.subject }); pendingUpdate = null;
     } else if (factTurn) {
       const type = types[typeIndex % types.length]; typeIndex += 1;
       if (type === 'tool_only') {
@@ -126,16 +126,16 @@ export function buildConversation({ turns, seed = 0, profile = 'mixed' }) {
         const body = { path, content: { customer: 'Northwind Traders', invoice_total: total, currency: 'EUR', line_items: rng.int(3, 12), status: 'issued', notes: sentences(rng, rng.int(900, 2200)) } };
         tool = { name: 'fs.read_text', arguments: { workspace_id: 'ws-finance', path }, text: JSON.stringify(body) };
         answer = reply(rng, rng.int(200, 400));
-        facts.push({ type, turn: t, value: total });
+        facts.push({ type, turn: t, value: total, path });
       } else if (type === 'updated') {
         const old = FACT_SPECS.updated.make(rng); let value = old; while (value === old) value = FACT_SPECS.updated.make(rng);
         const p = subject(type);
         user = `${FACT_SPECS.updated.say(p, old)} ${sentences(rng, rng.int(60, 200))}`;
         pendingUpdate = { turn: t + 2, value, old, subject: p };
       } else {
-        const value = FACT_SPECS[type].make(rng);
-        user = `${sentences(rng, rng.int(40, 160))} ${FACT_SPECS[type].say(subject(type), value)} ${sentences(rng, rng.int(40, 160))}`;
-        facts.push({ type, turn: t, value });
+        const value = FACT_SPECS[type].make(rng); const factSubject = subject(type);
+        user = `${sentences(rng, rng.int(40, 160))} ${FACT_SPECS[type].say(factSubject, value)} ${sentences(rng, rng.int(40, 160))}`;
+        facts.push({ type, turn: t, value, subject: factSubject });
       }
     } else if (t === turns) {
       user = 'Thanks, that is everything for today. Anything I should follow up on tomorrow?';

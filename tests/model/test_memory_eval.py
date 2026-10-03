@@ -173,6 +173,37 @@ class SharedPromptTests(unittest.TestCase):
         self.assertIn(" [...]", host["excerpts"][0]["text"])
 
 
+class RecallParityTests(unittest.TestCase):
+    """The evaluator's recall mirror reproduces the host module's output on the shared vectors."""
+
+    VECTORS = json.loads((ROOT / "tests" / "model" / "memory_recall_vectors.json").read_text(encoding="utf-8"))
+
+    def test_words_match_the_host(self):
+        for vector in self.VECTORS["words"]:
+            with self.subTest(text=vector["text"]):
+                self.assertEqual(me.recall_words(vector["text"]), vector["words"])
+
+    def test_entries_match_the_host(self):
+        for vector in self.VECTORS["entries"]:
+            with self.subTest(message=json.dumps(vector["message"])[:60]):
+                self.assertEqual(me.recall_entries(PROMPTS, vector["message"]), vector["entries"])
+
+    def test_searches_match_the_host(self):
+        for vector in self.VECTORS["searches"]:
+            options = vector.get("options", {})
+            archive = me.RecallArchive(PROMPTS, recall_bytes=options.get("recallBytes", me.RECALL_BYTES),
+                                       recall_entries=options.get("recallEntries", me.RECALL_ENTRIES))
+            archive.add(vector["messages"])
+            with self.subTest(question=vector["question"]):
+                self.assertEqual(archive.search(me.recall_queries(vector["question"], vector.get("previous"))),
+                                 vector["lines"])
+
+    def test_a_recalled_block_is_never_archived_again(self):
+        block = me.recall_message(PROMPTS, ["User: something worth remembering"])
+        self.assertEqual(me.recall_entries(PROMPTS, block), [])
+        self.assertIsNone(me.recall_message(PROMPTS, []))
+
+
 class ConversationTests(unittest.TestCase):
     def test_facts_land_where_the_receipt_says(self):
         conv = me.build_conversation("memory|0", 2500, 1500)
@@ -257,6 +288,39 @@ class EndToEndTests(unittest.TestCase):
         ages = receipt["summary"]["by_arm_age"]
         self.assertTrue(ages and all(key.split("/")[0] in ("note", "drop", "full") for key in ages))
         self.assertEqual({k: v["accuracy"] for k, v in ages.items() if k.startswith("drop/")}, {k: 0.0 for k in ages if k.startswith("drop/")})
+
+    def test_recall_arms_find_what_dropping_loses_and_keep_text_out_of_the_receipt(self):
+        secret_filler = tuple(f"{PROMPT_MARKER} sentence number {i} about the weekly sync." for i in range(4))
+        with FakeMemoryEngine() as fake, mock.patch.object(lce, "FILLER_SENTENCES", secret_filler):
+            code, receipt, stdout, _ = run_eval(fake, "--conversations", "2", "--arms", "drop,recall,both", out=self.out)
+            sent = json.dumps(fake.requests)
+        raw = self.out.read_text(encoding="utf-8")
+        self.assertEqual(code, 0)
+        self.assertTrue(receipt["complete"])
+        self.assertEqual(receipt["requests_sent_this_run"], receipt["plan"]["planned_requests"])
+        self.assertIn(PROMPTS["recall_label"][:40], sent, "a recalled block really was sent")
+        for text in (raw, stdout):
+            for marker in (PROMPT_MARKER, NOTE_MARKER, PROMPTS["recall_label"][:40], "User:"):
+                self.assertNotIn(marker, text)
+        by = receipt["summary"]["by_arm_probe"]
+        for probe in ("name", "number", "preference", "decision", "updated"):
+            with self.subTest(probe=probe):
+                self.assertEqual(by[f"recall/{probe}"]["accuracy"], 1.0)
+                self.assertEqual(by[f"both/{probe}"]["accuracy"], 1.0)
+                self.assertEqual(by[f"drop/{probe}"]["accuracy"], 0.0)
+        for arm in ("drop", "recall", "both"):
+            self.assertEqual(by[f"{arm}/retained_control"]["accuracy"], 1.0)
+            self.assertEqual(by[f"{arm}/hallucination"]["accuracy"], 1.0, "an absent project retrieves nothing, so nothing invites an invented value")
+        for conv in receipt["conversations"]:
+            retrieved = conv["recall"]["facts_retrieved"]
+            self.assertEqual(set(retrieved), set(me.FACT_TYPES))
+            self.assertTrue(all(retrieved.values()), retrieved)
+            self.assertGreater(conv["recall"]["archive_entries"], 20)
+            absent = [c for c in conv["cells"] if c["arm"] == "recall" and c["probe"] == "hallucination"][0]
+            self.assertEqual(absent["recall_lines"], 0)
+        self.assertEqual(receipt["summary"]["notes"]["generated"], 2, "the both arm makes a note")
+        self.assertEqual(me.planned_requests(me.argparse.Namespace(conversations=2, chunks=2, arms=("drop", "recall"))), 2 * 16)
+        self.assertEqual(me.planned_requests(me.argparse.Namespace(conversations=2, chunks=2, arms=("both",))), 2 * (2 + 8))
 
     def test_a_stale_note_and_an_invented_value_are_caught(self):
         with FakeMemoryEngine(stale=True, hallucinate=True) as fake:

@@ -47,11 +47,11 @@ function rig({ summarise, memory = {}, toolText = () => JSON.stringify({ body: '
 }
 async function* reply(text) { yield { kind: 'text_delta', text }; yield { kind: 'done', finish_reason: 'stop', usage: {} }; }
 
-test('memory is off by default: a long conversation compacts but never summarises or emits memory events', async () => {
+test('with memory off, a long conversation compacts but never summarises, archives or emits memory events', async () => {
   const { script } = buildConversation({ turns: 40, seed: 1 });
   const toolText = new Map(script.filter(s => s.tool).map(s => [JSON.stringify([s.tool.name, s.tool.arguments]), s.tool.text]));
   const engine = retentionEngine({ script });
-  const controller = new ConversationController({ engine, toolRegistry: retentionTools((name, args) => toolText.get(JSON.stringify([name, args]))) });
+  const controller = new ConversationController({ engine, toolRegistry: retentionTools((name, args) => toolText.get(JSON.stringify([name, args]))), memory: { mode: 'off' } });
   const events = [];
   for (const spec of script) assert.equal((await controller.runTurn({ sessionId: 'ses_memory_off', requestId: `req_off_${String(spec.turn).padStart(4, '0')}`, message: spec.user, onEvent: event => events.push(event) })).state, 'COMPLETED');
   assert.ok(events.some(event => event.data.context_compaction), 'the scenario must compact');

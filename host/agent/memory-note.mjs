@@ -29,7 +29,7 @@ export const MEMORY_PROMPTS = deepFreeze(validatePrompts(JSON.parse(PROMPTS_BYTE
 
 function deepFreeze(value) { if (value && typeof value === 'object') { for (const item of Object.values(value)) deepFreeze(item); Object.freeze(value); } return value; }
 function validatePrompts(prompts) {
-  const strings = ['version', 'system', 'user_template', 'output_instruction', 'empty_note', 'note_label', 'note_message_template'];
+  const strings = ['version', 'system', 'user_template', 'output_instruction', 'empty_note', 'note_label', 'recall_label', 'note_message_template'];
   for (const key of strings) if (typeof prompts?.[key] !== 'string' || !prompts[key]) throw new TypeError(`memory-prompts.json: ${key} must be a non-empty string`);
   for (const key of ['user', 'assistant', 'assistant_tool_call', 'tool', 'line_template', 'separator', 'truncation_marker']) if (typeof prompts.excerpt?.[key] !== 'string') throw new TypeError(`memory-prompts.json: excerpt.${key} must be a string`);
   if (!(Number.isInteger(prompts.bytes_per_word) && prompts.bytes_per_word >= 3 && prompts.bytes_per_word <= 16)) throw new TypeError('memory-prompts.json: bytes_per_word must be an integer in 3..16');
@@ -37,16 +37,21 @@ function validatePrompts(prompts) {
   return prompts;
 }
 
-export const MEMORY_MODES = Object.freeze(['off', 'summary']);
-// Off by default: on a laptop CPU the extra call costs minutes of prefill
-// and decode, which only an operator who wants long-conversation memory
-// should pay for.
+// off: plain dropping.  recall: dropped turns are archived and searched by
+// keyword when the user asks about them again (memory-recall.mjs; no engine
+// call).  summary: recall plus the model-written note below.
+export const MEMORY_MODES = Object.freeze(['off', 'recall', 'summary']);
+// Recall is the default: it adds no engine call, only a small bounded block
+// on turns that matched something.  The note stays opt-in ('summary'): on a
+// laptop CPU its extra call costs minutes of prefill and decode.
 export const MEMORY_DEFAULTS = Object.freeze({
-  mode: 'off',
-  // ~150 words: room for a few dozen short facts, small enough to be a
-  // modest fixed cost in every later prompt of an 8,192-token window.
-  noteTokens: 256,
-  noteBytes: 1024,
+  mode: 'recall',
+  // ~170 words: room for a few dozen short facts, small enough to be a
+  // modest fixed cost in every later prompt of an 8,192-token window.  (The
+  // first real-model measurement, with 256 tokens / 768 bytes, truncated five
+  // of six notes; see docs/research/CONTEXT_MEMORY_EVALUATION.md.)
+  noteTokens: 512,
+  noteBytes: 1536,
   // What one summarisation call may read.  Bounded so the extra call's
   // prefill on a CPU stays in the low minutes, whatever was dropped.
   maxInputBytes: 6144,
@@ -72,7 +77,7 @@ export const MEMORY_DEFAULTS = Object.freeze({
 // Option names are the controller's camelCase; config.mjs maps snake_case.
 export function memoryOptions(input = {}) {
   const o = { ...MEMORY_DEFAULTS, ...(input ?? {}) };
-  if (!MEMORY_MODES.includes(o.mode)) throw new TypeError('memory.mode must be off or summary');
+  if (!MEMORY_MODES.includes(o.mode)) throw new TypeError('memory.mode must be off, recall or summary');
   const int = (key, min, max) => { if (!Number.isInteger(o[key]) || o[key] < min || o[key] > max) throw new TypeError(`memory.${key} must be an integer in ${min}..${max}`); };
   int('noteTokens', 32, 1024); int('noteBytes', 128, 4096); int('maxInputBytes', 512, 32768); int('perMessageBytes', 128, 8192);
   int('backlogBytes', 0, 262144); int('timeoutMs', 1000, 3600000); int('waitMs', 0, 600000); int('planHeadroomTokens', 0, 8192); int('planTargetPercent', 20, 60);
@@ -194,7 +199,7 @@ export function excerptLine(message, { perMessageBytes = MEMORY_DEFAULTS.perMess
 }
 // The screened, one-line form of a message, before any length bound.
 function prepareExcerpt(message, { mask }) {
-  if (!message || typeof message.content !== 'string' || isElidedToolResult(message)) return null;
+  if (!message || typeof message.content !== 'string' || isElidedToolResult(message) || isRecallMessage(message)) return null;
   const labels = MEMORY_PROMPTS.excerpt;
   const call = isToolCallText(message);
   const role = message.role === 'tool' ? fillTemplate(labels.tool, { name: stripMarkup(message.name ?? 'tool') }) : message.role === 'assistant' ? (call ? labels.assistant_tool_call : labels.assistant) : message.role === 'user' ? labels.user : null;
@@ -258,6 +263,10 @@ export function summaryRequest({ note, excerpt, noteLimitBytes = noteByteLimit(M
 // derived from untrusted tool output and web text, and the system role is the
 // one place the engine puts the app's own policy.  The label tells the model
 // it is an unverified summary and data, not instructions.
+// The recalled-lines message (memory-recall.mjs) is stored in the history just
+// before the user message it was found for, so it must never be archived or
+// summarised again.
+export const isRecallMessage = message => message?.role === 'user' && typeof message.content === 'string' && message.content.startsWith(MEMORY_PROMPTS.recall_label);
 export function noteMessage(note) {
   return { role: 'user', content: fillTemplate(MEMORY_PROMPTS.note_message_template, { label: MEMORY_PROMPTS.note_label, note }) };
 }

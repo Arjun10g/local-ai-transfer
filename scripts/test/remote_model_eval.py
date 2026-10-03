@@ -78,26 +78,26 @@ LONG_CONTEXT_PROFILE = {
 }
 # The memory member (``scripts/test/memory_eval.py`` with the host's shared
 # ``host/agent/memory-prompts.json``). One fixed profile, like long context:
-# six synthetic conversations, all three arms, two summarisation chunks per
-# note, the host's own note/excerpt bounds. 6 x (2 + 8 x 3) = 156 requests, and
-# ``max_requests`` is exactly that, so the harness refuses a larger plan
-# before its first request.
+# six synthetic conversations, all five arms (note, drop, full, recall, both),
+# two summarisation chunks per note, the host's own note/excerpt bounds.
+# 6 x (2 + 8 x 5) = 252 requests, and ``max_requests`` is exactly that, so the
+# harness refuses a larger plan before its first request.
 MEMORY_TOTAL_TIMEOUT = 600.0
 MEMORY_RAW_MAX_BYTES = 4 * 1024 * 1024
 MEMORY_PROMPTS_MAX_BYTES = 64 * 1024
 MEMORY_PROFILE = {
     "conversations": 6,
-    "arms": ["note", "drop", "full"],
+    "arms": ["note", "drop", "full", "recall", "both"],
     "chunks": 2,
     "dropped_tokens": 2500,
     "retained_tokens": 1500,
-    "note_tokens": 256,
-    "note_bytes": 1024,
+    "note_tokens": 512,
+    "note_bytes": 1536,
     "max_input_bytes": 6144,
     "per_message_bytes": 1536,
     "max_output": 64,
     "request_timeout_seconds": 60,
-    "max_requests": 156,
+    "max_requests": 252,
 }
 # Mirrors of scripts/test/memory_eval.py's closed vocabularies; the extended
 # suite tests pin that the two agree.
@@ -1505,7 +1505,7 @@ def _long_context_session(*, args: argparse.Namespace, artifact: dict[str, Any],
 
 def _memory_planned_requests(profile: dict[str, Any]) -> int:
     questions = len(MEMORY_FACT_TYPES) + 2
-    return profile["conversations"] * (profile["chunks"] * ("note" in profile["arms"]) + questions * len(profile["arms"]))
+    return profile["conversations"] * (profile["chunks"] * bool({"note", "both"} & set(profile["arms"])) + questions * len(profile["arms"]))
 
 
 def _memory_age_bucket(age: int) -> str:

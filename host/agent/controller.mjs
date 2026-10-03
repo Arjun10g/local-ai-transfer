@@ -9,7 +9,8 @@ import { isGraphReadTool, readGraphReadAttestation, transferGraphReadAttestation
 import { copilotSafeCompletionDigest, readCopilotAttestation, transferCopilotAttestation } from '../providers/copilot-cli.mjs';
 import { timeNowDefinition, timeNowTool } from '../tools/time-now.mjs';
 import { CONTEXT_DEFAULTS, ContextBudgetError, droppableHeadLength, fitHistory, historyBudget, messageTokens, messagesTokens, isContextOverflowError, isElidedToolResult, learnBytesPerToken, observedBytesPerToken, penalizeBytesPerToken, utf8Bytes } from './context-budget.mjs';
-import { buildExcerpt, memoryOptions, noteByteLimit, noteMessage, planCompaction, removedBy, sanitizeNote, summaryRequest } from './memory-note.mjs';
+import { RecallArchive, recallMessage, recallOptions, recallQueries } from './memory-recall.mjs';
+import { buildExcerpt, isRecallMessage, memoryOptions, noteByteLimit, noteMessage, planCompaction, removedBy, sanitizeNote, summaryRequest } from './memory-note.mjs';
 import { ENGINE_MAX_MESSAGE_BYTES, toolResultByteCap, truncateUtf8 } from './tool-result-cap.mjs';
 import { displayDiff, maskCredentialText, summarizeToolArguments } from './argument-summary.mjs';
 
@@ -24,7 +25,7 @@ const MEMORY_CANCEL_GRACE_MS = 30000;
 // ride on their own property so they never enter the request-error space.
 const memoryFailure = outcome => Object.assign(new Error(outcome), { memoryOutcome: outcome });
 const settleWithin = (promise, ms) => new Promise(resolve => { const timer = setTimeout(resolve, ms); promise.then(() => { clearTimeout(timer); resolve(); }, () => { clearTimeout(timer); resolve(); }); });
-const newMemoryState = (epoch = 0) => ({ note: null, backlog: [], backlog_bytes: 0, epoch, ready: null, outcome: null, summaries: 0, failures: 0, cancelled: 0, lost_messages: 0 });
+const newMemoryState = (epoch = 0) => ({ archive: null, last_user: null, note: null, backlog: [], backlog_bytes: 0, epoch, ready: null, outcome: null, summaries: 0, failures: 0, cancelled: 0, lost_messages: 0 });
 // Long enough to read a confirmation card aloud during a narrated demo; the
 // host config can shorten or lengthen it (host.confirmation_timeout_ms).
 export const DEFAULT_CONFIRMATION_TIMEOUT_MS = 120000;
@@ -443,6 +444,8 @@ export class ConversationController {
     this.contextTokens = contextTokens; this.maxOutputTokens = maxOutputTokens;
     // Off unless asked for: see memory-note.mjs.
     this.memory = memoryOptions(memory);
+    // Validated now, so a bad recall bound fails at start-up, not mid-conversation.
+    this.recallBounds = recallOptions(this.memory);
     this.#journalMethods = actionJournal === undefined ? null : snapshotJournalMethods(actionJournal);
     this.engine = engine; this.maxToolCalls = maxToolCalls; this.confirmationTimeoutMs = confirmationTimeoutMs; this.maxSessions = maxSessions; this.maxHistoryMessages = maxHistoryMessages; this.maxHistoryBytes = maxHistoryBytes; this.actionJournal = actionJournal; this.clock = 0;
     this.sessions = new Map(); this.active = null; this.pending = new Map(); this.expiredConfirmations = new Map();
@@ -529,10 +532,27 @@ export class ConversationController {
   // earlier ones.
   _promptMessages(session) { const note = session.memory?.note; return note ? [noteMessage(note), ...session.history] : session.history; }
   _noteTokens(session, bytesPerToken) { const note = session.memory?.note; return note ? messageTokens(noteMessage(note), bytesPerToken) : 0; }
+  // Recall (memory.mode 'recall' or 'summary'): everything that leaves the
+  // window is archived, and the lines best matching the user's new message
+  // are stored in the history just before that user message.  Stored, not
+  // injected per prompt, so every later prompt still extends the one before it
+  // and the engine's prefix reuse is untouched; they age out like any message.
+  get #recallOn() { return this.memory.mode !== 'off'; }
+  _archive(session) { const memory = this._memoryState(session); return (memory.archive ??= new RecallArchive(this.recallBounds)); }
+  _recallFor(session, message) {
+    if (!this.#recallOn) return null;
+    const memory = this._memoryState(session); const archive = memory.archive;
+    let lines = archive?.size ? archive.search(recallQueries(message, memory.last_user)) : [];
+    // A line already in the window (from an earlier recalled block) is not
+    // repeated: recalled blocks would otherwise pile up and crowd the window.
+    if (lines.length) { const visible = new Set(); for (const stored of session.history) if (isRecallMessage(stored)) for (const line of stored.content.split('\n').slice(1)) visible.add(line.slice(2)); lines = lines.filter(line => !visible.has(line)); }
+    return recallMessage(lines);
+  }
   // Summary mode only: content that left the window without being summarised
   // waits here (bounded, oldest discarded first) and is folded into the next
   // summary.  In off mode dropped content is simply gone, as it always was.
   _toBacklog(session, messages) {
+    if (this.#recallOn && messages.length) this._archive(session).add(messages);
     if (this.memory.mode !== 'summary' || !messages.length) return;
     const memory = this._memoryState(session);
     for (const message of messages) {
@@ -676,6 +696,9 @@ export class ConversationController {
     // the head of the prompt, not two.
     session.history = [...ready.plan.messages, ...session.history.slice(ready.base.length)];
     session.history_bytes = session.history.reduce((sum, message) => sum + storedBytes(message), 0);
+    // What the plan removed was still in the window until now; the backlog part
+    // of the excerpt was archived when it entered the backlog.
+    this._archive(session).add(ready.plan.removed);
     memory.note = ready.note; memory.summaries += 1;
     for (const message of memory.backlog.splice(0, ready.backlogUsed)) memory.backlog_bytes -= utf8Bytes(message.content);
     memory.lost_messages += ready.excerpt.omitted;
@@ -743,6 +766,8 @@ export class ConversationController {
     if (partialText) { this._appendHistory(session, { role: 'assistant', content: partialText + INTERRUPTED_ANSWER_MARKER }); return true; }
     if (session.history.at(-1) !== userMessage) return true;
     session.history.pop(); session.history_bytes -= storedBytes(userMessage);
+    // The recalled lines were stored for this message only.
+    const before = session.history.at(-1); if (isRecallMessage(before)) { session.history.pop(); session.history_bytes -= storedBytes(before); }
     return false;
   }
   emitFactory(requestId, sessionId, onEvent) { let sequence = 0; return (event, data) => { const output = makeEvent({ event, requestId, sessionId, sequence: sequence++, data }); onEvent?.(output); return output; }; }
@@ -786,6 +811,16 @@ export class ConversationController {
         let callText = ''; let gotCall = false; let usage; let finishReason;
         if (calls === 0 && this.memory.mode === 'summary') await this._settleMemory(session, tools, emit);
         let fit = this._fitContext(session, tools, emit, { turnStart: calls === 0 }); let sent;
+        if (calls === 0) {
+          // After the fit, so lines it just archived can be found, and then a
+          // second fit so the recalled block counts against the budget.
+          const memory = this._memoryState(session); const recalled = this._recallFor(session, message); memory.last_user = message;
+          if (recalled) {
+            const at = session.history.lastIndexOf(userMessage);
+            if (at >= 0) { session.history.splice(at, 0, recalled); session.history_bytes += storedBytes(recalled); this._enforceHistoryBounds(session); fit = this._fitContext(session, tools, emit, { turnStart: true }); }
+            emit('metrics.snapshot', { memory_recall: { lines: recalled.content.split('\n').length - 1, bytes: utf8Bytes(recalled.content), archive_entries: memory.archive?.size ?? 0 } });
+          }
+        }
         for (let attempt = 0; ; attempt++) {
           let framed = false; sent = this._promptMessages(session);
           try {

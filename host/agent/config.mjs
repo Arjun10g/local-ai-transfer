@@ -22,6 +22,7 @@ const MEMORY_CONFIG_KEYS = Object.freeze([
   ['mode', 'mode'], ['note_tokens', 'noteTokens', 32, 1024], ['note_bytes', 'noteBytes', 128, 4096], ['max_input_bytes', 'maxInputBytes', 512, 32768],
   ['per_message_bytes', 'perMessageBytes', 128, 8192], ['backlog_bytes', 'backlogBytes', 0, 262144], ['timeout_ms', 'timeoutMs', 1000, 3600000],
   ['wait_ms', 'waitMs', 0, 600000], ['plan_headroom_tokens', 'planHeadroomTokens', 0, 8192], ['plan_target_percent', 'planTargetPercent', 20, 60],
+  ['archive_bytes', 'archiveBytes', 4096, 4194304], ['entry_bytes', 'entryBytes', 64, 2048], ['recall_bytes', 'recallBytes', 128, 8192], ['recall_entries', 'recallEntries', 1, 32],
 ]);
 // The ConversationController `memory` option for a validated config.
 export function memoryOptionsFromConfig(config = {}) {
@@ -85,7 +86,7 @@ export function validateConfig(input = {}) {
   // minutes on a laptop CPU.
   if (own(input, 'memory')) {
     const m = object(input.memory, 'memory'); keys(m, MEMORY_CONFIG_KEYS.map(([key]) => key), 'memory');
-    if (own(m, 'mode') && !['off', 'summary'].includes(m.mode)) throw new Error('memory.mode must be off or summary');
+    if (own(m, 'mode') && !['off', 'recall', 'summary'].includes(m.mode)) throw new Error('memory.mode must be off, recall or summary');
     for (const [key, , min, max] of MEMORY_CONFIG_KEYS.slice(1)) if (own(m, key) && (!Number.isInteger(m[key]) || m[key] < min || m[key] > max)) throw new Error(`memory.${key} out of range`);
     if (Number.isInteger(m.per_message_bytes) && m.per_message_bytes > (m.max_input_bytes ?? 6144)) throw new Error('memory.per_message_bytes out of range');
   }

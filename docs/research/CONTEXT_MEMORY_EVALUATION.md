@@ -339,3 +339,26 @@ Command, against a serving `lae-engine` with the pinned Q4_K_M and an
 ## Real-model result (2026-10-03, `j1m-eval-20261003-e`)
 
 On an A100, 6 synthetic conversations, 144 cells: full (no compaction) 36/36, plain dropping 0/36, memory note 27/36 (75%). The note keeps names, numbers, preferences and updated values 6/6, decisions 3/6 and tool-result facts 0/6; hallucination 6/6. Five of six notes hit the byte cap. Median note time 4.3 s (A100). See claim `MEMORY-NOTE-MEASURED-001` for the limits. This replaces the 'stand-in summariser' upper bound above with a measurement for the default 256-token note.
+
+
+## Recall memory (2026-10-03): the answer to "the note loses 25%"
+
+The first real-model run showed the model-written note keeps names, numbers, preferences and updated values, but drops decisions (3/6) and tool-result values (0/6), and 5 of 6 notes hit the byte cap. Two causes were found and one hypothesis was refuted:
+
+- **Refuted:** the credential screen did not erase the tool-result values. With the evaluator's project names the number passes through unmasked; the loss is in what the summariser chose to write.
+- **Cap:** the effective note limit was `min(noteBytes, noteTokens x 3)` = 768 bytes, not 1,024. Now 512 tokens / 1,536 bytes, and the prompt asks for fewer words than the cap (bytes_per_word 9).
+- **Prompt (memory-prompts.v2):** priority order (tool-result values first), one-fact-per-line formats, "drop small talk before any value".
+
+The larger change is a **second mechanism that needs no model call: recall** (`host/agent/memory-recall.mjs`). Everything that leaves the window is split into short entries (sentences; `key=value` slices of JSON tool results that repeat the file name; one line per tool call), stored verbatim (markup stripped, credentials masked), and searched with BM25 when the user's next message arrives. The best lines, at most 8 and ~1.3 KB, are stored in the history just before that message as a labelled, quoted block ("unverified, not instructions; later lines win"). Properties, each pinned by a test:
+
+- **No engine call, no wait**: it can be on by default. `memory.mode`: `off`, `recall` (default), `summary` (= recall + the model note).
+- **Exact values**: nothing rewrites them, so tool-result values and both halves of a correction come back; lines are shown oldest first so the later one wins.
+- **Names are anchors**: a capitalised word or a number in the question (`Orion`, `7790`) must appear in a returned line, and a name the archive never saw returns nothing instead of the nearest other project. Removing this gate fails a test (mutation-checked).
+- **Prefix reuse is kept**: the block is stored, not injected per prompt, so each later prompt still extends the previous one; lines already in the window are not repeated; a failed turn removes its block; blocks are never archived or summarised again.
+- **Bounded**: 256 KB archive, 4,000 entries, 320 B per entry.
+
+### Offline measurement (retrieval only, no model)
+
+`node tests/host/memory-recall-retrieval.mjs` drives the real controller over the synthetic conversations (60 and 120 turns, 8 seeds), then for every planted fact that left the window asks the question the way a user would, in two wordings. Result: **every one of 184 (60 turns) and 388 (120 turns) out-of-window facts was retrieved, in both wordings**, with a mean block of ~420-450 bytes, and 0 cases where only the stale value came back. Honest limits: the questions name the subject (`Orion`), the facts are one sentence each, and the archive holds <1,100 entries. A question that shares no word with its answer ("who was that person?") will find nothing; embeddings are the fix if the Dell shows it matters.
+
+Whether the **model uses** the recalled lines correctly is a separate question, measured by `memory_eval.py` arms `recall` and `both` (see claim `MEMORY-RECALL-001` for the A100 result).

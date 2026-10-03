@@ -25,11 +25,12 @@ test('the prompt file is data the host and the evaluator share, identified by it
   assert.throws(() => { MEMORY_PROMPTS.system = 'changed'; }, TypeError, 'frozen: nothing at runtime can rewrite the shipped prompt');
 });
 
-test('memory is off by default and its options are bounded', () => {
-  assert.equal(MEMORY_DEFAULTS.mode, 'off');
-  assert.equal(memoryOptions().mode, 'off'); assert.equal(memoryOptions(undefined).mode, 'off');
+test('recall is the default mode, the model-written note is opt-in, and options are bounded', () => {
+  assert.equal(MEMORY_DEFAULTS.mode, 'recall');
+  assert.equal(memoryOptions().mode, 'recall'); assert.equal(memoryOptions(undefined).mode, 'recall');
   const controller = new ConversationController({ engine: { async *generate() {} } });
-  assert.equal(controller.memory.mode, 'off', 'a controller built without the option never summarises');
+  assert.equal(controller.memory.mode, 'recall', 'a controller built without the option archives and recalls but never summarises');
+  assert.equal(memoryOptions({ mode: 'off' }).mode, 'off');
   assert.throws(() => memoryOptions({ mode: 'always' }), /memory\.mode/);
   assert.throws(() => memoryOptions({ noteTokens: 4096 }), /noteTokens/);
   assert.throws(() => memoryOptions({ perMessageBytes: 9000, maxInputBytes: 8000 }), /perMessageBytes/);

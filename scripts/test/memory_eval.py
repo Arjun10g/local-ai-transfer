@@ -72,7 +72,9 @@ from scripts.test import long_context_eval as lce  # noqa: E402
 
 SCHEMA = "local_bmo.memory-eval.v1"
 PROMPTS_PATH = ROOT / "host" / "agent" / "memory-prompts.json"
-ARMS = ("note", "drop", "full")
+# note: the model-written note; drop: plain dropping (the control); full: no compaction (the ceiling);
+# recall: the dropped turns searched by keyword (host/agent/memory-recall.mjs); both: note plus recall.
+ARMS = ("note", "drop", "full", "recall", "both")
 DEFAULT_ARMS = ("note", "drop")
 FACT_TYPES = ("name", "number", "preference", "decision", "tool_result", "updated")
 PROBES = FACT_TYPES + ("retained_control", "hallucination")
@@ -81,8 +83,8 @@ TIMEOUT_CEILING = 3600
 # Host defaults (host/agent/memory-note.mjs MEMORY_DEFAULTS) and the host's
 # conservative bytes-per-token estimate (context-budget.mjs).
 HOST_BYTES_PER_TOKEN = 3.0
-DEFAULT_NOTE_TOKENS = 256
-DEFAULT_NOTE_BYTES = 1024
+DEFAULT_NOTE_TOKENS = 512
+DEFAULT_NOTE_BYTES = 1536
 DEFAULT_MAX_INPUT_BYTES = 6144
 DEFAULT_PER_MESSAGE_BYTES = 1536
 DONE_OUTCOMES = frozenset({"pass", "fail", "context_overflow", "request_too_large", "skipped"})
@@ -102,7 +104,7 @@ def load_prompts(path: Path = PROMPTS_PATH) -> tuple[dict, str]:
     raw = path.read_bytes()
     prompts = json.loads(raw.decode("utf-8"))
     for key in ("version", "system", "user_template", "output_instruction", "empty_note", "note_label",
-                "note_message_template"):
+                "recall_label", "note_message_template"):
         if not isinstance(prompts.get(key), str) or not prompts[key]:
             raise ValueError(f"memory-prompts.json: {key} must be a non-empty string")
     return prompts, hashlib.sha256(raw).hexdigest()
@@ -300,6 +302,271 @@ def note_message(prompts: dict, note: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Recall: a mirror of host/agent/memory-recall.mjs (the reference), kept in
+# this one file because the remote harness is uploaded and hashed as a single
+# file. Credential masking is omitted, as above. tests/model/
+# memory_recall_vectors.json holds shared vectors both implementations must
+# reproduce (tests/model/test_memory_eval.py, tests/host/memory-recall.test.mjs).
+# ---------------------------------------------------------------------------
+
+RECALL_ENTRY_BYTES = 320
+RECALL_BYTES = 1280
+RECALL_ENTRIES = 8
+RECALL_ARCHIVE_BYTES = 262144
+RECALL_MAX_ENTRIES = 4000
+RECALL_MAX_LEAVES = 80
+RECALL_MIN_ENTRY_CHARS = 8
+RECALL_MARKER = " [...]"
+_WORD = re.compile(r"[^\W_]+")
+_STOP = frozenset(
+    "a an the is was were are be been am what which who whom whose when where how why do does did for of to in on at by "
+    "from with about as and or but if then than that this these those it its i me my we our you your he she they them "
+    "there here please tell remind earlier before previously said told mentioned again now can could would will just so "
+    "not no yes ok okay thanks thank reply only one any all".split())
+_JS_WS = "[" + re.escape(_JS_SPACE) + "]"
+_SENTENCE_BREAK = re.compile(rf"(?<=[.!?]){_JS_WS}+(?=[A-Z0-9\"'(\[])")
+_NAME_KEYS = frozenset({"path", "file", "filename", "name", "id", "url", "title", "key", "workspace_id"})
+_CORRECTION = re.compile(r"\b(?:correction|corrected|actually|instead|no longer|changed|updated|update|now)\b",
+                         re.IGNORECASE | re.ASCII)
+_CALL_NAME = re.compile(r"<function=([^<>\n]{1,96})>")
+_CALL_PARAM = re.compile(r"<parameter=([^<>\n]{1,96})>\s*(.*?)\s*</parameter>", re.DOTALL)
+_RECALL_K1, _RECALL_B = 1.2, 0.75
+_RECALL_MIN_SCORE, _RECALL_RELATIVE = 1.0, 0.35
+
+
+def recall_stem(word: str) -> str:
+    if len(word) > 4 and word.endswith("ies"):
+        return word[:-3] + "y"
+    if len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "us", "is")):
+        return word[:-1]
+    return word
+
+
+def recall_words(text: str) -> list[str]:
+    return [recall_stem(w) for w in _WORD.findall(str(text or "").lower()) if w not in _STOP]
+
+
+def recall_anchor_words(text: str) -> list[str]:
+    out: list[str] = []
+    for index, match in enumerate(_WORD.finditer(str(text or ""))):
+        raw = match.group(0)
+        lower = raw.lower()
+        if lower in _STOP:
+            continue
+        has_digit = any(unicodedata.category(ch).startswith("N") for ch in raw)
+        if (index > 0 and len(raw) > 1 and raw[0].isupper()) or has_digit:
+            out.append(recall_stem(lower))
+    return list(dict.fromkeys(out))
+
+
+def _recall_clean(text: str) -> str:
+    return js_trim(collapse_spaces(strip_markup(text)))
+
+
+def _recall_bound(text: str, max_bytes: int) -> str:
+    if len(text.encode("utf-8")) <= max_bytes:
+        return text
+    return cut_utf8(text, max_bytes - len(RECALL_MARKER.encode("utf-8"))).rstrip(_JS_SPACE) + RECALL_MARKER
+
+
+def _recall_sentences(text: str, max_bytes: int) -> list[str]:
+    out: list[str] = []
+    for part in _SENTENCE_BREAK.split(text):
+        rest = js_trim(part)
+        while len(rest) >= RECALL_MIN_ENTRY_CHARS:
+            if len(rest.encode("utf-8")) <= max_bytes:
+                out.append(rest)
+                break
+            head = cut_utf8(rest, max_bytes)
+            space = head.rfind(" ")
+            if space > len(head) / 2:
+                head = head[:space]
+            if not head:
+                break
+            out.append(js_trim(head))
+            rest = js_trim(rest[len(head):])
+    return out
+
+
+def _recall_prose(text: str, max_bytes: int) -> list[str]:
+    return [s for line in re.split(r"[\n\r]+", strip_markup(text)) for s in _recall_sentences(_recall_clean(line), max_bytes)]
+
+
+def _recall_leaves(value: Any, prefix: str, out: list, depth: int = 0) -> None:
+    if len(out) >= RECALL_MAX_LEAVES or value is None:
+        return
+    if isinstance(value, bool):
+        out.append((prefix, "true" if value else "false"))
+        return
+    if isinstance(value, (int, float)):
+        out.append((prefix, str(int(value)) if isinstance(value, float) and value.is_integer() else str(value)))
+        return
+    if isinstance(value, str):
+        out.append((prefix, value))
+        return
+    if depth >= 6 or not isinstance(value, (dict, list)):
+        return
+    items = list(enumerate(value)) if isinstance(value, list) else list(value.items())
+    for key, item in items:
+        _recall_leaves(item, f"{prefix}.{key}" if prefix else str(key), out, depth + 1)
+
+
+def _recall_tool_entries(message: dict, entry_bytes: int) -> list[str]:
+    name = _recall_clean(message.get("name") or "tool")
+    text = js_trim(message["content"])
+    parsed: Any = None
+    if text.startswith(("{", "[")):
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            parsed = None
+    label = f"Tool result ({name})"
+    if not isinstance(parsed, (dict, list)):
+        return [f"{label}: {line}" for line in _recall_prose(text, entry_bytes - len(label.encode()) - 2)]
+    flat: list[tuple[str, str]] = []
+    _recall_leaves(parsed, "", flat)
+    identity = next((leaf for leaf in flat if leaf[0].split(".")[-1].lower() in _NAME_KEYS), None)
+    head = _recall_clean(f"{label}{' ' + identity[1] if identity else ''}:")
+    room = max(32, entry_bytes - len(head.encode("utf-8")) - 1)
+    out: list[str] = []
+    current = ""
+    for key, value in flat:
+        if identity and key == identity[0]:
+            continue
+        pair = _recall_clean(f"{key}={value}")
+        if not pair:
+            continue
+        piece = _recall_bound(pair, room)
+        if current and len(f"{current}; {piece}".encode("utf-8")) > room:
+            out.append(f"{head} {current}")
+            current = ""
+        current = f"{current}; {piece}" if current else piece
+    if current:
+        out.append(f"{head} {current}")
+    return out
+
+
+def recall_entries(prompts: dict, message: dict, entry_bytes: int = RECALL_ENTRY_BYTES) -> list[str]:
+    content = message.get("content")
+    role = message.get("role")
+    if (not isinstance(content, str) or (role == "tool" and _ELIDED.match(content)) or
+            (role == "user" and content.startswith(prompts["recall_label"]))):
+        return []
+    if role == "tool":
+        return _recall_tool_entries(message, entry_bytes)
+    if role == "assistant" and _TOOL_CALL_HINT.search(content):
+        match = _CALL_NAME.search(content)
+        if not match:
+            return []
+        params = "; ".join(f"{m.group(1)}={m.group(2)}" for m in _CALL_PARAM.finditer(content))
+        return [_recall_bound(_recall_clean(f"Assistant called {match.group(1)}{' with ' + params if params else ''}"),
+                              entry_bytes)]
+    if role not in ("user", "assistant"):
+        return []
+    label = "User" if role == "user" else "Assistant"
+    return [f"{label}: {line}" for line in _recall_prose(content, entry_bytes - len(label.encode()) - 2)]
+
+
+class RecallArchive:
+    """memory-recall.mjs RecallArchive: entries, BM25 search with name anchors, byte and line bounds."""
+
+    def __init__(self, prompts: dict, recall_bytes: int = RECALL_BYTES, recall_entries: int = RECALL_ENTRIES,
+                 entry_bytes: int = RECALL_ENTRY_BYTES, archive_bytes: int = RECALL_ARCHIVE_BYTES) -> None:
+        self.prompts, self.recall_bytes, self.recall_entries = prompts, recall_bytes, recall_entries
+        self.entry_bytes, self.archive_bytes = entry_bytes, archive_bytes
+        self.entries: list[dict] = []
+        self.bytes = 0
+        self.seq = 0
+
+    def add(self, messages: list[dict]) -> int:
+        added = 0
+        for message in messages:
+            for text in recall_entries(self.prompts, message, self.entry_bytes):
+                tokens = recall_words(text)
+                if not tokens:
+                    continue
+                size = len(text.encode("utf-8"))
+                self.entries.append({"seq": self.seq, "text": text, "tokens": tokens, "bytes": size})
+                self.seq += 1
+                self.bytes += size
+                added += 1
+        while len(self.entries) > RECALL_MAX_ENTRIES or self.bytes > self.archive_bytes:
+            self.bytes -= self.entries.pop(0)["bytes"]
+        return added
+
+    def search(self, queries: list[tuple[str, float]]) -> list[str]:
+        entries = self.entries
+        n = len(entries)
+        if not n:
+            return []
+        weights: dict[str, float] = {}
+        for text, weight in queries:
+            for word in dict.fromkeys(recall_words(text)):
+                weights[word] = max(weights.get(word, 0.0), weight)
+        if not weights:
+            return []
+        df: dict[str, int] = {}
+        for entry in entries:
+            for word in dict.fromkeys(entry["tokens"]):
+                if word in weights:
+                    df[word] = df.get(word, 0) + 1
+        if not df:
+            return []
+        anchors = recall_anchor_words(queries[0][0] if queries else "")
+        present = [w for w in anchors if w in df]
+        if anchors and not present:
+            return []
+        average = sum(len(e["tokens"]) for e in entries) / n
+        scored: list[tuple[float, dict]] = []
+        for entry in entries:
+            tf: dict[str, int] = {}
+            for word in entry["tokens"]:
+                if word in weights:
+                    tf[word] = tf.get(word, 0) + 1
+            if not tf or (present and not any(w in tf for w in present)):
+                continue
+            score = 0.0
+            for word, count in tf.items():
+                idf = math.log(1 + (n - df[word] + 0.5) / (df[word] + 0.5))
+                score += (weights[word] * idf * (count * (_RECALL_K1 + 1)) /
+                          (count + _RECALL_K1 * (1 - _RECALL_B + _RECALL_B * len(entry["tokens"]) / average)))
+            if _CORRECTION.search(entry["text"]):
+                score *= 1.1
+            scored.append((score, entry))
+        if not scored:
+            return []
+        scored.sort(key=lambda item: (-item[0], -item[1]["seq"]))
+        top = scored[0][0]
+        if not present and top < _RECALL_MIN_SCORE:
+            return []
+        picked: list[dict] = []
+        size = len(self.prompts["recall_label"].encode("utf-8")) + 1
+        for score, entry in scored:
+            if (len(picked) >= self.recall_entries or score < top * _RECALL_RELATIVE or
+                    (not present and score < _RECALL_MIN_SCORE * 0.5)):
+                break
+            cost = len(entry["text"].encode("utf-8")) + 3
+            if size + cost > self.recall_bytes:
+                continue
+            picked.append(entry)
+            size += cost
+        return [e["text"] for e in sorted(picked, key=lambda e: e["seq"])]
+
+
+def recall_queries(message: str, previous: str | None = None) -> list[tuple[str, float]]:
+    queries = [(str(message or ""), 1.0)]
+    if previous:
+        queries.append((str(previous), 0.5))
+    return queries
+
+
+def recall_message(prompts: dict, lines: list[str]) -> dict | None:
+    if not lines:
+        return None
+    return {"role": "user", "content": prompts["recall_label"] + "\n" + "\n".join(f"- {line}" for line in lines)}
+
+
+# ---------------------------------------------------------------------------
 # Synthetic conversations
 # ---------------------------------------------------------------------------
 
@@ -439,7 +706,7 @@ def _age_bucket(age: int) -> str:
 
 def planned_requests(opts: argparse.Namespace) -> int:
     questions = len(FACT_TYPES) + 2
-    return opts.conversations * (opts.chunks * ("note" in opts.arms) + questions * len(opts.arms))
+    return opts.conversations * (opts.chunks * bool({"note", "both"} & set(opts.arms)) + questions * len(opts.arms))
 
 
 def make_note(client: lce.EngineClient, prompts: dict, dropped: list[dict], opts: argparse.Namespace,
@@ -481,7 +748,7 @@ def run_conversation(client: lce.EngineClient, prompts: dict, index: int, opts: 
         "cells": [],
     }
     note: str | None = None
-    if "note" in opts.arms:
+    if {"note", "both"} & set(opts.arms):
         try:
             note, meta = make_note(client, prompts, conv["dropped"], opts, show, result["id"])
             # Booleans only: whether each planted value made it into the
@@ -499,10 +766,19 @@ def run_conversation(client: lce.EngineClient, prompts: dict, index: int, opts: 
     for fact in conv["facts"] + [conv["control"]]:
         probes.append((fact["type"], fact, question_for(fact), lambda out, f=fact: grade(f, out)))
     probes.append(("hallucination", None, hallucination_question(conv["absent_project"]), grade_hallucination))
+    archive = None
+    if {"recall", "both"} & set(opts.arms):
+        archive = RecallArchive(prompts)
+        archive.add(conv["dropped"])
+        # Whether retrieval found each planted value (booleans only): separates
+        # "the lines never came back" from "the model did not use them".
+        result["recall"] = {"archive_entries": len(archive.entries), "facts_retrieved": {
+            f["type"]: any(lce._contains(line, f["value"]) for line in archive.search(recall_queries(question_for(f))))
+            for f in conv["facts"]}}
     for arm in opts.arms:
-        if arm == "note":
+        if arm in ("note", "both"):
             context = ([note_message(prompts, note)] if note else []) + conv["retained"]
-        elif arm == "drop":
+        elif arm in ("drop", "recall"):
             context = list(conv["retained"])
         else:
             context = conv["dropped"] + conv["retained"]
@@ -510,12 +786,18 @@ def run_conversation(client: lce.EngineClient, prompts: dict, index: int, opts: 
             cell: dict[str, Any] = {"arm": arm, "probe": probe,
                                     "age_turns": fact["age_turns"] if fact else None,
                                     "in_dropped": fact["in_dropped"] if fact else None}
-            if arm == "note" and not note:
+            if arm in ("note", "both") and not note:
                 cell.update({"outcome": "skipped", "passed": None, "reason": "note_failed"})
                 result["cells"].append(cell)
                 continue
+            asked = context
+            if arm in ("recall", "both"):
+                block = recall_message(prompts, archive.search(recall_queries(question)))
+                cell["recall_lines"] = block["content"].count("\n") if block else 0
+                if block:
+                    asked = context + [block]
             try:
-                reply = client.chat(client.new_session(), context + [{"role": "user", "content": question}], None,
+                reply = client.chat(client.new_session(), asked + [{"role": "user", "content": question}], None,
                                     opts.max_tokens)
             except lce.RequestFailed as failed:
                 cell.update({"outcome": failed.outcome, "passed": None, "reason": failed.reason})
