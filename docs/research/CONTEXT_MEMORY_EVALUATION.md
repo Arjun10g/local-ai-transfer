@@ -362,3 +362,15 @@ The larger change is a **second mechanism that needs no model call: recall** (`h
 `node tests/host/memory-recall-retrieval.mjs` drives the real controller over the synthetic conversations (60 and 120 turns, 8 seeds), then for every planted fact that left the window asks the question the way a user would, in two wordings. Result: **every one of 184 (60 turns) and 388 (120 turns) out-of-window facts was retrieved, in both wordings**, with a mean block of ~420-450 bytes, and 0 cases where only the stale value came back. Honest limits: the questions name the subject (`Orion`), the facts are one sentence each, and the archive holds <1,100 entries. A question that shares no word with its answer ("who was that person?") will find nothing; embeddings are the fix if the Dell shows it matters.
 
 Whether the **model uses** the recalled lines correctly is a separate question, measured by `memory_eval.py` arms `recall` and `both` (see claim `MEMORY-RECALL-001` for the A100 result).
+
+### Real-model result for recall (2026-10-03, `j1m-eval-20261003-f`, A100)
+
+| Arm (facts the compaction dropped) | Recall |
+|---|---|
+| no compaction (control) | 48/48 = 100% |
+| **recall** | **48/48 = 100%** |
+| **recall + note** | **48/48 = 100%** |
+| model note alone (cap 1,536 B, prompt v2) | 35/48 = 72% (names, numbers, preferences, updated 6/6; decisions 2/6; tool-result values 0/6) |
+| plain dropping | 0/48 |
+
+The absent-project probe is 100% in every arm (recall retrieves nothing for an unknown name, so nothing invites an invented value). The note's truncation fell from 5/6 to 1/6 (median 1,395 B, 9.6 s on the A100) but the prompt change did not make it keep tool-result values: **the note is a gist, recall carries exact values**, so the default is recall and the note stays opt-in. Limits: six synthetic conversations, one sample per cell, questions name the subject, one machine, the same 9B model writes and answers. Where recall will fail (no shared words with the question; hundreds of near-identical facts) is not measured here.

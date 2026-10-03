@@ -1,0 +1,866 @@
+{
+  "artifact": {
+    "llama_cpp_revision": "3581ba0cf591b3f772fbb002de0f70e294bc0396",
+    "modality": "text_only_no_mmproj",
+    "name": "Qwen3.5-9B-Q4_K_M.gguf",
+    "quantization": "Q4_K_M",
+    "sha256": "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b",
+    "size_bytes": 5629109088,
+    "source_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
+  },
+  "duration_ms": 298499.5,
+  "engine": {
+    "api_version": "0.1.0",
+    "compiled_backend": "llama.cpp/3581ba0c/cuda",
+    "engine_version": "0.1.0",
+    "llama_cpp_revision": "3581ba0cf591b3f772fbb002de0f70e294bc0396",
+    "model": "qwen35-9b-q4-k-m"
+  },
+  "fixture": {
+    "case_count": 37,
+    "category_counts": {
+      "abstention": 1,
+      "confirmation_sensitive": 15,
+      "no_tool": 1,
+      "prompt_injection": 1,
+      "schema_edge": 1,
+      "tool_selection": 18
+    },
+    "limits": {
+      "context_tokens": 8192,
+      "max_cases": 64,
+      "max_output_tokens": 256,
+      "temperature": 0
+    },
+    "model": "Qwen3.5-9B-Q4_K_M",
+    "protocol": "qwen35-xml-tool-call-v1",
+    "schema": "local_bmo.tool-call-eval.v1",
+    "sha256": "d3c4d457800e8f1c04a4f3dcfaabe7897af8c7473d90b4bf0fdbfbf00225a452",
+    "tool_count": 33,
+    "tool_names": [
+      "time.now",
+      "system.get_info",
+      "clipboard.read",
+      "clipboard.write",
+      "app.open",
+      "browser.open_url",
+      "fs.list",
+      "fs.read_text",
+      "fs.search_text",
+      "fs.write_new",
+      "fs.apply_patch",
+      "process.run_allowlisted",
+      "mail.list_messages",
+      "mail.search_messages",
+      "mail.read_message",
+      "mail.create_draft",
+      "mail.send_draft",
+      "mail.mark_read",
+      "teams.list_chats",
+      "teams.list_messages",
+      "teams.read_message",
+      "teams.list_channels",
+      "teams.list_channel_messages",
+      "teams.read_channel_message",
+      "teams.send_message",
+      "coding.copilot_ask",
+      "browser.session_start",
+      "browser.inspect_links",
+      "browser.inspect_page",
+      "browser.follow_link",
+      "browser.fill_field",
+      "browser.activate_control",
+      "browser.session_close"
+    ]
+  },
+  "harness": {
+    "long_context_sha256": "31fcd8f81dead13283a7f681a5de0141fe464be4ca203ea32371b079846c55fa",
+    "process": {
+      "exit_code": 0,
+      "status": "completed"
+    },
+    "schema": "local_bmo.memory-eval.v1",
+    "sha256": "ae9d34b7f750c7d5349c1c59123caef676867f4e1990123859da2c5388cd3c13"
+  },
+  "instance_id": "a1776531-3d3f-4ca6-bca4-51fd71fe792c",
+  "memory_prompts": {
+    "sha256": "35a3ae2023d1b345db0924c7f35722b411fb459d8e5eda8b91410ef2dada3d8c",
+    "version": "memory-prompts.v2"
+  },
+  "model_preflight": {
+    "code": "ok",
+    "gguf_version": 3,
+    "sha256": "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b",
+    "size_bytes": 5629109088,
+    "status": "verified",
+    "valid": true
+  },
+  "plan": {
+    "arms": [
+      "note",
+      "drop",
+      "full",
+      "recall",
+      "both"
+    ],
+    "chunks": 2,
+    "conversations": 6,
+    "dropped_tokens": 2500,
+    "max_input_bytes": 6144,
+    "max_output": 64,
+    "max_requests": 252,
+    "note_bytes": 1536,
+    "note_tokens": 512,
+    "per_message_bytes": 1536,
+    "request_timeout_seconds": 60,
+    "retained_tokens": 1500
+  },
+  "prompt_response_logging": false,
+  "results": {
+    "by_arm": {
+      "both": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 36
+      },
+      "drop": {
+        "accuracy": 0.0,
+        "fail": 36,
+        "not_graded": 0,
+        "pass": 0
+      },
+      "full": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 36
+      },
+      "note": {
+        "accuracy": 0.722,
+        "fail": 10,
+        "not_graded": 0,
+        "pass": 26
+      },
+      "recall": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 36
+      }
+    },
+    "by_arm_age": {
+      "both/11-20": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 23
+      },
+      "both/21-40": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "both/6-10": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 7
+      },
+      "drop/11-20": {
+        "accuracy": 0.0,
+        "fail": 23,
+        "not_graded": 0,
+        "pass": 0
+      },
+      "drop/21-40": {
+        "accuracy": 0.0,
+        "fail": 6,
+        "not_graded": 0,
+        "pass": 0
+      },
+      "drop/6-10": {
+        "accuracy": 0.0,
+        "fail": 7,
+        "not_graded": 0,
+        "pass": 0
+      },
+      "full/11-20": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 23
+      },
+      "full/21-40": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "full/6-10": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 7
+      },
+      "note/11-20": {
+        "accuracy": 0.609,
+        "fail": 9,
+        "not_graded": 0,
+        "pass": 14
+      },
+      "note/21-40": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "note/6-10": {
+        "accuracy": 0.857,
+        "fail": 1,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "recall/11-20": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 23
+      },
+      "recall/21-40": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "recall/6-10": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 7
+      }
+    },
+    "by_arm_probe": {
+      "both/decision": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "both/hallucination": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "both/name": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "both/number": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "both/preference": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "both/retained_control": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "both/tool_result": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "both/updated": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "drop/decision": {
+        "accuracy": 0.0,
+        "fail": 6,
+        "not_graded": 0,
+        "pass": 0
+      },
+      "drop/hallucination": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "drop/name": {
+        "accuracy": 0.0,
+        "fail": 6,
+        "not_graded": 0,
+        "pass": 0
+      },
+      "drop/number": {
+        "accuracy": 0.0,
+        "fail": 6,
+        "not_graded": 0,
+        "pass": 0
+      },
+      "drop/preference": {
+        "accuracy": 0.0,
+        "fail": 6,
+        "not_graded": 0,
+        "pass": 0
+      },
+      "drop/retained_control": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "drop/tool_result": {
+        "accuracy": 0.0,
+        "fail": 6,
+        "not_graded": 0,
+        "pass": 0
+      },
+      "drop/updated": {
+        "accuracy": 0.0,
+        "fail": 6,
+        "not_graded": 0,
+        "pass": 0
+      },
+      "full/decision": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "full/hallucination": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "full/name": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "full/number": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "full/preference": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "full/retained_control": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "full/tool_result": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "full/updated": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "note/decision": {
+        "accuracy": 0.333,
+        "fail": 4,
+        "not_graded": 0,
+        "pass": 2
+      },
+      "note/hallucination": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "note/name": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "note/number": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "note/preference": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "note/retained_control": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "note/tool_result": {
+        "accuracy": 0.0,
+        "fail": 6,
+        "not_graded": 0,
+        "pass": 0
+      },
+      "note/updated": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "recall/decision": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "recall/hallucination": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "recall/name": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "recall/number": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "recall/preference": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "recall/retained_control": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "recall/tool_result": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      },
+      "recall/updated": {
+        "accuracy": 1.0,
+        "fail": 0,
+        "not_graded": 0,
+        "pass": 6
+      }
+    },
+    "cells_run": 240,
+    "complete": true,
+    "conversations_planned": 6,
+    "conversations_run": 6,
+    "latency": {
+      "answered": 240,
+      "incoherent": 0,
+      "max_prompt_tokens": 4774,
+      "median_prompt_tokens": 2185.0,
+      "median_seconds": 0.7
+    },
+    "not_passed": [
+      {
+        "arm": "note",
+        "conversation": "conv0",
+        "outcome": "fail",
+        "probe": "decision",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "note",
+        "conversation": "conv0",
+        "outcome": "fail",
+        "probe": "tool_result",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv0",
+        "outcome": "fail",
+        "probe": "name",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv0",
+        "outcome": "fail",
+        "probe": "number",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv0",
+        "outcome": "fail",
+        "probe": "preference",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv0",
+        "outcome": "fail",
+        "probe": "decision",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv0",
+        "outcome": "fail",
+        "probe": "tool_result",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv0",
+        "outcome": "fail",
+        "probe": "updated",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "note",
+        "conversation": "conv1",
+        "outcome": "fail",
+        "probe": "tool_result",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv1",
+        "outcome": "fail",
+        "probe": "name",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv1",
+        "outcome": "fail",
+        "probe": "number",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv1",
+        "outcome": "fail",
+        "probe": "preference",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv1",
+        "outcome": "fail",
+        "probe": "decision",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv1",
+        "outcome": "fail",
+        "probe": "tool_result",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv1",
+        "outcome": "fail",
+        "probe": "updated",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "note",
+        "conversation": "conv2",
+        "outcome": "fail",
+        "probe": "decision",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "note",
+        "conversation": "conv2",
+        "outcome": "fail",
+        "probe": "tool_result",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv2",
+        "outcome": "fail",
+        "probe": "name",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv2",
+        "outcome": "fail",
+        "probe": "number",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv2",
+        "outcome": "fail",
+        "probe": "preference",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv2",
+        "outcome": "fail",
+        "probe": "decision",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv2",
+        "outcome": "fail",
+        "probe": "tool_result",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv2",
+        "outcome": "fail",
+        "probe": "updated",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "note",
+        "conversation": "conv3",
+        "outcome": "fail",
+        "probe": "decision",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "note",
+        "conversation": "conv3",
+        "outcome": "fail",
+        "probe": "tool_result",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv3",
+        "outcome": "fail",
+        "probe": "name",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv3",
+        "outcome": "fail",
+        "probe": "number",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv3",
+        "outcome": "fail",
+        "probe": "preference",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv3",
+        "outcome": "fail",
+        "probe": "decision",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv3",
+        "outcome": "fail",
+        "probe": "tool_result",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv3",
+        "outcome": "fail",
+        "probe": "updated",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "note",
+        "conversation": "conv4",
+        "outcome": "fail",
+        "probe": "tool_result",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv4",
+        "outcome": "fail",
+        "probe": "name",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv4",
+        "outcome": "fail",
+        "probe": "number",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv4",
+        "outcome": "fail",
+        "probe": "preference",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv4",
+        "outcome": "fail",
+        "probe": "decision",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv4",
+        "outcome": "fail",
+        "probe": "tool_result",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv4",
+        "outcome": "fail",
+        "probe": "updated",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "note",
+        "conversation": "conv5",
+        "outcome": "fail",
+        "probe": "decision",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "note",
+        "conversation": "conv5",
+        "outcome": "fail",
+        "probe": "tool_result",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv5",
+        "outcome": "fail",
+        "probe": "name",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv5",
+        "outcome": "fail",
+        "probe": "number",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv5",
+        "outcome": "fail",
+        "probe": "preference",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv5",
+        "outcome": "fail",
+        "probe": "decision",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv5",
+        "outcome": "fail",
+        "probe": "tool_result",
+        "reason": "missing_fact"
+      },
+      {
+        "arm": "drop",
+        "conversation": "conv5",
+        "outcome": "fail",
+        "probe": "updated",
+        "reason": "missing_fact"
+      }
+    ],
+    "note_minus_drop": {
+      "decision": 0.333,
+      "hallucination": 0.0,
+      "name": 1.0,
+      "number": 1.0,
+      "preference": 1.0,
+      "retained_control": 0.0,
+      "tool_result": 0.0,
+      "updated": 1.0
+    },
+    "notes": {
+      "facts_kept_by_type": {
+        "decision": 2,
+        "name": 6,
+        "number": 6,
+        "preference": 6,
+        "tool_result": 0,
+        "updated": 6
+      },
+      "failed": 0,
+      "generated": 6,
+      "markup_removed": 0,
+      "median_note_bytes": 1395.0,
+      "median_note_seconds": 9.61,
+      "stale_value_kept": 0,
+      "truncated": 1
+    },
+    "outcomes": {
+      "context_overflow": 0,
+      "engine_busy": 0,
+      "error": 0,
+      "fail": 46,
+      "pass": 194,
+      "request_too_large": 0,
+      "skipped": 0,
+      "timeout": 0
+    },
+    "requests_planned": 252,
+    "requests_sent": 252
+  },
+  "run_id": "J1M-EVAL-37F",
+  "schema": "local_bmo.j1m.memory-eval-receipt.v1",
+  "status": "completed",
+  "suite_member": "memory",
+  "tokens_logged": false
+}
