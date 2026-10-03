@@ -25,6 +25,8 @@ const char* lifecycle_name(LifecycleState state) {
 Engine::Engine(std::unique_ptr<EngineBackend> backend) : backend_(std::move(backend)) {}
 Engine::~Engine() { stop(); }
 
+void Engine::touch() { last_activity_ = std::chrono::steady_clock::now(); }
+
 void Engine::set_state(LifecycleState next) {
   std::lock_guard<std::mutex> lock(mutex_);
   state_ = next;
@@ -53,8 +55,12 @@ void Engine::stop() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (state_ == LifecycleState::STOPPED || state_ == LifecycleState::STOPPING) return;
     state_ = LifecycleState::STOPPING;
+    idle_stop_ = true;
     for (auto& item : active_) item.second->store(true);
   }
+  idle_cv_.notify_all();
+  // The watcher takes mutex_, so it is joined without holding it.
+  if (idle_thread_.joinable()) idle_thread_.join();
   if (backend_) backend_->shutdown();
   set_state(LifecycleState::STOPPED);
 }
@@ -91,6 +97,7 @@ SessionInfo Engine::create_session() {
      << next_session_++;
   SessionInfo info{id.str(), 1, 0};
   sessions_.emplace(info.id, info);
+  touch();
   return info;
 }
 
@@ -159,6 +166,7 @@ GenerationResult Engine::generate(const std::string& request_id, const std::stri
                      announced_.end());
     active_session_ = session_id;
     state_ = LifecycleState::BUSY;
+    touch();
   }
   GenerationResult result;
   try {
@@ -172,6 +180,7 @@ GenerationResult Engine::generate(const std::string& request_id, const std::stri
     active_.erase(request_id);
     active_session_.clear();
     state_ = LifecycleState::READY;
+    touch();
     throw;
   }
   {
@@ -184,6 +193,7 @@ GenerationResult Engine::generate(const std::string& request_id, const std::stri
     if (!session_id.empty() && result.finish_reason != "cancelled" && session != sessions_.end())
       ++session->second.committed_generations;
     state_ = LifecycleState::READY;
+    touch();
   }
   return result;
 }
@@ -193,8 +203,33 @@ std::string Engine::metrics_json() const {
   std::ostringstream out;
   out << "{\"lifecycle\":\"" << lifecycle_name(state_) << "\",\"backend\":\"" << backend_id()
       << "\",\"active_sessions\":" << sessions_.size() << ",\"active_generations\":" << active_.size()
-      << ",\"cancellations\":" << cancellation_count_ << ",\"runtime\":" << backend_->runtime_info_json() << "}";
+      << ",\"cancellations\":" << cancellation_count_ << ",\"idle_unload_seconds\":" << idle_unload_.count() / 1000
+      << ",\"idle_unloads\":" << idle_unloads_ << ",\"runtime\":" << backend_->runtime_info_json() << "}";
   return out.str();
+}
+
+void Engine::enable_idle_unload(std::chrono::milliseconds idle, std::chrono::milliseconds poll) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (idle.count() <= 0 || idle_thread_.joinable() || state_ != LifecycleState::READY) return;
+    idle_unload_ = idle;
+    touch();
+  }
+  if (poll.count() < 1) poll = std::chrono::milliseconds(1);
+  idle_thread_ = std::thread([this, poll] {
+    std::unique_lock<std::mutex> lock(mutex_);
+    while (!idle_stop_) {
+      idle_cv_.wait_for(lock, poll, [this] { return idle_stop_; });
+      if (idle_stop_) break;
+      // Only while READY with nothing in flight: a request that is about to
+      // start needs mutex_ to become BUSY, and this holds it while unloading,
+      // so the two cannot overlap.
+      if (state_ == LifecycleState::READY && active_.empty() && backend_ && backend_->loaded() &&
+          std::chrono::steady_clock::now() - last_activity_ >= idle_unload_) {
+        try { if (backend_->unload()) ++idle_unloads_; } catch (...) {}
+      }
+    }
+  });
 }
 
 }  // namespace lae

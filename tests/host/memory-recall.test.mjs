@@ -178,3 +178,24 @@ test('controller: a long recall-mode conversation keeps every prompt inside the 
   assert.ok(run.session.history.filter(isRecallMessage).length <= 8, 'recalled blocks do not pile up');
   void retentionEngine; void ConversationController;
 });
+
+test('a long conversation keeps its facts findable: 200 turns, even when the question shares only the subject', async () => {
+  const result = await report({ turnsList: [200], seeds: 2 });
+  const r = result.results[200];
+  assert.ok(r.facts_out_of_window >= 80);
+  assert.ok(r.hit_exact >= 0.95 && r.hit_paraphrase >= 0.95 && r.hit_gap >= 0.9, JSON.stringify({ e: r.hit_exact, p: r.hit_paraphrase, g: r.hit_gap }));
+});
+
+test('past the old 256 KB archive cap nothing is evicted: 400 turns still find 95% of facts (the old cap found 42%)', async () => {
+  const r = (await report({ turnsList: [400], seeds: 1 })).results[400];
+  assert.ok(r.mean_archive_bytes > 262144, `${r.mean_archive_bytes} bytes archived`);
+  assert.ok(r.hit_exact >= 0.95 && r.hit_gap >= 0.95, JSON.stringify({ e: r.hit_exact, g: r.hit_gap }));
+});
+
+test('one huge message cannot flood the archive', () => {
+  const archive = new RecallArchive();
+  const added = archive.add([user('First, remember that the vault code is 4471-ZETA. ' + 'Filler sentence about the weather and lunch. '.repeat(2000))]);
+  assert.ok(added <= 40, `${added} entries from one message`);
+  archive.add(filler(5));
+  assert.ok(search(archive, 'What is the vault code?').some(line => line.includes('4471-ZETA')), 'the start of the message, where the fact is, was kept');
+});

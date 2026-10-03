@@ -25,8 +25,9 @@ import { isElidedToolResult, utf8Bytes } from './context-budget.mjs';
 import { MEMORY_PROMPTS, collapseSpaces, cutUtf8, isRecallMessage, stripMarkup } from './memory-note.mjs';
 
 export const RECALL_DEFAULTS = Object.freeze({
-  // Total archived text.  Oldest entries go first beyond it.
-  archiveBytes: 262144,
+  // Total archived text (2 MiB: a few hundred turns of everything).  Oldest
+  // entries go first beyond it.
+  archiveBytes: 2097152,
   // One entry (a sentence, or a slice of one tool result).
   entryBytes: 320,
   // The block put in front of the user's message.  ~300 tokens: a modest cost
@@ -35,7 +36,9 @@ export const RECALL_DEFAULTS = Object.freeze({
   recallEntries: 8,
 });
 export const RECALL_LABEL = MEMORY_PROMPTS.recall_label;
-const MAX_ENTRIES = 4000;
+const MAX_ENTRIES = 24000;
+// One pasted file or log must not push the rest of the conversation out.
+const MAX_ENTRIES_PER_MESSAGE = 40;
 const MAX_LEAVES = 80;
 const MIN_ENTRY_CHARS = 8;
 const TRUNCATION_MARKER = ' [...]';
@@ -193,7 +196,7 @@ export class RecallArchive {
   add(messages) {
     let added = 0;
     for (const message of messages ?? []) {
-      for (const text of entriesFromMessage(message, this.options)) {
+      for (const text of entriesFromMessage(message, this.options).slice(0, MAX_ENTRIES_PER_MESSAGE)) {
         const tokens = words(text); if (!tokens.length) continue;
         const bytes = utf8Bytes(text);
         this.#entries.push({ seq: this.#seq++, text, tokens, bytes }); this.#bytes += bytes; added += 1;

@@ -292,7 +292,7 @@ class EndToEndTests(unittest.TestCase):
     def test_recall_arms_find_what_dropping_loses_and_keep_text_out_of_the_receipt(self):
         secret_filler = tuple(f"{PROMPT_MARKER} sentence number {i} about the weekly sync." for i in range(4))
         with FakeMemoryEngine() as fake, mock.patch.object(lce, "FILLER_SENTENCES", secret_filler):
-            code, receipt, stdout, _ = run_eval(fake, "--conversations", "2", "--arms", "drop,recall,both", out=self.out)
+            code, receipt, stdout, _ = run_eval(fake, "--conversations", "2", "--arms", "drop,recall,both,recall_gap", out=self.out)
             sent = json.dumps(fake.requests)
         raw = self.out.read_text(encoding="utf-8")
         self.assertEqual(code, 0)
@@ -308,18 +308,19 @@ class EndToEndTests(unittest.TestCase):
                 self.assertEqual(by[f"recall/{probe}"]["accuracy"], 1.0)
                 self.assertEqual(by[f"both/{probe}"]["accuracy"], 1.0)
                 self.assertEqual(by[f"drop/{probe}"]["accuracy"], 0.0)
-        for arm in ("drop", "recall", "both"):
+        for arm in ("drop", "recall", "both", "recall_gap"):
             self.assertEqual(by[f"{arm}/retained_control"]["accuracy"], 1.0)
             self.assertEqual(by[f"{arm}/hallucination"]["accuracy"], 1.0, "an absent project retrieves nothing, so nothing invites an invented value")
         for conv in receipt["conversations"]:
             retrieved = conv["recall"]["facts_retrieved"]
             self.assertEqual(set(retrieved), set(me.FACT_TYPES))
             self.assertTrue(all(retrieved.values()), retrieved)
+            self.assertTrue(all(conv["recall"]["facts_retrieved_gap"].values()), conv["recall"]["facts_retrieved_gap"])
             self.assertGreater(conv["recall"]["archive_entries"], 20)
             absent = [c for c in conv["cells"] if c["arm"] == "recall" and c["probe"] == "hallucination"][0]
             self.assertEqual(absent["recall_lines"], 0)
         self.assertEqual(receipt["summary"]["notes"]["generated"], 2, "the both arm makes a note")
-        self.assertEqual(me.planned_requests(me.argparse.Namespace(conversations=2, chunks=2, arms=("drop", "recall"))), 2 * 16)
+        self.assertEqual(me.planned_requests(me.argparse.Namespace(conversations=2, chunks=2, arms=("drop", "recall", "recall_gap"))), 2 * 24)
         self.assertEqual(me.planned_requests(me.argparse.Namespace(conversations=2, chunks=2, arms=("both",))), 2 * (2 + 8))
 
     def test_a_stale_note_and_an_invented_value_are_caught(self):

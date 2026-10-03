@@ -74,7 +74,8 @@ SCHEMA = "local_bmo.memory-eval.v1"
 PROMPTS_PATH = ROOT / "host" / "agent" / "memory-prompts.json"
 # note: the model-written note; drop: plain dropping (the control); full: no compaction (the ceiling);
 # recall: the dropped turns searched by keyword (host/agent/memory-recall.mjs); both: note plus recall.
-ARMS = ("note", "drop", "full", "recall", "both")
+# recall_gap: recall, but each question is worded to share NOTHING with the fact except its subject.
+ARMS = ("note", "drop", "full", "recall", "both", "recall_gap")
 DEFAULT_ARMS = ("note", "drop")
 FACT_TYPES = ("name", "number", "preference", "decision", "tool_result", "updated")
 PROBES = FACT_TYPES + ("retained_control", "hallucination")
@@ -312,8 +313,9 @@ def note_message(prompts: dict, note: str) -> dict:
 RECALL_ENTRY_BYTES = 320
 RECALL_BYTES = 1280
 RECALL_ENTRIES = 8
-RECALL_ARCHIVE_BYTES = 262144
-RECALL_MAX_ENTRIES = 4000
+RECALL_ARCHIVE_BYTES = 2097152
+RECALL_MAX_ENTRIES = 24000
+RECALL_MAX_ENTRIES_PER_MESSAGE = 40
 RECALL_MAX_LEAVES = 80
 RECALL_MIN_ENTRY_CHARS = 8
 RECALL_MARKER = " [...]"
@@ -481,7 +483,7 @@ class RecallArchive:
     def add(self, messages: list[dict]) -> int:
         added = 0
         for message in messages:
-            for text in recall_entries(self.prompts, message, self.entry_bytes):
+            for text in recall_entries(self.prompts, message, self.entry_bytes)[:RECALL_MAX_ENTRIES_PER_MESSAGE]:
                 tokens = recall_words(text)
                 if not tokens:
                     continue
@@ -672,6 +674,21 @@ def question_for(fact: dict) -> str:
     return f"What is the {attribute} for project {fact['project']}{now}? Reply with only the {attribute}."
 
 
+def gap_question_for(fact: dict) -> str:
+    """The same question in words that appear nowhere in the fact (only the subject does)."""
+    kind, project = fact["type"], fact.get("project", "")
+    if kind == "tool_result":
+        return (f"What did that billing file {fact['path']} come to? Reply with only the number.")
+    gaps = {
+        "name": f"Remind me who covers pager duty for project {project}. Reply with only the name.",
+        "number": f"What was the access code I gave you for project {project}? Reply with only the number.",
+        "preference": f"How do I like my write-ups laid out for project {project}? Reply with only the layout.",
+        "decision": f"Where is the code for project {project} cut from again? Reply with only the name.",
+        "updated": f"Which space did we book for project {project} catch-ups these days? Reply with only the room.",
+    }
+    return gaps[kind]
+
+
 def grade(fact: dict, output: str) -> tuple[bool, str]:
     if fact["type"] == "updated":
         has_new, has_old = lce._contains(output, fact["value"]), lce._contains(output, fact["stale"])
@@ -767,18 +784,21 @@ def run_conversation(client: lce.EngineClient, prompts: dict, index: int, opts: 
         probes.append((fact["type"], fact, question_for(fact), lambda out, f=fact: grade(f, out)))
     probes.append(("hallucination", None, hallucination_question(conv["absent_project"]), grade_hallucination))
     archive = None
-    if {"recall", "both"} & set(opts.arms):
+    if {"recall", "both", "recall_gap"} & set(opts.arms):
         archive = RecallArchive(prompts)
         archive.add(conv["dropped"])
         # Whether retrieval found each planted value (booleans only): separates
         # "the lines never came back" from "the model did not use them".
         result["recall"] = {"archive_entries": len(archive.entries), "facts_retrieved": {
             f["type"]: any(lce._contains(line, f["value"]) for line in archive.search(recall_queries(question_for(f))))
-            for f in conv["facts"]}}
+            for f in conv["facts"]},
+            "facts_retrieved_gap": {
+                f["type"]: any(lce._contains(line, f["value"]) for line in archive.search(recall_queries(gap_question_for(f))))
+                for f in conv["facts"]}}
     for arm in opts.arms:
         if arm in ("note", "both"):
             context = ([note_message(prompts, note)] if note else []) + conv["retained"]
-        elif arm in ("drop", "recall"):
+        elif arm in ("drop", "recall", "recall_gap"):
             context = list(conv["retained"])
         else:
             context = conv["dropped"] + conv["retained"]
@@ -791,7 +811,9 @@ def run_conversation(client: lce.EngineClient, prompts: dict, index: int, opts: 
                 result["cells"].append(cell)
                 continue
             asked = context
-            if arm in ("recall", "both"):
+            if arm == "recall_gap" and fact is not None and probe in FACT_TYPES:
+                question = gap_question_for(fact)
+            if arm in ("recall", "both", "recall_gap"):
                 block = recall_message(prompts, archive.search(recall_queries(question)))
                 cell["recall_lines"] = block["content"].count("\n") if block else 0
                 if block:

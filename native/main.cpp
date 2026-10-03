@@ -29,7 +29,7 @@ lae::HttpServer* active_server = nullptr;
 volatile std::sig_atomic_t stop_requested = 0;
 void on_signal(int) { stop_requested = 1; }
 void usage() {
-  std::cout << "lae-engine 0.1.0\ncommands: serve verify-model version print-build-info probe\nserve options: --config <absolute-json> --backend cpu|intel-vulkan|cuda --model <absolute-gguf> --context <tokens> --gpu-layers <0..99> --threads <1..256> --threads-batch <1..256> --speculate <0..8> --vulkan-device-name <exact-name> --cuda-device-name <exact-name> (--token-file <protected-file> | --token-stdin)\nmodel filename, size, SHA-256, GGUF metadata, and tensor profile are compiled product identity and cannot be supplied by callers\n";
+  std::cout << "lae-engine 0.1.0\ncommands: serve verify-model version print-build-info probe\nserve options: --config <absolute-json> --backend cpu|intel-vulkan|cuda --model <absolute-gguf> --context <tokens> --gpu-layers <0..99> --threads <1..256> --threads-batch <1..256> --speculate <0..8> --snapshots <1..8> --idle-unload <0|30..86400 seconds> --vulkan-device-name <exact-name> --cuda-device-name <exact-name> (--token-file <protected-file> | --token-stdin)\nmodel filename, size, SHA-256, GGUF metadata, and tensor profile are compiled product identity and cannot be supplied by callers\n";
 }
 
 // Backend and socket implementations may throw implementation-specific
@@ -157,7 +157,7 @@ int main(int argc, char** argv) {
   }
   if (command != "serve" && command != "verify-model") { usage(); return command == "help" ? 0 : 2; }
 
-  unsigned port = 0; unsigned context_tokens = 8192; unsigned gpu_layers = 0; unsigned threads = 0; unsigned threads_batch = 0; unsigned speculate = 0;
+  unsigned port = 0; unsigned context_tokens = 8192; unsigned gpu_layers = 0; unsigned threads = 0; unsigned threads_batch = 0; unsigned speculate = 0; unsigned snapshots = 4; unsigned idle_unload = 0;
 #if LAE_ENABLE_FIXTURE_CLI
   std::string backend = "fixture-cpu";
 #else
@@ -181,6 +181,8 @@ int main(int argc, char** argv) {
     else if (arg == "--threads" && i + 1 < argc) { size_t end = 0; const auto value = std::stoull(argv[++i], &end); if (end != std::strlen(argv[i]) || value < 1 || value > 256) throw std::invalid_argument("invalid threads"); threads = static_cast<unsigned>(value); }
     else if (arg == "--threads-batch" && i + 1 < argc) { size_t end = 0; const auto value = std::stoull(argv[++i], &end); if (end != std::strlen(argv[i]) || value < 1 || value > 256) throw std::invalid_argument("invalid threads-batch"); threads_batch = static_cast<unsigned>(value); }
     else if (arg == "--speculate" && i + 1 < argc) { size_t end = 0; const auto value = std::stoull(argv[++i], &end); if (end != std::strlen(argv[i]) || value > 8) throw std::invalid_argument("invalid speculate"); speculate = static_cast<unsigned>(value); }
+    else if (arg == "--snapshots" && i + 1 < argc) { size_t end = 0; const auto value = std::stoull(argv[++i], &end); if (end != std::strlen(argv[i]) || value < 1 || value > 8) throw std::invalid_argument("invalid snapshots"); snapshots = static_cast<unsigned>(value); }
+    else if (arg == "--idle-unload" && i + 1 < argc) { size_t end = 0; const auto value = std::stoull(argv[++i], &end); if (end != std::strlen(argv[i]) || (value != 0 && (value < 30 || value > 86400))) throw std::invalid_argument("invalid idle unload"); idle_unload = static_cast<unsigned>(value); }
     else if (arg == "--vulkan-device-name" && i + 1 < argc) { vulkan_device_name = argv[++i]; if (vulkan_device_name.empty() || vulkan_device_name.size() > 256) throw std::invalid_argument("invalid Vulkan device name"); vulkan_device_seen = true; }
     else if (arg == "--cuda-device-name" && i + 1 < argc) { cuda_device_name = argv[++i]; if (cuda_device_name.empty() || cuda_device_name.size() > 256) throw std::invalid_argument("invalid CUDA device name"); cuda_device_seen = true; }
     else if (arg == "--config" && i + 1 < argc) { config_path = argv[++i]; config_seen = true; }
@@ -210,7 +212,7 @@ int main(int argc, char** argv) {
   }
   if (context_tokens < 1 || context_tokens > 16384) { std::cerr << "context must be between 1 and 16384 tokens\n"; return 2; }
   std::unique_ptr<lae::EngineBackend> backend_instance;
-  lae::BackendConfig backend_config; backend_config.backend_profile = backend; backend_config.context_tokens = context_tokens; backend_config.gpu_layers = gpu_layers; backend_config.threads = threads; backend_config.threads_batch = threads_batch; backend_config.speculate_tokens = speculate; backend_config.vulkan_device_name = vulkan_device_name; backend_config.cuda_device_name = cuda_device_name;
+  lae::BackendConfig backend_config; backend_config.backend_profile = backend; backend_config.context_tokens = context_tokens; backend_config.gpu_layers = gpu_layers; backend_config.threads = threads; backend_config.threads_batch = threads_batch; backend_config.speculate_tokens = speculate; backend_config.snapshot_slots = snapshots; backend_config.idle_unload_seconds = idle_unload; backend_config.vulkan_device_name = vulkan_device_name; backend_config.cuda_device_name = cuda_device_name;
   if (backend == "fixture-cpu") {
 #if LAE_ENABLE_FIXTURE_CLI
     if (!model_path.empty()) { std::cerr << "fixture backend does not accept a model path\n"; return 2; }
@@ -236,6 +238,7 @@ int main(int argc, char** argv) {
   try { engine.initialize(backend_config); } catch (const std::exception& error) { std::cerr << stable_initialize_error(error) << "\n"; return 1; } catch (...) { std::cerr << "engine initialization failed\n"; return 1; }
   lae::HttpServer server(engine, token);
   try { server.start(port); } catch (const std::exception& error) { std::cerr << stable_server_error(error) << "\n"; return 1; } catch (...) { std::cerr << "server start failed\n"; return 1; }
+  if (idle_unload != 0) engine.enable_idle_unload(std::chrono::seconds(idle_unload));
   active_engine = &engine; active_server = &server;
   std::signal(SIGINT, on_signal); std::signal(SIGTERM, on_signal);
   std::cout << "{\"event\":\"ready\",\"port\":" << server.port() << ",\"bind\":\"127.0.0.1\",\"token_required\":true}\n" << std::flush;

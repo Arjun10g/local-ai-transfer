@@ -119,6 +119,10 @@ class Engine:
             cmd += ["--threads-batch", str(self.args.threads_batch)]
         if self.args.speculate:
             cmd += ["--speculate", str(self.args.speculate)]
+        if getattr(self.args, "snapshots", None):
+            cmd += ["--snapshots", str(self.args.snapshots)]
+        if getattr(self.args, "idle_unload_minutes", 0):
+            cmd += ["--idle-unload", str(self.args.idle_unload_minutes * 60)]
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         t0 = time.monotonic()
         # stderr goes to a file so a chatty backend can never fill a pipe and
@@ -593,6 +597,10 @@ def build_parser() -> argparse.ArgumentParser:
                        help="CPU threads for prompt processing only (default: same as --threads)")
         s.add_argument("--speculate", type=int, default=0,
                        help="draft-free n-gram speculation: tokens verified per pass, 0-8 (default 0 = off)")
+        s.add_argument("--snapshots", type=int, default=None,
+                       help="conversation snapshots the engine keeps, 1-8 (default 4): lets two conversations share the engine without re-reading history")
+        s.add_argument("--idle-unload-minutes", type=int, default=0, dest="idle_unload_minutes",
+                       help="free the 6 GB model after this many idle minutes and reload it on the next message (default 0 = never)")
         s.add_argument("--context", type=int, default=8192)
         s.add_argument("--ready-timeout", type=float, default=600)
         s.add_argument("--log", default=str(ROOT / "local" / "out" / f"engine-{name}.log"))

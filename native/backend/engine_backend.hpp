@@ -29,6 +29,12 @@ struct BackendConfig {
   // leaves the generation path unchanged. It also sizes the recurrent-state
   // rollback (`n_rs_seq`) the hybrid model needs to discard a rejected draft.
   unsigned speculate_tokens = 0;
+  // Conversation snapshots kept (see snapshot_store.hpp), one per conversation,
+  // ~50 MB each. 1 behaves as the engine did before several were kept.
+  unsigned snapshot_slots = 4;
+  // Free the model after this many idle seconds and reload it on the next
+  // request (0 = never). Applied by the Engine, not the backend.
+  unsigned idle_unload_seconds = 0;
   std::string vulkan_device_name;
   std::string cuda_device_name;
   std::shared_ptr<ModelValidationLease> model_lease;
@@ -88,6 +94,12 @@ class EngineBackend {
   // Drop any context retained for `key` (a deleted session's conversation).
   // Backends that retain nothing keep the default.
   virtual void forget(const std::string& /*key*/) {}
+  // Free the model and context (the big allocations) while keeping what makes
+  // loading them again cheap: the validated file lease and the saved
+  // conversation snapshots. Only called with no generation in flight. Returns
+  // whether anything was freed. The next `generate` reloads transparently.
+  virtual bool unload() { return false; }
+  virtual bool loaded() const { return true; }
   virtual void shutdown() = 0;
 };
 

@@ -610,6 +610,10 @@ def add_engine_args(p: argparse.ArgumentParser, log_name: str) -> None:
                    help="CPU threads for prompt processing only (default: same as --threads)")
     p.add_argument("--speculate", type=int, default=0,
                    help="draft-free n-gram speculation: tokens verified per pass, 0-8 (default 0 = off)")
+    p.add_argument("--snapshots", type=int, default=None,
+                   help="conversation snapshots the engine keeps, 1-8 (default 4): lets two conversations share the engine without re-reading history")
+    p.add_argument("--idle-unload-minutes", type=int, default=0, dest="idle_unload_minutes",
+                   help="free the 6 GB model after this many idle minutes and reload it on the next message (default 0 = never)")
     p.add_argument("--context", type=int, default=8192)
     p.add_argument("--ready-timeout", type=float, default=600)
     p.add_argument("--log", default=str(HERE / "out" / log_name))

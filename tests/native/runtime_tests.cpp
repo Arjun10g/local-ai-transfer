@@ -5,9 +5,13 @@
 #include "../../native/server/chat_request.hpp"
 #include "../../native/backend/llama_chat_template.hpp"
 #include "../../native/backend/llama_backend.hpp"
+#include "../../native/backend/snapshot_store.hpp"
 #include "../../native/config/runtime_config.hpp"
 
 #include <cassert>
+#include <chrono>
+#include <thread>
+#include <atomic>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -51,6 +55,30 @@ int main() {
   assert(large_batches.n_ctx == 1200 && large_batches.n_batch == 1200 && large_batches.n_ubatch == 512);
   // Prompt-prefix reuse: only a strict prefix is reusable, because the
   // product model's recurrent layers cannot have their state rewound.
+  {
+    // Several conversations keep their snapshots; the least recently used goes first.
+    const auto slot = [](const char* key, size_t bytes, std::vector<int32_t> tokens) { SnapshotSlot s; s.key = key; s.blob.assign(bytes, 7); s.tokens = std::move(tokens); return s; };
+    SnapshotStore store(3, 1000);
+    assert(store.count() == 0 && store.bytes() == 0 && store.newest_tokens() == 0 && store.find("a") == nullptr);
+    assert(store.put(slot("a", 100, {1, 2})) && store.put(slot("b", 100, {3})) && store.put(slot("c", 100, {4, 5, 6})));
+    assert(store.count() == 3 && store.bytes() == 300 && store.newest_tokens() == 3);
+    assert(store.find("a") != nullptr && store.newest_tokens() == 2);                    // a is most recent now
+    assert(store.put(slot("d", 100, {9})));                                                // evicts b, the least recently used
+    assert(store.find("b") == nullptr && store.find("a") != nullptr && store.find("c") != nullptr && store.find("d") != nullptr);
+    assert(store.put(slot("a", 50, {1, 2, 3, 4})) && store.count() == 3 && store.bytes() == 250);   // same key replaces, never duplicates
+    assert(store.find("a")->tokens.size() == 4 && store.find("a")->blob.size() == 50);
+    store.drop("c"); assert(store.find("c") == nullptr && store.count() == 2 && store.bytes() == 150);
+    store.drop("zzz"); assert(store.count() == 2);                                         // dropping an unknown key is harmless
+    assert(!store.put(slot("", 10, {1})) && !store.put(slot("big", 1001, {1})) && !store.put(slot("empty", 0, {1})));  // no key / over the byte cap / no state
+    assert(store.find("") == nullptr && store.count() == 2);
+    SnapshotStore tight(8, 250);                                                           // the byte cap evicts too
+    assert(tight.put(slot("x", 100, {1})) && tight.put(slot("y", 100, {1})) && tight.put(slot("z", 100, {1})));
+    assert(tight.count() == 2 && tight.bytes() == 200 && tight.find("x") == nullptr);
+    SnapshotStore one(1, 1000);                                                            // one slot is the old single-snapshot behaviour
+    assert(one.put(slot("p", 10, {1})) && one.put(slot("q", 10, {2})) && one.find("p") == nullptr && one.find("q") != nullptr);
+    SnapshotStore none(0, 1000); assert(!none.put(slot("p", 10, {1})) && none.count() == 0);
+    tight.clear(); assert(tight.count() == 0 && tight.bytes() == 0);
+  }
   assert(reusable_prefix_tokens({1, 2, 3}, {1, 2, 3, 4}) == 3);
   assert(reusable_prefix_tokens({1, 2, 3}, {1, 2, 3}) == 0);      // nothing left to read logits from
   assert(reusable_prefix_tokens({1, 2, 3}, {1, 2, 9, 4}) == 0);   // divergence anywhere
@@ -278,6 +306,47 @@ int main() {
   assert(!engine.has_session(session.id));
   engine.stop();
   assert(engine.state() == LifecycleState::STOPPED);
+
+  {
+    // Idle unload: the model is freed after a quiet period, never while a
+    // request runs, and the next request loads it again.
+    using namespace std::chrono_literals;
+    Engine idle(std::make_unique<FixtureBackend>());
+    BackendConfig idle_config; idle_config.backend_profile = "fixture-cpu";
+    idle.initialize(idle_config);
+    assert(idle.metrics_json().find("\"model_loaded\":true") != std::string::npos);
+    idle.enable_idle_unload(120ms, 10ms);
+    const auto session_idle = idle.create_session();
+    GenerationRequest idle_request; idle_request.messages.push_back({"user", "hello", "", ""}); idle_request.max_tokens = 4;
+    auto never_cancelled = std::make_shared<std::atomic<bool>>(false);
+    bool stayed_loaded_during_request = true;
+    idle.generate("req-idle-1", session_idle.id, idle_request, never_cancelled, [&](const std::string&) {
+      std::this_thread::sleep_for(60ms);   // 4 tokens x 60 ms = 240 ms > the 120 ms idle limit, but the request is running
+      stayed_loaded_during_request = stayed_loaded_during_request && idle.metrics_json().find("\"model_loaded\":true") != std::string::npos;
+      return true;
+    });
+    assert(stayed_loaded_during_request);
+    assert(idle.metrics_json().find("\"idle_unloads\":0") != std::string::npos);
+    std::this_thread::sleep_for(500ms);    // quiet: the watcher frees the model
+    const auto after_idle = idle.metrics_json();
+    assert(after_idle.find("\"idle_unloads\":1") != std::string::npos && after_idle.find("\"model_loaded\":false") != std::string::npos);
+    assert(after_idle.find("\"idle_unload_seconds\":0") != std::string::npos);  // sub-second limits report as 0 whole seconds
+    assert(idle.state() == LifecycleState::READY && idle.has_session(session_idle.id));    // still ready, sessions kept
+    std::string reloaded_output;
+    idle.generate("req-idle-2", session_idle.id, idle_request, never_cancelled, [&](const std::string& token) { reloaded_output += token; return true; });
+    assert(reloaded_output == "fixture response ");    // served normally after the reload
+    const auto after_reload = idle.metrics_json();
+    assert(after_reload.find("\"model_loaded\":true") != std::string::npos && after_reload.find("\"reloads\":1") != std::string::npos);
+    std::this_thread::sleep_for(500ms);
+    assert(idle.metrics_json().find("\"idle_unloads\":2") != std::string::npos);        // and it unloads again
+    idle.stop();                                                                      // joins the watcher
+    assert(idle.state() == LifecycleState::STOPPED);
+    Engine off(std::make_unique<FixtureBackend>()); off.initialize(idle_config);
+    off.enable_idle_unload(0ms, 10ms);                                                // zero means never
+    std::this_thread::sleep_for(100ms);
+    assert(off.metrics_json().find("\"idle_unloads\":0") != std::string::npos && off.metrics_json().find("\"model_loaded\":true") != std::string::npos);
+    off.stop();
+  }
 
   const auto model_path = std::filesystem::temp_directory_path() / "Qwen3.5-9B-Q4_K_M.gguf";
   const std::string model_text = model_path.generic_string();

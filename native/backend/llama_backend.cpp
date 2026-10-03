@@ -1,5 +1,6 @@
 #include "llama_backend.hpp"
 #include "llama_chat_template.hpp"
+#include "snapshot_store.hpp"
 #include "model_validation/model_validator.hpp"
 
 #include <algorithm>
@@ -118,11 +119,11 @@ struct LlamaBackend::Impl {
   // diverges from the live state a few tokens before the generated reply, and the
   // recurrent layers cannot be rewound that far. Restoring this snapshot instead
   // costs one memory copy, where re-reading the history costs minutes on a CPU.
-  std::vector<uint8_t> snapshot_blob;
-  std::vector<llama_token> snapshot_tokens;
-  std::string snapshot_key;
-  bool snapshot_valid = false;
-  std::atomic<size_t> pub_snapshot_tokens{0}, pub_snapshot_bytes{0};
+  // Several are kept (one per conversation, least recently used evicted): the
+  // live context serves one conversation at a time, and a second one (a delegated
+  // job, another tab) must not make the first re-read its whole history.
+  SnapshotStore snapshots{4, static_cast<size_t>(1) << 30};
+  std::atomic<size_t> pub_snapshot_tokens{0}, pub_snapshot_bytes{0}, pub_snapshot_count{0};
   std::atomic<unsigned long long> snapshot_restores{0};
   std::atomic<unsigned> last_restored{0};
   void clear_context() {
@@ -130,11 +131,19 @@ struct LlamaBackend::Impl {
     if (sampler) llama_sampler_reset(sampler);
     state_tokens.clear(); state_key.clear(); state_valid = false; last_reused = 0; publish();
   }
-  void drop_snapshot() {
-    std::vector<uint8_t>().swap(snapshot_blob);
-    snapshot_tokens.clear(); snapshot_key.clear(); snapshot_valid = false;
-    pub_snapshot_tokens = 0; pub_snapshot_bytes = 0;
+  void publish_snapshots() {
+    pub_snapshot_tokens = snapshots.newest_tokens(); pub_snapshot_bytes = snapshots.bytes(); pub_snapshot_count = snapshots.count();
   }
+  void drop_snapshot(const std::string& key) { snapshots.drop(key); publish_snapshots(); }
+  void release_resources() {
+    if (sampler) { llama_sampler_free(sampler); sampler = nullptr; }
+    if (context) { llama_free(context); context = nullptr; }
+    if (model) { llama_model_free(model); model = nullptr; }
+    state_tokens.clear(); state_key.clear(); state_valid = false; last_reused = 0; publish();
+  }
+  void drop_all_snapshots() { snapshots.clear(); publish_snapshots(); }
+  BackendConfig config;  // kept so an idle unload can load again
+  std::atomic<unsigned long long> idle_unloads{0}, reloads{0};
   llama_model* model = nullptr;
   llama_context* context = nullptr;
   llama_sampler* sampler = nullptr;
@@ -161,8 +170,13 @@ std::string LlamaBackend::id() const {
   return std::string("llama.cpp/3581ba0c/") + impl_->active_backend;
 }
 std::string LlamaBackend::runtime_info_json() const {
-  if (!impl_->context) return "{}";
-  return std::string("{\"context_tokens\":") + std::to_string(llama_n_ctx(impl_->context)) +
+  if (!impl_->context) {
+    return impl_->model_lease ? std::string("{\"model_loaded\":false,\"idle_unloads\":") + std::to_string(impl_->idle_unloads.load()) +
+                               ",\"reloads\":" + std::to_string(impl_->reloads.load()) + ",\"snapshot_count\":" + std::to_string(impl_->pub_snapshot_count.load()) + "}" : "{}";
+  }
+  return std::string("{\"model_loaded\":true,\"idle_unloads\":") + std::to_string(impl_->idle_unloads.load()) +
+         ",\"reloads\":" + std::to_string(impl_->reloads.load()) +
+         ",\"context_tokens\":" + std::to_string(llama_n_ctx(impl_->context)) +
          ",\"n_batch\":" + std::to_string(llama_n_batch(impl_->context)) +
          ",\"n_ubatch\":" + std::to_string(llama_n_ubatch(impl_->context)) +
          ",\"n_threads\":" + std::to_string(llama_n_threads(impl_->context)) +
@@ -177,6 +191,8 @@ std::string LlamaBackend::runtime_info_json() const {
          ",\"retained_prompt_tokens\":" + std::to_string(impl_->retained.load()) +
          ",\"snapshot_tokens\":" + std::to_string(impl_->pub_snapshot_tokens.load()) +
          ",\"snapshot_bytes\":" + std::to_string(impl_->pub_snapshot_bytes.load()) +
+         ",\"snapshot_count\":" + std::to_string(impl_->pub_snapshot_count.load()) +
+         ",\"snapshot_slots\":" + std::to_string(impl_->snapshots.max_slots()) +
          ",\"snapshot_restores\":" + std::to_string(impl_->snapshot_restores.load()) +
          ",\"last_restored_snapshot_tokens\":" + std::to_string(impl_->last_restored.load()) + "}";
 }
@@ -247,6 +263,13 @@ void LlamaBackend::initialize(const BackendConfig& config) {
     llama_backend_init();
     impl_->backend_initialized = true;
   }
+  impl_->config = config;
+  impl_->snapshots = SnapshotStore(std::max(1u, config.snapshot_slots), static_cast<size_t>(1) << 30);
+  load_resources();
+}
+
+void LlamaBackend::load_resources() {
+  const BackendConfig& config = impl_->config;
   auto model_params = llama_model_default_params();
 #if defined(LAE_ENABLE_LLAMA_VULKAN) || defined(LAE_ENABLE_LLAMA_CUDA)
   ggml_backend_dev_t device_list[2] = {nullptr, nullptr};
@@ -266,6 +289,7 @@ void LlamaBackend::initialize(const BackendConfig& config) {
   const char* embedded_template = llama_model_chat_template(impl_->model, nullptr);
   if (!embedded_template || !*embedded_template) throw std::runtime_error("llama chat template unavailable; raw prompt mode is not accepted");
   impl_->chat_template.load(embedded_template);
+  impl_->control_texts.clear(); impl_->tag_texts.clear();  // a reload collects them again
   {
     const auto* vocab_for_controls = llama_model_get_vocab(impl_->model);
     const int32_t vocab_size = llama_vocab_n_tokens(vocab_for_controls);
@@ -305,6 +329,12 @@ void LlamaBackend::initialize(const BackendConfig& config) {
 GenerationResult LlamaBackend::generate(const GenerationRequest& request,
                                         const Cancellation& cancellation,
                                         const TokenSink& sink) {
+  // After an idle unload the first request loads the model again. The file
+  // lease is still held, so this re-checks identity instead of re-hashing 5.6 GB.
+  if (impl_->model_lease && (!impl_->model || !impl_->context || !impl_->sampler)) {
+    impl_->release_resources();  // also clears the leftovers of a reload that failed half way
+    load_resources(); ++impl_->reloads;
+  }
   if (!impl_->model || !impl_->context || !impl_->sampler) throw std::runtime_error("llama backend is not initialized");
   impl_->cancellation = cancellation;
   const auto* vocab = llama_model_get_vocab(impl_->model);
@@ -353,22 +383,22 @@ GenerationResult LlamaBackend::generate(const GenerationRequest& request,
   if (reused == 0) {
     // The live context does not serve this prompt (a new user turn lands here).
     // Prefer restoring the snapshot taken at the last conversation boundary.
-    const size_t snap = (impl_->snapshot_valid && !request.cache_key.empty() && impl_->snapshot_key == request.cache_key)
-                            ? reusable_prefix_tokens(impl_->snapshot_tokens, prompt) : 0;
+    const SnapshotSlot* slot = impl_->snapshots.find(request.cache_key);
+    const size_t snap = slot ? reusable_prefix_tokens(slot->tokens, prompt) : 0;
     impl_->clear_context();
     if (snap > 0) {
-      if (llama_state_seq_set_data(impl_->context, impl_->snapshot_blob.data(), impl_->snapshot_blob.size(), 0) != 0) {
+      if (llama_state_seq_set_data(impl_->context, slot->blob.data(), slot->blob.size(), 0) != 0) {
         reused = snap;
-        impl_->state_tokens = impl_->snapshot_tokens;  // what the context now holds
+        impl_->state_tokens.assign(slot->tokens.begin(), slot->tokens.end());  // what the context now holds
         impl_->last_restored = static_cast<unsigned>(snap);
         ++impl_->snapshot_restores;
       } else {
         impl_->clear_context();  // a half-restored context is worse than an empty one
-        impl_->drop_snapshot();
+        impl_->drop_snapshot(request.cache_key);
       }
-    } else if (impl_->snapshot_valid && impl_->snapshot_key != request.cache_key) {
-      impl_->drop_snapshot();  // another conversation took the context over
     }
+    // Another conversation's snapshots are kept: they are still valid, and this
+    // is exactly the case they exist for.
   }
   impl_->state_valid = false;  // the context is in flux until the decode lands
   impl_->publish();
@@ -421,15 +451,13 @@ GenerationResult LlamaBackend::generate(const GenerationRequest& request,
     try {
       const size_t bytes = llama_state_seq_get_size(impl_->context, 0);
       if (bytes > 0 && bytes <= kMaxSnapshotBytes) {
-        impl_->snapshot_blob.resize(bytes);
-        if (llama_state_seq_get_data(impl_->context, impl_->snapshot_blob.data(), impl_->snapshot_blob.size(), 0) == bytes) {
-          impl_->snapshot_tokens.assign(prompt.begin(), prompt.begin() + static_cast<std::ptrdiff_t>(split));
-          impl_->snapshot_key = request.cache_key;
-          impl_->snapshot_valid = true;
-          impl_->pub_snapshot_tokens = split; impl_->pub_snapshot_bytes = bytes;
-        } else impl_->drop_snapshot();
-      } else impl_->drop_snapshot();
-    } catch (...) { impl_->drop_snapshot(); }
+        SnapshotSlot fresh; fresh.key = request.cache_key; fresh.blob.resize(bytes);
+        if (llama_state_seq_get_data(impl_->context, fresh.blob.data(), fresh.blob.size(), 0) == bytes) {
+          fresh.tokens.assign(prompt.begin(), prompt.begin() + static_cast<std::ptrdiff_t>(split));
+          impl_->snapshots.put(std::move(fresh)); impl_->publish_snapshots();
+        } else impl_->drop_snapshot(request.cache_key);
+      } else impl_->drop_snapshot(request.cache_key);
+    } catch (...) { impl_->drop_snapshot(request.cache_key); }
     prefill_status = decode_range(split, prompt.size());
   }
   if (prefill_status != 0) {
@@ -548,14 +576,26 @@ GenerationResult LlamaBackend::generate(const GenerationRequest& request,
 
 void LlamaBackend::reset() {
   impl_->clear_context();
-  impl_->drop_snapshot();
+  impl_->drop_all_snapshots();
 }
 
 void LlamaBackend::forget(const std::string& key) {
   // Only ever called with no generation in flight (see Engine::delete_session).
   if (!impl_->context || key.empty()) return;
   if (impl_->state_valid && impl_->state_key == key) impl_->clear_context();
-  if (impl_->snapshot_valid && impl_->snapshot_key == key) impl_->drop_snapshot();
+  impl_->drop_snapshot(key);
+}
+
+bool LlamaBackend::loaded() const { return impl_->model != nullptr; }
+
+bool LlamaBackend::unload() {
+  // Frees the big allocations. The file lease, the chat template, the control
+  // token lists and the conversation snapshots stay, so loading again is a
+  // re-map plus an identity check, and conversations keep their snapshots.
+  if (!impl_->model) return false;
+  impl_->release_resources();
+  ++impl_->idle_unloads;
+  return true;
 }
 
 void LlamaBackend::shutdown() {
@@ -578,6 +618,9 @@ void LlamaBackend::initialize(const BackendConfig&) { throw std::runtime_error("
 GenerationResult LlamaBackend::generate(const GenerationRequest&, const Cancellation&, const TokenSink&) { throw std::runtime_error("real backend disabled"); }
 void LlamaBackend::reset() {}
 void LlamaBackend::forget(const std::string&) {}
+bool LlamaBackend::unload() { return false; }
+bool LlamaBackend::loaded() const { return false; }
+void LlamaBackend::load_resources() {}
 void LlamaBackend::shutdown() {}
 }  // namespace lae
 #endif

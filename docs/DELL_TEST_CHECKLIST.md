@@ -35,6 +35,8 @@ Result column: PASS / FAIL / WARN + the number asked for. Tick only with a resul
 | B4 | `-Speculate 4` on tool-call prompts and on free text | acceptance rate (`/metrics` spec_accepted / spec_drafted) and tok/s. Expect 1.5-2.5x on JSON/tool calls, ~1.0x on prose (an estimate, not a measurement) | |
 | B5 | Second-turn saving | turn 2 `prompt_tokens` vs `last_reused_prefix_tokens` / `last_restored_snapshot_tokens` | |
 | B6 | Memory + battery | RSS of the engine while idle and while generating | |
+| B7 | Idle unload (`-IdleUnloadMinutes 1`): RSS drops by ~5-6 GB after the quiet minute, then the next message **reloads under the Windows share-deny file handle**. Time the reload (page cache warm vs cold). Windows path of the lease is untested | reload works, conversation snapshot restored (`last_restored_snapshot_tokens` > 0) | |
+| B8 | Two conversations on one engine (`-Snapshots 4`, the default): UI tab A, then tab B, then tab A again | A's next turn restores its snapshot (`/metrics` `snapshot_count` 2, `last_restored_snapshot_tokens` > 0), not a full re-read | |
 
 ## C. Tool-call quality on this hardware (gate L1)
 
@@ -75,7 +77,7 @@ Recall memory is **on by default** (`memory.mode: "recall"`: no extra engine cal
 | F1 | `Start-BMO.ps1 -EnableDelegation`, `-ShowDelegateKey` | host prints the key once; `host.json` written | |
 | F2 | VS Code probe from `docs/research/COPILOT_MCP_COMPATIBILITY.md` (10 min) | `bmo_ask` listed; approval prompt appears on the laptop; denied job returns cleanly | |
 | F3 | Copilot CLI ≥ 1.0.81 with `docs/copilot/copilot-cli-mcp.json` | **`${VAR}` env expansion in its config is unverified**: does the key arrive? | |
-| F4 | Job while a chat is open | the chat's next turn re-reads its history (single engine context); how long | |
+| F4 | Job while a chat is open | with `-Snapshots` >= 2 the chat's next turn should RESTORE its snapshot, not re-read its history. Verify, and time it | |
 | F5 | Rotate key (`-RotateDelegateKey`), old key refused | | |
 | F6 | Cloud coding agent | cannot reach a laptop: expect it NOT to work | |
 

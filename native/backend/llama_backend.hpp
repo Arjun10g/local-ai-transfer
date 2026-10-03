@@ -88,9 +88,14 @@ class LlamaBackend final : public EngineBackend {
                             const TokenSink& sink) override;
   void reset() override;
   void forget(const std::string& key) override;
+  bool unload() override;
+  bool loaded() const override;
   void shutdown() override;
 
  private:
+  // Model, context and sampler from the stored config; used by initialize and
+  // by the reload after an idle unload.
+  void load_resources();
   struct Impl;
   Impl* impl_ = nullptr;
 };

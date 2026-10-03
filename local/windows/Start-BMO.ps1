@@ -35,6 +35,16 @@
   Experimental. Verify up to this many n-gram-drafted tokens per forward pass
   (1-8). Off by default.
 
+.PARAMETER Snapshots
+  How many conversations the engine keeps a saved state for (1-8, default 4,
+  about 50 MB each). More than one lets a second conversation (a delegated
+  Copilot job, another tab) use the engine without making the first one
+  re-read its whole history.
+
+.PARAMETER IdleUnloadMinutes
+  Free the 6 GB model after this many idle minutes and load it again on the
+  next message (that first message waits for the load). Off by default.
+
 .PARAMETER MaxTokens
   Chat mode only: the longest reply, in tokens (default 1024, at most 2048).
   A longer limit leaves less of the 8,192-token context for the conversation.
@@ -79,6 +89,8 @@ param(
     [ValidateRange(1, 256)] [int] $Threads,
     [ValidateRange(1, 256)] [int] $ThreadsBatch,
     [ValidateRange(1, 8)] [int] $Speculate,
+    [ValidateRange(1, 8)] [int] $Snapshots,
+    [ValidateRange(1, 1440)] [int] $IdleUnloadMinutes,
     [ValidateRange(1, 99)] [int] $GpuLayers,
     [ValidateRange(1, 2048)] [int] $MaxTokens,
     [string] $NodePath,
@@ -194,6 +206,8 @@ if ($Threads) { $argv += @('--threads', $Threads) }
 if ($GpuLayers) { $argv += @('--gpu-layers', $GpuLayers) }
 if ($ThreadsBatch) { $argv += @('--threads-batch', $ThreadsBatch) }
 if ($Speculate) { $argv += @('--speculate', $Speculate) }
+if ($Snapshots) { $argv += @('--snapshots', $Snapshots) }
+if ($IdleUnloadMinutes) { $argv += @('--idle-unload-minutes', $IdleUnloadMinutes) }
 if ($Backend -eq 'intel-vulkan') { $argv += @('--vulkan-device-name', $VulkanDeviceName) }
 
 Write-Host "== $Mode on $Backend" -ForegroundColor Cyan

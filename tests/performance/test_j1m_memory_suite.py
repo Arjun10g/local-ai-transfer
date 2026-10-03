@@ -230,9 +230,9 @@ class MemoryPlanTests(unittest.TestCase):
         self.assertEqual(rme.MEMORY_PROBES, tuple(me.PROBES))
         self.assertEqual(rme.MEMORY_OUTCOMES, tuple(sorted(me.OUTCOMES)))
         self.assertEqual(rme.MEMORY_AGE_BUCKETS, tuple(me.AGE_BUCKETS))
-        self.assertEqual(_memory_identity()["planned_requests"], 252)
-        self.assertEqual(rme.MEMORY_PROFILE["max_requests"], 252)
-        self.assertEqual(rme._memory_planned_requests(rme.MEMORY_PROFILE), 252)
+        self.assertEqual(_memory_identity()["planned_requests"], 300)
+        self.assertEqual(rme.MEMORY_PROFILE["max_requests"], 300)
+        self.assertEqual(rme._memory_planned_requests(rme.MEMORY_PROFILE), 300)
 
     def test_a_changed_prompt_file_changes_the_pinned_identity(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as directory:
@@ -316,7 +316,7 @@ class MemoryVerificationTests(unittest.TestCase):
 
     def test_a_correct_receipt_verifies_with_its_prompt_version(self):
         verified = self.verify(self.raw)
-        self.assertEqual((verified["status"], verified["cells_run"]), ("completed", 240))
+        self.assertEqual((verified["status"], verified["cells_run"]), ("completed", 288))
         self.assertEqual(verified["memory_prompts"]["sha256"], self.binding["memory_prompts_sha256"])
 
     def test_tampered_receipts_are_refused(self):
@@ -426,7 +426,7 @@ class MemoryHostTests(unittest.TestCase):
             sent = json.dumps(fake.requests)
         stamped = {**rme._stamp_suite_member(receipt, "memory"), "run_id": "r", "instance_id": "i"}
         encoded = json.dumps(stamped, indent=2, sort_keys=True) + "\n"
-        self.assertEqual(requests, 252)
+        self.assertEqual(requests, 300)
         self.assertIn("for project", sent)
         for leaked in (fake.token, SECRET_OUTPUT_MARKER, NOTE_MARKER, PROMPT_MARKER, "for project", "<tool_call>",
                        "credential_masking"):
@@ -435,7 +435,7 @@ class MemoryHostTests(unittest.TestCase):
         j1m_runner.validate_persisted_receipt(json.loads(encoded))
         j1m_runner.validate_persisted_document(encoded)
         results = receipt["results"]
-        self.assertEqual((receipt["status"], results["cells_run"], results["requests_sent"]), ("completed", 240, 252))
+        self.assertEqual((receipt["status"], results["cells_run"], results["requests_sent"]), ("completed", 288, 300))
         self.assertEqual(results["by_arm_probe"]["note/hallucination"]["fail"], 6, "the fake invents a value")
         directory = _PrivateDir(self)
         verified = orc._verify_memory_receipt(directory.write("memory-receipt.json", stamped), artifact,
@@ -494,9 +494,9 @@ class MemoryHostTests(unittest.TestCase):
 
     def test_the_distiller_refuses_anything_but_typed_cells_and_the_pinned_plan(self):
         digest = _sha(orc._MEMORY_PROMPTS)
-        plan = {"conversations": 6, "arms": ["note", "drop", "full", "recall", "both"], "chunks": 2, "dropped_tokens": 2500,
+        plan = {"conversations": 6, "arms": ["note", "drop", "full", "recall", "both", "recall_gap"], "chunks": 2, "dropped_tokens": 2500,
                 "retained_tokens": 1500, "note_tokens": 512, "note_bytes": 1536, "max_input_bytes": 6144,
-                "per_message_bytes": 1536, "max_tokens": 64, "planned_requests": 252,
+                "per_message_bytes": 1536, "max_tokens": 64, "planned_requests": 300,
                 "credential_masking": "not applied"}
         cell = {"arm": "note", "probe": "name", "age_turns": 12, "in_dropped": True, "outcome": "pass",
                 "passed": True, "reason": "recalled", "coherent": True, "prompt_tokens": 1800, "seconds": 0.4}
@@ -526,11 +526,11 @@ class MemoryHostTests(unittest.TestCase):
         conversations = [{"id": f"conv{index}", "complete": True, "note": {"outcome": "error", "reason": "client_timeout"},
                           "cells": [{"arm": arm, "probe": probe, "age_turns": 40, "in_dropped": True,
                                      "outcome": "timeout", "reason": "client_timeout_" + "x" * 49}
-                                    for arm in ("note", "drop", "full", "recall", "both") for probe in rme.MEMORY_PROBES]}
+                                    for arm in ("note", "drop", "full", "recall", "both", "recall_gap") for probe in rme.MEMORY_PROBES]}
                          for index in range(6)]
-        plan = {"conversations": 6, "arms": ["note", "drop", "full", "recall", "both"], "chunks": 2, "dropped_tokens": 2500,
+        plan = {"conversations": 6, "arms": ["note", "drop", "full", "recall", "both", "recall_gap"], "chunks": 2, "dropped_tokens": 2500,
                 "retained_tokens": 1500, "note_tokens": 512, "note_bytes": 1536, "max_input_bytes": 6144,
-                "per_message_bytes": 1536, "max_tokens": 64, "planned_requests": 252}
+                "per_message_bytes": 1536, "max_tokens": 64, "planned_requests": 300}
         results = rme._distill_memory({"schema": "local_bmo.memory-eval.v1", "prompt_response_logging": False,
                                        "memory_prompts": {"sha256": digest}, "plan": plan,
                                        "conversations": conversations}, prompts_sha256=digest)
@@ -538,7 +538,8 @@ class MemoryHostTests(unittest.TestCase):
                    "fixture": rme._fixture_contract(SHIPPING_FIXTURE)["fixture_identity"],
                    "plan": rme.MEMORY_PROFILE, "harness": {"sha256": "a" * 64}, "run_id": "r" * 64,
                    "instance_id": "i" * 64}
-        self.assertEqual(len(results["not_passed"]), 240)
+        self.assertEqual(results["not_passed_total"], 288)
+        self.assertEqual(len(results["not_passed"]), rme.MEMORY_NOT_PASSED_LISTED)
         self.assertLess(len(json.dumps(receipt, indent=2, sort_keys=True)), rme.MAX_RECEIPT_BYTES)
 
 

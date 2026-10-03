@@ -78,16 +78,16 @@ LONG_CONTEXT_PROFILE = {
 }
 # The memory member (``scripts/test/memory_eval.py`` with the host's shared
 # ``host/agent/memory-prompts.json``). One fixed profile, like long context:
-# six synthetic conversations, all five arms (note, drop, full, recall, both),
-# two summarisation chunks per note, the host's own note/excerpt bounds.
-# 6 x (2 + 8 x 5) = 252 requests, and ``max_requests`` is exactly that, so the
+# six synthetic conversations, all six arms (note, drop, full, recall, both,
+# recall_gap), two summarisation chunks per note, the host's own note/excerpt bounds.
+# 6 x (2 + 8 x 6) = 300 requests, and ``max_requests`` is exactly that, so the
 # harness refuses a larger plan before its first request.
 MEMORY_TOTAL_TIMEOUT = 600.0
 MEMORY_RAW_MAX_BYTES = 4 * 1024 * 1024
 MEMORY_PROMPTS_MAX_BYTES = 64 * 1024
 MEMORY_PROFILE = {
     "conversations": 6,
-    "arms": ["note", "drop", "full", "recall", "both"],
+    "arms": ["note", "drop", "full", "recall", "both", "recall_gap"],
     "chunks": 2,
     "dropped_tokens": 2500,
     "retained_tokens": 1500,
@@ -97,7 +97,7 @@ MEMORY_PROFILE = {
     "per_message_bytes": 1536,
     "max_output": 64,
     "request_timeout_seconds": 60,
-    "max_requests": 252,
+    "max_requests": 300,
 }
 # Mirrors of scripts/test/memory_eval.py's closed vocabularies; the extended
 # suite tests pin that the two agree.
@@ -105,6 +105,7 @@ MEMORY_FACT_TYPES = ("name", "number", "preference", "decision", "tool_result", 
 MEMORY_PROBES = MEMORY_FACT_TYPES + ("retained_control", "hallucination")
 MEMORY_OUTCOMES = ("context_overflow", "engine_busy", "error", "fail", "pass", "request_too_large", "skipped", "timeout")
 MEMORY_AGE_BUCKETS = ((1, 5), (6, 10), (11, 20), (21, 40), (41, 1000))
+MEMORY_NOT_PASSED_LISTED = 120
 MEMORY_CONVERSATION_ID = re.compile(r"^conv[0-9]{1,2}$")
 LONG_CONTEXT_OUTCOMES = ("context_overflow", "engine_busy", "error", "fail", "pass", "request_too_large", "timeout")
 LONG_CONTEXT_CELL_ID = re.compile(r"^[a-z_]{1,16}/[a-z_]{1,16}/s[0-9]{3,5}/d[0-9.]{1,6}/t[0-9]{1,2}$")
@@ -1647,9 +1648,12 @@ def _distill_memory(raw: Any, *, prompts_sha256: str) -> dict[str, Any]:
             "median_seconds": _median([item["seconds"] for item in answered if item["seconds"] is not None]),
             "incoherent": sum(1 for item in answered if item["coherent"] is False),
         },
+        # Bounded so the worst case (every cell failing) stays inside the receipt limit;
+        # the count says how many were not listed.
         "not_passed": [{"conversation": item["conversation"], "arm": item["arm"], "probe": item["probe"],
                         "outcome": item["outcome"], "reason": item["reason"]}
-                       for item in cells if item["outcome"] != "pass"],
+                       for item in cells if item["outcome"] != "pass"][:MEMORY_NOT_PASSED_LISTED],
+        "not_passed_total": sum(1 for item in cells if item["outcome"] != "pass"),
     }
 
 

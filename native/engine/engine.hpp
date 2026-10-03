@@ -2,10 +2,13 @@
 
 #include "../backend/engine_backend.hpp"
 
+#include <chrono>
+#include <condition_variable>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -46,9 +49,15 @@ class Engine final {
                             const GenerationRequest& request, const Cancellation& cancellation,
                             const TokenSink& sink);
   std::string metrics_json() const;
+  // Free the model after `idle` with no request in flight (zero turns it off);
+  // the next request loads it again. `poll` is how often the clock is checked
+  // (tests use milliseconds; the server uses a few seconds). Call after
+  // initialize; stop() ends the watcher.
+  void enable_idle_unload(std::chrono::milliseconds idle, std::chrono::milliseconds poll = std::chrono::seconds(5));
 
  private:
   void set_state(LifecycleState next);
+  void touch();  // guarded by mutex_
   std::unique_ptr<EngineBackend> backend_;
   mutable std::mutex mutex_;
   LifecycleState state_ = LifecycleState::NEW;
@@ -62,6 +71,13 @@ class Engine final {
   std::map<std::string, Cancellation> active_;
   unsigned next_session_ = 1;
   unsigned cancellation_count_ = 0;
+  // Idle unload: a watcher thread that frees the model after a quiet period.
+  std::chrono::steady_clock::time_point last_activity_ = std::chrono::steady_clock::now();
+  std::chrono::milliseconds idle_unload_{0};
+  unsigned idle_unloads_ = 0;
+  bool idle_stop_ = false;
+  std::condition_variable idle_cv_;
+  std::thread idle_thread_;
 };
 
 }  // namespace lae
