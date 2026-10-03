@@ -130,6 +130,41 @@ const EXACT = new Map(Object.entries({
   invalid_url: URL_BLOCKED,
   unknown_app: ['That app is not on BMO\'s allowed list.', ''],
   platform_unsupported: ['That tool does not work on this computer.', ''],
+  // Conversation memory (host/agent/memory-note.mjs); shown only in metrics.
+  memory_empty_note: ['BMO could not summarise the earlier conversation, so older parts were dropped instead.', ''],
+  memory_tool_call_output: ['BMO could not summarise the earlier conversation, so older parts were dropped instead.', ''],
+  // Delegated jobs from a coding assistant (host/delegate), as the approval
+  // card and the delegate bridge report them.
+  approval_expired: ['Nobody approved that coding-assistant job in time, so it did not run.', 'The coding assistant can ask again.'],
+  operator_denied: ['You declined that coding-assistant job.', ''],
+  job_not_found: ['That coding-assistant job is no longer known to BMO (it may have finished or expired).', ''],
+  job_not_pending: ['That coding-assistant job was already answered or stopped.', ''],
+  queue_full: ['Too many coding-assistant jobs are waiting.', 'Approve, deny, or wait for the waiting ones first.'],
+  task_too_large: ['That coding-assistant job is too long for BMO.', 'Ask the coding assistant to send a shorter task.'],
+  job_too_large: ['That coding-assistant job is too long for BMO.', 'Ask the coding assistant to send less context.'],
+  job_timeout: ['A coding-assistant job ran past its time limit and was stopped.', ''],
+  token_limit: ['A coding-assistant job reached its output limit and was stopped.', ''],
+  preempted: ['A coding-assistant job was stopped so you could use BMO.', ''],
+  engine_busy: BUSY,
+  engine_unavailable: NOT_READY,
+  rate_limited: ['Too many coding-assistant jobs were started in the last minute.', 'Wait a minute.'],
+  tool_not_offered: ['The assistant asked for a tool it was not allowed to use in this job, so it was stopped.', ''],
+  confirmation_unavailable: ['That job cannot ask for confirmation, so the action was refused.', ''],
+  invalid_delegate_scope: INTERNAL,
+  delegate_key_invalid: ['The coding-assistant key file is damaged.', 'Make a new one: python local\\bmo_local.py delegate-key --rotate'],
+  delegate_key_unsafe: ['The coding-assistant key file is not private to you, so BMO will not use it.', 'Make a new one: python local\\bmo_local.py delegate-key --rotate'],
+  state_dir_invalid: ['BMO cannot find its settings folder for coding-assistant jobs.', 'Restart BMO with its launcher.'],
+  state_dir_unsafe: ['BMO\'s settings folder for coding-assistant jobs is not private to you.', 'Check the folder\'s owner and permissions, then restart BMO.'],
+  host_file_invalid: INTERNAL,
+  // The delegate bridge's own codes (host/mcp), shown to the coding assistant.
+  bmo_not_running: ['BMO is not running, or coding-assistant jobs are switched off.', 'Start BMO with coding-assistant jobs enabled.'],
+  no_key: ['The coding assistant has no BMO key configured.', 'Show the key on the laptop and paste it into the coding assistant\'s settings.'],
+  host_unreachable: LOST,
+  host_timeout: ['BMO did not answer in time.', 'Check that BMO is still running, then try again.'],
+  host_protocol_error: INTERNAL,
+  invalid_job_id: MALFORMED,
+  aborted: CANCELLED,
+  timeout: ['That took too long.', 'Try again.'],
 }));
 
 // Families keep the table finite while still giving every emitted code a

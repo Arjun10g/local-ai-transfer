@@ -315,6 +315,37 @@ never the prompt, the reply or the token. `-NodePath` checks a portable
 node.exe instead of the one on PATH; the same `-Threads`, `-Backend` and
 `-EnginePath` options as the other modes apply.
 
+## 4e. Optional: let a coding assistant hand BMO jobs
+
+GitHub Copilot (through the BMO MCP bridge, `lae-mcp.mjs`; see
+`docs/copilot/`) can send BMO small read-only text jobs. It is off unless
+you turn it on, and every job waits for you:
+
+```powershell
+.\local\windows\Start-BMO.ps1 -ShowDelegateKey
+.\local\windows\Start-BMO.ps1 -ModelPath <gguf> -Mode app -EnableDelegation
+```
+
+- `-ShowDelegateKey` prints the key (made on first use) to paste once into
+  the coding assistant's BMO key prompt. It lives in
+  `%LOCALAPPDATA%\BMO\delegate-key`, readable only by you; `-RotateDelegateKey`
+  replaces it and the old one stops working at once.
+- With `-EnableDelegation` the host writes `%LOCALAPPDATA%\BMO\host.json`
+  (its port and process id, no secret) so the bridge can find it, and
+  removes it when BMO stops.
+- Each job shows a card on the BMO page: who sent it, the task, how much
+  reference material came with it, and which folders it may read. Nothing
+  runs until you press Approve; unanswered cards expire after 2 minutes. The
+  answer goes back to the coding assistant and may leave the laptop, so
+  approve only what you are happy to share. Under "Delegated access" you can
+  allow jobs without a card for 15 minutes or an hour; "Stop & revoke all"
+  stops every job.
+- Jobs are read-only: the clock, basic system information, and (only with
+  `"delegate": true` on a folder in the `-HostConfig` file) reading files in
+  that folder. Your own messages always go first; a job you interrupt is
+  run again afterwards. A job between your turns makes your next reply
+  re-read the conversation from the start (the engine keeps one context).
+
 ## 5. Tool-call evaluation
 
 ```powershell

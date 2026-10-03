@@ -16,11 +16,45 @@ function object(value, name) { if (!value || typeof value !== 'object' || Array.
 // current directory before PATH, so a binary planted there would run instead.
 // UNC and `//` paths are refused because they reach the network.
 const absoluteLocalExecutable = value => typeof value === 'string' && value.length >= 2 && value.length <= 1024 && !/[\u0000-\u001f\u007f]/u.test(value) && (/^\/(?!\/)/u.test(value) || /^[A-Za-z]:[\\/]/u.test(value));
+// [config key, controller option, min, max]; the ranges match
+// memoryOptions() in memory-note.mjs, which validates again.
+const MEMORY_CONFIG_KEYS = Object.freeze([
+  ['mode', 'mode'], ['note_tokens', 'noteTokens', 32, 1024], ['note_bytes', 'noteBytes', 128, 4096], ['max_input_bytes', 'maxInputBytes', 512, 32768],
+  ['per_message_bytes', 'perMessageBytes', 128, 8192], ['backlog_bytes', 'backlogBytes', 0, 262144], ['timeout_ms', 'timeoutMs', 1000, 3600000],
+  ['wait_ms', 'waitMs', 0, 600000], ['plan_headroom_tokens', 'planHeadroomTokens', 0, 8192], ['plan_target_percent', 'planTargetPercent', 20, 60],
+]);
+// The ConversationController `memory` option for a validated config.
+export function memoryOptionsFromConfig(config = {}) {
+  const m = config?.memory ?? {};
+  return Object.fromEntries(MEMORY_CONFIG_KEYS.filter(([key]) => own(m, key)).map(([key, option]) => [option, m[key]]));
+}
 function keys(value, allowed, name) { for (const key of Object.keys(value)) if (!allowed.includes(key)) throw new Error(`${name} has unknown key: ${key}`); }
+// Delegation (host/delegate): [config key, min, max, default].  Off unless
+// `enabled` is true or LAE_DELEGATE_ENABLED=1; the defaults are the job
+// bounds the delegate bridge is documented against.
+export const DELEGATE_LIMITS = Object.freeze([
+  // How long a job waits for the operator's Approve before it expires.
+  ['approval_timeout_ms', 5000, 600000, 120000],
+  // Hard wall-clock cap on one job's generation, tools included.
+  ['max_runtime_ms', 10000, 3600000, 600000],
+  // Cap on the job's total generated tokens across all its model calls.
+  ['max_output_tokens', 64, 16384, 2048],
+  // Tool calls one job may make; each is a further model call on a CPU.
+  ['max_tool_calls', 0, 8, 4],
+]);
+/** The delegate service's options for a validated config and environment. */
+export function delegateOptionsFromConfig(config = {}, env = {}) {
+  const raw = env.LAE_DELEGATE_ENABLED;
+  if (raw !== undefined && raw !== '0' && raw !== '1') throw new Error('invalid LAE_DELEGATE_ENABLED; expected 0 or 1');
+  const d = config?.delegate ?? {};
+  const options = { enabled: d.enabled === true || raw === '1' };
+  for (const [key, , , fallback] of DELEGATE_LIMITS) options[key] = own(d, key) ? d[key] : fallback;
+  return options;
+}
 
 export function validateConfig(input = {}) {
   object(input, 'config');
-  keys(input, ['version', 'host', 'engine', 'workspace_roots', 'applications', 'process_actions', 'network', 'providers'], 'config');
+  keys(input, ['version', 'host', 'engine', 'workspace_roots', 'applications', 'process_actions', 'network', 'providers', 'memory', 'delegate'], 'config');
   if (own(input, 'version') && input.version !== CONFIG_VERSION) throw new Error('unsupported config version');
   if (own(input, 'host')) {
     const h = object(input.host, 'host'); keys(h, ['bind', 'max_body_bytes', 'request_timeout_ms', 'max_connections', 'max_header_bytes', 'max_header_count', 'confirmation_timeout_ms'], 'host');
@@ -46,8 +80,26 @@ export function validateConfig(input = {}) {
     // own bounds (a CPU prefill can take many minutes before the first token).
     for (const [key, min, max] of ENGINE_GENERATION_LIMITS) if (own(e, key) && (!Number.isInteger(e[key]) || e[key] < min || e[key] > max)) throw new Error(`engine.${key} out of range`);
   }
+  // Opt-in conversation memory (host/agent/memory-note.mjs).  Absent means
+  // 'off': the summary costs one extra engine call per compaction, which is
+  // minutes on a laptop CPU.
+  if (own(input, 'memory')) {
+    const m = object(input.memory, 'memory'); keys(m, MEMORY_CONFIG_KEYS.map(([key]) => key), 'memory');
+    if (own(m, 'mode') && !['off', 'summary'].includes(m.mode)) throw new Error('memory.mode must be off or summary');
+    for (const [key, , min, max] of MEMORY_CONFIG_KEYS.slice(1)) if (own(m, key) && (!Number.isInteger(m[key]) || m[key] < min || m[key] > max)) throw new Error(`memory.${key} out of range`);
+    if (Number.isInteger(m.per_message_bytes) && m.per_message_bytes > (m.max_input_bytes ?? 6144)) throw new Error('memory.per_message_bytes out of range');
+  }
   if (own(input, 'workspace_roots')) {
-    if (!Array.isArray(input.workspace_roots) || input.workspace_roots.length > 16 || input.workspace_roots.some(x => (typeof x === 'string' && (x.length < 1 || x.length > 1024)) || (x && typeof x === 'object' && !Array.isArray(x) && (Object.keys(x).some(key => !['id', 'path', 'read', 'write'].includes(key)) || typeof x.id !== 'string' || x.id.length < 1 || x.id.length > 64 || typeof x.path !== 'string' || x.path.length < 1 || x.path.length > 1024 || (x.read !== undefined && typeof x.read !== 'boolean') || (x.write !== undefined && typeof x.write !== 'boolean'))) || (typeof x !== 'string' && (!x || typeof x !== 'object' || Array.isArray(x))))) throw new Error('workspace_roots invalid');
+    if (!Array.isArray(input.workspace_roots) || input.workspace_roots.length > 16 || input.workspace_roots.some(x => (typeof x === 'string' && (x.length < 1 || x.length > 1024)) || (x && typeof x === 'object' && !Array.isArray(x) && (Object.keys(x).some(key => !['id', 'path', 'read', 'write', 'delegate'].includes(key)) || typeof x.id !== 'string' || x.id.length < 1 || x.id.length > 64 || typeof x.path !== 'string' || x.path.length < 1 || x.path.length > 1024 || (x.read !== undefined && typeof x.read !== 'boolean') || (x.write !== undefined && typeof x.write !== 'boolean') || (x.delegate !== undefined && typeof x.delegate !== 'boolean'))) || (typeof x !== 'string' && (!x || typeof x !== 'object' || Array.isArray(x))))) throw new Error('workspace_roots invalid');
+    // A folder lent to delegated jobs is read by a model whose answer leaves
+    // the laptop, so it must be readable, and its id must be one the job's
+    // scope can name.
+    for (const x of input.workspace_roots) if (x && typeof x === 'object' && x.delegate === true && (x.read === false || !/^[A-Za-z0-9_.-]{1,64}$/u.test(x.id))) throw new Error('workspace_roots delegate folder must be readable with a simple id');
+  }
+  if (own(input, 'delegate')) {
+    const d = object(input.delegate, 'delegate'); keys(d, ['enabled', ...DELEGATE_LIMITS.map(([key]) => key)], 'delegate');
+    if (own(d, 'enabled') && typeof d.enabled !== 'boolean') throw new Error('delegate.enabled invalid');
+    for (const [key, min, max] of DELEGATE_LIMITS) if (own(d, key) && (!Number.isInteger(d[key]) || d[key] < min || d[key] > max)) throw new Error(`delegate.${key} out of range`);
   }
   if (own(input, 'applications')) {
     const applications = object(input.applications, 'applications'); if (Object.keys(applications).length > 16) throw new Error('applications limit exceeded');

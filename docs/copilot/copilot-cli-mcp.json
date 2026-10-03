@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "bmo": {
+      "type": "local",
+      "command": "C:\\Program Files\\nodejs\\node.exe",
+      "args": ["C:\\ABSOLUTE\\PATH\\TO\\local_assistant_engine_plan_qwen35\\lae-mcp.mjs"],
+      "env": { "BMO_DELEGATE_KEY": "${BMO_DELEGATE_KEY}" },
+      "tools": ["*"],
+      "timeout": 60000
+    }
+  }
+}

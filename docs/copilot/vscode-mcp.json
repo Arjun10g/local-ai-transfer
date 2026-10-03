@@ -1,0 +1,18 @@
+{
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "bmo-delegate-key",
+      "description": "BMO delegate key (show it on the laptop with Start-BMO.ps1 -ShowDelegateKey)",
+      "password": true
+    }
+  ],
+  "servers": {
+    "bmo": {
+      "type": "stdio",
+      "command": "C:\\Program Files\\nodejs\\node.exe",
+      "args": ["C:\\ABSOLUTE\\PATH\\TO\\local_assistant_engine_plan_qwen35\\lae-mcp.mjs"],
+      "env": { "BMO_DELEGATE_KEY": "${input:bmo-delegate-key}" }
+    }
+  }
+}

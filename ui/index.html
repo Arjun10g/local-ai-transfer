@@ -17,9 +17,11 @@
         <button id="reset" type="button" title="Start a new conversation">Reset</button>
       </div>
     </header>
-    <section class="status-grid" aria-label="Runtime status"><div><span>Engine</span><strong id="engine">…</strong></div><div><span>Backend</span><strong id="backend">…</strong></div><div><span>Network</span><strong id="network">…</strong></div><div><span>Actions</span><strong id="actions">…</strong></div></section>
+    <section class="status-grid" aria-label="Runtime status"><div><span>Engine</span><strong id="engine">…</strong></div><div><span>Backend</span><strong id="backend">…</strong></div><div><span>Network</span><strong id="network">…</strong></div><div><span>Actions</span><strong id="actions">…</strong></div><div><span>Coding assistants</span><strong id="delegate" title="Jobs a coding assistant (such as GitHub Copilot) may send to BMO. Off unless turned on at launch.">off</strong></div></section>
     <!-- Parked integrations: hidden unless /api/status reports a configured provider or grantable capability. -->
     <section id="access-panel" class="access-panel" aria-labelledby="access-title" hidden><div><h2 id="access-title">Delegated access</h2><p>Grant one-hour access only to the capability you select. Stop remains immediate; external sends and other high-impact actions still ask every time.</p><div id="graph-controls" hidden><button id="graph-auth" type="button">Connect Outlook / Teams</button> <button id="graph-auth-cancel" type="button">Cancel</button> <button id="graph-auth-clear" type="button">Disconnect / clear</button><p id="graph-auth-status" role="status">Not connected</p></div></div><button id="revoke-all" class="danger" type="button">Stop &amp; revoke all</button><div id="grant-list" class="grant-list"><p>No grantable capabilities are configured.</p></div></section>
+    <!-- Approval cards for jobs a coding assistant sent; shown only while one is waiting. -->
+    <section id="delegate-panel" class="delegate-panel" aria-labelledby="delegate-title" aria-live="polite" hidden><h2 id="delegate-title">Requests from coding assistants</h2><div id="delegate-list"></div></section>
     <section id="transcript" class="transcript" aria-live="polite" aria-label="Conversation"></section>
     <div id="activity" class="activity" hidden>
       <span class="spinner" aria-hidden="true"></span>

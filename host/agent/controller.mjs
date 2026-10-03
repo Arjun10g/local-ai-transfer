@@ -8,18 +8,48 @@ import { browserSafeCompletionDigest, projectBrowserResult, readBrowserAttestati
 import { isGraphReadTool, readGraphReadAttestation, transferGraphReadAttestation } from '../providers/microsoft-graph-reads.mjs';
 import { copilotSafeCompletionDigest, readCopilotAttestation, transferCopilotAttestation } from '../providers/copilot-cli.mjs';
 import { timeNowDefinition, timeNowTool } from '../tools/time-now.mjs';
-import { CONTEXT_DEFAULTS, ContextBudgetError, droppableHeadLength, fitHistory, historyBudget, messagesTokens, isContextOverflowError, learnBytesPerToken, observedBytesPerToken, penalizeBytesPerToken, utf8Bytes } from './context-budget.mjs';
+import { CONTEXT_DEFAULTS, ContextBudgetError, droppableHeadLength, fitHistory, historyBudget, messageTokens, messagesTokens, isContextOverflowError, isElidedToolResult, learnBytesPerToken, observedBytesPerToken, penalizeBytesPerToken, utf8Bytes } from './context-budget.mjs';
+import { buildExcerpt, memoryOptions, noteByteLimit, noteMessage, planCompaction, removedBy, sanitizeNote, summaryRequest } from './memory-note.mjs';
 import { ENGINE_MAX_MESSAGE_BYTES, toolResultByteCap, truncateUtf8 } from './tool-result-cap.mjs';
 import { displayDiff, maskCredentialText, summarizeToolArguments } from './argument-summary.mjs';
 
 // The stored-history accounting the hard byte bound has always used.
 const storedBytes = message => Buffer.byteLength(JSON.stringify(message), 'utf8');
+// After cancelling an unfinished memory summary, how long a new turn waits for
+// that engine call to wind down before sending its own (the engine runs one
+// generation at a time and answers 409 busy to a second).
+const MEMORY_CANCEL_GRACE_MS = 30000;
+// Memory outcomes are reported in `metrics.snapshot` (memory_note.code),
+// never as a request error: a failed summary does not fail the turn.  They
+// ride on their own property so they never enter the request-error space.
+const memoryFailure = outcome => Object.assign(new Error(outcome), { memoryOutcome: outcome });
+const settleWithin = (promise, ms) => new Promise(resolve => { const timer = setTimeout(resolve, ms); promise.then(() => { clearTimeout(timer); resolve(); }, () => { clearTimeout(timer); resolve(); }); });
+const newMemoryState = (epoch = 0) => ({ note: null, backlog: [], backlog_bytes: 0, epoch, ready: null, outcome: null, summaries: 0, failures: 0, cancelled: 0, lost_messages: 0 });
 // Long enough to read a confirmation card aloud during a narrated demo; the
 // host config can shorten or lengthen it (host.confirmation_timeout_ms).
 export const DEFAULT_CONFIRMATION_TIMEOUT_MS = 120000;
 // `auto` offers every available tool; `off` sends an empty tool list, which
 // drops the ~1,200+ token tool preamble from the prompt for plain chat.
-export const TOOL_MODES = Object.freeze(['auto', 'off']);
+// `delegate` is for jobs a coding assistant hands this laptop (host/delegate):
+// read-only tools only, and the fs trio only over the folders the job's scope
+// names.  It is never reachable from the chat route, which accepts auto/off.
+export const TOOL_MODES = Object.freeze(['auto', 'off', 'delegate']);
+// What a delegated job may ever be offered.  The answer leaves the laptop for
+// a cloud caller, so nothing that writes, launches, runs, reads the clipboard,
+// browses, or calls a provider is on this list, whatever the registry holds.
+export const DELEGATE_TOOL_NAMES = Object.freeze(['time.now', 'system.get_info', 'fs.list', 'fs.read_text', 'fs.search_text']);
+const DELEGATE_FILE_TOOLS = new Set(['fs.list', 'fs.read_text', 'fs.search_text']);
+// Beyond its name, a delegated tool must be declared inert: T0, no side
+// effect, no network, no confirmation, no preview/authorize hooks.  A tool
+// that would need the operator's click cannot run in a job nobody watches.
+function delegateEligible(name, tool, scope) {
+  if (!DELEGATE_TOOL_NAMES.includes(name) || (DELEGATE_FILE_TOOLS.has(name) && !scope.workspaces.length)) return false;
+  return tool?.risk_tier === 'T0' && tool.side_effect === 'none' && tool.network !== true && tool.requires_confirmation !== true && typeof tool.confirmationRequired !== 'function' && typeof tool.preview !== 'function' && typeof tool.authorize !== 'function';
+}
+function delegateScopeOf(scope) {
+  if (!scope || typeof scope !== 'object' || Array.isArray(scope) || !Array.isArray(scope.workspaces) || scope.workspaces.length > 16 || scope.workspaces.some(id => typeof id !== 'string' || !/^[A-Za-z0-9_.-]{1,64}$/u.test(id))) throw Object.assign(new Error('invalid_delegate_scope'), { code: 'invalid_delegate_scope' });
+  return Object.freeze({ workspaces: Object.freeze([...scope.workspaces]) });
+}
 const EXPIRED_CONFIRMATION = Symbol('expired-confirmation');
 // `length` means the answer hit the max_tokens cap, which the UI turns into a
 // "Continue" offer; anything unknown is reported as a normal stop.
@@ -37,6 +67,8 @@ function reportedUsage(usage) {
 const MAX_EXPIRED_CONFIRMATIONS = 16;
 // Appended to a partial answer kept in history, so the model knows the text
 // it sees was cut off rather than finished.
+// Fraction of a hard history bound that a trim drops down to (see _enforceHistoryBounds).
+const HISTORY_LOW_WATER = 0.75;
 const INTERRUPTED_ANSWER_MARKER = '\n\n[This answer was interrupted before it finished.]';
 export const STATES = Object.freeze(['IDLE', 'BUILDING_PROMPT', 'INFERENCING', 'TOOL_PROPOSED', 'WAITING_CONFIRMATION', 'TOOL_RUNNING', 'CONTINUING_MODEL', 'COMPLETED', 'CANCELLED', 'FAILED']);
 const opaque = prefix => `${prefix}_${randomUUID().replaceAll('-', '')}`;
@@ -394,10 +426,13 @@ export class ConversationController {
   #journalMethods;
   #graphRestartControls;
   #restartReconciliationPromise;
+  // The one memory summary in flight, controller-wide: the engine serves one
+  // generation at a time, whichever session it belongs to.
+  #memoryJob = null;
   // `contextTokens` must match the engine's `--context`; `maxOutputTokens`
   // defaults to the engine client's per-request `max_tokens`, which the engine
   // reserves out of the same window.
-  constructor({ engine, maxToolCalls = 8, confirmationTimeoutMs = DEFAULT_CONFIRMATION_TIMEOUT_MS, maxSessions = 4, maxHistoryMessages = 64, maxHistoryBytes = 262144, contextTokens = CONTEXT_DEFAULTS.contextTokens, maxOutputTokens = engine?.maxTokens ?? CONTEXT_DEFAULTS.maxOutputTokens, toolRegistry, actionJournal } = {}) {
+  constructor({ engine, maxToolCalls = 8, confirmationTimeoutMs = DEFAULT_CONFIRMATION_TIMEOUT_MS, maxSessions = 4, maxHistoryMessages = 64, maxHistoryBytes = 262144, contextTokens = CONTEXT_DEFAULTS.contextTokens, maxOutputTokens = engine?.maxTokens ?? CONTEXT_DEFAULTS.maxOutputTokens, toolRegistry, actionJournal, memory } = {}) {
     if (!engine?.generate) throw new TypeError('engine.generate is required');
     if (!Number.isInteger(maxSessions) || maxSessions < 1) throw new TypeError('maxSessions must be positive');
     if (!Number.isInteger(maxHistoryMessages) || maxHistoryMessages < 1 || !Number.isInteger(maxHistoryBytes) || maxHistoryBytes < 1024) throw new TypeError('history limits are invalid');
@@ -406,6 +441,8 @@ export class ConversationController {
     if (!Number.isInteger(contextTokens) || contextTokens < 512 || contextTokens > 16384 || !Number.isInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens * 4 > contextTokens) throw new TypeError('context limits are invalid');
     if (!Number.isInteger(confirmationTimeoutMs) || confirmationTimeoutMs < 1 || confirmationTimeoutMs > 3600000) throw new TypeError('confirmationTimeoutMs is invalid');
     this.contextTokens = contextTokens; this.maxOutputTokens = maxOutputTokens;
+    // Off unless asked for: see memory-note.mjs.
+    this.memory = memoryOptions(memory);
     this.#journalMethods = actionJournal === undefined ? null : snapshotJournalMethods(actionJournal);
     this.engine = engine; this.maxToolCalls = maxToolCalls; this.confirmationTimeoutMs = confirmationTimeoutMs; this.maxSessions = maxSessions; this.maxHistoryMessages = maxHistoryMessages; this.maxHistoryBytes = maxHistoryBytes; this.actionJournal = actionJournal; this.clock = 0;
     this.sessions = new Map(); this.active = null; this.pending = new Map(); this.expiredConfirmations = new Map();
@@ -450,7 +487,7 @@ export class ConversationController {
       candidates.sort((a, b) => a.last_used - b.last_used || a.id.localeCompare(b.id));
       this.sessions.delete(candidates[0].id);
     }
-    const session = { id: sessionId, state: 'IDLE', history: [], history_bytes: 0, bytes_per_token: null, context_compactions: 0, created_at: new Date().toISOString(), last_request_id: null, last_used: ++this.clock };
+    const session = { id: sessionId, state: 'IDLE', history: [], history_bytes: 0, bytes_per_token: null, context_compactions: 0, memory: newMemoryState(), created_at: new Date().toISOString(), last_request_id: null, last_used: ++this.clock };
     this.sessions.set(sessionId, session); return session;
   }
   _touch(session) { session.last_used = ++this.clock; return session; }
@@ -461,9 +498,49 @@ export class ConversationController {
   // split, so it may alone exceed a bound; the token budget then decides.
   _appendHistory(session, message) {
     session.history.push(message); session.history_bytes += storedBytes(message);
-    while (session.history.length > this.maxHistoryMessages || session.history_bytes > this.maxHistoryBytes) {
+    this._enforceHistoryBounds(session);
+  }
+  // The pinned memory note is one more message on the wire, and the engine
+  // refuses more than 64, so it takes one slot of the message bound.
+  _enforceHistoryBounds(session) {
+    const maxMessages = this.maxHistoryMessages - (session.memory?.note ? 1 : 0);
+    const overMessages = session.history.length > maxMessages;
+    const overBytes = session.history_bytes > this.maxHistoryBytes;
+    if (!overMessages && !overBytes) return;
+    // Trim to a LOW-WATER mark, not merely back under the cap. The engine reuses
+    // the retained prompt only while each prompt strictly extends the last, and
+    // dropping the oldest turn changes the prompt's start. Trimming exactly to the
+    // cap would drop one turn on EVERY following turn (a short chat sits at the cap
+    // forever), so every turn would re-read the whole history. Dropping to 75% once
+    // buys many stable turns before the next trim.
+    const lowMessages = overMessages ? Math.max(1, Math.floor(maxMessages * HISTORY_LOW_WATER)) : maxMessages;
+    const lowBytes = overBytes ? Math.floor(this.maxHistoryBytes * HISTORY_LOW_WATER) : this.maxHistoryBytes;
+    while (session.history.length > lowMessages || session.history_bytes > lowBytes) {
       const length = droppableHeadLength(session.history); if (!length) break;
-      for (const removed of session.history.splice(0, length)) session.history_bytes -= storedBytes(removed);
+      const removed = session.history.splice(0, length);
+      for (const message of removed) session.history_bytes -= storedBytes(message);
+      this._toBacklog(session, removed);
+    }
+  }
+  _memoryState(session) { session.memory ??= newMemoryState(); return session.memory; }
+  // What the engine is sent: the pinned note (when there is one) and then the
+  // history.  The note is rebuilt from the same stored text every time, so it
+  // is byte-identical between compactions and later prompts still extend
+  // earlier ones.
+  _promptMessages(session) { const note = session.memory?.note; return note ? [noteMessage(note), ...session.history] : session.history; }
+  _noteTokens(session, bytesPerToken) { const note = session.memory?.note; return note ? messageTokens(noteMessage(note), bytesPerToken) : 0; }
+  // Summary mode only: content that left the window without being summarised
+  // waits here (bounded, oldest discarded first) and is folded into the next
+  // summary.  In off mode dropped content is simply gone, as it always was.
+  _toBacklog(session, messages) {
+    if (this.memory.mode !== 'summary' || !messages.length) return;
+    const memory = this._memoryState(session);
+    for (const message of messages) {
+      if (typeof message?.content !== 'string' || isElidedToolResult(message)) continue;
+      memory.backlog.push(message); memory.backlog_bytes += utf8Bytes(message.content);
+    }
+    while (memory.backlog.length && memory.backlog_bytes > this.memory.backlogBytes) {
+      const lost = memory.backlog.shift(); memory.backlog_bytes -= utf8Bytes(lost.content); memory.lost_messages += 1;
     }
   }
   // Fit the history into the engine window before a model call and persist the
@@ -476,18 +553,140 @@ export class ConversationController {
   // rejected, not to the budget the estimate claimed was met.
   _fitContext(session, tools, emit, { reason = 'budget', turnStart = false, shrink } = {}) {
     const budget = historyBudget({ tools, bytesPerToken: session.bytes_per_token ?? undefined, contextTokens: this.contextTokens, maxOutputTokens: this.maxOutputTokens });
+    // The pinned note is part of every prompt, so the history gets what is
+    // left after it (with no note this is the whole budget, as before).
+    const noteTokens = this._noteTokens(session, budget.bytesPerToken);
+    const available = budget.budgetTokens - noteTokens;
     const limits = shrink !== undefined
-      ? { triggerTokens: 0, targetTokens: Math.floor(Math.min(budget.budgetTokens, messagesTokens(session.history, budget.bytesPerToken)) * shrink) }
-      : turnStart ? { triggerTokens: Math.floor(budget.budgetTokens * CONTEXT_DEFAULTS.turnStartTriggerRatio), targetTokens: Math.floor(budget.budgetTokens * CONTEXT_DEFAULTS.turnStartTargetRatio) } : {};
-    const fitted = fitHistory({ messages: session.history, budgetTokens: budget.budgetTokens, ...limits, bytesPerToken: budget.bytesPerToken });
-    const estimatedTokens = fitted.tokens + budget.toolTokens + budget.overheadTokens;
+      ? { triggerTokens: 0, targetTokens: Math.floor(Math.min(available, messagesTokens(session.history, budget.bytesPerToken)) * shrink) }
+      : turnStart ? { triggerTokens: Math.floor(available * CONTEXT_DEFAULTS.turnStartTriggerRatio), targetTokens: Math.floor(available * CONTEXT_DEFAULTS.turnStartTargetRatio) } : {};
+    const before = session.history;
+    const fitted = fitHistory({ messages: session.history, budgetTokens: available, ...limits, bytesPerToken: budget.bytesPerToken });
+    const estimatedTokens = fitted.tokens + noteTokens + budget.toolTokens + budget.overheadTokens;
     if (fitted.changed) {
       session.history = fitted.messages; session.history_bytes = fitted.messages.reduce((sum, message) => sum + storedBytes(message), 0); session.context_compactions += 1;
+      // A compaction the memory note was not ready for: what it removed
+      // waits for the next summary instead of being lost outright.
+      this._toBacklog(session, removedBy(before, fitted.messages).removed);
+      const state = this._memoryState(session);
+      const memory = this.memory.mode === 'summary' ? { memory_note: { state: 'deferred', backlog_messages: state.backlog.length, lost_messages: state.lost_messages } } : {};
       // Counts only: the UI can say "earlier context was condensed" without
       // the host logging any prompt or tool content.
-      emit('metrics.snapshot', { context_compaction: { reason, masked_tool_results: fitted.masked, elided_bytes: fitted.maskedBytes, dropped_turns: fitted.droppedTurns, dropped_messages: fitted.droppedMessages, estimated_prompt_tokens: estimatedTokens, context_tokens: this.contextTokens, history_messages: session.history.length, compactions: session.context_compactions } });
+      emit('metrics.snapshot', { context_compaction: { reason, masked_tool_results: fitted.masked, elided_bytes: fitted.maskedBytes, dropped_turns: fitted.droppedTurns, dropped_messages: fitted.droppedMessages, estimated_prompt_tokens: estimatedTokens, context_tokens: this.contextTokens, history_messages: session.history.length, compactions: session.context_compactions }, ...memory });
     }
     return { estimatedTokens, changed: fitted.changed };
+  }
+  // ---- memory note (memory.mode 'summary') ---------------------------------
+  // Timeline, designed so the extra engine call never delays the user:
+  //  1. Right after a turn's answer is complete, plan the compaction the next
+  //     turn start would make (with some headroom), and summarise what it
+  //     would remove -- plus any backlog -- in the background.  The UI gets a
+  //     `memory_note: scheduled` event on the turn that just finished.
+  //  2. At the next turn start: if the summary is ready, apply the planned
+  //     compaction and the new note together, as ONE compaction event.  If it
+  //     is still running it is cancelled (after `waitMs`), and if it failed
+  //     the turn falls back to plain dropping; either way the turn proceeds.
+  // The note therefore changes only when the history head changes anyway,
+  // and the summary call only runs when a compaction is imminent, which is
+  // when the engine's retained prompt is about to be invalidated regardless.
+  memoryIdle() { return this.#memoryJob ? this.#memoryJob.promise : Promise.resolve(); }
+  _scheduleMemory(session, tools, emit) {
+    try {
+      if (this.memory.mode !== 'summary' || this.#memoryJob) return;
+      const memory = this._memoryState(session);
+      const budget = historyBudget({ tools, bytesPerToken: session.bytes_per_token ?? undefined, contextTokens: this.contextTokens, maxOutputTokens: this.maxOutputTokens });
+      const noteLimit = noteByteLimit(this.memory);
+      // Planned against the LARGEST note the summary may return, so applying
+      // it can never push the next prompt over the budget.
+      const available = budget.budgetTokens - messageTokens(noteMessage('x'.repeat(noteLimit)), budget.bytesPerToken);
+      // Room for the next user message and answer under the message bound.
+      const maxMessages = this.maxHistoryMessages - 3;
+      const plan = planCompaction({ history: session.history, budgetTokens: available, triggerTokens: Math.floor(available * CONTEXT_DEFAULTS.turnStartTriggerRatio) - this.memory.planHeadroomTokens, targetTokens: Math.floor(available * this.memory.planTargetPercent / 100), bytesPerToken: budget.bytesPerToken, maxMessages, targetMessages: Math.floor(maxMessages * 0.75) });
+      // No compaction coming: nothing is summarised, and a backlog waits for
+      // the next one rather than costing a call (and the engine's retained
+      // prompt) on a turn that would otherwise reuse it.
+      if (!plan) return;
+      // The summary prompt itself must fit the engine window with the
+      // engine's per-request output reservation.
+      const skeleton = summaryRequest({ note: memory.note, excerpt: '', noteLimitBytes: noteLimit });
+      const margin = Math.max(CONTEXT_DEFAULTS.minMarginTokens, Math.ceil(this.contextTokens * CONTEXT_DEFAULTS.marginRatio));
+      const room = this.contextTokens - this.maxOutputTokens - margin - CONTEXT_DEFAULTS.noToolsOverheadTokens - messagesTokens(skeleton, budget.bytesPerToken);
+      const maxBytes = Math.min(this.memory.maxInputBytes, Math.floor(room * budget.bytesPerToken));
+      if (maxBytes < 256) return;
+      const backlogUsed = memory.backlog.length;
+      const excerpt = buildExcerpt([...memory.backlog, ...plan.removed], { maxBytes, perMessageBytes: Math.min(this.memory.perMessageBytes, maxBytes) });
+      if (!excerpt.included) return;
+      const job = { session, epoch: memory.epoch, base: session.history.slice(), plan, excerpt, backlogUsed, abort: new AbortController(), requestId: opaque('req'), started: Date.now(), promise: null };
+      this.#memoryJob = job;
+      job.promise = this.#runMemoryJob(job);
+      emit('metrics.snapshot', { memory_note: { state: 'scheduled', dropped_turns: plan.droppedTurns, masked_tool_results: plan.masked, summarised_messages: excerpt.included, omitted_messages: excerpt.omitted, backlog_messages: backlogUsed, input_bytes: excerpt.bytes } });
+    } catch { /* memory is best-effort: plain dropping still keeps the turn inside the window */ }
+  }
+  async #runMemoryJob(job) {
+    const memory = job.session.memory; const limit = noteByteLimit(this.memory);
+    const timeout = AbortSignal.timeout(this.memory.timeoutMs);
+    const signal = AbortSignal.any([job.abort.signal, timeout]);
+    let outcome;
+    try {
+      const messages = summaryRequest({ note: memory.note, excerpt: job.excerpt.text, noteLimitBytes: limit });
+      let text = '';
+      for await (const frame of this.engine.generate({ requestId: job.requestId, sessionId: job.session.id, messages, tools: [], mode: 'normal', signal })) {
+        if (signal.aborted) break;
+        // Offered no tools, a model that answers with a call has not
+        // written a note; nothing of it is kept.
+        if (frame.kind === 'tool_call_chunk') throw memoryFailure('memory_tool_call_output');
+        // The engine client's answer cap is far above the note's; stop
+        // reading (which stops the engine) once there is more than enough.
+        if (frame.kind === 'text_delta' && typeof frame.text === 'string') { text += frame.text; if (utf8Bytes(text) > limit * 4) break; }
+      }
+      if (signal.aborted) throw Object.assign(new Error('memory_aborted'), { code: 'cancelled' });
+      const note = sanitizeNote(text, { maxBytes: limit });
+      if (!note) throw memoryFailure('memory_empty_note');
+      if (memory.epoch !== job.epoch) outcome = { state: 'stale' };
+      else { memory.ready = { epoch: job.epoch, base: job.base, plan: job.plan, note, backlogUsed: job.backlogUsed, excerpt: { included: job.excerpt.included, omitted: job.excerpt.omitted }, duration_ms: Date.now() - job.started }; outcome = { state: 'ready' }; }
+    } catch (error) {
+      const cancelled = job.abort.signal.aborted && !timeout.aborted;
+      const code = timeout.aborted || error?.code === 'engine_timeout' ? 'memory_timeout' : cancelled ? 'memory_cancelled' : isContextOverflowError(error) ? 'memory_context_overflow' : error?.code === 'busy' ? 'memory_engine_busy' : error?.memoryOutcome ?? 'memory_engine_error';
+      if (cancelled) memory.cancelled += 1; else memory.failures += 1;
+      outcome = { state: cancelled ? 'cancelled' : 'failed', code };
+    } finally {
+      if (this.#memoryJob === job) this.#memoryJob = null;
+      if (memory.epoch === job.epoch) memory.outcome = { ...outcome, duration_ms: Date.now() - job.started };
+    }
+  }
+  async _settleMemory(session, tools, emit) {
+    const memory = this._memoryState(session); const job = this.#memoryJob; let waited = 0;
+    if (job) {
+      const start = Date.now();
+      if (this.memory.waitMs > 0) await settleWithin(job.promise, this.memory.waitMs);
+      if (this.#memoryJob === job) {
+        job.abort.abort();
+        await settleWithin(job.promise, MEMORY_CANCEL_GRACE_MS);
+        try { await this.engine.waitReady?.({ timeoutMs: MEMORY_CANCEL_GRACE_MS }); } catch { /* the turn's own call reports a busy engine */ }
+      }
+      waited = Date.now() - start;
+    }
+    const ready = memory.ready; const outcome = memory.outcome; memory.ready = null; memory.outcome = null;
+    const startsWithBase = ready && session.history.length >= ready.base.length && ready.base.every((message, index) => session.history[index] === message);
+    if (!ready || ready.epoch !== memory.epoch || !startsWithBase) {
+      if (outcome) emit('metrics.snapshot', { memory_note: { ...(ready ? { state: 'stale' } : outcome), waited_ms: waited } });
+      return;
+    }
+    // The planned compaction and the new note land together: one change to
+    // the head of the prompt, not two.
+    session.history = [...ready.plan.messages, ...session.history.slice(ready.base.length)];
+    session.history_bytes = session.history.reduce((sum, message) => sum + storedBytes(message), 0);
+    memory.note = ready.note; memory.summaries += 1;
+    for (const message of memory.backlog.splice(0, ready.backlogUsed)) memory.backlog_bytes -= utf8Bytes(message.content);
+    memory.lost_messages += ready.excerpt.omitted;
+    session.context_compactions += 1;
+    this._enforceHistoryBounds(session);
+    const budget = historyBudget({ tools, bytesPerToken: session.bytes_per_token ?? undefined, contextTokens: this.contextTokens, maxOutputTokens: this.maxOutputTokens });
+    const noteTokens = this._noteTokens(session, budget.bytesPerToken);
+    emit('metrics.snapshot', {
+      context_compaction: { reason: 'memory_summary', masked_tool_results: ready.plan.masked, dropped_turns: ready.plan.droppedTurns, dropped_messages: ready.plan.droppedMessages, estimated_prompt_tokens: messagesTokens(session.history, budget.bytesPerToken) + noteTokens + budget.toolTokens + budget.overheadTokens, context_tokens: this.contextTokens, history_messages: session.history.length, compactions: session.context_compactions },
+      memory_note: { state: 'applied', note_bytes: utf8Bytes(memory.note), note_tokens_estimate: noteTokens, summarised_messages: ready.excerpt.included, omitted_messages: ready.excerpt.omitted, duration_ms: ready.duration_ms, waited_ms: waited, summaries: memory.summaries },
+    });
   }
   // Only a real tokenizer count can move the ratio; see observedBytesPerToken.
   _learnTokenRatio(session, messages, tools, usage) {
@@ -495,7 +694,17 @@ export class ConversationController {
     const learned = learnBytesPerToken({ observed: observedBytesPerToken({ messages, tools, promptTokens }), current: session.bytes_per_token ?? undefined, promptTokens, contextTokens: this.contextTokens });
     if (learned !== null) session.bytes_per_token = learned;
   }
-  resetSession(sessionId) { const session = this.sessions.get(sessionId); if (!session) return false; if (session.state !== 'IDLE' && session.state !== 'COMPLETED' && session.state !== 'FAILED' && session.state !== 'CANCELLED') throw Object.assign(new Error('session_busy'), { code: 'session_busy' }); session.history = []; session.history_bytes = 0; session.state = 'IDLE'; return true; }
+  resetSession(sessionId) {
+    const session = this.sessions.get(sessionId); if (!session) return false;
+    if (session.state !== 'IDLE' && session.state !== 'COMPLETED' && session.state !== 'FAILED' && session.state !== 'CANCELLED') throw Object.assign(new Error('session_busy'), { code: 'session_busy' });
+    session.history = []; session.history_bytes = 0; session.state = 'IDLE';
+    // A reset forgets the note too, and a summary still running for this
+    // session is stopped; its result would describe a conversation that no
+    // longer exists (the epoch check refuses it even if it lands).
+    if (this.#memoryJob?.session === session) this.#memoryJob.abort.abort();
+    session.memory = newMemoryState((session.memory?.epoch ?? 0) + 1);
+    return true;
+  }
   state(sessionId) { return this.getSession(sessionId).state; }
   _cancelPending(requestId) { const active = this.active; if (!active || active.requestId !== requestId || !active.confirmationId) return false; const item = this.pending.get(active.confirmationId); if (!item) return false; this.pending.delete(active.confirmationId); active.confirmationId = null; item.resolve(CANCELLED_CONFIRMATION); return true; }
   cancel(requestId) { if (this.active?.requestId !== requestId) return false; this.active.controller.abort(); this._cancelPending(requestId); this.engine.cancel?.(requestId); return true; }
@@ -538,7 +747,7 @@ export class ConversationController {
   }
   emitFactory(requestId, sessionId, onEvent) { let sequence = 0; return (event, data) => { const output = makeEvent({ event, requestId, sessionId, sequence: sequence++, data }); onEvent?.(output); return output; }; }
   // `tools: 'off'` sends this turn with no tool definitions (plain chat).
-  async runTurn({ sessionId, message, mode = 'normal', tools: toolMode = 'auto', requestId = opaque('req'), signal, onEvent } = {}) {
+  async runTurn({ sessionId, message, mode = 'normal', tools: toolMode = 'auto', requestId = opaque('req'), signal, onEvent, delegateScope } = {}) {
     if (typeof message !== 'string' || !message.trim()) throw Object.assign(new Error('invalid_message'), { code: 'invalid_message' });
     // The engine bounds each message in UTF-8 BYTES, not UTF-16 characters:
     // 20,000 CJK characters are 60,000 bytes and would pass a length check
@@ -547,6 +756,10 @@ export class ConversationController {
     if (messageBytes > ENGINE_MAX_MESSAGE_BYTES) throw Object.assign(new Error(`Message is too long: ${messageBytes} bytes of UTF-8 text; the limit is ${ENGINE_MAX_MESSAGE_BYTES} bytes. Shorten it or split it into several messages.`), { code: 'invalid_message_too_large', bytes: messageBytes, limit_bytes: ENGINE_MAX_MESSAGE_BYTES });
     if (!/^[A-Za-z0-9_-]{8,96}$/.test(requestId)) throw Object.assign(new Error('invalid_request_id'), { code: 'invalid_request_id' });
     if (!TOOL_MODES.includes(toolMode)) throw Object.assign(new Error('invalid_tools_mode'), { code: 'invalid_tools_mode' });
+    // A scope only means something to delegate mode, and delegate mode never
+    // runs without one: no scope cannot quietly mean "every folder".
+    if ((toolMode === 'delegate') !== (delegateScope !== undefined)) throw Object.assign(new Error('invalid_delegate_scope'), { code: 'invalid_delegate_scope' });
+    const scope = toolMode === 'delegate' ? delegateScopeOf(delegateScope) : null;
     const session = this.getSession(sessionId); if (this.active) throw Object.assign(new Error('another_generation_active'), { code: 'busy' });
     if (!['normal', 'deep'].includes(mode)) throw Object.assign(new Error('invalid_mode'), { code: 'invalid_mode' });
     const controller = new AbortController();
@@ -566,15 +779,17 @@ export class ConversationController {
         // template renders no tool preamble at all and the budget reserves
         // only the small no-tools overhead.
         const tools = toolMode === 'off' ? [] : modelToolDefinitions(new Map([...this.#tools].filter(([name, tool]) => {
+          if (scope) return delegateEligible(name, tool, scope);
           const nativeOwned = nativeSupervisorOwnerFor(name, tool, process.platform) !== null;
           return nativeOwned ? ready : !requiresDurableAction(tool) || ready;
         })));
         let callText = ''; let gotCall = false; let usage; let finishReason;
+        if (calls === 0 && this.memory.mode === 'summary') await this._settleMemory(session, tools, emit);
         let fit = this._fitContext(session, tools, emit, { turnStart: calls === 0 }); let sent;
         for (let attempt = 0; ; attempt++) {
-          let framed = false; sent = session.history;
+          let framed = false; sent = this._promptMessages(session);
           try {
-            for await (const frame of this.engine.generate({ requestId, sessionId: session.id, messages: session.history, tools, mode, signal: controller.signal })) {
+            for await (const frame of this.engine.generate({ requestId, sessionId: session.id, messages: sent, tools, mode, signal: controller.signal })) {
               framed = true;
               if (frame.kind === 'text_delta') { text += frame.text; emit('message.delta', { text: frame.text }); }
               else if (frame.kind === 'tool_call_chunk') { gotCall = true; callText += frame.text; if (Buffer.byteLength(callText) > 32768) throw new EnvelopeError('tool_call_too_large', 'tool call exceeds limit'); }
@@ -594,7 +809,15 @@ export class ConversationController {
           }
         }
         this._learnTokenRatio(session, sent, tools, usage);
-        if (!gotCall) { this._appendHistory(session, { role: 'assistant', content: text }); session.state = 'COMPLETED'; emit('message.completed', { text, finish_reason: FINISH_REASONS.has(finishReason) ? finishReason : 'stop', usage: reportedUsage(usage), state: session.state }); emit('metrics.snapshot', { tool_calls: calls, history_messages: session.history.length, history_bytes: session.history_bytes }); return { requestId, sessionId: session.id, state: session.state, text }; }
+        if (!gotCall) {
+          this._appendHistory(session, { role: 'assistant', content: text }); session.state = 'COMPLETED';
+          emit('message.completed', { text, finish_reason: FINISH_REASONS.has(finishReason) ? finishReason : 'stop', usage: reportedUsage(usage), state: session.state });
+          emit('metrics.snapshot', { tool_calls: calls, history_messages: session.history.length, history_bytes: session.history_bytes });
+          // After the answer, so the summary (if one is due) runs while the
+          // user reads, not while they wait.
+          if (this.memory.mode === 'summary') this._scheduleMemory(session, tools, emit);
+          return { requestId, sessionId: session.id, state: session.state, text };
+        }
         if (text.trim()) throw new EnvelopeError('mixed_tool_call_output', 'tool call output cannot contain assistant text');
         // A model can still emit call syntax it was never offered; running a
         // tool the user switched off would make the switch meaningless.
@@ -602,6 +825,10 @@ export class ConversationController {
         calls++; if (calls > this.maxToolCalls) throw Object.assign(new Error('tool_call_limit_exceeded'), { code: 'tool_call_limit_exceeded' });
         const call = parseToolCall(callText); session.state = 'TOOL_PROPOSED';
         const tool = this.#tools.get(call.name); if (!tool) throw Object.assign(new Error('unknown_tool'), { code: 'unknown_tool' });
+        // Delegate mode fails closed on anything it did not offer, and on a
+        // folder outside the job's scope, before any preview or execution.
+        if (scope && !delegateEligible(call.name, tool, scope)) throw Object.assign(new Error('tool_not_offered'), { code: 'tool_not_offered' });
+        if (scope && DELEGATE_FILE_TOOLS.has(call.name) && !scope.workspaces.includes(call.arguments?.workspace_id)) throw Object.assign(new Error('workspace_not_offered'), { code: 'workspace_not_offered' });
         coerceBooleanArguments(tool.parameters ?? parameterSchema(call.name), call.arguments);
         validateToolArgumentShape(tool, call);
         const nativeDispatchOwner = nativeSupervisorOwnerFor(tool.name, tool, process.platform);
@@ -657,6 +884,9 @@ export class ConversationController {
           };
         }
         const requiresConfirmation = !previewAccessDenied && (typeof tool.confirmationRequired === 'function' ? await tool.confirmationRequired(call, { preview }) : Boolean(tool.requires_confirmation));
+        // Nobody watches a delegated job, so a confirmation would only ever
+        // expire; refusing outright keeps that path from existing at all.
+        if (scope && requiresConfirmation) throw Object.assign(new Error('confirmation_unavailable'), { code: 'confirmation_unavailable' });
         if (requiresConfirmation) {
           session.state = 'WAITING_CONFIRMATION'; const confirmationId = opaque('cnf');
           this.active.confirmationId = confirmationId; emit('tool.confirmation_required', { confirmation_id: confirmationId, call: publicToolCall(call), ...argumentsSummaryField(call, preview), preview: displayPreview(preview, call), risk_tier: tool.risk_tier, expires_in_ms: this.confirmationTimeoutMs });
@@ -721,7 +951,7 @@ export class ConversationController {
         const hostResult = result;
         // Measured before this call's two messages are appended, so the cap
         // already accounts for the assistant call message that precedes it.
-        const resultCapBytes = toolResultByteCap({ history: session.history, pending: [{ role: 'assistant', content: callText }], tools, bytesPerToken: session.bytes_per_token ?? undefined, contextTokens: this.contextTokens, maxOutputTokens: this.maxOutputTokens });
+        const resultCapBytes = toolResultByteCap({ history: session.history, pending: [...(session.memory?.note ? [noteMessage(session.memory.note)] : []), { role: 'assistant', content: callText }], tools, bytesPerToken: session.bytes_per_token ?? undefined, contextTokens: this.contextTokens, maxOutputTokens: this.maxOutputTokens });
         // Provider results are bound to digests of their exact text, so only
         // an unattested result may be cut before validation; the projected,
         // model-visible copy of every result is capped below.

@@ -34,13 +34,22 @@ Commands
           and check every endpoint they rely on. One PASS/WARN/FAIL line
           per check, a fix for each problem; exits 1 on any FAIL. See
           `local/bmo_preflight.py`.
+  delegate-key  print the key a coding assistant (the BMO MCP bridge) uses to
+          send BMO jobs, creating it on first use; `--rotate` replaces it.
+          It is printed to this console only, for pasting once into the
+          coding assistant's secret prompt. It is stored in the per-user BMO
+          state folder, readable only by you; it never goes on a command
+          line. Jobs stay off unless BMO is started with delegation on.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
+import re
+import stat
 import platform
 import secrets
 import subprocess
@@ -427,6 +436,128 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     return bmo_preflight.run(args)
 
 
+# --- delegate key (host/delegate/state.mjs is the other half) -----------------
+
+DELEGATE_KEY_FILE = "delegate-key"
+DELEGATE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+
+
+def delegate_state_dir(env=None, system: str | None = None, home: str | None = None) -> str:
+    """The per-user BMO state folder, exactly as the host resolves it.
+
+    BMO_STATE_DIR overrides and must be absolute; Windows uses
+    %LOCALAPPDATA%\\BMO, macOS ~/Library/Application Support/BMO, other
+    systems ${XDG_STATE_HOME:-~/.local/state}/bmo (a relative XDG value is
+    ignored, as the XDG spec says).
+    """
+    env = os.environ if env is None else env
+    system = sys.platform if system is None else system
+    override = env.get("BMO_STATE_DIR")
+    if override:
+        if not (override.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", override)):
+            raise ValueError("BMO_STATE_DIR must be an absolute path")
+        return override
+    if system == "win32":
+        local = env.get("LOCALAPPDATA", "")
+        if not re.match(r"^[A-Za-z]:[\\/]", local):
+            raise ValueError("LOCALAPPDATA is not set to a local drive path")
+        return local.rstrip("\\/") + "\\BMO"
+    home = home or str(Path.home())
+    if system == "darwin":
+        return os.path.join(home, "Library", "Application Support", "BMO")
+    xdg = env.get("XDG_STATE_HOME", "")
+    return os.path.join(xdg if xdg.startswith("/") else os.path.join(home, ".local", "state"), "bmo")
+
+
+def _private(path: str, *, directory: bool) -> None:
+    """Refuse a symlink or another user's file; close one that is too open.
+
+    Windows ACLs are not visible here; there the per-user %LOCALAPPDATA%
+    location is what keeps the key private.
+    """
+    info = os.lstat(path)
+    if stat.S_ISLNK(info.st_mode) or not (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)):
+        raise PermissionError(f"{path} is not a plain {'folder' if directory else 'file'}")
+    if os.name == "nt":
+        return
+    if info.st_uid != os.getuid():
+        raise PermissionError(f"{path} belongs to another user")
+    if info.st_mode & 0o077:
+        os.chmod(path, 0o700 if directory else 0o600)
+
+
+def _write_private_temp(state_dir: str, text: str) -> str:
+    temp = os.path.join(state_dir, f"{DELEGATE_KEY_FILE}.{secrets.token_hex(8)}.tmp")
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+    try:
+        os.write(fd, text.encode("ascii"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return temp
+
+
+def read_delegate_key(state_dir: str) -> str | None:
+    path = os.path.join(state_dir, DELEGATE_KEY_FILE)
+    try:
+        _private(path, directory=False)
+        with open(path, encoding="ascii", errors="replace") as handle:
+            key = handle.read().strip()
+    except FileNotFoundError:
+        return None
+    if not DELEGATE_KEY_RE.match(key):
+        raise ValueError(f"{path} is damaged; replace it with: python local/bmo_local.py delegate-key --rotate")
+    return key
+
+
+def delegate_key(state_dir: str, rotate: bool = False) -> tuple[str, bool]:
+    """The stored key (created on first use), or a new one with rotate. Returns (key, new)."""
+    os.makedirs(state_dir, mode=0o700, exist_ok=True)
+    _private(state_dir, directory=True)
+    path = os.path.join(state_dir, DELEGATE_KEY_FILE)
+    if not rotate:
+        existing = read_delegate_key(state_dir)
+        if existing:
+            return existing, False
+    key = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode("ascii")
+    temp = _write_private_temp(state_dir, key + "\n")
+    try:
+        if rotate:
+            os.replace(temp, path)  # atomic: a reader sees the old key or the new one
+        else:
+            try:
+                os.link(temp, path)  # never replaces a key another process just made
+            except FileExistsError:
+                pass
+            except OSError:
+                if not os.path.exists(path):
+                    os.replace(temp, path)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+    stored = read_delegate_key(state_dir)
+    return stored, stored == key
+
+
+def cmd_delegate_key(args: argparse.Namespace) -> int:
+    try:
+        state_dir = delegate_state_dir()
+        key, new = delegate_key(state_dir, rotate=args.rotate)
+    except (OSError, ValueError) as error:
+        print(f"delegate-key: {error}", file=sys.stderr)
+        return 1
+    # Only the key goes to stdout, so `| Set-Clipboard` or `| pbcopy` copies
+    # exactly it; the explanation goes to stderr.
+    print(key)
+    print(("A new key was made. " if new else "") + "Paste it once into the coding assistant's BMO key prompt "
+          "(the bmo MCP server asks for it). It is stored in "
+          f"{os.path.join(state_dir, DELEGATE_KEY_FILE)}, readable only by you.\n"
+          + ("Anything still using the old key is now refused; paste this one instead.\n" if args.rotate else "")
+          + "Jobs run only while BMO is started with delegation on (Start-BMO.ps1 -Mode app -EnableDelegation), "
+          "and each one waits for your Approve on the BMO page.", file=sys.stderr)
+    return 0
+
+
 def console_safe_output() -> None:
     """A replacement character instead of a crash on an unencodable character.
 
@@ -444,6 +575,10 @@ def console_safe_output() -> None:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="command", required=True)
+    key = sub.add_parser("delegate-key", help="print (or --rotate) the coding-assistant key")
+    key.set_defaults(handler=cmd_delegate_key)
+    key.add_argument("--rotate", action="store_true",
+                     help="replace the key; whatever holds the old one is refused from then on")
     for name, handler in (("smoke", cmd_smoke), ("eval", cmd_eval), ("bench", cmd_bench),
                           ("longctx", cmd_longctx), ("serve", cmd_serve), ("preflight", cmd_preflight)):
         s = sub.add_parser(name)

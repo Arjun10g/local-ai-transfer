@@ -81,11 +81,13 @@ async function body(req, maxBytes, timeoutMs, { maxString = 8192 } = {}) {
 }
 
 export class HostServer {
-  constructor({ controller, engine, config = {}, providers, providerAuth, providerShutdown, operatorGrants, actionJournal, localCapabilities } = {}) {
+  constructor({ controller, engine, config = {}, providers, providerAuth, providerShutdown, operatorGrants, actionJournal, localCapabilities, delegate = null } = {}) {
     if (!controller) throw new TypeError('controller is required');
     const controllerJournal = controller.actionJournal;
     if (controllerJournal !== undefined && actionJournal !== undefined && controllerJournal !== actionJournal) throw new TypeError('controller and host action journals must be identical');
     this.controller = controller; this.engine = engine; this.config = mergeConfig(config); this.providers = providers; this.providerAuth = providerAuth; this.providerShutdown = providerShutdown; this.operatorGrants = operatorGrants; this.localCapabilities = localCapabilities; this.actionJournal = actionJournal ?? controllerJournal; this.actionJournalBound = this.actionJournal !== undefined && this.controller.actionJournal === this.actionJournal; this.token = randomBytes(32).toString('base64url'); this.bootstrapNonce = randomBytes(32).toString('base64url'); this.bootstrapTtlMs = bootstrapTtlMs(); this.bootstrapExpiresAt = 0; this.bootstrapUsed = false; this.server = null; this.port = null; this.authFailures = new Map(); this.closePromise = null;
+    // Delegated jobs (host/delegate/service.mjs); null when delegation is off.
+    this.delegate = delegate;
   }
   async listen(port = 0) {
     if (this.server) return this.address();
@@ -94,7 +96,12 @@ export class HostServer {
     this.server.maxConnections = this.config.host.max_connections;
     this.server.maxHeadersCount = this.config.host.max_header_count;
     await new Promise((resolve, reject) => { this.server.once('error', reject); this.server.listen(port, '127.0.0.1', resolve); });
-    this.port = this.server.address().port; this.bootstrapExpiresAt = Date.now() + this.bootstrapTtlMs; return this.address();
+    this.port = this.server.address().port; this.bootstrapExpiresAt = Date.now() + this.bootstrapTtlMs;
+    // Startup hook: the delegate service writes host.json (port, pid) and
+    // makes sure its key exists.  The UI bearer is passed only so answers
+    // sent to a delegate caller can be scrubbed of it.
+    if (this.delegate) await this.delegate.start({ port: this.port, secrets: [this.token] });
+    return this.address();
   }
   address() { const url = `http://127.0.0.1:${this.port}`; return { host: '127.0.0.1', port: this.port, token: this.token, url, bootstrap_url: this.bootstrapNonce ? `${url}/#bootstrap=${encodeURIComponent(this.bootstrapNonce)}` : null }; }
   async close() {
@@ -103,6 +110,8 @@ export class HostServer {
       let failed = false;
       const attempt = async action => { try { await action?.(); } catch { failed = true; } };
       await attempt(() => this.operatorGrants?.revokeAll?.());
+      // Shutdown hook: stop every delegated job and remove host.json.
+      await attempt(() => this.delegate?.close?.());
       await attempt(() => this.controller.cancelActive?.());
       await attempt(() => this.providerShutdown?.());
       const server = this.server; this.server = null; this.port = null;
@@ -147,6 +156,9 @@ export class HostServer {
     if (!this.allowedRequest(req)) return json(res, 403, { error: 'forbidden' });
     const requestUrl = new URL(req.url ?? '/', 'http://127.0.0.1');
     const path = requestUrl.pathname;
+    // The bridge's routes take only the delegate key, never the UI bearer, so
+    // they are answered before the bearer check.  Off means 404, key or not.
+    if (path === '/api/delegate' || path.startsWith('/api/delegate/')) return this.delegate ? this.delegate.handleBridge(req, res, requestUrl) : json(res, 404, { error: 'not_found' });
     if (req.method === 'GET' && path === '/healthz') return json(res, 200, { ok: true });
     if (req.method === 'GET' && ASSETS.has(path) && !requestUrl.search) return this.asset(path, res);
     if (req.method === 'POST' && path === '/bootstrap' && !requestUrl.search) return this.bootstrap(req, res);
@@ -183,6 +195,8 @@ export class HostServer {
       }
       if (req.method === 'POST' && path === '/api/sessions') { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); const input = exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), ['session_id', 'reset']); if (input.session_id !== undefined && (typeof input.session_id !== 'string' || !OPAQUE_ID.test(input.session_id))) return json(res, 400, { error: 'invalid_request_body' }); if (input.reset !== undefined && typeof input.reset !== 'boolean') return json(res, 400, { error: 'invalid_request_body' }); const session = this.controller.createSession(input.session_id); if (input.reset) { try { this.controller.resetSession(session.id); } catch (error) { if (error?.message === 'session_busy') return json(res, 409, { error: 'session_busy' }); throw error; } } return json(res, 201, { session_id: session.id, state: this.controller.state(session.id) }); }
       if (req.method === 'POST' && path === '/api/chat') return await this.chat(req, res);
+      // The operator's approval cards and stop button (UI bearer only).
+      if (path === '/api/delegation' || path.startsWith('/api/delegation/')) return this.delegate ? await this.delegate.handleOperator(req, res, requestUrl) : json(res, 404, { error: 'not_found' });
       const authAction = path.match(/^\/api\/provider-auth\/microsoft_graph\/(start|cancel|clear)$/);
       if (req.method === 'POST' && authAction) { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), []); const control = resolveAuthControl(this.providerAuth); let configured = false; try { configured = control?.configured === true; } catch {} if (!configured) return json(res, 409, { error: 'provider_unconfigured' }); if (authAction[1] === 'start') { void Promise.resolve().then(() => control.start()).then(() => this.controller.reconcileRestartActions?.()).catch(() => {}); return json(res, 202, { accepted: true, status: safeAuthStatus(control) }); } let accepted = true; try { if (authAction[1] === 'cancel') control.cancel(); else control.clear(); } catch { accepted = false; } return json(res, accepted ? 200 : 503, { accepted, status: safeAuthStatus(control) }); }
       if (req.method === 'POST' && path === '/api/cancel') { if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' }); const input = exactBody(await body(req, this.config.host.max_body_bytes, this.config.host.request_timeout_ms), ['request_id'], ['request_id']); if (typeof input.request_id !== 'string' || !OPAQUE_ID.test(input.request_id)) return json(res, 400, { error: 'invalid_request_id' }); const cancelled = this.controller.cancel(input.request_id); return json(res, cancelled ? 200 : 404, { cancelled }); }
@@ -207,7 +221,7 @@ export class HostServer {
     if (!isWithinDirectory(UI_ROOT, candidate)) return json(res, 404, { error: 'not_found' });
     try { const content = await readFile(candidate, 'utf8'); res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', ...securityHeaders() }); res.end(content); } catch { json(res, 404, { error: 'not_found' }); }
   }
-  async status(res) { let engine = { ready: false, backend: 'unknown' }; try { engine = await this.engine?.health?.() ?? engine; } catch { /* generic status only */ } const providers = typeof this.providers === 'function' ? this.providers() : this.providers ?? {}; const journal = this.actionJournal?.health?.() ?? { state: 'unavailable', error: 'action_journal_unavailable' }; const bound = this.actionJournalBound; const journalError = this.actionJournal === undefined ? journal.error : bound ? journal.error ?? null : 'action_journal_controller_mismatch'; json(res, 200, { host: { bind: '127.0.0.1', port: this.port }, engine, network: { provider: this.config.network.provider, enabled: this.config.network.provider !== 'disabled' }, providers, local_capabilities: this.localCapabilities ?? { basis: 'unavailable', platform: 'unknown', tools: {} }, action_journal: { state: journal.state, error: journalError, bound_to_controller: bound, durable_action_dispatch: bound && journal.state === 'ready' }, operator_grants: { available: this.operatorGrants?.list?.().length ?? 0, active: this.operatorGrants?.list?.().filter(value => value.granted).length ?? 0 }, limits: { max_body_bytes: this.config.host.max_body_bytes, max_connections: this.config.host.max_connections } }); }
+  async status(res) { let engine = { ready: false, backend: 'unknown' }; try { engine = await this.engine?.health?.() ?? engine; } catch { /* generic status only */ } const providers = typeof this.providers === 'function' ? this.providers() : this.providers ?? {}; const journal = this.actionJournal?.health?.() ?? { state: 'unavailable', error: 'action_journal_unavailable' }; const bound = this.actionJournalBound; const journalError = this.actionJournal === undefined ? journal.error : bound ? journal.error ?? null : 'action_journal_controller_mismatch'; json(res, 200, { host: { bind: '127.0.0.1', port: this.port }, engine, network: { provider: this.config.network.provider, enabled: this.config.network.provider !== 'disabled' }, providers, local_capabilities: this.localCapabilities ?? { basis: 'unavailable', platform: 'unknown', tools: {} }, action_journal: { state: journal.state, error: journalError, bound_to_controller: bound, durable_action_dispatch: bound && journal.state === 'ready' }, operator_grants: { available: this.operatorGrants?.list?.().length ?? 0, active: this.operatorGrants?.list?.().filter(value => value.granted).length ?? 0 }, delegate: this.delegate?.statusSummary?.() ?? { enabled: false, queue: 0, approval: 'per_job' }, limits: { max_body_bytes: this.config.host.max_body_bytes, max_connections: this.config.host.max_connections } }); }
   async chat(req, res) {
     if (!jsonContentType(req)) return json(res, 415, { error: 'unsupported_content_type' });
     // The message string may use the whole body bound: the controller owns the
@@ -219,7 +233,11 @@ export class HostServer {
     const aborted = () => abort.abort(); req.on('aborted', aborted);
     const startStream = () => { if (headersSent || res.destroyed) return; headersSent = true; res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', connection: 'keep-alive', ...securityHeaders() }); for (const frame of pending.splice(0)) res.write(frame); };
     const closed = () => { if (!finished) abort.abort(); }; res.on('close', closed);
+    // The operator's turn has priority over delegated jobs: a running job is
+    // stopped first and none starts until this turn ends.
+    let releaseDelegate = null;
+    try { releaseDelegate = this.delegate ? await this.delegate.interactiveBegin() : null; } catch { releaseDelegate = null; }
     try { await this.controller.runTurn({ sessionId: input.session_id, message: input.message, mode: input.mode ?? 'normal', tools: input.tools ?? 'auto', requestId: input.request_id, signal: abort.signal, onEvent: event => { if (res.destroyed) return; const frame = sseFrame(event); if (!headersSent) { pending.push(frame); startStream(); } else res.write(frame); } }); finished = true; if (!headersSent) startStream(); if (!res.destroyed) res.end(); }
-    finally { req.off('aborted', aborted); res.off('close', closed); }
+    finally { req.off('aborted', aborted); res.off('close', closed); releaseDelegate?.(); }
   }
 }

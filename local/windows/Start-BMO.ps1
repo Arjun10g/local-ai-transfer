@@ -46,6 +46,18 @@
   for folders named here. Without it the model is offered time.now and
   system.get_info only.
 
+.PARAMETER EnableDelegation
+  App mode only: accept read-only jobs from a coding assistant (the BMO MCP
+  bridge for GitHub Copilot). Each job waits for your Approve on the BMO page.
+  The host then writes host.json (its port; no secret) to %LOCALAPPDATA%\BMO.
+
+.PARAMETER ShowDelegateKey
+  Print the key the coding assistant needs (made on first use) and exit. Paste
+  it once into the coding assistant's BMO key prompt. Needs no -ModelPath.
+
+.PARAMETER RotateDelegateKey
+  Replace that key and print the new one; the old one stops working at once.
+
 .PARAMETER NodePath
   App mode only: the node.exe to use, e.g. from the portable nodejs.org zip.
   Default: node.exe from PATH, never from the current folder.
@@ -53,11 +65,13 @@
 .EXAMPLE
   .\local\windows\Start-BMO.ps1 -ModelPath D:\models\Qwen3.5-9B-Q4_K_M.gguf
   .\local\windows\Start-BMO.ps1 -ModelPath D:\models\Qwen3.5-9B-Q4_K_M.gguf -Mode app
+  .\local\windows\Start-BMO.ps1 -ModelPath D:\models\Qwen3.5-9B-Q4_K_M.gguf -Mode app -EnableDelegation
+  .\local\windows\Start-BMO.ps1 -ShowDelegateKey
   .\local\windows\Start-BMO.ps1 -ModelPath D:\models\Qwen3.5-9B-Q4_K_M.gguf -Backend intel-vulkan -VulkanDeviceName 'Intel(R) Arc(TM) Graphics'
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Run')]
 param(
-    [Parameter(Mandatory = $true)] [string] $ModelPath,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Run')] [string] $ModelPath,
     [ValidateSet('chat', 'app')] [string] $Mode = 'chat',
     [ValidateSet('cpu', 'intel-vulkan')] [string] $Backend = 'cpu',
     [string] $VulkanDeviceName,
@@ -69,10 +83,26 @@ param(
     [ValidateRange(1, 2048)] [int] $MaxTokens,
     [string] $NodePath,
     [string] $HostConfig,
-    [switch] $NoBrowser
+    [switch] $NoBrowser,
+    [switch] $EnableDelegation,
+    [Parameter(ParameterSetName = 'Key')] [switch] $ShowDelegateKey,
+    [Parameter(ParameterSetName = 'Key')] [switch] $RotateDelegateKey
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# The coding-assistant key: printed by bmo_local.py, never passed on a
+# command line. Handled first, because it needs no engine and no model.
+if ($ShowDelegateKey -or $RotateDelegateKey) {
+    $KeyPython = if (Get-Command 'py' -ErrorAction SilentlyContinue) { 'py' } else { 'python' }
+    $KeyArgs = @()
+    if ($KeyPython -eq 'py') { $KeyArgs += '-3' }
+    $KeyArgs += @((Join-Path (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path 'local\bmo_local.py'), 'delegate-key')
+    if ($RotateDelegateKey) { $KeyArgs += '--rotate' }
+    & $KeyPython @KeyArgs
+    exit $LASTEXITCODE
+}
+if ($EnableDelegation -and $Mode -ne 'app') { throw '-EnableDelegation needs -Mode app (the approval cards are on the BMO page).' }
 
 # Engine resolution is the same as Test-BMO.ps1, so both scripts run the same binary.
 $Repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -155,6 +185,7 @@ if ($Mode -eq 'chat') {
         $argv += @('--host-config', (Resolve-Path -LiteralPath $HostConfig).Path)
     }
     if ($NoBrowser) { $argv += '--no-browser' }
+    if ($EnableDelegation) { $argv += '--delegate' }
 }
 # The engine log holds the engine's own diagnostics, never prompts or replies.
 $argv += @('--engine', $Engine, '--model', $Model, '--backend', $Backend,

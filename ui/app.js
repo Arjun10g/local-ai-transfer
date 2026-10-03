@@ -2,7 +2,7 @@ import { describeError, isCancellation } from './errors.js';
 import { renderMarkdown, revealInvisible, separateThinking } from './markdown.js';
 import { clearTranscript, loadTranscript, normalizeItem, purgeLegacyLocalStorage, saveTranscript, transcriptToMarkdown } from './transcript.js';
 import { hasToolLabel, toolLabel, toolStatusText } from './tool-labels.js';
-import { buildDiff, buildExcerpt } from './cards.js';
+import { buildDelegateCard, buildDiff, buildExcerpt, delegateBadgeText } from './cards.js';
 
 // The single-use launch nonce arrives in the URL fragment.  Strip it from the
 // address bar (and so from history, bookmarks, and screen shares) before any
@@ -25,6 +25,10 @@ const MAX_MESSAGE_BYTES = 32768;
 const STATUS_POLL_MS = 5000;
 const SLOW_HINT_MS = 30000;
 const STOP_FALLBACK_MS = 15000;
+// Approval cards for coding-assistant jobs are polled, not streamed: a job can
+// arrive while no chat request is open.
+const DELEGATION_POLL_MS = 3000;
+const DELEGATE_CAPABILITY = 'delegate.read_only_jobs';
 
 const $ = selector => document.querySelector(selector);
 const transcript = $('#transcript');
@@ -45,6 +49,8 @@ let items = [];
 let current = null; // the assistant bubble that deltas currently stream into
 const previews = new Map();
 const pendingConfirmations = new Map();
+let delegateEnabled = false;
+const delegateCards = new Map();
 
 class HostError extends Error { constructor(code, status = 0) { super(code); this.code = code; this.status = status; } }
 
@@ -442,6 +448,8 @@ function applyStatus(info) {
   $('#graph-controls').hidden = !graph;
   $('#access-panel').hidden = !(graph || grants);
   $('#external-notice').hidden = !(Object.values(providers).some(isActiveProvider) || info?.network?.enabled === true);
+  $('#delegate').textContent = delegateBadgeText(info?.delegate);
+  delegateEnabled = info?.delegate?.enabled === true;
   return { graph, grants };
 }
 
@@ -465,9 +473,86 @@ function disconnected() {
 
 // ---- operator grants and Microsoft Graph (parked unless configured) -----------
 
-async function renderGrants() { const response = await api('/api/operator-grants'); if (!response.ok) return; const { capabilities = [] } = await response.json(); const list = $('#grant-list'); list.replaceChildren(); if (!capabilities.length) { const empty = document.createElement('p'); empty.textContent = 'No grantable capabilities are configured.'; list.append(empty); return; } for (const item of capabilities) { const row = document.createElement('div'); row.className = 'grant-row'; const description = document.createElement('span'); description.textContent = item.label; const detailText = document.createElement('small'); detailText.textContent = `${item.provider} · ${item.scope}${item.granted ? ` · expires ${new Date(item.expires_at).toLocaleTimeString()}` : ''}`; description.append(detailText); const button = document.createElement('button'); button.type = 'button'; button.textContent = item.granted ? 'Revoke' : 'Grant 1 hour'; button.onclick = async () => { if (!item.granted && !confirm(`Grant one hour of full access to: ${item.label}?\n\nThis does not auto-approve external sends, installs, elevation, purchases, deletion, or security changes.`)) return; const body = item.granted ? { granted: false } : { granted: true, duration_ms: 3600000 }; await api(`/api/operator-grants/${item.capability}`, { method: 'POST', body }); await renderGrants(); }; row.append(description, button); list.append(row); } }
+async function renderGrants() {
+  const response = await api('/api/operator-grants'); if (!response.ok) return;
+  const { capabilities = [] } = await response.json(); const list = $('#grant-list'); list.replaceChildren();
+  if (!capabilities.length) { const empty = document.createElement('p'); empty.textContent = 'No grantable capabilities are configured.'; list.append(empty); return; }
+  for (const item of capabilities) {
+    const row = document.createElement('div'); row.className = 'grant-row';
+    const description = document.createElement('span'); description.textContent = item.label;
+    const detailText = document.createElement('small'); detailText.textContent = `${item.provider} · ${item.scope}${item.granted ? ` · expires ${new Date(item.expires_at).toLocaleTimeString()}` : ''}`; description.append(detailText);
+    row.append(description);
+    const grant = async durationMs => {
+      const ask = item.capability === DELEGATE_CAPABILITY
+        ? `Approve every coding-assistant job for ${durationMs === 900000 ? '15 minutes' : '1 hour'} without asking?\n\nJobs stay read-only, but their answers go back to the coding assistant and may leave this laptop.`
+        : `Grant one hour of full access to: ${item.label}?\n\nThis does not auto-approve external sends, installs, elevation, purchases, deletion, or security changes.`;
+      if (!confirm(ask)) return;
+      await api(`/api/operator-grants/${item.capability}`, { method: 'POST', body: { granted: true, duration_ms: durationMs } }); await renderGrants(); void refreshStatus();
+    };
+    const button = (text, onClick) => { const element = document.createElement('button'); element.type = 'button'; element.textContent = text; element.onclick = onClick; row.append(element); };
+    if (item.granted) button('Revoke', async () => { await api(`/api/operator-grants/${item.capability}`, { method: 'POST', body: { granted: false } }); await renderGrants(); void refreshStatus(); });
+    // Coding-assistant jobs get the short choices: a quarter of an hour or an hour.
+    else if (item.capability === DELEGATE_CAPABILITY) { button('Allow 15 min', () => grant(900000)); button('Allow 1 hour', () => grant(3600000)); }
+    else button('Grant 1 hour', () => grant(3600000));
+    list.append(row);
+  }
+}
 async function refreshGraphAuth() { const response = await api('/api/provider-auth/microsoft_graph'); if (!response.ok) return; const auth = (await response.json()).microsoft_graph ?? {}; const label = $('#graph-auth-status'); label.textContent = auth.prompt ? `Enter ${auth.prompt.userCode} at ${auth.prompt.verificationUri}` : auth.state === 'authenticated' && auth.account_verified === true ? 'Connected (account verified)' : auth.state; }
 async function startGraphAuth() { const response = await api('/api/provider-auth/microsoft_graph/start', { method: 'POST', body: {} }); if (!response.ok) return; for (let count = 0; count < 900; count += 1) { await refreshGraphAuth(); const statusResponse = await api('/api/provider-auth/microsoft_graph'); const state = (await statusResponse.json()).microsoft_graph?.state; if (state !== 'requesting_device_code' && state !== 'awaiting_user') break; await new Promise(resolve => setTimeout(resolve, 1000)); } }
+
+// ---- coding-assistant jobs (only when /api/status says delegation is on) ------
+
+function addDelegateCard(job) {
+  const entry = { answered: false, finish: null };
+  const expiresIn = Number.isSafeInteger(job.expires_in_ms) && job.expires_in_ms > 0 ? job.expires_in_ms : 0;
+  // Counted from when the card arrived, one second early, like tool cards.
+  const deadline = Date.now() + expiresIn - 1000;
+  let timer = null;
+  const submit = async approved => {
+    entry.answered = true; built.approve.disabled = true; built.deny.disabled = true; built.countdown.textContent = approved ? 'Approving…' : 'Denying…';
+    try {
+      const response = await api(`/api/delegation/jobs/${job.job_id}/decision`, { method: 'POST', body: { approved } });
+      const data = await response.json().catch(() => null);
+      if (response.ok) entry.finish(approved ? 'Approved. BMO runs it when it is free; your own messages always go first.' : 'Denied. Nothing was run.', approved ? 'approved' : 'denied');
+      else if (response.status === 410) entry.finish('Expired. Nobody answered in time, so nothing was run.', 'expired');
+      else entry.finish(describeError(typeof data?.error === 'string' ? data.error : null, { status: response.status }).message, 'expired');
+    } catch { entry.finish(describeError('network_error').message, 'expired'); }
+  };
+  const built = buildDelegateCard(document, job, { onDecision: approved => { void submit(approved); } });
+  entry.finish = (text, state) => {
+    clearInterval(timer); built.approve.disabled = true; built.deny.disabled = true; built.countdown.textContent = text; built.card.dataset.state = state; built.card.classList.remove('urgent');
+    setTimeout(() => { built.card.remove(); if (delegateCards.get(job.job_id) === entry) delegateCards.delete(job.job_id); $('#delegate-panel').hidden = delegateCards.size === 0; }, 5000);
+  };
+  const tick = () => { const left = Math.ceil((deadline - Date.now()) / 1000); if (left <= 0) { if (!entry.answered) entry.finish('Expired. Nobody answered in time, so nothing was run.', 'expired'); return; } built.countdown.textContent = `Waiting for your decision: ${formatElapsed(left * 1000)} left`; built.card.classList.toggle('urgent', left <= 10); };
+  delegateCards.set(job.job_id, entry);
+  $('#delegate-list').append(built.card); $('#delegate-panel').hidden = false;
+  tick(); timer = setInterval(tick, 1000);
+}
+
+function renderDelegation(view) {
+  const pending = new Set();
+  for (const job of view.pending.slice(0, 8)) {
+    if (!job || typeof job.job_id !== 'string' || !OPAQUE_ID.test(job.job_id)) continue;
+    pending.add(job.job_id);
+    if (!delegateCards.has(job.job_id)) addDelegateCard(job);
+  }
+  // Withdrawn by the caller, expired, or answered in another tab.
+  for (const [id, entry] of delegateCards) if (!pending.has(id) && !entry.answered) { entry.answered = true; entry.finish('No longer waiting: it was withdrawn, answered elsewhere, or expired.', 'expired'); }
+  $('#delegate').textContent = delegateBadgeText(view);
+}
+
+let delegationInFlight = false;
+async function refreshDelegation() {
+  if (!headers || !delegateEnabled || delegationInFlight) return;
+  delegationInFlight = true;
+  try {
+    const response = await api('/api/delegation');
+    if (!response.ok) { if (response.status === 404) delegateEnabled = false; return; }
+    const view = await response.json().catch(() => null);
+    if (view && Array.isArray(view.pending)) renderDelegation(view);
+  } catch { /* the next poll retries */ }
+  finally { delegationInFlight = false; }
+}
 
 // ---- start-up ---------------------------------------------------------------
 
@@ -504,6 +589,7 @@ async function init() {
   if (graph) await refreshGraphAuth().catch(() => {});
   sendButton.disabled = false; input.focus();
   setInterval(() => { void refreshStatus(); }, STATUS_POLL_MS);
+  void refreshDelegation(); setInterval(() => { void refreshDelegation(); }, DELEGATION_POLL_MS);
 }
 
 $('#chat').addEventListener('submit', send);
@@ -519,7 +605,7 @@ function applyToolsToggle() { const button = $('#tools'); button.setAttribute('a
 $('#tools').onclick = () => { toolsOff = !toolsOff; sessionSet(TOOLS_OFF_KEY, toolsOff ? '1' : null); applyToolsToggle(); };
 $('#normal').onclick = () => { mode = 'normal'; $('#normal').setAttribute('aria-pressed', 'true'); $('#deep').setAttribute('aria-pressed', 'false'); };
 $('#deep').onclick = () => { mode = 'deep'; $('#deep').setAttribute('aria-pressed', 'true'); $('#normal').setAttribute('aria-pressed', 'false'); };
-$('#revoke-all').onclick = async () => { if (activeRequest) await api('/api/cancel', { method: 'POST', body: { request_id: activeRequest } }).catch(() => {}); await api('/api/operator-grants/revoke-all', { method: 'POST', body: {} }).catch(() => {}); await renderGrants().catch(() => {}); };
+$('#revoke-all').onclick = async () => { if (activeRequest) await api('/api/cancel', { method: 'POST', body: { request_id: activeRequest } }).catch(() => {}); await api('/api/operator-grants/revoke-all', { method: 'POST', body: {} }).catch(() => {}); if (delegateEnabled) await api('/api/delegation/stop', { method: 'POST', body: {} }).catch(() => {}); await renderGrants().catch(() => {}); void refreshDelegation(); };
 $('#graph-auth').onclick = () => { void startGraphAuth().catch(() => { $('#graph-auth-status').textContent = 'Authentication failed'; }); };
 $('#graph-auth-cancel').onclick = async () => { await api('/api/provider-auth/microsoft_graph/cancel', { method: 'POST', body: {} }).catch(() => {}); await refreshGraphAuth().catch(() => {}); };
 $('#graph-auth-clear').onclick = async () => { await api('/api/provider-auth/microsoft_graph/clear', { method: 'POST', body: {} }).catch(() => {}); await refreshGraphAuth().catch(() => {}); };

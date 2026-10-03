@@ -8,7 +8,10 @@ import { ConversationController } from './host/agent/controller.mjs';
 import { CONTEXT_DEFAULTS } from './host/agent/context-budget.mjs';
 import { ActionJournal, DescriptorActionJournal } from './host/agent/action-journal.mjs';
 import { HostServer } from './host/server/host-server.mjs';
-import { ENGINE_GENERATION_LIMITS, mergeConfig } from './host/agent/config.mjs';
+import { ENGINE_GENERATION_LIMITS, delegateOptionsFromConfig, memoryOptionsFromConfig, mergeConfig } from './host/agent/config.mjs';
+import { DelegateService, DELEGATE_GRANT_BINDING } from './host/delegate/service.mjs';
+import { createDelegateToolRegistry } from './host/delegate/tools.mjs';
+import { resolveStateDir } from './host/delegate/state.mjs';
 import { createLocalToolRegistry } from './host/tools/local/index.mjs';
 import { createExternalToolRegistry, OperatorGrantStore, OperatorGrantControl, buildOperatorGrantBindings } from './host/providers/index.mjs';
 
@@ -112,13 +115,17 @@ export async function createHostComposition({ fileConfig = {}, env = process.env
   const envContextTokens = parseContextTokensEnv(env.LAE_CONTEXT_TOKENS);
   const config = mergeConfig({ ...fileConfig, engine: { ...(fileConfig.engine ?? {}), mode } });
   const generationOptions = engineGenerationOptions(env, config.engine);
+  // Delegated jobs are off unless the config or LAE_DELEGATE_ENABLED=1 turns
+  // them on; off means no routes, no key file, no host.json.
+  const delegateOptions = delegateOptionsFromConfig(config, env);
+  const stateDir = delegateOptions.enabled ? resolveStateDir({ env }) : null;
   if (mode === 'native' && (!model || !backend)) throw new Error('native engine model and backend must be explicit in config or environment');
   let engine; let operatorGrants; let externalTools; let actionJournal;
   try {
     engine = engineFactory ? await engineFactory() : mode === 'native' ? new NativeEngineClient({ endpoint, token, model, backend, timeoutMs: requestTimeoutMs, ...generationOptions }) : new FixtureEngineClient();
     if (mode === 'native') await engine.waitReady();
     const grantStore = new OperatorGrantStore();
-    operatorGrants = new OperatorGrantControl({ store: grantStore, bindings: buildOperatorGrantBindings(config) });
+    operatorGrants = new OperatorGrantControl({ store: grantStore, bindings: [...buildOperatorGrantBindings(config), ...(delegateOptions.enabled ? [DELEGATE_GRANT_BINDING] : [])] });
     externalTools = createExternalToolRegistry({ config: config.providers, workspaceRoots: config.workspace_roots, graph: { grantStore } });
     if (journalDescriptor !== undefined) actionJournal = await DescriptorActionJournal.open({ fd: journalDescriptor, ownsDescriptor: true });
     else if (journalDirectory !== undefined) actionJournal = await ActionJournal.open({ directory: journalDirectory });
@@ -128,10 +135,16 @@ export async function createHostComposition({ fileConfig = {}, env = process.env
     const toolRegistry = { ...localTools, ...externalTools };
     const contextTokens = resolveContextTokens({ envTokens: envContextTokens, engineTokens: await readEngineContextTokens(engine) });
     const maxOutputTokens = outputTokenReservation(engine, contextTokens);
-    const controller = new ConversationController({ engine, actionJournal, toolRegistry, contextTokens, maxOutputTokens, confirmationTimeoutMs: config.host.confirmation_timeout_ms });
+    const controller = new ConversationController({ engine, actionJournal, toolRegistry, contextTokens, maxOutputTokens, confirmationTimeoutMs: config.host.confirmation_timeout_ms, memory: memoryOptionsFromConfig(config) });
     await controller.reconcileRestartActions();
-    const host = new HostServer({ controller, engine, config, providers: externalTools.providerStatus, providerAuth: externalTools.providerAuthControl, providerShutdown: externalTools.shutdown, operatorGrants, actionJournal, localCapabilities });
-    return { config, mode, engine, grantStore, operatorGrants, externalTools, localTools, toolRegistry, controller, host, actionJournal };
+    let delegate = null;
+    if (delegateOptions.enabled) {
+      // Its own registry: read-only tools, files only in flagged folders.
+      const delegateTools = createDelegateToolRegistry({ workspaceRoots: config.workspace_roots });
+      delegate = new DelegateService({ engine, userController: controller, toolRegistry: delegateTools.registry, workspaceIds: delegateTools.workspaceIds, stateDir, grantControl: operatorGrants, options: delegateOptions, contextTokens, maxOutputTokens, requestTimeoutMs: config.host.request_timeout_ms });
+    }
+    const host = new HostServer({ controller, engine, config, providers: externalTools.providerStatus, providerAuth: externalTools.providerAuthControl, providerShutdown: externalTools.shutdown, operatorGrants, actionJournal, localCapabilities, delegate });
+    return { config, mode, engine, grantStore, operatorGrants, externalTools, localTools, toolRegistry, controller, host, actionJournal, delegate };
   } catch (error) {
     for (const cleanup of [() => operatorGrants?.revokeAll?.(), () => externalTools?.shutdown?.(), () => actionJournal?.close?.(), () => engine?.shutdown?.()]) {
       try { await cleanup(); } catch {}
@@ -147,7 +160,7 @@ export async function bootstrap({ fileConfig, env = process.env, compositionFact
   try { address = await composition.host.listen(Number(env.LAE_PORT ?? 0)); }
   catch (error) { try { await composition.host.close?.(); } catch {} throw error; }
   if (env.LAE_REVEAL_BOOTSTRAP_URL === '1') console.log(address.bootstrap_url);
-  else console.log(JSON.stringify({ ready: true, host: address.host, port: address.port, bootstrap: 'hidden-use-approved-launcher', engine: composition.mode, context_tokens: composition.controller?.contextTokens ?? null, network: composition.config.network.provider, action_journal: composition.actionJournal?.health().state ?? 'unavailable' }));
+  else console.log(JSON.stringify({ ready: true, host: address.host, port: address.port, bootstrap: 'hidden-use-approved-launcher', engine: composition.mode, context_tokens: composition.controller?.contextTokens ?? null, network: composition.config.network.provider, action_journal: composition.actionJournal?.health().state ?? 'unavailable', delegate: composition.delegate ? 'enabled' : 'off' }));
   return { ...composition, address };
 }
 

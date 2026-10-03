@@ -107,7 +107,7 @@ def host_command(node: str) -> list[str]:
 
 
 def host_environment(base: dict, *, port: int, token: str, model: str, backend: str,
-                     config: str | None = None) -> dict:
+                     config: str | None = None, delegate: bool = False) -> dict:
     """The host's environment: the caller's, minus any stray LAE_* or NODE_* setting, plus ours.
 
     An inherited LAE_ENGINE_MODE=fixture or LAE_CONFIG_PATH would make the host
@@ -127,6 +127,12 @@ def host_environment(base: dict, *, port: int, token: str, model: str, backend: 
     })
     if config:
         env["LAE_CONFIG_PATH"] = str(Path(config).resolve())
+    # Jobs from a coding assistant only on the operator's explicit --delegate:
+    # an inherited LAE_DELEGATE_ENABLED was already dropped above. With it on,
+    # the host writes host.json (its port, no secret) to the per-user state
+    # folder so the MCP bridge can find it.
+    if delegate:
+        env["LAE_DELEGATE_ENABLED"] = "1"
     return env
 
 
@@ -201,7 +207,7 @@ def stop_host(host: subprocess.Popen, interrupted: bool, grace: float = 10.0) ->
 def run(eng, args: argparse.Namespace, node: str) -> int:
     model, backend = engine_identity(eng)
     env = host_environment(os.environ, port=eng.port, token=eng.token, model=model,
-                           backend=backend, config=args.host_config)
+                           backend=backend, config=args.host_config, delegate=args.delegate)
     host = start_host(node, env)
     interrupted = False
     try:
@@ -213,6 +219,10 @@ def run(eng, args: argparse.Namespace, node: str) -> int:
         print(f"\nBMO is running on {backend}.\n  open: {url}\n"
               "  (that link works once, within 3 minutes; to open the UI again later, restart with Ctrl+C)\n"
               "  Ctrl+C here stops everything.", file=sys.stderr)
+        if args.delegate:
+            print("  coding-assistant jobs: ON. Each one waits for your Approve on the BMO page.\n"
+                  "  The key to paste into the coding assistant: python local/bmo_local.py delegate-key",
+                  file=sys.stderr)
         if not args.no_browser:
             webbrowser.open(url)
         outcome = supervise(host, eng.proc)
@@ -235,6 +245,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host-timeout", type=float, default=60,
                    help="seconds to wait for the host to come up")
     p.add_argument("--no-browser", action="store_true", help="print the UI link but do not open it")
+    p.add_argument("--delegate", action="store_true",
+                   help="accept read-only jobs from a coding assistant (the BMO MCP bridge); each "
+                        "job still needs your Approve on the BMO page")
     return p
 
 
