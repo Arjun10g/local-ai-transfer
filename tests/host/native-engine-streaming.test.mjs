@@ -69,14 +69,17 @@ test('NativeEngineClient yields text before the engine finishes, then length and
   assert.deepEqual(cancels(engine.log), [], 'a finished generation is not cancelled');
 });
 
-test('NativeEngineClient falls back to a counted usage when the engine omits it', async t => {
+// Previously pinned a counted `completion_tokens` (one per stream frame) when
+// the engine omitted usage. That tally was presented as engine-reported usage
+// in message.completed, so a missing count now stays missing.
+test('NativeEngineClient leaves usage the engine omits missing instead of counting frames', async t => {
   const engine = await fakeEngine(async ({ response, head }) => { head(); response.end(delta('a') + delta('b') + finish('stop') + DONE); }); t.after(engine.close);
   const native = client(engine.port); t.after(() => native.shutdown());
   const frames = await collect(native.generate({ requestId: 'req_usage01', sessionId: 'ses_usage01', messages }));
-  assert.deepEqual(frames.at(-1), { kind: 'done', finish_reason: 'stop', usage: { completion_tokens: 2 } });
+  assert.deepEqual(frames.at(-1), { kind: 'done', finish_reason: 'stop', usage: {} });
   const garbage = await fakeEngine(async ({ response, head }) => { head(); response.end(delta('a') + finish('stop', { prompt_tokens: -4, completion_tokens: 'many' }) + DONE); }); t.after(garbage.close);
   const other = client(garbage.port); t.after(() => other.shutdown());
-  assert.deepEqual((await collect(other.generate({ requestId: 'req_usage02', sessionId: 'ses_usage02', messages }))).at(-1).usage, { completion_tokens: 1 });
+  assert.deepEqual((await collect(other.generate({ requestId: 'req_usage02', sessionId: 'ses_usage02', messages }))).at(-1).usage, {});
 });
 
 test('NativeEngineClient tolerates a prefill longer than the stall limit', async t => {

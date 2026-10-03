@@ -927,8 +927,9 @@ test('Copilot output overflow terminates the process and fails closed', async ()
 
 test('Copilot Windows tree termination uses fixed taskkill argv without a shell', async () => {
   const calls = []; const child = new FakeChild({ finish: false }); child.pid = 4321; child.exitCode = null; child.signalCode = null;
-  await killCopilotProcessTree(child, { platform: 'win32', graceMs: 100, spawn: (executable, args, options) => { calls.push({ executable, args, options }); const killer = new FakeChild({ finish: false }); killer.exitCode = 0; queueMicrotask(() => { child.exitCode = 1; child.treeReaped = true; child.emit('close', 1); killer.emit('close', 0); }); return killer; } });
-  assert.deepEqual(calls[0].args, ['/PID', '4321', '/T', '/F']); assert.equal(calls[0].executable, 'taskkill.exe'); assert.equal(calls[0].options.shell, false);
+  await killCopilotProcessTree(child, { platform: 'win32', graceMs: 100, environment: { SystemRoot: 'C:\\Windows' }, spawn: (executable, args, options) => { calls.push({ executable, args, options }); const killer = new FakeChild({ finish: false }); killer.exitCode = 0; queueMicrotask(() => { child.exitCode = 1; child.treeReaped = true; child.emit('close', 1); killer.emit('close', 0); }); return killer; } });
+  // Absolute System32 path, not a bare name: see hardening2-child-boundaries.
+  assert.deepEqual(calls[0].args, ['/PID', '4321', '/T', '/F']); assert.equal(calls[0].executable, 'C:\\Windows\\System32\\taskkill.exe'); assert.equal(calls[0].options.shell, false);
 });
 
 test('Copilot Windows cleanup never falls back to leader-only kill', async () => {

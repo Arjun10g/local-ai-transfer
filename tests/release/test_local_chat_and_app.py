@@ -775,5 +775,15 @@ class AppLaunchTests(unittest.TestCase):
         return data if raw else json.loads(data)
 
 
+class StartBmoHostConfigTests(unittest.TestCase):
+    def test_app_mode_can_be_given_a_workspace_config(self):
+        # On Windows the only way to give the assistant a folder to read is the
+        # host config, so the one-command launcher must be able to pass it on.
+        text = (ROOT / "local" / "windows" / "Start-BMO.ps1").read_text(encoding="utf-8")
+        self.assertIn("[string] $HostConfig", text)
+        self.assertIn("'--host-config'", text)
+        self.assertNotIn("--token-file", text)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -39,6 +39,13 @@
   Chat mode only: the longest reply, in tokens (default 1024, at most 2048).
   A longer limit leaves less of the 8,192-token context for the conversation.
 
+.PARAMETER HostConfig
+  App mode only: a host config JSON, which is how the assistant is given a
+  folder it may READ (a `workspaces` entry; see config.example.json). On Windows
+  only the read-only fs.list / fs.read_text / fs.search_text tools exist, and only
+  for folders named here. Without it the model is offered time.now and
+  system.get_info only.
+
 .PARAMETER NodePath
   App mode only: the node.exe to use, e.g. from the portable nodejs.org zip.
   Default: node.exe from PATH, never from the current folder.
@@ -61,6 +68,7 @@ param(
     [ValidateRange(1, 99)] [int] $GpuLayers,
     [ValidateRange(1, 2048)] [int] $MaxTokens,
     [string] $NodePath,
+    [string] $HostConfig,
     [switch] $NoBrowser
 )
 Set-StrictMode -Version Latest
@@ -142,6 +150,10 @@ if ($Mode -eq 'chat') {
 } else {
     $argv += @((Join-Path $Repo 'local\bmo_app.py'))
     $argv += @('--node', $Node)
+    if ($HostConfig) {
+        if (-not (Test-Path -LiteralPath $HostConfig -PathType Leaf)) { throw "No host config at $HostConfig" }
+        $argv += @('--host-config', (Resolve-Path -LiteralPath $HostConfig).Path)
+    }
     if ($NoBrowser) { $argv += '--no-browser' }
 }
 # The engine log holds the engine's own diagnostics, never prompts or replies.

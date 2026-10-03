@@ -68,13 +68,16 @@ async function* sseEvents(response, signal, { onFrame, onEnd } = {}) {
 const integerIn = (value, min, max) => Number.isInteger(value) && value >= min && value <= max;
 const tokenCount = value => integerIn(value, 0, 1 << 24);
 // The final SSE frame carries the engine's real token counts; the controller
-// learns its bytes-per-token estimate from `prompt_tokens`. An engine that
-// omits them (or sends garbage) still yields a usable `done`: completion
-// tokens fall back to the frame count, which is one frame per sampled token,
-// and no prompt count is invented.
-function engineUsage(usage, tokenFrames) {
-  const completion = tokenCount(usage?.completion_tokens) ? usage.completion_tokens : tokenFrames;
-  return tokenCount(usage?.prompt_tokens) ? { prompt_tokens: usage.prompt_tokens, completion_tokens: completion } : { completion_tokens: completion };
+// learns its bytes-per-token estimate from `prompt_tokens` and reports both
+// fields in `message.completed.usage`. Only counts the engine actually sent
+// are passed on: an engine that omits them (or sends garbage) still yields a
+// usable `done`, with the missing field left missing. A host-side tally of
+// stream frames would be the host's guess, not the engine's count, and
+// anything downstream would read it as a real measurement.
+function engineUsage(usage) {
+  const out = {};
+  for (const key of ['prompt_tokens', 'completion_tokens']) if (tokenCount(usage?.[key])) out[key] = usage[key];
+  return out;
 }
 
 export class NativeEngineClient {
@@ -217,12 +220,11 @@ export class NativeEngineClient {
         let emitted = false;
         try {
           const response = await this.#openStream(active, payload);
-          const decoder = new ToolCallStreamDecoder({ stream: true, reasoning: mode === 'deep' }); let tokenFrames = 0;
+          const decoder = new ToolCallStreamDecoder({ stream: true, reasoning: mode === 'deep' });
           const frames = sseEvents(response, localAbort.signal, { onFrame: () => arm(this.idleTimeoutMs, 'stalled'), onEnd: () => { active.engineFinished = true; } });
           for await (const chunk of frames) {
             const choice = chunk.choices?.[0]; const delta = choice?.delta?.content;
-            // The engine writes exactly one SSE frame per sampled token.
-            if (typeof delta === 'string' && delta) { tokenFrames++; for (const event of decoder.push(delta)) { emitted = true; yield event; } }
+            if (typeof delta === 'string' && delta) { for (const event of decoder.push(delta)) { emitted = true; yield event; } }
             const finish = choice?.finish_reason;
             if (finish) {
               active.engineFinished = true;
@@ -231,7 +233,7 @@ export class NativeEngineClient {
               // answer first. finish_reason 'length' means the max_tokens cap
               // cut the answer; it is passed through for a "continue" offer.
               for (const event of decoder.finish()) { emitted = true; yield event; }
-              emitted = true; yield { kind: 'done', finish_reason: finish, usage: engineUsage(chunk.usage, tokenFrames) };
+              emitted = true; yield { kind: 'done', finish_reason: finish, usage: engineUsage(chunk.usage) };
             }
           }
           for (const event of decoder.finish()) yield event;

@@ -60,6 +60,8 @@ test('process termination uses an injectable bounded Windows tree-kill path', as
   await terminateProcessTree(child, undefined, 'win32', (executable, args, options) => { launched = { executable, args, options }; const killer = new EventEmitter(); queueMicrotask(() => { child.exitCode = 1; child.emit('close', 1); killer.emit('close', 0); }); return killer; });
   // Absolute System32 path, never the bare name: CreateProcess searches the
   // current directory first, so `taskkill.exe` alone could run a planted binary.
+  // And it gets a minimal environment, not the host's: taskkill needs none of the tokens the host holds.
+  assert.deepEqual(Object.keys(launched.options.env).sort(), ['SystemRoot', 'windir']);
   assert.deepEqual(launched.args, ['/PID', '42', '/T', '/F']); assert.ok(win32.isAbsolute(launched.executable) && /^[A-Za-z]:\\/u.test(launched.executable), launched.executable); assert.equal(win32.basename(launched.executable).toLowerCase(), 'taskkill.exe'); assert.equal(win32.basename(win32.dirname(launched.executable)).toLowerCase(), 'system32'); assert.equal(launched.options.shell, false);
 });
 

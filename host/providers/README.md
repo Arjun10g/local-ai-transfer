@@ -91,7 +91,13 @@ disabled until its stdin protocol is independently verified against the pinned
 Copilot CLI release.
 
 `BrowserActionProvider` starts an allowlisted browser with a fresh temporary
-profile behind the validating public-HTTPS proxy. Page inspection exposes only
+profile behind the validating public-HTTPS proxy. The browser gets an explicit
+environment allowlist (`browserEnvironment()` in `browser-actions.mjs`: on
+Windows `SystemRoot`, `windir`, `TEMP`, `TMP`, `USERPROFILE`, `APPDATA`,
+`LOCALAPPDATA`, each a plain local drive path; on POSIX a fixed `PATH` plus a
+few display and locale variables), never the host's whole environment, and
+`taskkill.exe` is started by absolute System32 path with only `SystemRoot` and
+`windir`. Page inspection exposes only
 bounded visible text and opaque IDs for visible controls. Field entry and
 activation require a page-revision-bound preview and user confirmation; static
 provider-authored CDP expressions are used, never model selectors or scripts.

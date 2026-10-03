@@ -109,6 +109,19 @@ cwd workspace is writable because the current execution contract resolves cwd
 with write authorization; relaxing that condition requires a separate policy
 decision.
 
+## Launching URLs and stopping processes
+
+- **macOS/Linux URL opener:** `/usr/bin/open` on macOS. On Linux only
+  `/usr/bin/xdg-open` or `/bin/xdg-open`, and only a root-owned, executable
+  regular file that group and others cannot write; otherwise the tool refuses
+  with `browser_open_unavailable`. A bare `open`/`xdg-open` is never used: it
+  would be found through `PATH`, so a planted binary could run.
+- **Windows `taskkill.exe`:** started by its System32 path from a validated
+  `%SystemRoot%` with only `SystemRoot` and `windir` in its environment.
+- `launchEnvironment` (used by `app.open` and `browser.open_url`) removes only
+  `LAE_*`; other variables still reach an application you configured. That is
+  a deliberate design choice, recorded here so it is not mistaken for an oversight.
+
 ## Not verified on a real Windows machine
 
 Every Windows behavior above is tested on POSIX with `path.win32` semantics,

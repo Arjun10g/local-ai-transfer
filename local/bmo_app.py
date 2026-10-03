@@ -8,7 +8,7 @@
      `createHostComposition` in `lae-host.mjs`): never a command-line argument,
      never a file. Only the host process receives that environment.
   3. The host prints a one-time UI link (`LAE_REVEAL_BOOTSTRAP_URL=1`). It is
-     good for one page load within 60 seconds; it is opened in the default
+     good for one page load within 3 minutes; it is opened in the default
      browser and printed in case that fails.
 
 Ctrl+C stops both. If either one exits, the other is stopped too.
@@ -211,7 +211,7 @@ def run(eng, args: argparse.Namespace, node: str) -> int:
             return 1
         forward_host_output(host)
         print(f"\nBMO is running on {backend}.\n  open: {url}\n"
-              "  (that link works once, within 60 s; to open the UI again later, restart with Ctrl+C)\n"
+              "  (that link works once, within 3 minutes; to open the UI again later, restart with Ctrl+C)\n"
               "  Ctrl+C here stops everything.", file=sys.stderr)
         if not args.no_browser:
             webbrowser.open(url)

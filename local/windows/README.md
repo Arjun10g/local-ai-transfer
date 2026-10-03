@@ -217,7 +217,7 @@ default browser, talking to the real model:
   `-NodePath C:\path\to\node.exe`; or just use the chat above. Node is
   taken from PATH, never from the current folder, and none of your `NODE_*`
   settings (such as `NODE_OPTIONS`) reach the host.
-- The link it prints works **once, within 60 seconds**. If the browser did not
+- The link it prints works **once, within 3 minutes**. If the browser did not
   open in time, or you closed the tab, press Ctrl+C and start it again.
 - Ctrl+C in the PowerShell window stops both the host and the engine.
 - With the default (empty) host config the model is offered only two tools
@@ -326,7 +326,8 @@ node.exe instead of the one on PATH; the same `-Threads`, `-Backend` and
   -Cases prod-mail-read-state-001,prod-mail-list-001,prod-fs-patch-001
 ```
 
-On an A100 the full evaluation scored **34/37**. The CPU path is slower but
+On an A100 the full evaluation scored **36/37** (it was 34/37 before the chat-format and
+boolean fixes; the two changes shipped together, so the run cannot say which helped). The CPU path is slower but
 should score the same or very nearly so; a large gap is itself worth reporting.
 
 **Expect it to take a while on CPU.** Every case sends a ~5,800-token prompt

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { ProviderToolError, boundedArray, boundedString, checkAborted, digest, exactObject, failureResult, result } from './provider-common.mjs';
 import { parseStrictJson } from '../agent/tool-envelope.mjs';
 import { isTrustedWorkspaceContextReader } from './copilot-context.mjs';
+import { windowsSystem32Path, windowsSystemRoot } from '../tools/local/system-tools.mjs';
 
 const MAX_OUTPUT = 65536;
 const MAX_ATTEMPTS = 256;
@@ -201,11 +202,16 @@ function endInput(stream, chunk, onClosed, onError) {
   } catch (error) { onError(error); }
 }
 
-export async function killCopilotProcessTree(child, { platform = process.platform, spawn = nodeSpawn, graceMs = 1000 } = {}) {
+// taskkill.exe is spawned by its System32 path from a validated SystemRoot
+// (the host's own environment, not the Copilot child's allowlist): a bare
+// name is searched in the application and current directories before PATH,
+// so `taskkill.exe` alone could run a planted binary with a live pid.  It
+// gets only that root as its environment; it needs nothing else of the host's.
+export async function killCopilotProcessTree(child, { platform = process.platform, spawn = nodeSpawn, graceMs = 1000, environment = process.env } = {}) {
   if (!child || !Number.isInteger(child.pid) || child.pid <= 0 || child.__laeCloseObserved === true) return child?.treeReaped === true && child?.__laeCloseObserved === true;
   if (platform === 'win32') {
     const childClose = waitForClose(child, Math.min(5000, Math.max(100, graceMs) * 2));
-    let killer; try { killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore' }); } catch { throw new ProviderToolError('provider_cleanup_unknown'); }
+    let killer; try { const root = windowsSystemRoot(environment); killer = spawn(windowsSystem32Path('taskkill.exe', environment), ['/PID', String(child.pid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore', env: { SystemRoot: root, windir: root } }); } catch { throw new ProviderToolError('provider_cleanup_unknown'); }
     if (!killer || !await waitForClose(killer, Math.min(5000, Math.max(100, graceMs))) || killer.exitCode !== 0 || killer.signalCode !== null && killer.signalCode !== undefined) throw new ProviderToolError('provider_cleanup_unknown');
     if (!await childClose) throw new ProviderToolError('provider_cleanup_unknown');
     return child.treeReaped === true;

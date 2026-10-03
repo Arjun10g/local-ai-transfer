@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { basename } from 'node:path';
+import { basename, win32 as pathWin32 } from 'node:path';
 import { lstat, realpath, stat } from 'node:fs/promises';
 import { applyOperatorGrantPolicy } from '../../providers/operator-tool-policy.mjs';
 import { ProviderToolError, digest, exactObject, boundedInteger, boundedString, checkAborted, failureResult, result } from '../../providers/provider-common.mjs';
@@ -96,13 +96,14 @@ function collect(target, chunk, max, final = false) { const bytes = Buffer.from(
 
 async function waitClosed(child, timeoutMs = 5000) { if (!child || !Number.isInteger(child.pid)) return; if (child.exitCode !== null && child.exitCode !== undefined) return; await new Promise(resolve => { let timer = setTimeout(resolve, timeoutMs); const done = () => { clearTimeout(timer); resolve(); }; child.once?.('close', done); child.once?.('exit', done); }); }
 async function boundedOperation(operation, timeoutMs) { await new Promise(resolve => { let finished = false; const timer = setTimeout(() => { if (!finished) { finished = true; resolve(); } }, timeoutMs); Promise.resolve().then(operation).catch(() => {}).finally(() => { if (!finished) { finished = true; clearTimeout(timer); resolve(); } }); }); }
+// taskkill gets a minimal environment (SystemRoot, windir) too: it needs none of the tokens the host holds.
 // taskkill.exe is spawned by its System32 path from a validated SystemRoot:
 // by bare name, CreateProcess would search the current directory first.
 export async function terminateProcessTree(child, killProcess, platform, taskkillSpawn = spawn, environment = process.env) {
   if (!child) return;
   try {
     if (killProcess) await boundedOperation(() => killProcess(child), 5000);
-    else if (platform === 'win32' && Number.isInteger(child.pid)) await new Promise(resolve => { let killer; try { killer = taskkillSpawn(windowsSystem32Path('taskkill.exe', environment), ['/PID', String(child.pid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore' }); } catch { child.kill?.(); resolve(); return; } const timer = setTimeout(() => { clearTimeout(timer); child.kill?.(); resolve(); }, 5000); killer.once('close', () => { clearTimeout(timer); resolve(); }); killer.once('error', () => { clearTimeout(timer); child.kill?.(); resolve(); }); });
+    else if (platform === 'win32' && Number.isInteger(child.pid)) await new Promise(resolve => { let killer; try { const taskkillPath = windowsSystem32Path('taskkill.exe', environment); const systemRoot = pathWin32.dirname(pathWin32.dirname(taskkillPath)); killer = taskkillSpawn(taskkillPath, ['/PID', String(child.pid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore', env: { SystemRoot: systemRoot, windir: systemRoot } }); } catch { child.kill?.(); resolve(); return; } const timer = setTimeout(() => { clearTimeout(timer); child.kill?.(); resolve(); }, 5000); killer.once('close', () => { clearTimeout(timer); resolve(); }); killer.once('error', () => { clearTimeout(timer); child.kill?.(); resolve(); }); });
     else if (Number.isInteger(child.pid)) { try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill?.('SIGTERM'); } await waitClosed(child, 1000); try { process.kill(-child.pid, 'SIGKILL'); } catch { /* group is gone */ } }
     else child.kill?.('SIGTERM');
   } catch { /* termination is bounded and cleanup continues */ }
