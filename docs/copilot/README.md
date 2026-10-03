@@ -68,6 +68,7 @@ Optional: copy [`copilot-instructions-snippet.md`](copilot-instructions-snippet.
 |---|---|---|
 | `bmo_not_running` | BMO is not running or delegation is off: no valid `host.json`, the host's process is gone, or the connection was refused | Run `Start-BMO.ps1 -Mode app -EnableDelegation` |
 | `no_key` | `BMO_DELEGATE_KEY` is missing, malformed, or an unexpanded `${…}` placeholder | VS Code: clear the stored input so it prompts again. CLI: set `$env:BMO_DELEGATE_KEY` before starting `copilot` |
+| `host_unverified` | The listener on BMO's port could not prove it is BMO, so the key was not sent. Either `host.json` is stale or the key changed | Restart BMO; if that does not help, re-enter the key from `Start-BMO.ps1 -ShowDelegateKey` |
 | `unauthorized` | The host rejected the key; it may have been rotated | Run `Start-BMO.ps1 -ShowDelegateKey` and re-enter the key |
 | `auth_rate_limited` | Too many wrong keys were tried | Wait a minute, then fix the key |
 | `queue_full`, `rate_limited` | 3 jobs are already queued or awaiting approval, or job starts are rate-limited. `retry_after_s` says how long to wait | Wait, or cancel stale jobs |
@@ -85,7 +86,10 @@ The bridge logs only metadata to stderr: event names, tool names, durations and 
 - The key comes only from the `BMO_DELEGATE_KEY` environment variable. The bridge refuses to start if it is given any command-line argument, and it removes the key from its own environment after reading it.
 - The bridge connects only to `127.0.0.1:<port from host.json>`. It sends no `Origin` header, follows no redirects, ignores proxy settings, and reads at most 256 KiB per response.
 - On macOS and Linux the bridge ignores a `host.json` that is a symlink, is owned by another user, or is group- or world-writable. **On Windows** Node cannot inspect ACLs, so protection rests on `%LOCALAPPDATA%` being per-user. The host should still write the file with a user-only ACL.
-- Residual risk: if BMO crashed without removing `host.json`, its pid has been reused, and another local program listens on the old port, the bridge would send the key to that program. A host self-authentication step would close this gap (see the interface notes in the implementation report).
+- **Identity handshake.** Before any request that carries the key, the bridge proves the listener is BMO. It sends `POST /api/delegate/handshake` with a fresh random nonce and no key. It accepts the listener only if the reply is `base64url(HMAC-SHA256(key, "bmo-delegate-handshake-v1|<nonce>|<port>|<pid>"))`, with port and pid taken from `host.json`.
+  - A stale `host.json` pointing at another program therefore never receives the key.
+  - A successful check is cached until `host.json` changes or a connection fails.
+  - A failed check is cached for at most 5 s.
 
 ## Unverified (check on the laptop)
 

@@ -12,7 +12,7 @@
 //     and a new turn stops a running job (which is queued again);
 //   * nothing about a job is written to disk or logged; its text lives in
 //     memory until it ends (prompt) or for 15 minutes after (answer).
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { ConversationController } from '../agent/controller.mjs';
 import { CONTEXT_DEFAULTS, isContextOverflowError, utf8Bytes } from '../agent/context-budget.mjs';
 import { ENGINE_MAX_MESSAGE_BYTES } from '../agent/tool-result-cap.mjs';
@@ -34,6 +34,20 @@ const MAX_BUSY_RETRIES = 3;
 const STARTS_PER_MINUTE = 6;
 const AUTH_FAILURE_LIMIT = 20;
 const AUTH_WINDOW_MS = 60000;
+// The handshake is unauthenticated, so every request counts, not only bad ones.
+export const HANDSHAKE_LIMIT = 30;
+const HANDSHAKE_NONCE = /^[A-Za-z0-9_-]{22,64}$/u;
+export const HANDSHAKE_CONTEXT = 'bmo-delegate-handshake-v1';
+
+/**
+ * Proof that this host holds the delegate key, bound to the caller's nonce
+ * and to the port and pid the bridge read from host.json: a stale host.json
+ * pointing at some other program on a reused port cannot be answered, so the
+ * bridge learns that before it ever sends the key.
+ */
+export function handshakeProof(key, nonce, port, pid) {
+  return createHmac('sha256', Buffer.from(key, 'utf8')).update(Buffer.from(`${HANDSHAKE_CONTEXT}|${nonce}|${port}|${pid}`, 'utf8')).digest('base64url');
+}
 // task 4,000 + context 16,000 code points at up to 4 UTF-8 bytes each, plus
 // the JSON around them.
 const MAX_BODY_BYTES = 96 * 1024;
@@ -89,7 +103,7 @@ export class DelegateService {
     this.contextTokens = contextTokens; this.maxOutputTokens = maxOutputTokens ?? engine.maxTokens ?? CONTEXT_DEFAULTS.maxOutputTokens; this.requestTimeoutMs = requestTimeoutMs;
     this.jobs = new Map(); this.queue = []; this.running = null; this.starting = false; this.interactive = 0; this.retryTimer = null;
     this.port = null; this.secrets = []; this.started = false; this.closed = false; this.hostRecord = null;
-    this.authFailures = { count: 0, until: 0 }; this.startTimes = [];
+    this.authFailures = { count: 0, until: 0 }; this.startTimes = []; this.handshakes = { count: 0, until: 0 };
     // A revoked grant withdraws the approval of the jobs it approved.
     this.unsubscribe = grantControl?.store?.subscribe?.(DELEGATE_CAPABILITY, () => this.#grantChanged()) ?? null;
   }
@@ -394,6 +408,9 @@ export class DelegateService {
     if (req.headers.origin !== undefined) return sendJson(res, 403, { error: 'forbidden' });
     const host = String(req.headers.host ?? '').toLowerCase();
     if (!this.port || (host !== `127.0.0.1:${this.port}` && host !== `localhost:${this.port}`)) return sendJson(res, 403, { error: 'forbidden' });
+    // Unauthenticated by design and answered before the key check: it proves
+    // the host to the bridge, never the bridge to the host.
+    if (url.pathname === '/api/delegate/handshake') return this.#handshake(req, res, url);
     if (this.#authLimited()) return sendRetry(res, 429, 'auth_rate_limited', (this.authFailures.until - this.now()) / 1000);
     const match = /^Bearer ([A-Za-z0-9_-]{1,128})$/u.exec(req.headers.authorization ?? '');
     const key = await this.#currentKey();
@@ -405,6 +422,32 @@ export class DelegateService {
     this.authFailures = { count: 0, until: 0 };
     try { return await this.#routeBridge(req, res, url); }
     catch (error) {
+      if (res.headersSent) { res.end(); return undefined; }
+      if (error instanceof DelegateHttpError) return sendJson(res, error.status, { error: error.code });
+      return sendJson(res, 500, { error: 'request_failed' });
+    }
+  }
+
+  async #handshake(req, res, url) {
+    if (req.method !== 'POST' || url.search) return sendJson(res, 404, { error: 'not_found' });
+    // Its own budget, separate from the key-failure counter: it cannot lock
+    // out a valid bridge's key checks, and it cannot be used to pump HMACs.
+    const now = this.now();
+    if (this.handshakes.until <= now) this.handshakes = { count: 0, until: now + AUTH_WINDOW_MS };
+    this.handshakes.count += 1;
+    if (this.handshakes.count > HANDSHAKE_LIMIT) return sendRetry(res, 429, 'rate_limited', (this.handshakes.until - now) / 1000);
+    // The key is never sent here: a bridge that did would defeat the point.
+    if (req.headers.authorization !== undefined) return sendJson(res, 400, { error: 'invalid_request' });
+    try {
+      if (!jsonContentType(req)) return sendJson(res, 415, { error: 'unsupported_content_type' });
+      const input = exactKeys(await readJsonBody(req, { maxBytes: 256, timeoutMs: this.requestTimeoutMs, maxString: 64 }), ['nonce'], ['nonce']);
+      if (typeof input.nonce !== 'string' || !HANDSHAKE_NONCE.test(input.nonce)) throw new DelegateHttpError(400, 'invalid_request_body');
+      const key = await this.#currentKey();
+      if (!key) return sendJson(res, 503, { error: 'not_ready' });
+      // The port this request actually arrived on, and this process: exactly
+      // what host.json claims.  No logging of nonce or proof anywhere.
+      return sendJson(res, 200, { proof: handshakeProof(key, input.nonce, req.socket.localPort, process.pid) });
+    } catch (error) {
       if (res.headersSent) { res.end(); return undefined; }
       if (error instanceof DelegateHttpError) return sendJson(res, error.status, { error: error.code });
       return sendJson(res, 500, { error: 'request_failed' });

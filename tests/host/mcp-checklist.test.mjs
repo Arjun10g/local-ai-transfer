@@ -18,6 +18,16 @@ const NOT_TESTABLE_OFFLINE = Object.freeze({
   HTTP1: 'No HTTP transport is built: the bridge is stdio-only (doc §0.3), so there is no listener to probe.',
 });
 
+// Bridge requirements beyond the research checklist: the host identity handshake added after
+// review (the key must never reach a listener that has not proved it is BMO).
+const BRIDGE_REQUIREMENTS = Object.freeze({
+  HS1: 'Handshake precedes every keyed request, carries only a fresh nonce, no key; success cached.',
+  HS2: 'Proof binds key, nonce, port and pid: wrong key/pid/port and replayed proofs are rejected.',
+  HS3: 'Missing/malformed/oversized proof, non-200 or timeout => unverified, key not sent.',
+  HS4: 'Re-verify when host.json identity changes or a connection fails; concurrent calls share one handshake.',
+  HS5: 'Proof failures are cached for at most ~5 s.',
+});
+
 async function checklistIds() {
   const doc = await read('docs/research/COPILOT_MCP_COMPATIBILITY.md');
   const section = doc.slice(doc.indexOf('## 8.'), doc.indexOf('## 9.'));
@@ -39,12 +49,12 @@ test('every conformance-checklist item is covered by a test title or explicitly 
   const ids = await checklistIds();
   assert.equal(ids.length, 30, `expected the 30 checklist items, found ${ids.length}: ${ids.join(' ')}`);
   const titles = await testTitles();
-  const uncovered = ids.filter(id => !titles.some(title => title.includes(`[${id}]`)) && !NOT_TESTABLE_OFFLINE[id]);
+  const uncovered = [...ids, ...Object.keys(BRIDGE_REQUIREMENTS)].filter(id => !titles.some(title => title.includes(`[${id}]`)) && !NOT_TESTABLE_OFFLINE[id]);
   assert.deepEqual(uncovered, []);
   for (const id of Object.keys(NOT_TESTABLE_OFFLINE)) assert.ok(ids.includes(id), `stale exclusion ${id}`);
   // No typos: every bracketed id in a title must be a real checklist id.
   const used = new Set(titles.flatMap(title => [...title.matchAll(/\[([A-Z]+\d+)\]/g)].map(match => match[1])));
-  for (const id of used) assert.ok(ids.includes(id), `unknown checklist id [${id}] in a test title`);
+  for (const id of used) assert.ok(ids.includes(id) || Object.hasOwn(BRIDGE_REQUIREMENTS, id), `unknown checklist id [${id}] in a test title`);
 });
 
 test('[C8] VS Code client config: server "bmo", stdio, absolute node and script paths, key only via a password input', async () => {

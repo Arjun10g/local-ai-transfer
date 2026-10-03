@@ -81,6 +81,8 @@ TEST_INVENTORY = {
     "tests/host/mcp-host-client.test.mjs": "loopback_fixture",
     "tests/host/mcp-protocol.test.mjs": "loopback_fixture",
     "tests/host/mcp-real-host.test.mjs": "loopback_fixture",
+    "tests/host/mcp-handshake.test.mjs": "loopback_fixture",
+    "tests/host/delegate-handshake.test.mjs": "loopback_fixture",
     "tests/host/mcp-stdio.test.mjs": "loopback_fixture",
     "tests/host/mcp-tools.test.mjs": "loopback_fixture",
     "tests/host/memory-controller.test.mjs": "host_fixture",

@@ -3,7 +3,7 @@
 // like VS Code (legacy initialize handshake) and like Copilot CLI (stateless 2026-07-28).
 
 import http from 'node:http';
-import { randomBytes } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import { PassThrough } from 'node:stream';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -24,6 +24,8 @@ export const FAST_LIMITS = Object.freeze({ maxInFlight: 4, callDeadlineMs: 2_500
  * by the host agent): ids `job_` + 24 base64url chars, phase names, error-body codes, strict
  * request validation (Origin -> 403, Host pinned, JSON content type on POST, exact body keys,
  * cancel body `{}`), queue cap 3 counting jobs awaiting approval, `retry_after_s` on 409/429.
+ * Identity handshake: POST /api/delegate/handshake {nonce} (no key) -> {proof}, computed here
+ * independently of the bridge's code; `state.handshake` selects an impostor behaviour.
  * Jobs complete `completeAfterMs` after creation unless a test overrides behaviour via `hooks`
  * (per-route functions returning true when they handled the request) or `state`.
  */
@@ -31,12 +33,14 @@ export const HOST_PHASES = Object.freeze(['waiting_for_operator', 'waiting_for_e
 const PHASE_BY_STATUS = { awaiting_approval: 'waiting_for_operator', queued: 'waiting_for_engine', running: 'generating' };
 const TERMINAL = ['completed', 'failed', 'cancelled', 'denied', 'expired'];
 const codePoints = text => [...text].length;
+export const proofFor = (key, nonce, port, pid) => createHmac('sha256', key).update(`bmo-delegate-handshake-v1|${nonce}|${port}|${pid}`).digest('base64url');
 
 export async function startFakeHost({ key = TEST_KEY, completeAfterMs = 50, answer = 'fake answer', initialStatus = 'queued', queueCap = 3, hooks = {} } = {}) {
   const requests = [];
   const jobs = new Map();
   const sockets = new Set();
-  const state = { completeAfterMs, answer, initialStatus, finalStatus: 'completed', finalError: null, phase: null, queueCap };
+  // handshake: 'correct' | 'wrong-key' | 'wrong-pid' | 'wrong-port' | 'replay' | 'no-proof' | 'short-proof' | 'not-json' | 'status-500' | 'hang' | 'huge' | 'reset'
+  const state = { completeAfterMs, answer, initialStatus, finalStatus: 'completed', finalError: null, phase: null, queueCap, handshake: 'correct', startedAt: new Date().toISOString(), pid: process.pid, firstNonce: null };
   const view = job => {
     const done = Date.now() - job.created >= job.completeAfterMs && job.status !== 'cancelled';
     const status = job.status === 'cancelled' ? 'cancelled' : done ? job.finalStatus : job.initialStatus;
@@ -61,6 +65,27 @@ export async function startFakeHost({ key = TEST_KEY, completeAfterMs = 50, answ
       const send = (status, value) => { entry.status = status; if (!res.writableEnded && !res.destroyed) { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); } };
       if (req.headers.origin !== undefined) return send(403, { error: 'forbidden' });
       if (req.headers.host !== `127.0.0.1:${port}` && req.headers.host !== `localhost:${port}`) return send(403, { error: 'forbidden' });
+      if (req.url === '/api/delegate/handshake' && req.method === 'POST') {
+        // Like the real host: the key must never arrive here.
+        if (req.headers.authorization !== undefined) return send(400, { error: 'invalid_request' });
+        if (!/^application\/json\b/.test(req.headers['content-type'] ?? '')) return send(415, { error: 'unsupported_content_type' });
+        if (!exactKeys(body, ['nonce'], ['nonce']) || typeof body.nonce !== 'string' || !/^[A-Za-z0-9_-]{22,64}$/.test(body.nonce)) return send(400, { error: 'invalid_request_body' });
+        state.firstNonce ??= body.nonce;
+        const mode = state.handshake;
+        if (mode === 'hang') return;
+        if (mode === 'reset') { req.socket.destroy(); return; }
+        if (mode === 'status-500') return send(500, { error: 'request_failed' });
+        if (mode === 'not-json') { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{proof'); return; }
+        if (mode === 'no-proof') return send(200, { ok: true });
+        if (mode === 'short-proof') return send(200, { proof: 'abc' });
+        if (mode === 'huge') return send(200, { proof: proofFor(key, body.nonce, port, state.pid), pad: 'x'.repeat(5000) });
+        const proof = mode === 'wrong-key' ? proofFor('not-the-delegate-key-000000', body.nonce, port, state.pid)
+          : mode === 'wrong-pid' ? proofFor(key, body.nonce, port, state.pid + 1)
+          : mode === 'wrong-port' ? proofFor(key, body.nonce, port + 1, state.pid)
+          : mode === 'replay' ? proofFor(key, state.firstNonce, port, state.pid)
+          : proofFor(key, body.nonce, port, state.pid);
+        return send(200, { proof });
+      }
       const bearer = /^Bearer ([A-Za-z0-9_-]{1,128})$/u.exec(req.headers.authorization ?? '');
       if (!bearer || bearer[1] !== key) return send(401, { error: 'unauthorized' });
       if (state.forced) return send(state.forced.status, state.forced.body);
@@ -106,12 +131,17 @@ export async function startFakeHost({ key = TEST_KEY, completeAfterMs = 50, answ
       send(404, { error: 'not_found' });
     });
   });
-  server.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
+  // Every byte any client sent, for "the key never reached this listener" assertions.
+  const received = [];
+  server.on('connection', socket => { sockets.add(socket); socket.on('data', chunk => received.push(Buffer.from(chunk))); socket.on('close', () => sockets.delete(socket)); });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
   return {
     port, requests, jobs, state,
-    discover: async () => ({ ok: true, port, pid: process.pid }),
+    receivedText: () => Buffer.concat(received).toString('latin1'),
+    discover: async () => ({ ok: true, port, pid: process.pid, startedAt: state.startedAt }),
+    handshakes: () => requests.filter(request => request.url === '/api/delegate/handshake'),
+    keyed: () => requests.filter(request => request.headers.authorization !== undefined),
     close: async () => { for (const socket of sockets) socket.destroy(); await new Promise(resolve => server.close(resolve)); },
   };
 }

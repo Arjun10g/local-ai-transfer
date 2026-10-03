@@ -160,6 +160,8 @@ const EXACT = new Map(Object.entries({
   bmo_not_running: ['BMO is not running, or coding-assistant jobs are switched off.', 'Start BMO with coding-assistant jobs enabled.'],
   no_key: ['The coding assistant has no BMO key configured.', 'Show the key on the laptop and paste it into the coding assistant\'s settings.'],
   host_unreachable: LOST,
+  // The handshake proof did not match: whatever answers on that port is not this BMO.
+  host_unverified: ['The program on BMO\'s port is not BMO, so the key was not sent to it.', 'Restart BMO, then try again.'],
   host_timeout: ['BMO did not answer in time.', 'Check that BMO is still running, then try again.'],
   host_protocol_error: INTERNAL,
   invalid_job_id: MALFORMED,

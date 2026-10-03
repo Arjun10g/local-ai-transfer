@@ -75,11 +75,11 @@ test('[C15] real host: Stop on an in-flight bmo_ask cancels the job on the host'
   assert.deepEqual(client.responsesFor('stop-me'), []);
 });
 
-test('real host: a wrong key is unauthorized, and delegation off (no host.json) reads as not running or off', async t => {
+test('real host: a wrong key fails the identity handshake (the key is never sent), and delegation off reads as not running or off', async t => {
   const real = await startRealHost(t);
   const wrong = (await bridgeTo(t, real, { key: 'A'.repeat(43) })).client;
   const rejected = await wrong.callTool('bmo_ask', { task: 'hi' });
-  assert.equal(structured(rejected).error.code, 'unauthorized');
+  assert.equal(structured(rejected).error.code, 'host_unverified');
   assert.match(structured(rejected).error.message, /Start-BMO\.ps1 -ShowDelegateKey/);
   assert.equal(real.delegate.jobs.size, 0);
   const emptyState = join(await tempDir(t, 'bmo-mcp-off-'), 'state');

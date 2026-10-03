@@ -7,6 +7,7 @@
 // socket errors (Node puts "127.0.0.1:<port>" in them).
 
 import http from 'node:http';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import { open, lstat } from 'node:fs/promises';
 import os from 'node:os';
@@ -19,6 +20,16 @@ export const TERMINAL_STATUSES = Object.freeze(new Set(['completed', 'failed', '
 export const HOST_FILE_MAX_BYTES = 1024;
 export const MAX_RESPONSE_BYTES = 256 * 1024;
 export const MAX_ANSWER_CHARS = 8000;
+
+// Host identity handshake (see HostClient.#verifyHost). The context string, field order and
+// encodings are the contract shared with host/delegate/service.mjs.
+export const HANDSHAKE_CONTEXT = 'bmo-delegate-handshake-v1';
+export const HANDSHAKE_MAX_BYTES = 1024;
+export const HANDSHAKE_TIMEOUT_MS = 2_000;
+export const HANDSHAKE_FAILURE_TTL_MS = 5_000;
+const PROOF_SHAPE = /^[A-Za-z0-9_-]{43}$/; // base64url of a 32-byte HMAC-SHA256, unpadded
+// A wrong proof cannot tell an impostor from a rotated key, so the message names both fixes.
+export const UNVERIFIED_MESSAGE = 'The program listening on BMO\'s port could not prove it is BMO, so the delegate key was not sent. Either host.json is stale (restart BMO and try again) or the delegate key changed (re-enter it; Start-BMO.ps1 -ShowDelegateKey shows it).';
 
 /** Errors the tool layer turns into isError results. `code` is a fixed identifier; `message` is static text. */
 export class HostError extends Error {
@@ -75,7 +86,7 @@ export async function readHostInfo({ stateDir = defaultStateDir(), platform = pr
     const parsed = parseHostJson(buffer.subarray(0, bytesRead).toString('utf8'));
     if (!parsed) return { ok: false, reason: 'invalid' };
     if (!isAlive(parsed.pid)) return { ok: false, reason: 'stale' };
-    return { ok: true, port: parsed.port, pid: parsed.pid };
+    return { ok: true, port: parsed.port, pid: parsed.pid, startedAt: parsed.startedAt };
   } catch (error) {
     return { ok: false, reason: error?.code === 'ENOENT' || error?.code === 'ENOTDIR' ? 'missing' : 'insecure' };
   } finally {
@@ -95,7 +106,7 @@ export function parseHostJson(text) {
   if (!Number.isInteger(value.port) || value.port < 1024 || value.port > 65535) return null;
   if (!Number.isInteger(value.pid) || value.pid <= 0 || value.pid > 0x7fffffff) return null;
   if (typeof value.started_at !== 'string' || value.started_at.length > 64 || !Number.isFinite(Date.parse(value.started_at))) return null;
-  return { port: value.port, pid: value.pid };
+  return { port: value.port, pid: value.pid, startedAt: value.started_at };
 }
 
 // A private agent: the global agent may be replaced or proxied (Node 24's NODE_USE_ENV_PROXY),
@@ -105,12 +116,18 @@ const loopbackAgent = new http.Agent({ keepAlive: false, maxSockets: 8 });
 
 export class HostClient {
   #key;
-  constructor({ key, discover = () => readHostInfo(), maxResponseBytes = MAX_RESPONSE_BYTES, request = http.request, agent = loopbackAgent } = {}) {
+  #verified = null; // identity string of the host that last proved itself
+  #failed = null; // { identity, until }: a recent proof failure, cached briefly
+  #pending = null; // { identity, promise }: one handshake at a time per identity
+  constructor({ key, discover = () => readHostInfo(), maxResponseBytes = MAX_RESPONSE_BYTES, request = http.request, agent = loopbackAgent, handshakeTimeoutMs = HANDSHAKE_TIMEOUT_MS, failureTtlMs = HANDSHAKE_FAILURE_TTL_MS, now = Date.now } = {}) {
     this.#key = typeof key === 'string' ? key : '';
     this.discover = discover;
     this.maxResponseBytes = maxResponseBytes;
     this.requestImpl = request;
     this.agent = agent;
+    this.handshakeTimeoutMs = handshakeTimeoutMs;
+    this.failureTtlMs = failureTtlMs;
+    this.now = now;
   }
 
   hasKey() { return this.#key.length > 0; }
@@ -147,10 +164,69 @@ export class HostClient {
     if (signal?.aborted) throw new HostError('aborted', 'The request was cancelled.');
     const info = await this.discover();
     if (!info?.ok) throw new HostError('bmo_not_running', NOT_RUNNING_MESSAGE, { reason: info?.reason ?? 'missing' });
+    const deadline = Date.now() + timeoutMs;
+    // The key is sent only to a listener that has just proved it holds the key itself.
+    await this.#verifyHost(info, { signal, timeoutMs });
+    try {
+      return await this.#send(info, method, pathAndQuery, body, { timeoutMs: Math.max(1, deadline - Date.now()), signal, authorize: true, maxBytes: this.maxResponseBytes });
+    } catch (error) {
+      // A connection-level failure may mean the host restarted (possibly on a reused port):
+      // forget the verification so the next request proves identity again.
+      if (error?.code === 'host_unreachable' || error?.code === 'bmo_not_running') this.#verified = null;
+      throw error;
+    }
+  }
+
+  /**
+   * Host identity handshake. A stale host.json can name a port that another program now
+   * owns; sending the bearer key there would hand it over. So before the first keyed request
+   * (and again whenever host.json's identity changes or a connection fails) the bridge sends
+   * a fresh random nonce, WITHOUT the key, and requires
+   *   proof = base64url(HMAC-SHA256(key, "bmo-delegate-handshake-v1|<nonce>|<port>|<pid>"))
+   * with port and pid from the validated host.json. Only the real host knows the key, and the
+   * binding to port/pid rejects a proof relayed from a different host instance.
+   * Success is cached per (port, pid, started_at) for the process lifetime; proof failures
+   * for at most failureTtlMs so a restarted BMO is picked up quickly.
+   */
+  async #verifyHost(info, { signal, timeoutMs }) {
+    const identity = `${info.port}|${info.pid}|${info.startedAt ?? ''}`;
+    if (this.#verified === identity) return;
+    if (this.#failed?.identity === identity && this.now() < this.#failed.until) throw unverified();
+    if (this.#pending?.identity !== identity) {
+      const promise = this.#handshake(info, Math.min(this.handshakeTimeoutMs, timeoutMs)).then(
+        () => { this.#verified = identity; this.#failed = null; },
+        error => { if (error.code === 'host_unverified') this.#failed = { identity, until: this.now() + this.failureTtlMs }; throw error; },
+      ).finally(() => { if (this.#pending?.promise === promise) this.#pending = null; });
+      promise.catch(() => {}); // callers may all abandon it; its outcome is still recorded above
+      this.#pending = { identity, promise };
+    }
+    // Concurrent callers share one handshake; each can still abandon it via its own signal.
+    await raceAbort(this.#pending.promise, signal);
+  }
+
+  async #handshake(info, timeoutMs) {
+    const nonce = randomBytes(32).toString('base64url'); // fresh per attempt: a replayed proof cannot match
+    let response;
+    try {
+      response = await this.#send(info, 'POST', '/api/delegate/handshake', { nonce }, { timeoutMs, authorize: false, maxBytes: HANDSHAKE_MAX_BYTES });
+    } catch (error) {
+      // Nothing listening, or the connection broke: report that as such (and do not cache it).
+      if (['bmo_not_running', 'host_unreachable', 'aborted'].includes(error?.code)) throw error;
+      throw unverified(); // timeout, oversized body, redirect, malformed JSON
+    }
+    const proof = response.status === 200 && response.body && typeof response.body === 'object' && !Array.isArray(response.body) ? response.body.proof : undefined;
+    if (typeof proof !== 'string' || !PROOF_SHAPE.test(proof)) throw unverified();
+    const expected = createHmac('sha256', Buffer.from(this.#key, 'utf8')).update(Buffer.from(`${HANDSHAKE_CONTEXT}|${nonce}|${info.port}|${info.pid}`, 'utf8')).digest('base64url');
+    if (!timingSafeEqual(Buffer.from(proof, 'utf8'), Buffer.from(expected, 'utf8'))) throw unverified();
+  }
+
+  async #send(info, method, pathAndQuery, body, { timeoutMs, signal, authorize, maxBytes }) {
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body), 'utf8');
     // Header set is fixed. No Origin: the host treats any Origin as a browser and the bridge is
     // not one. Host is pinned to the literal loopback authority the host validates against.
-    const headers = { Host: `127.0.0.1:${info.port}`, Accept: 'application/json', Authorization: `Bearer ${this.#key}` };
+    // Authorization is added only for verified, keyed requests (never for the handshake).
+    const headers = { Host: `127.0.0.1:${info.port}`, Accept: 'application/json' };
+    if (authorize) headers.Authorization = `Bearer ${this.#key}`;
     if (payload) { headers['Content-Type'] = 'application/json'; headers['Content-Length'] = String(payload.length); }
     return await new Promise((resolve, reject) => {
       let settled = false;
@@ -164,7 +240,7 @@ export class HostClient {
         const chunks = []; let size = 0;
         response.on('data', chunk => {
           size += chunk.length;
-          if (size > this.maxResponseBytes) { request.destroy(); finish(new HostError('host_protocol_error', 'The BMO host response was too large.')); return; }
+          if (size > maxBytes) { request.destroy(); finish(new HostError('host_protocol_error', 'The BMO host response was too large.')); return; }
           chunks.push(chunk);
         });
         response.on('end', () => {
@@ -183,6 +259,18 @@ export class HostClient {
       request.end(payload);
     });
   }
+}
+
+function unverified() { return new HostError('host_unverified', UNVERIFIED_MESSAGE); }
+
+function raceAbort(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(new HostError('aborted', 'The request was cancelled.'));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(new HostError('aborted', 'The request was cancelled.'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(value => { signal.removeEventListener('abort', onAbort); resolve(value); }, error => { signal.removeEventListener('abort', onAbort); reject(error); });
+  });
 }
 
 function assertJobId(jobId) {

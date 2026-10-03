@@ -8,15 +8,23 @@ import { mkdtemp, rm, symlink, writeFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HostClient, HostError, MAX_RESPONSE_BYTES, NOT_RUNNING_MESSAGE, defaultStateDir, parseHostJson, readHostInfo } from '../../host/mcp/host-client.mjs';
-import { TEST_KEY, makeStateDir, startBridge, startFakeHost, structured, CopilotCliLikeClient } from './mcp-fake-host.mjs';
+import { TEST_KEY, makeStateDir, proofFor, startBridge, startFakeHost, structured, CopilotCliLikeClient } from './mcp-fake-host.mjs';
 
+// A raw listener that proves its identity correctly (so the bridge proceeds to the keyed
+// request under test) and hands every other request to `handler`.
 async function rawServer(t, handler) {
-  const server = http.createServer(handler);
+  let port;
+  const server = http.createServer((req, res) => {
+    if (req.url !== '/api/delegate/handshake') return handler(req, res);
+    let raw = ''; req.on('data', chunk => { raw += chunk; });
+    req.on('end', () => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ proof: proofFor(TEST_KEY, JSON.parse(raw).nonce, port, process.pid) })); });
+  });
   const sockets = new Set();
   server.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => { for (const socket of sockets) socket.destroy(); return new Promise(resolve => server.close(resolve)); });
-  return server.address().port;
+  port = server.address().port;
+  return port;
 }
 const clientFor = (port, options = {}) => new HostClient({ key: TEST_KEY, discover: async () => ({ ok: true, port, pid: process.pid }), ...options });
 
@@ -30,7 +38,10 @@ test('requests carry the bearer key and a pinned loopback Host, never an Origin,
   const job = await client.startJob({ task: 't', allow_files: false, caller: { client: 'c', name: 'n' } });
   await client.getJob(job.job_id, 0);
   await client.cancelJob(job.job_id);
-  for (const request of host.requests) {
+  const [handshake, ...keyed] = host.requests;
+  assert.equal(handshake.url, '/api/delegate/handshake');
+  assert.equal(handshake.headers.authorization, undefined);
+  for (const request of keyed) {
     assert.equal(request.headers.authorization, `Bearer ${TEST_KEY}`);
     assert.equal(request.headers.host, `127.0.0.1:${host.port}`);
     assert.equal(request.headers.origin, undefined);
@@ -40,7 +51,7 @@ test('requests carry the bearer key and a pinned loopback Host, never an Origin,
   assert.equal(requestOptions.host, '127.0.0.1');
   assert.equal(requestOptions.family, 4);
   assert.ok(requestOptions.agent instanceof http.Agent && requestOptions.agent !== http.globalAgent);
-  assert.deepEqual(host.requests.map(request => `${request.method} ${request.url}`), ['GET /api/delegate/health', 'POST /api/delegate/jobs', `GET /api/delegate/jobs/${job.job_id}?wait=0`, `POST /api/delegate/jobs/${job.job_id}/cancel`]);
+  assert.deepEqual(host.requests.map(request => `${request.method} ${request.url}`), ['POST /api/delegate/handshake', 'GET /api/delegate/health', 'POST /api/delegate/jobs', `GET /api/delegate/jobs/${job.job_id}?wait=0`, `POST /api/delegate/jobs/${job.job_id}/cancel`]);
 });
 
 test('redirects are refused, never followed (the bearer key must not travel to a second listener)', async t => {
@@ -95,13 +106,12 @@ test('job ids are validated before any URL is built (no traversal or query injec
   }
   assert.equal(host.requests.length, 0);
   await assert.rejects(() => client.getJob('job_12345678', 99), error => error.code === 'unknown_job');
-  assert.equal(host.requests[0].url, '/api/delegate/jobs/job_12345678?wait=15');
+  assert.equal(host.keyed()[0].url, '/api/delegate/jobs/job_12345678?wait=15');
 });
 
 test('a 401 from the host is reported as a rejected key without echoing it', async t => {
-  const host = await startFakeHost({ key: 'a-different-key-0123456789' });
-  t.after(() => host.close());
-  const error = await new HostClient({ key: TEST_KEY, discover: host.discover }).health().catch(failure => failure);
+  const port = await rawServer(t, (req, res) => { res.writeHead(401, { 'content-type': 'application/json' }); res.end('{"error":"unauthorized"}'); });
+  const error = await clientFor(port).health().catch(failure => failure);
   assert.equal(error.code, 'unauthorized');
   assert.ok(!error.message.includes(TEST_KEY));
   assert.match(error.message, /Start-BMO\.ps1 -ShowDelegateKey/);
@@ -120,8 +130,8 @@ test('state directory per platform, with an absolute BMO_STATE_DIR override', ()
 
 test('host.json content is parsed strictly', () => {
   const good = { version: 1, port: 50123, pid: 1234, started_at: '2026-10-03T10:00:00Z' };
-  assert.deepEqual(parseHostJson(JSON.stringify(good)), { port: 50123, pid: 1234 });
-  assert.deepEqual(parseHostJson(`\uFEFF${JSON.stringify(good)}`), { port: 50123, pid: 1234 });
+  assert.deepEqual(parseHostJson(JSON.stringify(good)), { port: 50123, pid: 1234, startedAt: good.started_at });
+  assert.deepEqual(parseHostJson(`\uFEFF${JSON.stringify(good)}`), { port: 50123, pid: 1234, startedAt: good.started_at });
   for (const bad of [{ ...good, version: 2 }, { ...good, port: 80 }, { ...good, port: 70000 }, { ...good, port: '50123' }, { ...good, pid: 0 }, { ...good, pid: 1.5 }, { ...good, started_at: 'yesterday' }, { ...good, extra: true }, { version: 1, port: 50123, pid: 1 }, [good]]) {
     assert.equal(parseHostJson(JSON.stringify(bad)), null, JSON.stringify(bad));
   }
@@ -131,7 +141,9 @@ test('host.json content is parsed strictly', () => {
 test('[C24] host.json is trusted only when it is ours, private, small, not a symlink, and names a live pid', { skip: process.platform === 'win32' && 'POSIX ownership/mode checks' }, async t => {
   const port = 50123;
   const ok = await makeStateDir(t, { port });
-  assert.deepEqual(await readHostInfo({ stateDir: ok }), { ok: true, port, pid: process.pid });
+  const info = await readHostInfo({ stateDir: ok });
+  assert.deepEqual({ ...info, startedAt: undefined }, { ok: true, port, pid: process.pid, startedAt: undefined });
+  assert.ok(Number.isFinite(Date.parse(info.startedAt)));
   assert.equal((await readHostInfo({ stateDir: join(ok, 'missing-dir') })).reason, 'missing');
   assert.equal((await readHostInfo({ stateDir: await makeStateDir(t, { port, mode: 0o666 }) })).reason, 'insecure');
   assert.equal((await readHostInfo({ stateDir: await makeStateDir(t, { port, mode: 0o620 }) })).reason, 'insecure');
