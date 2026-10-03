@@ -5,7 +5,7 @@ import { ConversationController } from '../../host/agent/controller.mjs';
 import { RECALL_DEFAULTS, RecallArchive, anchorWords, entriesFromMessage, recallMessage, recallOptions, recallQueries, stem, words } from '../../host/agent/memory-recall.mjs';
 import { MEMORY_PROMPTS, isRecallMessage } from '../../host/agent/memory-note.mjs';
 import { containsValue, retentionEngine, runConversation } from './memory-retention.mjs';
-import { QUESTIONS, probe, report } from './memory-recall-retrieval.mjs';
+import { QUESTIONS, aggregate, probe, report } from './memory-recall-retrieval.mjs';
 
 const search = (archive, question, previous) => archive.search(recallQueries(question, previous));
 const user = content => ({ role: 'user', content });
@@ -198,4 +198,12 @@ test('one huge message cannot flood the archive', () => {
   assert.ok(added <= 40, `${added} entries from one message`);
   archive.add(filler(5));
   assert.ok(search(archive, 'What is the vault code?').some(line => line.includes('4471-ZETA')), 'the start of the message, where the fact is, was kept');
+});
+
+test('a question about every fact of one kind: all of ~20 found, and the block bound (12 lines) is the stated limit for ~40', async () => {
+  const few = await aggregate({ turns: 120, seeds: 3 });
+  assert.ok(few.facts >= 60 && few.share >= 0.97, JSON.stringify(few));
+  // 40 facts of one kind cannot fit in 12 lines: the honest limit, pinned so a change to the block bound is noticed (8 lines gave 0.38).
+  const many = await aggregate({ turns: 300, seeds: 2 });
+  assert.ok(many.facts >= 120 && many.share >= 0.5 && many.share < 0.9, JSON.stringify(many));
 });

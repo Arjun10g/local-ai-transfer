@@ -30,10 +30,11 @@ export const RECALL_DEFAULTS = Object.freeze({
   archiveBytes: 2097152,
   // One entry (a sentence, or a slice of one tool result).
   entryBytes: 320,
-  // The block put in front of the user's message.  ~300 tokens: a modest cost
-  // in an 8,192-token window, paid only on turns that matched something.
-  recallBytes: 1280,
-  recallEntries: 8,
+  // The block put in front of the user's message.  Up to ~500 tokens, paid only
+  // on turns that matched something; a question about all of one kind of fact
+  // ("every on-call engineer") needs about 12 lines (91% of such facts at 8).
+  recallBytes: 2048,
+  recallEntries: 12,
 });
 export const RECALL_LABEL = MEMORY_PROMPTS.recall_label;
 const MAX_ENTRIES = 24000;

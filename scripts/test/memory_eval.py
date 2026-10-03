@@ -311,8 +311,8 @@ def note_message(prompts: dict, note: str) -> dict:
 # ---------------------------------------------------------------------------
 
 RECALL_ENTRY_BYTES = 320
-RECALL_BYTES = 1280
-RECALL_ENTRIES = 8
+RECALL_BYTES = 2048
+RECALL_ENTRIES = 12
 RECALL_ARCHIVE_BYTES = 2097152
 RECALL_MAX_ENTRIES = 24000
 RECALL_MAX_ENTRIES_PER_MESSAGE = 40

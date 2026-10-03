@@ -46,6 +46,25 @@ export async function probe({ turns, seed, profile = 'mixed' }) {
   return { rows, archive_entries: archive?.size ?? 0, archive_bytes: archive?.bytes ?? 0 };
 }
 
+// "Every on-call engineer I told you about": one question, many facts. The
+// share of the facts out of the window that the returned block contains.
+export const AGGREGATE_QUESTIONS = Object.freeze({
+  name: 'List every on-call engineer I told you about.', number: 'What badge numbers have I given you so far?',
+  preference: 'Which report formats did I say I prefer?', decision: 'Which release branches did we decide on?',
+});
+export async function aggregate({ turns = 120, seeds = 4 } = {}) {
+  let total = 0; let hit = 0;
+  for (let seed = 0; seed < seeds; seed++) {
+    const run = await runConversation({ turns, seed, mode: 'recall' });
+    const prompt = run.engine.lastPrompt.map(m => m.content).join('\n');
+    for (const [type, question] of Object.entries(AGGREGATE_QUESTIONS)) {
+      const lines = run.session.memory.archive.search(recallQueries(question));
+      for (const fact of run.facts.filter(f => f.type === type && !containsValue(prompt, f.value))) { total += 1; if (lines.some(line => containsValue(line, fact.value))) hit += 1; }
+    }
+  }
+  return { facts: total, found: hit, share: total ? Number((hit / total).toFixed(3)) : null };
+}
+
 export async function report({ turnsList = [60, 120], seeds = 8 } = {}) {
   const out = { schema: 'local_bmo.memory-recall-retrieval.v1', retrieval_only: true, seeds, results: {} };
   for (const turns of turnsList) {
