@@ -1,0 +1,641 @@
+{
+  "artifact": {
+    "llama_cpp_revision": "3581ba0cf591b3f772fbb002de0f70e294bc0396",
+    "modality": "text_only_no_mmproj",
+    "name": "Qwen3.5-9B-Q4_K_M.gguf",
+    "quantization": "Q4_K_M",
+    "sha256": "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b",
+    "size_bytes": 5629109088,
+    "source_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
+  },
+  "duration_ms": 198582.1,
+  "engine": {
+    "api_version": "0.1.0",
+    "compiled_backend": "llama.cpp/3581ba0c/cuda",
+    "engine_version": "0.1.0",
+    "llama_cpp_revision": "3581ba0cf591b3f772fbb002de0f70e294bc0396",
+    "model": "qwen35-9b-q4-k-m"
+  },
+  "fixture": {
+    "case_count": 37,
+    "category_counts": {
+      "abstention": 1,
+      "confirmation_sensitive": 15,
+      "no_tool": 1,
+      "prompt_injection": 1,
+      "schema_edge": 1,
+      "tool_selection": 18
+    },
+    "limits": {
+      "context_tokens": 8192,
+      "max_cases": 64,
+      "max_output_tokens": 256,
+      "temperature": 0
+    },
+    "model": "Qwen3.5-9B-Q4_K_M",
+    "protocol": "qwen35-xml-tool-call-v1",
+    "schema": "local_bmo.tool-call-eval.v1",
+    "sha256": "d3c4d457800e8f1c04a4f3dcfaabe7897af8c7473d90b4bf0fdbfbf00225a452",
+    "tool_count": 33,
+    "tool_names": [
+      "time.now",
+      "system.get_info",
+      "clipboard.read",
+      "clipboard.write",
+      "app.open",
+      "browser.open_url",
+      "fs.list",
+      "fs.read_text",
+      "fs.search_text",
+      "fs.write_new",
+      "fs.apply_patch",
+      "process.run_allowlisted",
+      "mail.list_messages",
+      "mail.search_messages",
+      "mail.read_message",
+      "mail.create_draft",
+      "mail.send_draft",
+      "mail.mark_read",
+      "teams.list_chats",
+      "teams.list_messages",
+      "teams.read_message",
+      "teams.list_channels",
+      "teams.list_channel_messages",
+      "teams.read_channel_message",
+      "teams.send_message",
+      "coding.copilot_ask",
+      "browser.session_start",
+      "browser.inspect_links",
+      "browser.inspect_page",
+      "browser.follow_link",
+      "browser.fill_field",
+      "browser.activate_control",
+      "browser.session_close"
+    ]
+  },
+  "harness": {
+    "process": {
+      "exit_code": 0,
+      "status": "completed"
+    },
+    "schema": "local_bmo.long-context-eval.v1",
+    "sha256": "31fcd8f81dead13283a7f681a5de0141fe464be4ca203ea32371b079846c55fa"
+  },
+  "instance_id": "3f2cbbce-dbeb-4ff7-852e-86f231d28796",
+  "model_preflight": {
+    "code": "ok",
+    "gguf_version": 3,
+    "sha256": "c654bc400fa0032ad9c621b62130aa9926125182b8bbf88a4e02da673268873b",
+    "size_bytes": 5629109088,
+    "status": "verified",
+    "valid": true
+  },
+  "plan": {
+    "depths": [
+      0.1,
+      0.5,
+      0.9
+    ],
+    "max_output": 96,
+    "probes": [
+      "needle",
+      "multi_needle",
+      "latest_value",
+      "tool_result",
+      "tool_call"
+    ],
+    "request_timeout_seconds": 60,
+    "sizes": [
+      1000,
+      2000,
+      4000,
+      6000
+    ],
+    "stop_after_failures": 40,
+    "styles": [
+      "turns",
+      "tool_loop"
+    ],
+    "trials": 1
+  },
+  "prompt_response_logging": false,
+  "results": {
+    "by_depth_size": {
+      "d0.1@1000": {
+        "accuracy": 0.9,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 1,
+        "pass": 9,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "d0.1@2000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 10,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "d0.1@4000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 10,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "d0.1@6000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 10,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "d0.5@1000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 10,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "d0.5@2000": {
+        "accuracy": 0.9,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 1,
+        "pass": 9,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "d0.5@4000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 10,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "d0.5@6000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 10,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "d0.9@1000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 10,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "d0.9@2000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 10,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "d0.9@4000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 10,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "d0.9@6000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 10,
+        "request_too_large": 0,
+        "timeout": 0
+      }
+    },
+    "by_probe_size": {
+      "latest_value@1000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 6,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "latest_value@2000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 6,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "latest_value@4000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 6,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "latest_value@6000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 6,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "multi_needle@1000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 6,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "multi_needle@2000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 6,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "multi_needle@4000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 6,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "multi_needle@6000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 6,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "needle@1000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 6,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "needle@2000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 6,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "needle@4000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 6,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "needle@6000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 6,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "tool_call@1000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 6,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "tool_call@2000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 6,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "tool_call@4000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 6,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "tool_call@6000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 6,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "tool_result@1000": {
+        "accuracy": 0.833,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 1,
+        "pass": 5,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "tool_result@2000": {
+        "accuracy": 0.833,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 1,
+        "pass": 5,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "tool_result@4000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 6,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "tool_result@6000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 6,
+        "request_too_large": 0,
+        "timeout": 0
+      }
+    },
+    "by_size": {
+      "1000": {
+        "accuracy": 0.967,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 1,
+        "pass": 29,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "2000": {
+        "accuracy": 0.967,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 1,
+        "pass": 29,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "4000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 30,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "6000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 30,
+        "request_too_large": 0,
+        "timeout": 0
+      }
+    },
+    "by_style_size": {
+      "tool_loop@1000": {
+        "accuracy": 0.933,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 1,
+        "pass": 14,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "tool_loop@2000": {
+        "accuracy": 0.933,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 1,
+        "pass": 14,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "tool_loop@4000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 15,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "tool_loop@6000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 15,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "turns@1000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 15,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "turns@2000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 15,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "turns@4000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 15,
+        "request_too_large": 0,
+        "timeout": 0
+      },
+      "turns@6000": {
+        "accuracy": 1.0,
+        "context_overflow": 0,
+        "engine_busy": 0,
+        "error": 0,
+        "fail": 0,
+        "pass": 15,
+        "request_too_large": 0,
+        "timeout": 0
+      }
+    },
+    "cells_planned": 120,
+    "cells_run": 120,
+    "complete": true,
+    "engine_context": 8192,
+    "latency_by_size": {
+      "1000": {
+        "cells": 30,
+        "incoherent": 0,
+        "max_reused_prefix": 1601,
+        "median_prefill_seconds_est": 0.075,
+        "median_prompt_tokens": 1379.0,
+        "median_seconds": 0.34
+      },
+      "2000": {
+        "cells": 30,
+        "incoherent": 0,
+        "max_reused_prefix": 2201,
+        "median_prefill_seconds_est": 0.205,
+        "median_prompt_tokens": 2203.0,
+        "median_seconds": 0.51
+      },
+      "4000": {
+        "cells": 30,
+        "incoherent": 0,
+        "max_reused_prefix": 3995,
+        "median_prefill_seconds_est": 0.47,
+        "median_prompt_tokens": 3841.0,
+        "median_seconds": 0.79
+      },
+      "6000": {
+        "cells": 30,
+        "incoherent": 0,
+        "max_reused_prefix": 5961,
+        "median_prefill_seconds_est": 0.77,
+        "median_prompt_tokens": 5811.5,
+        "median_seconds": 1.02
+      }
+    },
+    "not_passed": [
+      {
+        "id": "tool_result/tool_loop/s1000/d0.1/t0",
+        "outcome": "fail",
+        "reason": "distractor_answer"
+      },
+      {
+        "id": "tool_result/tool_loop/s2000/d0.5/t0",
+        "outcome": "fail",
+        "reason": "missing_fact"
+      }
+    ],
+    "outcomes": {
+      "context_overflow": 0,
+      "engine_busy": 0,
+      "error": 0,
+      "fail": 2,
+      "pass": 118,
+      "request_too_large": 0,
+      "timeout": 0
+    },
+    "stopped_early": null,
+    "tool_loop_reuse": {
+      "cells": 60,
+      "reused": 60
+    }
+  },
+  "run_id": "J1M-EVAL-37D",
+  "schema": "local_bmo.j1m.long-context-receipt.v1",
+  "status": "completed",
+  "suite_member": "long-context",
+  "tokens_logged": false
+}
