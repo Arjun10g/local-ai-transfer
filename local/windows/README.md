@@ -142,6 +142,24 @@ Clone to a short folder (the quick start uses `C:\bmo`): the Visual Studio
 build of the vendored llama.cpp nests deep enough to hit Windows' 260-character
 path limit from a long one, and `Build-Engine.ps1` warns when it might.
 
+### If the laptop cannot reach Hugging Face: the model from GitHub
+
+The model is published as a GitHub release in parts under 2 GiB (the release-asset
+limit); `local/get_model.py` downloads them (it resumes a broken download), checks
+each part, joins them, and refuses to finish unless the result has the pinned size
+and SHA-256 compiled into the script. Needs only Python.
+
+```powershell
+# public release: one command
+python local\get_model.py --base-url https://github.com/OWNER/REPO/releases/download/TAG --out C:\bmo-transfer --delete-parts
+# private release, or parts you downloaded by hand / with `gh release download`: point at the folder
+python local\get_model.py --folder C:\Users\you\Downloads\parts --out C:\bmo-transfer
+```
+
+It needs about 11.5 GB free while joining (the parts plus the result). The model is
+Apache-2.0 (Qwen3.5-9B); the release carries the licence and a NOTICE. Maintainer
+side: `scripts/model-artifact/split_for_github.py` makes the parts and the manifest.
+
 ## 3. Get an engine
 
 **Fast path: the prebuilt engine.** The transfer folder has a `lae-engine.exe`

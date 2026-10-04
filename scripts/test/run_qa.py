@@ -159,6 +159,7 @@ TEST_INVENTORY = {
     "tests/release/test_local_chat_and_app.py": "process_fixture",
     "tests/release/test_local_preflight.py": "process_fixture",
     "tests/release/test_demo_runbook.py": "release_static",
+    "tests/release/test_get_model.py": "loopback_fixture",
     "tests/security/permission-mode-adversarial.test.mjs": "security_fixture",
     "tests/security/test_adversarial.py": "security_fixture",
     "tests/security/tool-calling-adversarial.test.mjs": "loopback_fixture",
