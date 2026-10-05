@@ -185,6 +185,8 @@ add `--context 2048` (about 20 turns). Pass criteria, printed as `HOST PROBE: OK
   never-mentioned project retrieved no lines and got no invented number.
 - `off` mode: `number_exact`, `name_gap`, `room_corrected` are **expected to FAIL** (plain dropping loses them); if they PASS the window never overflowed or the model guessed: report.
 
+**Reference:** on the Mac (CPU, `--context 1024 --filler-turns 8`, this exact code and the real model) recall mode printed `HOST PROBE: OK`: `number_exact` 48213, `name_gap` Priya Raman, `room_corrected` R-777, and `absent_project` answered "I do not know" with no recalled lines; each turn there took 100-330 s because that Mac is ~100x slower than the Dell should be.
+
 Record both receipts (`local\out\host-probe-*.json`), the slowest turn (`slowest_turn_seconds`), and the `prompt_tokens` of a turn with and without a recalled block (the
 `turn_log`). That is the cost of recall on this CPU (D5). If recall mode FAILS, record **which check** and its `reason` (`missing_fact`, `stale_value`, `invented_value`).
 
