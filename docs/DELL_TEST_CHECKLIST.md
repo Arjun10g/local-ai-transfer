@@ -15,6 +15,7 @@ Result column: PASS / FAIL / WARN + the number asked for. Tick only with a resul
 
 | # | Step | Command / action | Expect | Result |
 |---|---|---|---|---|
+| A0 | Model without Hugging Face (only if the USB copy is not used) | `python local\get_model.py --base-url https://github.com/Arjun10g/bmo-qwen35-9b-gguf/releases/download/v1.0 --out C:\bmo-transfer --delete-parts` | ends `OK: ... sha256 c654bc400fa0...`; verified on the Mac against the real release (3 parts, 3:42 to download, byte-identical to the original) | |
 | A1 | Model copy | `Get-FileHash` on the .gguf | 5,629,109,088 bytes, sha256 `c654bc40…873b` | |
 | A2 | Prebuilt MinGW engine starts | `Test-BMO.ps1 -Mode preflight -VerifyModelHash` | every line PASS/WARN, ends `READY` | |
 | A3 | If A2 fails: VS build | `Build-Engine.ps1`, then A2 again | engine prints version | |

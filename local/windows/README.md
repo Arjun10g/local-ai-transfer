@@ -144,14 +144,14 @@ path limit from a long one, and `Build-Engine.ps1` warns when it might.
 
 ### If the laptop cannot reach Hugging Face: the model from GitHub
 
-The model is published as a GitHub release in parts under 2 GiB (the release-asset
+The model is published at https://github.com/Arjun10g/bmo-qwen35-9b-gguf (public release v1.0) in parts under 2 GiB (the release-asset
 limit); `local/get_model.py` downloads them (it resumes a broken download), checks
 each part, joins them, and refuses to finish unless the result has the pinned size
 and SHA-256 compiled into the script. Needs only Python.
 
 ```powershell
 # public release: one command
-python local\get_model.py --base-url https://github.com/OWNER/REPO/releases/download/TAG --out C:\bmo-transfer --delete-parts
+python local\get_model.py --base-url https://github.com/Arjun10g/bmo-qwen35-9b-gguf/releases/download/v1.0 --out C:\bmo-transfer --delete-parts
 # private release, or parts you downloaded by hand / with `gh release download`: point at the folder
 python local\get_model.py --folder C:\Users\you\Downloads\parts --out C:\bmo-transfer
 ```
