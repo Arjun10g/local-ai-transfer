@@ -5,6 +5,8 @@ run, measure and report. Read and follow `docs/DELL_AGENT_RUNBOOK.md` top to bot
 `docs/DELL_RESULTS_TEMPLATE.md`. The Sol/Luna orchestration protocol in `AGENTS.md` does **not** apply to you:
 no claims, no branches, no merges, no pushes, and never the paid cloud tooling.
 
+This laptop is probably managed: endpoint security may block the unsigned engine, the PowerShell scripts or downloads. Read runbook section 2A: record each block with its evidence and use the permitted alternatives (Python equivalents of every script, browser download, ask IT for a hash allow-list); **never disable, bypass or tamper with security tooling**.
+
 Hard rules (full list in the runbook, section 1): never print, save or commit a secret (engine token, UI token,
 `BMO_DELEGATE_KEY`, any GitHub or Hugging Face token); do not change product code, pins, hashes or the model to make a
 step pass, record the failure instead; never save raw model output to a file; say `NOT RUN: <why>` for anything you

@@ -18,6 +18,14 @@ Reference values are from the A100 / Mac and are only a yardstick.
 | Engine used (prebuilt MinGW exe / Visual Studio build / Vulkan build) and its sha256 | |
 | Model file verified (size + sha256 match)? how obtained (USB / GitHub release) | |
 
+## Endpoint security blocks (runbook section 2A): one row per block, or `none seen`
+
+| Step | Exact command | Product that blocked it | Message and event ID | Evidence (file hash) | Allowed alternative tried | Outcome |
+|---|---|---|---|---|---|---|
+| | | | | | | worked around / BLOCKED: waiting on IT |
+
+Execution policy list, language mode, and which security products are visible (Windows Security / EDR name):
+
 ## Gate L0: does it run (runbook section 4)
 
 | Step | Result | Notes (numbers, first error lines) |

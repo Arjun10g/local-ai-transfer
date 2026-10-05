@@ -162,6 +162,7 @@ TEST_INVENTORY = {
     "tests/release/test_get_model.py": "loopback_fixture",
     "tests/release/test_host_probe.py": "release_static",
     "tests/release/test_engine_probe.py": "release_static",
+    "tests/release/test_runbook_commands.py": "release_static",
     "tests/security/permission-mode-adversarial.test.mjs": "security_fixture",
     "tests/security/test_adversarial.py": "security_fixture",
     "tests/security/tool-calling-adversarial.test.mjs": "loopback_fixture",

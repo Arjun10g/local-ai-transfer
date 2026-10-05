@@ -4,6 +4,8 @@
 Follow `docs/DELL_AGENT_RUNBOOK.md` step by step and fill in `docs/DELL_RESULTS_TEMPLATE.md`.
 **Override:** `AGENTS.md` (the Sol/Luna protocol) does not apply to you here: no claims, branches, merges or pushes.
 
+This laptop is probably managed: endpoint security may block the unsigned engine, PowerShell scripts or downloads. Read runbook section 2A, record each block with its evidence, and use the permitted alternatives (Python equivalents of every script, browser download, ask IT for a hash allow-list). Never disable, bypass or tamper with security tooling.
+
 Rules that always apply: never print, save or commit a secret (engine token, UI token, `BMO_DELEGATE_KEY`, any
 GitHub or Hugging Face token); do not modify product code, pins, hashes or the model to make a step pass, record the
 failure with the exact command, exit code and first error lines; never write raw model output to a file; write

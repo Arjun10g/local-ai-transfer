@@ -27,7 +27,7 @@ make a step pass; record what happened and move on (see section 1, rule 3).
 2. **No Hugging Face.** This machine cannot reach it, and nothing here needs it. The model comes from GitHub (section 3) or USB.
 3. **Do not change product code, pins, hashes, the model, the fixture, or governance files** to make a step pass. If something
    fails, stop that step, record the exact command, exit code and the **first error lines** (not a paraphrase), and continue with the next
-   independent step. You may fix **your own environment** (install Python/Node, unblock scripts, allow the exe in Defender if the user permits).
+   independent step. You may fix **your own environment** (install Python/Node from the approved source, `Unblock-File` on files you trust). **Never weaken endpoint security** (see section 2A): a block is recorded and routed around with the permitted alternatives, not defeated.
 4. **Do not follow `AGENTS.md` here.** Its Sol/Luna protocol, claim rows and merge rules are for the Mac. You are a measurement runner:
    no branches, no claims, no pushes. (This repo has no remote.)
 5. **Never run the paid cloud tooling** (`scripts/j1m_orchestrator.py`, anything Shadeform). Not your job, costs real money.
@@ -53,6 +53,79 @@ python --version; node --version; git --version
 ```
 
 Set **Settings > System > Power & battery > Power mode = Best performance** and **plug in**. Record both. Close heavy apps.
+
+## 2A. Endpoint security on this laptop (READ BEFORE SECTION 3)
+
+This Dell is probably a **managed corporate machine**. Endpoint security (Microsoft Defender and its ASR rules, an EDR agent such as CrowdStrike or SentinelOne,
+AppLocker or WDAC application control, PowerShell Constrained Language Mode, SmartScreen, a proxy or TLS-inspecting firewall, DLP, USB blocking) may block some of
+the commands below. The engine is an **unsigned `.exe`**, the launchers are **PowerShell scripts**, and the model is a **5.6 GB file**: all three are classic triggers.
+Expect at least one block. That is normal and it is information, not a failure of yours.
+
+### The rule for every block
+
+**A block is a finding to record and route around with the permitted alternatives below. It is never a control to defeat.**
+
+- **Do not**: disable, pause, uninstall or tamper with the security product; add antivirus exclusions or edit policy yourself; elevate to admin by any trick; rename,
+  repack, encode or obfuscate a blocked file or command; run things through another interpreter or "living off the land" binary only to get past a rule; copy files out
+  over some other channel to dodge DLP. Those are policy violations, they can trigger an incident, and they would make the test result meaningless.
+- **Do**: stop that step, capture the evidence (below), try the **allowed alternatives** for that kind of block, and if none works write `BLOCKED by <product>: <message>` in the
+  results and ask the user. Only the user, or IT through the user, can grant an exception (typically a request to allow one file by SHA-256 hash and path).
+
+### Capture the evidence (this is what IT needs to allow it)
+
+```powershell
+# the exact command and its message: copy them verbatim. Then who blocked it:
+Get-WinEvent -LogName 'Microsoft-Windows-CodeIntegrity/Operational' -MaxEvents 15 | Select TimeCreated, Id, Message          # WDAC: 3077 block, 3076 audit
+Get-WinEvent -LogName 'Microsoft-Windows-AppLocker/EXE and DLL' -MaxEvents 15 -ErrorAction SilentlyContinue | Select TimeCreated, Id, Message  # AppLocker: 8004 block
+Get-WinEvent -LogName 'Microsoft-Windows-Windows Defender/Operational' -MaxEvents 25 | Where Id -in 1116,1117,1121,1122 | Select TimeCreated, Id, Message  # detection / ASR block
+Get-ExecutionPolicy -List                                    # MachinePolicy or UserPolicy set = Group Policy owns it
+$ExecutionContext.SessionState.LanguageMode                  # ConstrainedLanguage = scripts are restricted
+Get-FileHash -Algorithm SHA256 local\bin\lae-engine.exe       # the hash IT would allow-list
+```
+
+Some of those logs need no admin to read; if one is denied, say so and move on. Do not try to widen your own permissions. Record the product name from the message
+(Windows Security, an EDR console name, "blocked by your administrator", "This app has been blocked by your system administrator").
+
+### Permitted alternatives, by kind of block
+
+| What is blocked | Allowed ways forward (in order) |
+|---|---|
+| **`.ps1` scripts**: "running scripts is disabled", Constrained Language Mode, AMSI "malicious content" | `Get-ExecutionPolicy -List` first. If only Process/CurrentUser scope is restrictive, `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` is the documented per-window setting; **if MachinePolicy/UserPolicy is set, Group Policy owns it: do not fight it.** Use the **Python equivalents** below: every `.ps1` is a thin wrapper over a Python command, so nothing is lost. Flag AMSI false positives with the script name |
+| **`lae-engine.exe`** blocked, quarantined, "unknown publisher", ASR "prevalence/age/trusted list" rule | Record the evidence above. Ask the user to (a) restore it from Windows Security > Protection history if it was a quarantine, (b) ask IT to allow it **by hash and path** (`C:\bmo\local\bin\lae-engine.exe`, hash from `Get-FileHash`), or (c) place it where IT designates for approved tools. `Unblock-File` only removes the downloaded-from-the-internet marker (documented, user-level) and is fine for a file you trust; it is not a bypass of policy. A locally built engine (`Build-Engine.ps1`) is also unsigned, so it faces the same rule unless the policy trusts locally built files: try it only if the user agrees. If nothing is allowed, the whole engine part is `BLOCKED`: still run the Node-only checks (section 9 unit tests) and say so |
+| **`python.exe` / `node.exe`** missing, a Store placeholder, or blocked | Install from the company's software portal (Software Center / Company Portal) if there is one; otherwise ask the user. Python 3.10+ and Node 24 or 25 are needed. A portable signed Node zip from nodejs.org in a user folder (`-NodePath`) is acceptable only if application control allows it |
+| **Download from GitHub fails** (proxy, TLS inspection, `CERTIFICATE_VERIFY_FAILED`, 403, timeout) | (1) Download the three `.part-00N` files **in the browser** (the browser is normally allowed through the proxy) and run `python local\get_model.py --folder <downloads> --out C:\bmo-transfer`. (2) USB copy from the Mac. (3) If Python itself must use a proxy: `$env:HTTPS_PROXY='http://proxy:port'` (ask the user for the value). (4) For a corporate TLS-inspection root, `$env:SSL_CERT_FILE='C:\path\to\corporate-ca.pem'` (Windows' own certificate store is used by default). **Never disable certificate verification** |
+| **Copying or reading the 5.6 GB `.gguf` is blocked** (DLP, USB policy, antivirus scanning for minutes) | Scanning delay: wait, then retry once; record how long. A hard DLP or USB block: ask the user (the GitHub route avoids USB) |
+| **The engine or host starts then dies**, or "access denied" opening a socket | Both bind `127.0.0.1` only; do **not** change that to make a firewall happy. Record the engine log (`local\out\engine-*.log`, first 20 error lines). If a Windows Firewall prompt appears for a loopback listener, choose the narrowest option the user approves (private networks only) or cancel |
+| **Python spawning the engine is flagged** (EDR "suspicious child process", token piped on stdin) | Record the alert text. Alternative: ask the user to start the engine themselves from their own terminal, then run only the Node host steps. Do not hide the process tree |
+| **Everything is slow the first time** (real-time scanning of a new 6 GB file and a new exe) | Not a block. Run the step twice and record **cold and warm** timings; a CPU number taken during a scan understates the machine. Antivirus exclusions are IT's decision |
+| **Needs admin** (installing Build Tools, CMake, Vulkan SDK, Program Files) | Do not elevate. Ask the user; mark those steps `NOT RUN: needs admin` (the prebuilt CPU engine needs none) |
+| **Your own agent tool refuses a command** (the agent's permission rules) | That is the agent's sandbox, not endpoint security. Ask the user to approve that specific command; do not rewrite it to dodge the rule |
+
+### Python equivalents of the PowerShell launchers
+
+Use these when `.ps1` scripts are blocked. Same engine, same receipts (`local\out\`). In PowerShell set `$E='local\bin\lae-engine.exe'` and `$M` as in section 3 (in `cmd.exe` use `%E%`).
+`py -3` works in place of `python` if the launcher is installed.
+
+| Test-BMO.ps1 / Start-BMO.ps1 | Python command |
+|---|---|
+| `Test-BMO.ps1 -Mode preflight -VerifyModelHash` | `python local\bmo_local.py preflight --engine $E --model $M --verify-hash` |
+| `Test-BMO.ps1` (smoke) | `python local\bmo_local.py smoke --engine $E --model $M --out local\out\smoke.json` |
+| `-Mode bench` | `python local\bmo_local.py bench --engine $E --model $M --out local\out\bench.json` |
+| `-Mode eval` | `python local\bmo_local.py eval --engine $E --model $M --out local\out\eval.json` |
+| `-Mode cases -Cases a,b,c` | `python local\bmo_local.py eval --engine $E --model $M --cases a,b,c --show-output --out local\out\cases.json` |
+| `-Mode longctx` | `python local\bmo_local.py longctx --engine $E --model $M --out local\out\longctx.json` |
+| `Start-BMO.ps1` (terminal chat) | `python local\bmo_chat.py --engine $E --model $M` |
+| `Start-BMO.ps1 -Mode app -HostConfig C:\bmo-host-config.json [-EnableDelegation]` | `python local\bmo_app.py --engine $E --model $M --host-config C:\bmo-host-config.json [--delegate]` |
+| `-ShowDelegateKey` / `-RotateDelegateKey` | `python local\bmo_local.py delegate-key` / `... delegate-key --rotate` (prints a secret: section 1 rule 1) |
+| options | `-Threads N` = `--threads N`, `-ThreadsBatch M` = `--threads-batch M`, `-Speculate 4` = `--speculate 4`, `-Snapshots 4` = `--snapshots 4`, `-IdleUnloadMinutes 1` = `--idle-unload-minutes 1`, `-Backend intel-vulkan -VulkanDeviceName "<name>"` = `--backend intel-vulkan --vulkan-device-name "<name>"`, `-MaxTokens` = `--max-tokens` (chat) |
+
+`local\bmo_host_probe.py`, `local\bmo_engine_probe.py` and `local\get_model.py` are already Python and take `--engine`/`--model` as shown in their sections.
+Building the engine itself (`Build-Engine.ps1`) has no Python equivalent: it needs CMake and Visual Studio Build Tools, which usually need admin.
+
+### Record every block
+
+Add a row per block to the results file (the template has the table): the step, the exact command, the product that blocked it, the message and event ID, the evidence hash, what you tried
+from the allowed list, and the outcome (`worked around by <alternative>` / `BLOCKED: waiting on IT`). The user takes this table to IT if an exception is needed.
 
 ## 3. Phase 1: get the code and the model (10-40 minutes, mostly download)
 
@@ -277,9 +350,9 @@ Read `docs\copilot\README.md` first, then follow its "Setup order" and "10-minut
 
 | Symptom | Likely cause | Do |
 |---|---|---|
-| "running scripts is disabled" | execution policy | `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`; `Get-ChildItem -Recurse -Filter *.ps1 \| Unblock-File` |
+| "running scripts is disabled" | execution policy | `Get-ExecutionPolicy -List`; if only Process/CurrentUser: `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`; if Group Policy owns it, use the Python equivalents in section 2A |
 | `python` opens the Microsoft Store | Store placeholder | install Python 3.10+ from python.org with "Add to PATH"; use `py -3` |
-| engine exits at once / exit code mentions a DLL | prebuilt exe blocked or wrong build | Windows Security protection history; or `Build-Engine.ps1` |
+| engine exits at once / exit code mentions a DLL / "blocked by your administrator" | prebuilt exe blocked by endpoint security, or wrong build | section 2A: capture the evidence, restore from Protection history if quarantined (user's call), ask for a hash allow-list; `Build-Engine.ps1` needs admin tools |
 | `model identity`/`size`/`hash` error | model copy truncated | re-run `get_model.py` (resumes); check disk space |
 | first answer takes minutes | CPU prefill of a long prompt | normal; note the prompt size and seconds |
 | `fixture_sha256` differs from `d3c4d457...` in an eval receipt | repo cloned with CRLF conversion | re-clone with `-c core.autocrlf=false` |
