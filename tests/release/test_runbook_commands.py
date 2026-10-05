@@ -40,7 +40,7 @@ class RunbookCommandTests(unittest.TestCase):
     def test_the_runbook_still_documents_each_command(self):
         for needle in ("bmo_local.py preflight", "bmo_local.py smoke", "bmo_local.py bench", "bmo_local.py eval", "--cases a,b,c --show-output",
                        "bmo_local.py longctx", "bmo_chat.py --engine", "bmo_app.py --engine", "delegate-key", "get_model.py --folder",
-                       "Get-ExecutionPolicy -List", "SSL_CERT_FILE", "Never disable certificate verification"):
+                       "Get-ExecutionPolicy -List", "SSL_CERT_FILE", "Arjun10g/local-ai-transfer", "engine-v1", "d12958d377b7e1bb74bf74202f2266a429d607a3f0b93c64f2081266ba407513", "Never disable certificate verification"):
             self.assertIn(needle, RUNBOOK)
         self.assertRegex(RUNBOOK, re.compile(r"never[^\n]*(disable|defeat)", re.I))
 

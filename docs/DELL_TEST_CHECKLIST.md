@@ -5,6 +5,7 @@ claim below is "unverified" until a line here is ticked with a date and a result
 When a feature is added or a claim changes, edit this file in the same commit.
 
 Last updated: 2026-10-03 (after the recall-memory work, HEAD in `git log`).
+**Everything is on public GitHub: code https://github.com/Arjun10g/local-ai-transfer (+ release `engine-v1`), model https://github.com/Arjun10g/bmo-qwen35-9b-gguf.**
 **An agent on the Dell: follow `docs/DELL_AGENT_RUNBOOK.md` (the executable version of this list) and fill in `docs/DELL_RESULTS_TEMPLATE.md`.**
 Kit and commands: `local/windows/README.md`, `~/Downloads/BMO-Dell-Transfer/START-HERE.txt`.
 Send back: everything in `local\out\`, plus console text where a step says so

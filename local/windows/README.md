@@ -16,6 +16,13 @@ What a full run tells you, in gate terms:
 
 ## Quick start
 
+**No USB?** Everything is on GitHub, public, no login: the code at https://github.com/Arjun10g/local-ai-transfer (clone it with
+`git clone --depth 1 -c core.autocrlf=false https://github.com/Arjun10g/local-ai-transfer C:\bmo`), the Windows engine in its release `engine-v1`
+(`lae-engine.exe`, SHA-256 `d12958d377b7e1bb74bf74202f2266a429d607a3f0b93c64f2081266ba407513`), and the model at https://github.com/Arjun10g/bmo-qwen35-9b-gguf
+(`python local\get_model.py --base-url https://github.com/Arjun10g/bmo-qwen35-9b-gguf/releases/download/v1.0 --out C:\bmo-transfer --delete-parts`).
+The exact commands are in `docs/DELL_AGENT_RUNBOOK.md` section 3. The USB steps below work the same.
+
+
 Everything runs in PowerShell. The transfer folder holds `bmo.bundle`,
 `lae-engine.exe`, the model and `SHA256SUMS.txt`; copy it to the laptop's own
 disk first, e.g. `C:\bmo-transfer` (not a USB stick: the engine maps the

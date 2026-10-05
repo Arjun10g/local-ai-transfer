@@ -129,6 +129,24 @@ from the allowed list, and the outcome (`worked around by <alternative>` / `BLOC
 
 ## 3. Phase 1: get the code and the model (10-40 minutes, mostly download)
 
+### Fastest path: everything from GitHub (no USB, no login, no Hugging Face)
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass            # this window only (see section 2A if Group Policy blocks it)
+git clone --depth 1 -c core.autocrlf=false https://github.com/Arjun10g/local-ai-transfer C:\bmo
+cd C:\bmo
+New-Item -ItemType Directory -Force local\bin | Out-Null
+Invoke-WebRequest https://github.com/Arjun10g/local-ai-transfer/releases/download/engine-v1/lae-engine.exe -OutFile local\bin\lae-engine.exe
+(Get-FileHash -Algorithm SHA256 local\bin\lae-engine.exe).Hash.ToLower()          # must equal d12958d377b7e1bb74bf74202f2266a429d607a3f0b93c64f2081266ba407513
+python local\get_model.py --base-url https://github.com/Arjun10g/bmo-qwen35-9b-gguf/releases/download/v1.0 --out C:\bmo-transfer --delete-parts
+```
+
+`autocrlf=false` is required (the evaluation fixture is hash-pinned). The engine is an **unsigned** MinGW build that has never run on Windows: if endpoint security
+blocks it, follow section 2A. If a browser is the only thing allowed through the proxy, download the files from the two release pages instead
+(https://github.com/Arjun10g/local-ai-transfer/releases and https://github.com/Arjun10g/bmo-qwen35-9b-gguf/releases).
+
+### Or from the USB transfer folder
+
 Transfer folder (USB) = `C:\bmo-transfer` with `bmo.bundle`, `lae-engine.exe`, `SHA256SUMS.txt`, maybe the `.gguf`. Copy it to the local disk first.
 
 ```powershell
