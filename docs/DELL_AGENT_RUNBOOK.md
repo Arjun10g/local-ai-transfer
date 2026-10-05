@@ -294,9 +294,25 @@ You are not building a release, signing anything, or editing the plan.
 
 ## 13. Order of work and time budget
 
-Phase 0 (2 min) -> 1 (10-40) -> 2 (10) -> 5 phase "speed" (30-60) -> 7.2 memory probe (30-60) -> 6 tool cases C1 (10) ->
-8 snapshots/idle (20) -> 9 UI/safety (30) -> 7.1 longctx (hours; ask the user) -> 6 C2 full eval (hours; ask the user) -> 7.3 note timing (15) -> 10 delegation (30, needs the user present).
-**Ask the user before starting any step estimated over 30 minutes** (full eval, longctx), with your estimate from the shorter step.
+Do the sections in this order (numbers are the section numbers above, not the "Phase" labels):
+
+| Order | Section | What | Time |
+|---|---|---|---|
+| 1 | 2 | capture the machine | 2 min |
+| 2 | 3 | code and model | 10-40 min |
+| 3 | 4 | does it run (STOP if 4.2 fails) | 10 min |
+| 4 | 5 | speed: bench, thread sweep, speculation, Vulkan | 30-60 min |
+| 5 | 7.2 | host memory probe, recall then off | 20-60 min |
+| 6 | 6 | tool cases (C1 only) | 10 min |
+| 7 | 8 | snapshots and idle unload | 20 min |
+| 8 | 9 | web UI and safety checks | 30 min |
+| 9 | 7.3 | time one model-written note | 15 min |
+| 10 | 10 | Copilot delegation (the user must be present) | 30 min |
+| 11 | 7.1 and 6 (C2) | engine long-context and the full 37-case eval | **hours: ask the user first** |
+| last | 14 | write the results and the zip | 10 min |
+
+**Ask the user before starting any step estimated over 30 minutes** (the full eval, longctx), and give your estimate from the shorter step (seconds per case x 37).
+Write the results file incrementally after each section, not only at the end: if the session dies you keep what you measured.
 
 ## 14. Write the results (required)
 
